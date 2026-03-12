@@ -2,12 +2,16 @@ package swu
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
 func (cfg Config) Normalized() (Config, error) {
 	cfg.LocalAddr = strings.TrimSpace(cfg.LocalAddr)
 	cfg.RemoteAddr = strings.TrimSpace(cfg.RemoteAddr)
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 
 	if err := validatePortRange("initial port", cfg.InitialPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)

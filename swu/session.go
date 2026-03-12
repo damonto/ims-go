@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -489,7 +490,7 @@ func (s *Session) CloseContext(ctx context.Context) error {
 	}
 	s.wg.Wait()
 	_ = s.sendDeleteRequest(ctx)
-	s.discardSecurityAssociations()
+	s.discardSecurityAssociations(nil)
 	if !s.owned {
 		return nil
 	}
@@ -504,7 +505,7 @@ func (s *Session) isClosed() bool {
 	return s.conn == nil || (s.closeCtx != nil && s.closeCtx.Err() != nil)
 }
 
-func (s *Session) discardSecurityAssociations() {
+func (s *Session) discardSecurityAssociations(cause error) {
 	s.clearInformationalWaiters()
 	s.mu.Lock()
 	s.connected = false
@@ -527,22 +528,51 @@ func (s *Session) discardSecurityAssociations() {
 	s.mu.Unlock()
 
 	s.tcpMu.Lock()
+	tcp := s.tcp
+	tcpServer := s.tcpServer
 	s.tcp = nil
 	s.tcpServer = nil
 	s.tcpMu.Unlock()
 
 	s.udpMu.Lock()
+	udpServer := s.udpServer
 	s.udpServer = nil
 	s.udpMu.Unlock()
+
+	s.notifyDetachedTransports(tcp, tcpServer, udpServer, cause)
 }
 
-func (s *Session) failSecurityAssociations() {
-	s.discardSecurityAssociations()
+func (s *Session) failSecurityAssociations(cause error) {
+	s.discardSecurityAssociations(cause)
 	if s.closeCancel != nil {
 		s.closeCancel()
 	}
 	if s.owned && s.conn != nil {
 		_ = s.conn.Close()
+	}
+}
+
+func (s *Session) notifyDetachedTransports(tcp, tcpServer *TCPTransport, udpServer *SecureUDPTransport, cause error) {
+	if cause == nil {
+		if tcp != nil {
+			_ = tcp.Close()
+		}
+		if tcpServer != nil {
+			_ = tcpServer.Close()
+		}
+		if udpServer != nil {
+			_ = udpServer.Close()
+		}
+		return
+	}
+	if tcp != nil {
+		tcp.fail(fmt.Errorf("reading tcp packet: %w", cause))
+	}
+	if tcpServer != nil {
+		tcpServer.fail(fmt.Errorf("reading tcp packet: %w", cause))
+	}
+	if udpServer != nil {
+		udpServer.fail(fmt.Errorf("reading secure udp packet: %w", cause))
 	}
 }
 
@@ -631,7 +661,7 @@ func (s *Session) prepareInnerWrite() (innerWriteState, error) {
 	seq, ok := nextESPSequence(&s.espSeq)
 	s.mu.Unlock()
 	if !ok {
-		s.failSecurityAssociations()
+		s.failSecurityAssociations(errors.New("esp sequence number overflow"))
 		return innerWriteState{}, errors.New("writing packet: esp sequence number overflow")
 	}
 	return innerWriteState{connected: true, codec: codec, outer: outer, seq: seq}, nil
@@ -769,7 +799,11 @@ func (s *Session) handleESPPacket(packet []byte) {
 	codec, localUDPPort := s.inboundPacketContext()
 	espPacket, err := codec.Decode(packet)
 	if err != nil {
-		s.logger.Debug("decoding ESP packet failed", "err", err)
+		if len(packet) <= 16 {
+			s.logger.Debug("decoding ESP packet failed", "err", err, "packet_hex", shortPacketHex(packet))
+		} else {
+			s.logger.Debug("decoding ESP packet failed", "err", err)
+		}
 		return
 	}
 	if !s.acceptInboundESPSequence(espPacket.Sequence) {
@@ -1319,15 +1353,14 @@ func (s *Session) livenessLoop() {
 		if timeout <= 0 || lastRx.IsZero() || time.Since(lastRx) < timeout {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(s.closeCtx, 5*time.Second)
-		_, err := s.sendInformational(ctx, nil)
-		cancel()
+		_, err := s.sendInformational(s.closeCtx, nil)
 		if err == nil {
 			s.markProtectedRx(time.Now())
 			continue
 		}
-		s.tryDeliverError(fmt.Errorf("liveness check: %w", err))
-		s.failSecurityAssociations()
+		cause := fmt.Errorf("liveness check: %w", err)
+		s.tryDeliverError(cause)
+		s.failSecurityAssociations(cause)
 		return
 	}
 }
@@ -1420,6 +1453,14 @@ func hasNonESPMarker(data []byte) bool {
 
 func isNATKeepalive(data []byte) bool {
 	return len(data) == 1 && data[0] == 0xff
+}
+
+func shortPacketHex(packet []byte) string {
+	const maxBytes = 16
+	if len(packet) <= maxBytes {
+		return hex.EncodeToString(packet)
+	}
+	return hex.EncodeToString(packet[:maxBytes]) + "..."
 }
 
 func resolveOuterLocalAddr(conn net.PacketConn, remote *net.UDPAddr) (*net.UDPAddr, error) {
@@ -1634,7 +1675,7 @@ func (s *Session) handleInformationalRequest(state informationalState, packet IK
 	}
 	if deleteRequest {
 		s.logger.Debug("received IKE delete request", "message_id", packet.Header.MessageID)
-		s.failSecurityAssociations()
+		s.failSecurityAssociations(errors.New("peer deleted IKE SA"))
 	}
 	return true, nil
 }

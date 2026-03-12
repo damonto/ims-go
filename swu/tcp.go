@@ -332,13 +332,30 @@ func (t *TCPTransport) Close() error {
 		alreadyClosed := t.closed
 		t.closed = true
 		t.mu.Unlock()
-		if alreadyClosed {
-			return
+		if !alreadyClosed {
+			t.session.clearTCPTransport(t)
 		}
 		close(t.msgCh)
-		t.session.clearTCPTransport(t)
 	})
 	return err
+}
+
+func (t *TCPTransport) fail(err error) {
+	t.mu.Lock()
+	alreadyClosed := t.closed
+	t.closed = true
+	t.mu.Unlock()
+	if alreadyClosed {
+		return
+	}
+	t.session.clearTCPTransport(t)
+	if err == nil {
+		return
+	}
+	select {
+	case t.errCh <- err:
+	default:
+	}
 }
 
 func (t *TCPTransport) acceptInboundESP(sequence uint32) bool {

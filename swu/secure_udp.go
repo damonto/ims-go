@@ -144,13 +144,30 @@ func (t *SecureUDPTransport) Close() error {
 		alreadyClosed := t.closed
 		t.closed = true
 		t.mu.Unlock()
-		if alreadyClosed {
-			return
+		if !alreadyClosed {
+			t.session.clearUDPTransport(t)
 		}
-		t.session.clearUDPTransport(t)
 		close(t.done)
 	})
 	return nil
+}
+
+func (t *SecureUDPTransport) fail(err error) {
+	t.mu.Lock()
+	alreadyClosed := t.closed
+	t.closed = true
+	t.mu.Unlock()
+	if alreadyClosed {
+		return
+	}
+	t.session.clearUDPTransport(t)
+	if err == nil {
+		return
+	}
+	select {
+	case t.readCh <- inboundPacket{err: err}:
+	default:
+	}
 }
 
 func (t *SecureUDPTransport) deliver(payload []byte, peer net.Addr) {

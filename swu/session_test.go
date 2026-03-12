@@ -1546,6 +1546,179 @@ func TestSessionNATKeepaliveUpdatesLastProtectedTx(t *testing.T) {
 	}
 }
 
+func TestSessionFailureNotifiesDetachedTransports(t *testing.T) {
+	type readTransport interface {
+		ReadPacket(ctx context.Context) ([]byte, net.Addr, error)
+		Close() error
+	}
+
+	tests := []struct {
+		name    string
+		build   func(session *Session) readTransport
+		check   func(t *testing.T, transport readTransport)
+		wantErr string
+	}{
+		{
+			name: "tcp client transport",
+			build: func(session *Session) readTransport {
+				transport := &TCPTransport{
+					session: session,
+					msgCh:   make(chan []byte, 1),
+					errCh:   make(chan error, 1),
+					readyCh: make(chan struct{}),
+					ackCh:   make(chan struct{}, 1),
+				}
+				session.tcp = transport
+				return transport
+			},
+			check: func(t *testing.T, transport readTransport) {
+				t.Helper()
+				tcp, ok := transport.(*TCPTransport)
+				if !ok {
+					t.Fatalf("transport type = %T, want *TCPTransport", transport)
+				}
+				if !tcp.closed {
+					t.Fatal("tcp.closed = false, want true")
+				}
+			},
+			wantErr: "liveness check",
+		},
+		{
+			name: "tcp server transport",
+			build: func(session *Session) readTransport {
+				transport := &TCPTransport{
+					session: session,
+					msgCh:   make(chan []byte, 1),
+					errCh:   make(chan error, 1),
+					readyCh: make(chan struct{}),
+					ackCh:   make(chan struct{}, 1),
+				}
+				session.tcpServer = transport
+				return transport
+			},
+			check: func(t *testing.T, transport readTransport) {
+				t.Helper()
+				tcp, ok := transport.(*TCPTransport)
+				if !ok {
+					t.Fatalf("transport type = %T, want *TCPTransport", transport)
+				}
+				if !tcp.closed {
+					t.Fatal("tcp.closed = false, want true")
+				}
+			},
+			wantErr: "liveness check",
+		},
+		{
+			name: "secure udp transport",
+			build: func(session *Session) readTransport {
+				transport := &SecureUDPTransport{
+					session: session,
+					readCh:  make(chan inboundPacket, 1),
+					done:    make(chan struct{}),
+				}
+				session.udpServer = transport
+				return transport
+			},
+			check: func(t *testing.T, transport readTransport) {
+				t.Helper()
+				udp, ok := transport.(*SecureUDPTransport)
+				if !ok {
+					t.Fatalf("transport type = %T, want *SecureUDPTransport", transport)
+				}
+				if !udp.closed {
+					t.Fatal("udp.closed = false, want true")
+				}
+			},
+			wantErr: "liveness check",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			session := &Session{
+				conn:        &recordPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}},
+				logger:      testLogger(),
+				closeCtx:    ctx,
+				closeCancel: cancel,
+			}
+			transport := tt.build(session)
+			defer func() { _ = transport.Close() }()
+
+			result := make(chan error, 1)
+			go func() {
+				readCtx, readCancel := context.WithTimeout(context.Background(), time.Second)
+				defer readCancel()
+				_, _, err := transport.ReadPacket(readCtx)
+				result <- err
+			}()
+
+			session.failSecurityAssociations(errors.New("liveness check: waiting message 5: timeout"))
+
+			select {
+			case err := <-result:
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ReadPacket() error = %v, want substring %q", err, tt.wantErr)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("ReadPacket() did not return after session failure")
+			}
+
+			tt.check(t, transport)
+		})
+	}
+}
+
+func TestSessionLivenessLoopContinuesRetransmitting(t *testing.T) {
+	tests := []struct {
+		name       string
+		wantWrites int
+		wait       time.Duration
+	}{
+		{name: "beyond previous five second cap", wantWrites: 5, wait: 9 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initiator, _ := newInformationalIKEPair(t)
+			conn := &recordPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}}
+			ctx, cancel := context.WithCancel(context.Background())
+			session := &Session{
+				conn:            conn,
+				logger:          testLogger(),
+				outerNAT:        &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 4500},
+				closeCtx:        ctx,
+				closeCancel:     cancel,
+				ike:             initiator,
+				initiatorSPI:    1,
+				responderSPI:    2,
+				livenessTimeout: time.Millisecond,
+				lastProtectedRx: time.Now().Add(-time.Minute),
+				informWaiters:   map[uint32]chan inboundIKE{},
+			}
+
+			session.wg.Add(1)
+			go session.livenessLoop()
+
+			deadline := time.Now().Add(tt.wait)
+			for time.Now().Before(deadline) {
+				if conn.writeCount() >= tt.wantWrites {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			cancel()
+			session.wg.Wait()
+
+			if got := conn.writeCount(); got < tt.wantWrites {
+				t.Fatalf("writeCount = %d, want at least %d", got, tt.wantWrites)
+			}
+		})
+	}
+}
+
 func newInformationalIKEPair(t *testing.T) (*ikeCrypto, *ikeCrypto) {
 	t.Helper()
 	initiator, err := newIKECrypto(transformDH1024MODP)
