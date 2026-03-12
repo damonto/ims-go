@@ -82,6 +82,18 @@ func (t *SecureUDPTransport) RemoteAddr() net.Addr {
 }
 
 func (t *SecureUDPTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.writePacket(ctx, data, t.remote)
+}
+
+func (t *SecureUDPTransport) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
+	remote, ok := addr.(*net.UDPAddr)
+	if !ok || remote == nil {
+		return t.WritePacket(ctx, data)
+	}
+	return t.writePacket(ctx, data, cloneUDPAddr(remote))
+}
+
+func (t *SecureUDPTransport) writePacket(ctx context.Context, data []byte, remote *net.UDPAddr) error {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -95,7 +107,7 @@ func (t *SecureUDPTransport) WritePacket(ctx context.Context, data []byte) error
 		return errors.New("writing secure udp packet: esp sequence number overflow")
 	}
 
-	udpPacket, err := buildUDPSegment(t.local, t.remote, data)
+	udpPacket, err := buildUDPSegment(t.local, remote, data)
 	if err != nil {
 		return fmt.Errorf("writing secure udp packet: %w", err)
 	}
@@ -103,7 +115,7 @@ func (t *SecureUDPTransport) WritePacket(ctx context.Context, data []byte) error
 	if err != nil {
 		return fmt.Errorf("writing secure udp packet: %w", err)
 	}
-	packet, nextHeader, err := buildInnerIPPacket(t.local.IP, t.remote.IP, 50, sealed)
+	packet, nextHeader, err := buildInnerIPPacket(t.local.IP, remote.IP, 50, sealed)
 	if err != nil {
 		return fmt.Errorf("writing secure udp packet: %w", err)
 	}

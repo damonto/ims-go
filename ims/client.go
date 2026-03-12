@@ -821,11 +821,51 @@ func smsReportContext(ctx context.Context) (context.Context, context.CancelFunc)
 }
 
 func (c *Client) smsReportTarget(msg Message) string {
-	ackTarget := addressURI(msg.Header("P-Asserted-Identity"))
-	if ackTarget == "" {
-		ackTarget = addressURI(msg.Header("From"))
+	for _, candidate := range []string{
+		addressURI(msg.Header("P-Asserted-Identity")),
+		addressURI(msg.Header("From")),
+	} {
+		if target := sipMessageTarget(candidate); target != "" {
+			return target
+		}
 	}
-	return ackTarget
+	return viaMessageTarget(msg)
+}
+
+func sipMessageTarget(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return ""
+	}
+	lower := strings.ToLower(uri)
+	if strings.HasPrefix(lower, "sip:") || strings.HasPrefix(lower, "sips:") {
+		return uri
+	}
+	return ""
+}
+
+func viaMessageTarget(msg Message) string {
+	var last string
+	for _, value := range msg.HeadersByName("Via") {
+		for part := range strings.SplitSeq(value, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				last = trimmed
+			}
+		}
+	}
+	if last == "" {
+		return ""
+	}
+	fields := strings.Fields(last)
+	if len(fields) < 2 {
+		return ""
+	}
+	sentBy, _, _ := strings.Cut(fields[1], ";")
+	sentBy = strings.TrimSpace(sentBy)
+	if sentBy == "" {
+		return ""
+	}
+	return "sip:" + sentBy
 }
 
 func (c *Client) upgradeSecureTransport(ctx context.Context) error {
@@ -1169,10 +1209,113 @@ func (c *Client) handleRequest(ctx context.Context, transport Transport, msg Mes
 func writeStatus(ctx context.Context, transport Transport, req Message, code int, reason string) error {
 	resp := NewResponse(code, reason)
 	resp.Headers = responseHeaders(req, code)
-	return transport.WritePacket(ctx, resp.Bytes())
+	return writeResponsePacket(ctx, transport, req, resp.Bytes())
+}
+
+type targetedPacketWriter interface {
+	WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error
+}
+
+func writeResponsePacket(ctx context.Context, transport Transport, req Message, data []byte) error {
+	writer, ok := transport.(targetedPacketWriter)
+	if !ok {
+		return transport.WritePacket(ctx, data)
+	}
+	addr := responseDestination(transport.RemoteAddr(), req.Header("Via"))
+	if addr == nil {
+		return transport.WritePacket(ctx, data)
+	}
+	return writer.WritePacketTo(ctx, data, addr)
+}
+
+type viaHop struct {
+	host net.IP
+	port int
+}
+
+func responseDestination(remote net.Addr, _ string) net.Addr {
+	udpRemote, ok := remote.(*net.UDPAddr)
+	if !ok || udpRemote == nil {
+		return nil
+	}
+	return &net.UDPAddr{IP: append(net.IP(nil), udpRemote.IP...), Port: udpRemote.Port, Zone: udpRemote.Zone}
+}
+
+func parseTopVia(value string) (viaHop, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return viaHop{}, false
+	}
+	part, _, _ := strings.Cut(value, ",")
+	fields := strings.Fields(strings.TrimSpace(part))
+	if len(fields) < 2 {
+		return viaHop{}, false
+	}
+	sentBy, _, _ := strings.Cut(fields[1], ";")
+	host, port, ok := splitHostPortDefault(strings.TrimSpace(sentBy), defaultViaPort(fields[0]))
+	if !ok {
+		return viaHop{}, false
+	}
+	return viaHop{host: parseLiteralIP(host), port: port}, true
+}
+
+func defaultViaPort(protocol string) int {
+	if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(protocol)), "/TLS") {
+		return 5061
+	}
+	return 5060
+}
+
+func splitHostPortDefault(value string, defaultPort int) (string, int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", 0, false
+	}
+	if strings.HasPrefix(value, "[") {
+		host, portText, err := net.SplitHostPort(value)
+		if err != nil {
+			return "", 0, false
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil {
+			return "", 0, false
+		}
+		return host, port, true
+	}
+	if strings.Count(value, ":") == 1 {
+		host, portText, err := net.SplitHostPort(value)
+		if err == nil {
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				return "", 0, false
+			}
+			return host, port, true
+		}
+	}
+	return strings.Trim(value, "[]"), defaultPort, true
+}
+
+func parseLiteralIP(host string) net.IP {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return nil
+	}
+	if zone, _, ok := strings.Cut(host, "%"); ok {
+		host = zone
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	return append(net.IP(nil), ip...)
 }
 
 func (c *Client) handleMessageRequest(ctx context.Context, transport Transport, msg Message) error {
+	responseAddr := responseDestination(transport.RemoteAddr(), msg.Header("Via"))
+	if responseAddr == nil {
+		responseAddr = transport.RemoteAddr()
+	}
+	c.logger.Debug("sending MESSAGE response", "status_code", 200, "reason", "OK", "target_addr", responseAddr, "transport_remote_addr", transport.RemoteAddr(), "via", msg.Header("Via"), "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"))
 	if err := writeStatus(ctx, transport, msg, 200, "OK"); err != nil {
 		return err
 	}
@@ -1190,32 +1333,51 @@ func (c *Client) handleInboundRP(ctx context.Context, transport Transport, msg M
 	}
 	var tpdu smsDeliverTPDU
 	if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
-		return c.writeSMSRPError(ctx, transport, msg, rp.Reference, rpCauseInvalidMandatoryInformation)
+		if c.markSMSDeliveryReportSent(msg) {
+			c.sendSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+		}
+		return nil
 	}
 	c.deliverIncomingSMS(msg, rp, tpdu)
-	return c.writeSMSRPAck(ctx, transport, msg, rp.Reference)
+	if c.markSMSDeliveryReportSent(msg) {
+		c.sendSMSDeliveryReport(msg, newRPAckDeliverReportMessage(rp.Reference))
+	}
+	return nil
 }
 
 func isSMSReport(rp rpMessage) bool {
 	return rp.Type == rpAckNetworkToMS || rp.Type == rpErrorNetworkToMS
 }
 
-func (c *Client) writeSMSRPError(ctx context.Context, transport Transport, msg Message, reference, cause byte) error {
-	reportPayload, err := newRPErrorMessage(reference, cause).MarshalBinary()
-	if err != nil {
-		return err
+func (c *Client) sendSMSDeliveryReport(msg Message, report rpMessage) {
+	target := c.smsReportTarget(msg)
+	if target == "" {
+		c.logger.Debug("skipping sms delivery report", "reason", "target is empty", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"))
+		return
 	}
-	report := c.buildMessage(c.smsReportTarget(msg), reportPayload, msg.Header("Call-ID"))
-	return transport.WritePacket(ctx, report.Bytes())
+	reportPayload, err := report.MarshalBinary()
+	if err != nil {
+		c.logger.Debug("building sms delivery report failed", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
+		return
+	}
+	reportMsg := c.buildMessage(target, reportPayload, msg.Header("Call-ID"))
+	c.logger.Debug("sending sms delivery report", "target", target, "call_id", reportMsg.Header("Call-ID"), "in_reply_to", reportMsg.Header("In-Reply-To"))
+	go c.sendSMSDeliveryReportRequest(reportMsg)
 }
 
-func (c *Client) writeSMSRPAck(ctx context.Context, transport Transport, msg Message, reference byte) error {
-	ackPayload, err := newRPAckMessage(reference).MarshalBinary()
+func (c *Client) sendSMSDeliveryReportRequest(req Message) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := c.sendPending(ctx, req)
 	if err != nil {
-		return err
+		c.logger.Debug("sending sms delivery report failed", "call_id", req.Header("Call-ID"), "in_reply_to", req.Header("In-Reply-To"), "err", err)
+		return
 	}
-	ackMessage := c.buildMessage(c.smsReportTarget(msg), ackPayload, msg.Header("Call-ID"))
-	return transport.WritePacket(ctx, ackMessage.Bytes())
+	if status := resp.StatusCode(); status != 200 && status != 202 {
+		c.logger.Debug("sms delivery report rejected", "call_id", req.Header("Call-ID"), "in_reply_to", req.Header("In-Reply-To"), "status_code", status)
+		return
+	}
+	c.logger.Debug("sms delivery report accepted", "call_id", req.Header("Call-ID"), "in_reply_to", req.Header("In-Reply-To"), "status_code", resp.StatusCode())
 }
 
 func (c *Client) deliverIncomingSMS(msg Message, rp rpMessage, tpdu smsDeliverTPDU) {
@@ -1450,6 +1612,14 @@ func (c *Client) markSMSSeen(msg Message) bool {
 		return true
 	}
 	return c.markRecentSMSKey("sip|"+key, 2*time.Minute)
+}
+
+func (c *Client) markSMSDeliveryReportSent(msg Message) bool {
+	key, ok := smsSeenKey(msg)
+	if !ok {
+		return true
+	}
+	return c.markRecentSMSKey("report|"+key, 2*time.Minute)
 }
 
 func smsSeenKey(msg Message) (string, bool) {

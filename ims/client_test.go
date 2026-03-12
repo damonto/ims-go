@@ -15,11 +15,12 @@ import (
 )
 
 type stubTransport struct {
-	local   net.Addr
-	remote  net.Addr
-	writes  [][]byte
-	reads   [][]byte
-	onWrite func(data []byte)
+	local      net.Addr
+	remote     net.Addr
+	writes     [][]byte
+	writeAddrs []net.Addr
+	reads      [][]byte
+	onWrite    func(data []byte)
 }
 
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
@@ -39,8 +40,28 @@ func (t *stubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error
 	}
 }
 func (t *stubTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.writePacket(data, nil)
+}
+
+func (t *stubTransport) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
+	return t.writePacket(data, addr)
+}
+
+func (t *stubTransport) writePacket(data []byte, addr net.Addr) error {
 	pkt := append([]byte(nil), data...)
 	t.writes = append(t.writes, pkt)
+	if addr != nil {
+		switch v := addr.(type) {
+		case *net.UDPAddr:
+			t.writeAddrs = append(t.writeAddrs, &net.UDPAddr{IP: append(net.IP(nil), v.IP...), Port: v.Port, Zone: v.Zone})
+		case *net.TCPAddr:
+			t.writeAddrs = append(t.writeAddrs, &net.TCPAddr{IP: append(net.IP(nil), v.IP...), Port: v.Port, Zone: v.Zone})
+		default:
+			t.writeAddrs = append(t.writeAddrs, addr)
+		}
+	} else {
+		t.writeAddrs = append(t.writeAddrs, nil)
+	}
 	if t.onWrite != nil {
 		t.onWrite(pkt)
 	}
@@ -209,6 +230,17 @@ func mustParseMessage(t *testing.T, label string, data []byte) Message {
 		t.Fatalf("ParseMessage(%s) error = %v", label, err)
 	}
 	return msg
+}
+
+func waitForWriteEvents(t *testing.T, ch <-chan struct{}, want int) {
+	t.Helper()
+	for range want {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %d write events", want)
+		}
+	}
 }
 
 func newTestResponse(req Message, code int, reason string) Message {
@@ -396,6 +428,16 @@ func TestHandleIncomingMessage(t *testing.T) {
 			var got IncomingSMS
 			count := 0
 			client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) { got = msg; count++ }}, transport)
+			reportCh := make(chan struct{}, 1)
+			transport.onWrite = func(data []byte) {
+				reportCh <- struct{}{}
+				req, err := ParseMessage(data)
+				if err != nil {
+					t.Errorf("ParseMessage(delivery-report) error = %v", err)
+					return
+				}
+				go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+			}
 
 			tpdu, err := buildSMSDeliver("+15551234567", tt.text)
 			if err != nil {
@@ -416,23 +458,24 @@ func TestHandleIncomingMessage(t *testing.T) {
 			if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
 				t.Fatalf("handleRequest(duplicate) error = %v", err)
 			}
+			waitForWriteEvents(t, reportCh, 1)
 			if count != 1 {
 				t.Fatalf("sms callback count = %d, want 1", count)
 			}
 			if got.Text != tt.text || got.From != "15551234567" {
 				t.Fatalf("incoming sms = %+v", got)
 			}
-			if len(transport.writes) != 0 {
-				t.Fatalf("len(client writes) = %d, want 0", len(transport.writes))
+			if len(transport.writes) != 1 {
+				t.Fatalf("len(client writes) = %d, want 1", len(transport.writes))
 			}
-			if len(inboundTransport.writes) != 4 {
-				t.Fatalf("len(inbound writes) = %d, want 4", len(inboundTransport.writes))
+			if len(inboundTransport.writes) != 2 {
+				t.Fatalf("len(inbound writes) = %d, want 2", len(inboundTransport.writes))
 			}
 			response := mustParseMessage(t, "response", inboundTransport.writes[0])
 			if response.StatusCode() != 200 {
 				t.Fatalf("response.StatusCode() = %d, want 200", response.StatusCode())
 			}
-			ack := mustParseMessage(t, "ack", inboundTransport.writes[1])
+			ack := mustParseMessage(t, "ack", transport.writes[0])
 			if ack.Method() != "MESSAGE" {
 				t.Fatalf("ack.Method() = %q, want MESSAGE", ack.Method())
 			}
@@ -440,6 +483,137 @@ func TestHandleIncomingMessage(t *testing.T) {
 				t.Fatalf("ack Content-Transfer-Encoding = %q, want binary", ack.Header("Content-Transfer-Encoding"))
 			}
 		})
+	}
+}
+
+func TestSMSDeliveryReportTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  func() Message
+		want string
+	}{
+		{
+			name: "prefers sip asserted identity",
+			msg: func() Message {
+				msg := newInboundSMSRequest("call-1", "1 MESSAGE", []byte{rpAckNetworkToMS, 0x01})
+				msg.Headers = upsertHeader(msg.Headers, "P-Asserted-Identity", "<sip:ipsmgw.example.com>")
+				msg.Headers = upsertHeader(msg.Headers, "From", "<tel:+15551234567>;tag=1")
+				return msg
+			},
+			want: "sip:ipsmgw.example.com",
+		},
+		{
+			name: "falls back to sip from",
+			msg: func() Message {
+				msg := newInboundSMSRequest("call-1", "1 MESSAGE", []byte{rpAckNetworkToMS, 0x01})
+				msg.Headers = upsertHeader(msg.Headers, "P-Asserted-Identity", "<tel:+15550000000>")
+				msg.Headers = upsertHeader(msg.Headers, "From", "<sip:ipsmgw.example.com>;tag=remote-1")
+				return msg
+			},
+			want: "sip:ipsmgw.example.com",
+		},
+		{
+			name: "falls back to last via sent by",
+			msg: func() Message {
+				msg := newInboundSMSRequest("call-1", "1 MESSAGE", []byte{rpAckNetworkToMS, 0x01})
+				msg.Headers = upsertHeader(msg.Headers, "P-Asserted-Identity", "<tel:+15550000000>")
+				msg.Headers = upsertHeader(msg.Headers, "From", "<tel:+15551234567>;tag=remote-1")
+				msg.Headers = upsertHeader(msg.Headers, "Via", "SIP/2.0/UDP pcscf.example.com;branch=z9hG4bK-pcscf, SIP/2.0/UDP ipsmgw.example.com:6000;branch=z9hG4bK-gw")
+				return msg
+			},
+			want: "sip:ipsmgw.example.com:6000",
+		},
+	}
+
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := client.smsReportTarget(tt.msg()); got != tt.want {
+				t.Fatalf("smsReportTarget() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleIncomingMessageRoutesResponseToSourcePort(t *testing.T) {
+	transport := newUDPStubTransport(20481, 32773)
+	transport.remote = &net.UDPAddr{IP: net.IPv4(172, 29, 63, 232), Port: 32773}
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, 0x00)
+	rpdu = append(rpdu, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	msg := newInboundSMSRequest("call-1", "1 MESSAGE", rpdu)
+	msg.Headers = upsertHeader(msg.Headers, "Via", "SIP/2.0/UDP 172.29.63.232:6000;branch=z9hG4bK-test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.handleRequest(ctx, transport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	if len(transport.writeAddrs) == 0 {
+		t.Fatal("response write address not recorded")
+	}
+	addr, ok := transport.writeAddrs[0].(*net.UDPAddr)
+	if !ok || addr == nil {
+		t.Fatalf("response addr = %#v, want *net.UDPAddr", transport.writeAddrs[0])
+	}
+	if !addr.IP.Equal(net.IPv4(172, 29, 63, 232)) || addr.Port != 32773 {
+		t.Fatalf("response addr = %v, want 172.29.63.232:32773", addr)
+	}
+}
+
+func TestHandleIncomingMessageUsesViaTargetForDeliveryReport(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	reportCh := make(chan struct{}, 1)
+	transport.onWrite = func(data []byte) {
+		reportCh <- struct{}{}
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, 0x00)
+	rpdu = append(rpdu, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	msg := newInboundSMSRequest("call-1", "1 MESSAGE", rpdu)
+	msg.Headers = upsertHeader(msg.Headers, "From", "<tel:+15551234567>;tag=remote-1")
+	msg.Headers = upsertHeader(msg.Headers, "P-Asserted-Identity", "<tel:+15551234567>")
+	msg.Headers = upsertHeader(msg.Headers, "Via", "SIP/2.0/UDP pcscf.example.com;branch=z9hG4bK-pcscf, SIP/2.0/UDP 172.25.63.232:6000;branch=z9hG4bK-gw")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	waitForWriteEvents(t, reportCh, 1)
+	if len(transport.writes) != 1 {
+		t.Fatalf("len(transport.writes) = %d, want 1", len(transport.writes))
+	}
+	req := mustParseMessage(t, "delivery report", transport.writes[0])
+	parts := strings.Fields(req.StartLine)
+	if len(parts) < 2 {
+		t.Fatalf("request start line = %q", req.StartLine)
+	}
+	if parts[1] != "sip:172.25.63.232:6000" {
+		t.Fatalf("delivery report target = %q, want %q", parts[1], "sip:172.25.63.232:6000")
 	}
 }
 
@@ -509,7 +683,16 @@ func TestHandleIncomingMessageDuplicateResponseUsesSameToTag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newInboundUDPTransport()
-			client := newTestClient(t, Config{}, newClientUDPTransport())
+			clientTransport := newClientUDPTransport()
+			client := newTestClient(t, Config{}, clientTransport)
+			clientTransport.onWrite = func(data []byte) {
+				req, err := ParseMessage(data)
+				if err != nil {
+					t.Errorf("ParseMessage(delivery-report) error = %v", err)
+					return
+				}
+				go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+			}
 
 			tpdu, err := buildSMSDeliver("+15551234567", tt.text)
 			if err != nil {
@@ -530,12 +713,12 @@ func TestHandleIncomingMessageDuplicateResponseUsesSameToTag(t *testing.T) {
 			if err := client.handleRequest(ctx, transport, msg); err != nil {
 				t.Fatalf("handleRequest(duplicate) error = %v", err)
 			}
-			if len(transport.writes) != 4 {
-				t.Fatalf("len(writes) = %d, want 4", len(transport.writes))
+			if len(transport.writes) != 2 {
+				t.Fatalf("len(writes) = %d, want 2", len(transport.writes))
 			}
 
 			first := mustParseMessage(t, "first 200", transport.writes[0])
-			second := mustParseMessage(t, "second 200", transport.writes[2])
+			second := mustParseMessage(t, "second 200", transport.writes[1])
 			firstTag := headerTag(first.Header("To"))
 			secondTag := headerTag(second.Header("To"))
 			if firstTag == "" {
@@ -591,6 +774,16 @@ func TestHandleIncomingMessageSameBodyDifferentTransaction(t *testing.T) {
 	client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) {
 		got = append(got, msg)
 	}}, transport)
+	reportCh := make(chan struct{}, 2)
+	transport.onWrite = func(data []byte) {
+		reportCh <- struct{}{}
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
 
 	tpdu, err := buildSMSDeliver("+15551234567", "same body")
 	if err != nil {
@@ -610,6 +803,7 @@ func TestHandleIncomingMessageSameBodyDifferentTransaction(t *testing.T) {
 		}
 	}
 
+	waitForWriteEvents(t, reportCh, 2)
 	if len(got) != 2 {
 		t.Fatalf("sms callback count = %d, want 2", len(got))
 	}
@@ -617,6 +811,9 @@ func TestHandleIncomingMessageSameBodyDifferentTransaction(t *testing.T) {
 		if msg.Text != "same body" || msg.From != "15551234567" {
 			t.Fatalf("incoming sms %d = %+v", i, msg)
 		}
+	}
+	if len(transport.writes) != 2 {
+		t.Fatalf("len(transport.writes) = %d, want 2", len(transport.writes))
 	}
 }
 
@@ -946,6 +1143,16 @@ func TestHandleIncomingMultipartSMS(t *testing.T) {
 	client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) {
 		got = append(got, msg)
 	}}, transport)
+	reportCh := make(chan struct{}, len(parts))
+	transport.onWrite = func(data []byte) {
+		reportCh <- struct{}{}
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	for i, part := range parts {
@@ -959,14 +1166,18 @@ func TestHandleIncomingMultipartSMS(t *testing.T) {
 			t.Fatalf("handleRequest(part %d) error = %v", i, err)
 		}
 	}
+	waitForWriteEvents(t, reportCh, len(parts))
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
 	if got[0].Text != text || got[0].From != "15551234567" {
 		t.Fatalf("got[0] = %+v", got[0])
 	}
-	if len(inboundTransport.writes) != len(parts)*2 {
-		t.Fatalf("len(inboundTransport.writes) = %d, want %d", len(inboundTransport.writes), len(parts)*2)
+	if len(inboundTransport.writes) != len(parts) {
+		t.Fatalf("len(inboundTransport.writes) = %d, want %d", len(inboundTransport.writes), len(parts))
+	}
+	if len(transport.writes) != len(parts) {
+		t.Fatalf("len(transport.writes) = %d, want %d", len(transport.writes), len(parts))
 	}
 }
 

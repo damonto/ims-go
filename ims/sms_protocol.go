@@ -178,6 +178,10 @@ func newRPAckMessage(reference byte) rpMessage {
 	return rpMessage{Type: rpAckMSToNetwork, Reference: reference}
 }
 
+func newRPAckDeliverReportMessage(reference byte) rpMessage {
+	return rpMessage{Type: rpAckMSToNetwork, Reference: reference, UserData: []byte{0x00, 0x00}}
+}
+
 func newRPErrorMessage(reference, cause byte) rpMessage {
 	return rpMessage{Type: rpErrorMSToNetwork, Reference: reference, Cause: cause, HasCause: true}
 }
