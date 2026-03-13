@@ -659,6 +659,63 @@ func TestSMSDeliveryReportTarget(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingSMSFallsBackToSIPTargetAndDecodesAlphanumericSender(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	var got IncomingSMS
+	count := 0
+	client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) { got = msg; count++ }}, transport)
+	reportCh := make(chan struct{}, 1)
+	transport.onWrite = func(data []byte) {
+		reportCh <- struct{}{}
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	parts, err := buildSMSUserDataParts("balance")
+	if err != nil {
+		t.Fatalf("buildSMSUserDataParts() error = %v", err)
+	}
+	tpdu := []byte{0x00}
+	tpdu = append(tpdu, encodeAlphanumericTPAddress(t, "777")...)
+	tpdu = append(tpdu, 0x00, parts[0].dcs)
+	tpdu = append(tpdu, bytes.Repeat([]byte{0x00}, 7)...)
+	tpdu = append(tpdu, byte(parts[0].udl))
+	tpdu = append(tpdu, parts[0].userData...)
+
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, encodeRPAddress("")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.handleRequest(ctx, inboundTransport, newInboundSMSRequest("call-alpha", "1 MESSAGE", rpdu)); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+
+	waitForWriteEvents(t, reportCh, 1)
+	if count != 1 {
+		t.Fatalf("sms callback count = %d, want 1", count)
+	}
+	if got.From != "777" {
+		t.Fatalf("got.From = %q, want %q", got.From, "777")
+	}
+	if got.To != testPublicIdentity {
+		t.Fatalf("got.To = %q, want %q", got.To, testPublicIdentity)
+	}
+	if got.ServiceCenter != "+15550000000" {
+		t.Fatalf("got.ServiceCenter = %q, want %q", got.ServiceCenter, "+15550000000")
+	}
+	if got.Text != "balance" {
+		t.Fatalf("got.Text = %q, want %q", got.Text, "balance")
+	}
+}
+
 func TestHandleIncomingMessageRoutesResponseToSourcePort(t *testing.T) {
 	transport := newUDPStubTransport(20481, 32773)
 	transport.remote = &net.UDPAddr{IP: net.IPv4(172, 29, 63, 232), Port: 32773}

@@ -48,10 +48,11 @@ const (
 )
 
 type IncomingSMS struct {
-	From       string
-	To         string
-	Text       string
-	ReceivedAt time.Time
+	From          string
+	To            string
+	ServiceCenter string
+	Text          string
+	ReceivedAt    time.Time
 }
 
 type IncomingUSSD struct {
@@ -528,11 +529,11 @@ func (s *USSDService) Dial(ctx context.Context, code string) (*USSDSession, erro
 }
 
 func (c *Client) handleSMS(msg ims.IncomingSMS) {
-	event := IncomingSMS{From: msg.From, To: msg.To, Text: msg.Text, ReceivedAt: time.Now()}
+	event := IncomingSMS{From: msg.From, To: msg.To, ServiceCenter: msg.ServiceCenter, Text: msg.Text, ReceivedAt: time.Now()}
 	select {
 	case c.bus.sms <- event:
 	default:
-		c.logger.Debug("dropping sms event", "from", event.From, "to", event.To)
+		c.logger.Debug("dropping sms event", "from", event.From, "to", event.To, "service_center", event.ServiceCenter)
 	}
 }
 

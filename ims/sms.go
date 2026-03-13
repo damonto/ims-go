@@ -31,15 +31,17 @@ const (
 )
 
 type IncomingSMS struct {
-	From string
-	To   string
-	Text string
+	From          string
+	To            string
+	ServiceCenter string
+	Text          string
 }
 
 type rpMessage struct {
 	Type        byte
 	Reference   byte
 	TPDU        []byte
+	Originator  string
 	Destination string
 	Cause       byte
 	HasCause    bool
@@ -180,19 +182,35 @@ func digitOctetCount(digits int) int {
 	return (digits + 1) / 2
 }
 
+func decodeAlphanumericAddress(data []byte, lengthSemiOctets int) (string, error) {
+	septetCount := lengthSemiOctets * 4 / 7
+	if septetCount == 0 {
+		return "", nil
+	}
+	return decodeGSM7(unpackSeptets(data, septetCount))
+}
+
 func decodeTPAddress(data []byte) (string, int, error) {
 	if len(data) < 2 {
 		return "", 0, errors.New("decoding TP address: packet too short")
 	}
-	lengthDigits := int(data[0])
+	lengthSemiOctets := int(data[0])
 	ton := (data[1] >> 4) & 0x07
-	numberBytes := digitOctetCount(lengthDigits)
+	numberBytes := digitOctetCount(lengthSemiOctets)
 	if len(data) < 2+numberBytes {
 		return "", 0, errors.New("decoding TP address: truncated address")
 	}
-	number := unswapDigits(data[2 : 2+numberBytes])
-	if len(number) > lengthDigits {
-		number = number[:lengthDigits]
+	raw := data[2 : 2+numberBytes]
+	if ton == 0x05 {
+		number, err := decodeAlphanumericAddress(raw, lengthSemiOctets)
+		if err != nil {
+			return "", 0, fmt.Errorf("decoding TP address: %w", err)
+		}
+		return number, 2 + numberBytes, nil
+	}
+	number := unswapDigits(raw)
+	if len(number) > lengthSemiOctets {
+		number = number[:lengthSemiOctets]
 	}
 	if ton == 0x01 {
 		number = "+" + number
@@ -220,7 +238,11 @@ func decodeRPAddress(data []byte) (string, int, error) {
 	if len(data) < 1+length {
 		return "", 0, errors.New("decoding RP address: truncated address")
 	}
+	ton := (data[1] >> 4) & 0x07
 	number := unswapDigits(data[2 : 1+length])
+	if ton == 0x01 {
+		number = "+" + number
+	}
 	return number, 1 + length, nil
 }
 
@@ -502,6 +524,16 @@ func fromHexNibble(b byte) byte {
 	switch {
 	case b >= '0' && b <= '9':
 		return b - '0'
+	case b == '*':
+		return 0x0A
+	case b == '#':
+		return 0x0B
+	case b == 'a' || b == 'A':
+		return 0x0C
+	case b == 'b' || b == 'B':
+		return 0x0D
+	case b == 'c' || b == 'C':
+		return 0x0E
 	case b == 'f' || b == 'F':
 		return 0x0F
 	default:
@@ -510,10 +542,24 @@ func fromHexNibble(b byte) byte {
 }
 
 func toHexNibble(v byte) byte {
-	if v < 10 {
+	switch {
+	case v < 10:
 		return '0' + v
+	case v == 0x0A:
+		return '*'
+	case v == 0x0B:
+		return '#'
+	case v == 0x0C:
+		return 'a'
+	case v == 0x0D:
+		return 'b'
+	case v == 0x0E:
+		return 'c'
+	case v == 0x0F:
+		return 'f'
+	default:
+		return '0'
 	}
-	return 'a' + (v - 10)
 }
 
 var gsm7EncodeMap = map[rune]byte{

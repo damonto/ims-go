@@ -193,7 +193,7 @@ func (m rpMessage) MarshalBinary() ([]byte, error) {
 			return nil, fmt.Errorf("marshalling RP-DATA: tpdu too long %d", len(m.TPDU))
 		}
 		payload := []byte{m.Type, m.Reference}
-		payload = append(payload, encodeRPAddress("")...)
+		payload = append(payload, encodeRPAddress(m.Originator)...)
 		payload = append(payload, encodeRPAddress(m.Destination)...)
 		payload = append(payload, byte(len(m.TPDU)))
 		payload = append(payload, m.TPDU...)
@@ -250,7 +250,7 @@ func (m *rpMessage) UnmarshalBinary(data []byte) error {
 		return nil
 	case rpDataMSToNetwork, rpDataNetworkToMS:
 		idx := 2
-		_, n, err := decodeRPAddress(data[idx:])
+		originator, n, err := decodeRPAddress(data[idx:])
 		if err != nil {
 			return err
 		}
@@ -268,6 +268,7 @@ func (m *rpMessage) UnmarshalBinary(data []byte) error {
 		if len(data[idx:]) < length {
 			return errors.New("decoding RP: truncated user data")
 		}
+		msg.Originator = originator
 		msg.Destination = destination
 		msg.TPDU = append([]byte(nil), data[idx:idx+length]...)
 		*m = msg

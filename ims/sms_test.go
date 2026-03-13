@@ -56,11 +56,12 @@ func TestRPEncodeDecode(t *testing.T) {
 		{
 			name: "rp-data",
 			raw: func() []byte {
-				raw := append([]byte{rpDataNetworkToMS, 5, 0x00}, encodeRPAddress("+8613800000000")...)
+				raw := append([]byte{rpDataNetworkToMS, 5}, encodeRPAddress("+15550000000")...)
+				raw = append(raw, encodeRPAddress("+8613800000000")...)
 				raw = append(raw, 0x03, 0x01, 0x02, 0x03)
 				return raw
 			}(),
-			want: rpMessage{Type: rpDataNetworkToMS, Reference: 5, Destination: "8613800000000", TPDU: []byte{0x01, 0x02, 0x03}},
+			want: rpMessage{Type: rpDataNetworkToMS, Reference: 5, Originator: "+15550000000", Destination: "+8613800000000", TPDU: []byte{0x01, 0x02, 0x03}},
 		},
 		{
 			name: "rp-error",
@@ -74,7 +75,7 @@ func TestRPEncodeDecode(t *testing.T) {
 			if err := got.UnmarshalBinary(tt.raw); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			if got.Type != tt.want.Type || got.Reference != tt.want.Reference || got.Destination != tt.want.Destination || got.Cause != tt.want.Cause || got.HasCause != tt.want.HasCause || !bytes.Equal(got.TPDU, tt.want.TPDU) {
+			if got.Type != tt.want.Type || got.Reference != tt.want.Reference || got.Originator != tt.want.Originator || got.Destination != tt.want.Destination || got.Cause != tt.want.Cause || got.HasCause != tt.want.HasCause || !bytes.Equal(got.TPDU, tt.want.TPDU) {
 				t.Fatalf("UnmarshalBinary() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -96,6 +97,38 @@ func TestDecodeTPAddressAddsInternationalPrefix(t *testing.T) {
 	}
 	if got != "+15551234567" {
 		t.Fatalf("decodeTPAddress() = %q, want %q", got, "+15551234567")
+	}
+}
+
+func TestDecodeTPAddressAlphanumeric(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "short code", raw: "777", want: "777"},
+		{name: "brand name", raw: "One NZ", want: "One NZ"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := decodeTPAddress(encodeAlphanumericTPAddress(t, tt.raw))
+			if err != nil {
+				t.Fatalf("decodeTPAddress() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("decodeTPAddress() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeTPAddressSemiOctetSpecialDigits(t *testing.T) {
+	got, _, err := decodeTPAddress(encodeTPAddress("123#45*"))
+	if err != nil {
+		t.Fatalf("decodeTPAddress() error = %v", err)
+	}
+	if got != "+123#45*" {
+		t.Fatalf("decodeTPAddress() = %q, want %q", got, "+123#45*")
 	}
 }
 
@@ -274,4 +307,14 @@ func TestSMSDeliverTPDURoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func encodeAlphanumericTPAddress(t *testing.T, value string) []byte {
+	t.Helper()
+	septets, err := encodeGSM7(value)
+	if err != nil {
+		t.Fatalf("encodeGSM7(%q) error = %v", value, err)
+	}
+	lengthSemiOctets := (len(septets)*7 + 3) / 4
+	return append([]byte{byte(lengthSemiOctets), 0xD0}, packSeptets(septets)...)
 }

@@ -1462,12 +1462,37 @@ func (c *Client) sendSMSDeliveryReportRequest(req Message) {
 
 func (c *Client) deliverIncomingSMS(msg Message, rp rpMessage, tpdu smsDeliverTPDU) {
 	incoming := tpdu.Message
-	incoming.To = rp.Destination
+	incoming.To = incomingSMSRecipient(msg)
+	incoming.ServiceCenter = rp.Originator
 	if tpdu.Concat != nil {
 		c.deliverConcatSMS(incoming, *tpdu.Concat)
 		return
 	}
 	c.deliverSingleSMS(msg, incoming)
+}
+
+func incomingSMSRecipient(msg Message) string {
+	for _, candidate := range []string{msg.Header("To"), requestURI(msg)} {
+		if target := smsEnvelopeAddress(candidate); target != "" {
+			return target
+		}
+	}
+	return ""
+}
+
+func smsEnvelopeAddress(value string) string {
+	uri := addressURI(value)
+	if uri == "" {
+		return ""
+	}
+	switch lower := strings.ToLower(uri); {
+	case strings.HasPrefix(lower, "tel:"):
+		return uri[len("tel:"):]
+	case strings.HasPrefix(lower, "sip:"), strings.HasPrefix(lower, "sips:"):
+		return uri
+	default:
+		return uri
+	}
 }
 
 func (c *Client) deliverConcatSMS(msg IncomingSMS, concat smsConcatInfo) {
@@ -1677,7 +1702,7 @@ func (c *Client) markConcatSMSSeen(key string) bool {
 }
 
 func (c *Client) concatSMSKey(msg IncomingSMS, concat smsConcatInfo) string {
-	return fmt.Sprintf("%t|%d|%s|%s", concat.SixteenBit, concat.Reference, msg.From, msg.To)
+	return fmt.Sprintf("%t|%d|%s|%s", concat.SixteenBit, concat.Reference, msg.From, msg.ServiceCenter)
 }
 
 func (c *Client) evictExpiredConcatSMS(now time.Time) {
