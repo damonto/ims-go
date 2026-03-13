@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,7 +22,57 @@ type stubTransport struct {
 	writeAddrs []net.Addr
 	reads      [][]byte
 	onWrite    func(data []byte)
+	closeCount int
 }
+
+type blockingWriteTransport struct {
+	local      net.Addr
+	remote     net.Addr
+	entered    chan struct{}
+	release    chan struct{}
+	writeCount atomic.Int32
+	active     atomic.Int32
+	maxActive  atomic.Int32
+}
+
+func (t *blockingWriteTransport) LocalAddr() net.Addr  { return t.local }
+func (t *blockingWriteTransport) RemoteAddr() net.Addr { return t.remote }
+func (t *blockingWriteTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	<-ctx.Done()
+	return nil, nil, ctx.Err()
+}
+
+func (t *blockingWriteTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.waitWrite(ctx)
+}
+
+func (t *blockingWriteTransport) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
+	return t.waitWrite(ctx)
+}
+
+func (t *blockingWriteTransport) waitWrite(ctx context.Context) error {
+	active := t.active.Add(1)
+	defer t.active.Add(-1)
+	for {
+		maxActive := t.maxActive.Load()
+		if active <= maxActive || t.maxActive.CompareAndSwap(maxActive, active) {
+			break
+		}
+	}
+	select {
+	case t.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.release:
+		t.writeCount.Add(1)
+		return nil
+	}
+}
+
+func (t *blockingWriteTransport) Close() error { return nil }
 
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
@@ -67,7 +118,10 @@ func (t *stubTransport) writePacket(data []byte, addr net.Addr) error {
 	}
 	return nil
 }
-func (t *stubTransport) Close() error { return nil }
+func (t *stubTransport) Close() error {
+	t.closeCount++
+	return nil
+}
 
 type stubCard struct{}
 
@@ -76,7 +130,11 @@ func (stubCard) MCC() string  { return "001" }
 func (stubCard) MNC() string  { return "001" }
 func (stubCard) SMSC() string { return "+15550000000" }
 func (stubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
-	return usim.AKAResult{RES: []byte("password")}, nil
+	return usim.AKAResult{
+		RES: []byte("password"),
+		CK:  []byte("client-test-ck"),
+		IK:  []byte("client-test-ik"),
+	}, nil
 }
 
 type identityStubCard struct {
@@ -111,6 +169,16 @@ func authorizationNonce(value string) string {
 	return authorizationField(value, "nonce")
 }
 
+func viaBranch(value string) string {
+	for part := range strings.SplitSeq(value, ";") {
+		name, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && strings.EqualFold(name, "branch") {
+			return rawValue
+		}
+	}
+	return ""
+}
+
 const (
 	testPublicIdentity = "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org"
 	testUserAgent      = "test-agent"
@@ -128,6 +196,15 @@ func newTCPStubTransport(localPort, remotePort int) *stubTransport {
 	return &stubTransport{
 		local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort},
 		remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: remotePort},
+	}
+}
+
+func newBlockingWriteTransport() *blockingWriteTransport {
+	return &blockingWriteTransport{
+		local:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+		remote:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
 	}
 }
 
@@ -412,6 +489,53 @@ func TestHandleRequestDispatch(t *testing.T) {
 	}
 }
 
+func TestClientSerializesRequestAndResponseWrites(t *testing.T) {
+	transport := newBlockingWriteTransport()
+	client := newTestClient(t, Config{}, transport)
+	outbound := client.buildMessage("tel:777", []byte("hello"), "")
+	inbound := newInboundRequest("NOTIFY", "notify-serial", "1 NOTIFY")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	requestErrCh := make(chan error, 1)
+	go func() {
+		requestErrCh <- client.writeRequest(ctx, transport, outbound)
+	}()
+
+	select {
+	case <-transport.entered:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("first write did not reach transport")
+	}
+
+	responseErrCh := make(chan error, 1)
+	go func() {
+		responseErrCh <- client.handleRequest(ctx, transport, inbound)
+	}()
+
+	select {
+	case <-transport.entered:
+		t.Fatal("response write entered transport before request completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(transport.release)
+
+	if err := <-requestErrCh; err != nil {
+		t.Fatalf("writeRequest() error = %v", err)
+	}
+	if err := <-responseErrCh; err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	if got := transport.writeCount.Load(); got != 2 {
+		t.Fatalf("write count = %d, want 2", got)
+	}
+	if got := transport.maxActive.Load(); got != 1 {
+		t.Fatalf("max concurrent writes = %d, want 1", got)
+	}
+}
+
 func TestHandleIncomingMessage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -462,7 +586,7 @@ func TestHandleIncomingMessage(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("sms callback count = %d, want 1", count)
 			}
-			if got.Text != tt.text || got.From != "15551234567" {
+			if got.Text != tt.text || got.From != "+15551234567" {
 				t.Fatalf("incoming sms = %+v", got)
 			}
 			if len(transport.writes) != 1 {
@@ -808,7 +932,7 @@ func TestHandleIncomingMessageSameBodyDifferentTransaction(t *testing.T) {
 		t.Fatalf("sms callback count = %d, want 2", len(got))
 	}
 	for i, msg := range got {
-		if msg.Text != "same body" || msg.From != "15551234567" {
+		if msg.Text != "same body" || msg.From != "+15551234567" {
 			t.Fatalf("incoming sms %d = %+v", i, msg)
 		}
 	}
@@ -915,6 +1039,9 @@ func TestClientCloseContextSendsBYEAndDeregister(t *testing.T) {
 	if got := deregReq.Header("Authorization"); got == "" {
 		t.Fatal("deregister Authorization = empty, want digest credentials")
 	}
+	if transport.closeCount != 1 {
+		t.Fatalf("transport close count = %d, want 1", transport.closeCount)
+	}
 	if !session.isClosed() {
 		t.Fatal("session.isClosed() = false, want true")
 	}
@@ -940,7 +1067,7 @@ func TestRegisterBuildersUseSecondsAndAccessNetworkInfo(t *testing.T) {
 				AccessNetworkInfo: tt.accessInfo,
 			}, transport)
 
-			register := client.buildRegister("", "", nil)
+			register := client.buildRegister(nil, nil)
 			if got := register.Header("Expires"); got != "90" {
 				t.Fatalf("REGISTER Expires = %q, want 90", got)
 			}
@@ -961,33 +1088,47 @@ func TestRegisterBuildersUseSecondsAndAccessNetworkInfo(t *testing.T) {
 
 func TestBuildRegisterAuthorizationHeader(t *testing.T) {
 	tests := []struct {
-		name         string
-		nonce        string
-		response     string
-		wantNonce    string
-		wantResponse string
-		wantRealm    string
-		wantUsername string
+		name          string
+		challenge     AuthChallenge
+		wantNonce     string
+		wantResponse  string
+		matchResponse bool
+		wantRealm     string
+		wantUsername  string
+		wantQOP       string
 	}{
 		{
-			name:         "initial register uses empty digest fields",
+			name:          "initial register uses legacy empty digest",
+			wantNonce:     "",
+			wantResponse:  "",
+			matchResponse: true,
+			wantRealm:     "ims.mnc001.mcc001.3gppnetwork.org",
+			wantUsername:  "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+		},
+		{
+			name:         "challenged register keeps provided digest fields",
+			challenge:    AuthChallenge{Realm: "ims.mnc001.mcc001.3gppnetwork.org", Nonce: testAuthNonce(0x01)},
+			wantNonce:    testAuthNonce(0x01),
 			wantRealm:    "ims.mnc001.mcc001.3gppnetwork.org",
 			wantUsername: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		},
 		{
-			name:         "challenged register keeps provided digest fields",
-			nonce:        testAuthNonce(0x01),
-			response:     "deadbeef",
-			wantNonce:    testAuthNonce(0x01),
-			wantResponse: "deadbeef",
+			name:         "qop auth adds cnonce and nonce count",
+			challenge:    AuthChallenge{Realm: "ims.mnc001.mcc001.3gppnetwork.org", Nonce: testAuthNonce(0x02), QOP: "auth"},
+			wantNonce:    testAuthNonce(0x02),
 			wantRealm:    "ims.mnc001.mcc001.3gppnetwork.org",
 			wantUsername: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+			wantQOP:      "auth",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newTestClient(t, Config{}, newClientUDPTransport())
-			register := client.buildRegister(tt.nonce, tt.response, nil)
+			auth, err := client.buildRegisterAuthorization(context.Background(), tt.challenge.Realm, tt.challenge.Nonce, tt.challenge.QOP)
+			if err != nil {
+				t.Fatalf("buildRegisterAuthorization() error = %v", err)
+			}
+			register := client.buildRegister(auth, nil)
 
 			got := register.Header("Authorization")
 			if got == "" {
@@ -996,14 +1137,284 @@ func TestBuildRegisterAuthorizationHeader(t *testing.T) {
 			if gotNonce := authorizationField(got, "nonce"); gotNonce != tt.wantNonce {
 				t.Fatalf("REGISTER Authorization nonce = %q, want %q", gotNonce, tt.wantNonce)
 			}
-			if gotResponse := authorizationField(got, "response"); gotResponse != tt.wantResponse {
-				t.Fatalf("REGISTER Authorization response = %q, want %q", gotResponse, tt.wantResponse)
+			gotResponse := authorizationField(got, "response")
+			if tt.matchResponse {
+				if gotResponse != tt.wantResponse {
+					t.Fatalf("REGISTER Authorization response = %q, want %q", gotResponse, tt.wantResponse)
+				}
+			} else if gotResponse == "" {
+				t.Fatal("REGISTER Authorization response = empty")
 			}
 			if gotRealm := authorizationField(got, "realm"); gotRealm != tt.wantRealm {
 				t.Fatalf("REGISTER Authorization realm = %q, want %q", gotRealm, tt.wantRealm)
 			}
 			if gotUsername := authorizationField(got, "username"); gotUsername != tt.wantUsername {
 				t.Fatalf("REGISTER Authorization username = %q, want %q", gotUsername, tt.wantUsername)
+			}
+			if gotQOP := authorizationField(got, "qop"); gotQOP != tt.wantQOP {
+				t.Fatalf("REGISTER Authorization qop = %q, want %q", gotQOP, tt.wantQOP)
+			}
+			if tt.wantQOP != "" {
+				if gotNC := authorizationField(got, "nc"); gotNC != "00000001" {
+					t.Fatalf("REGISTER Authorization nc = %q, want %q", gotNC, "00000001")
+				}
+				if gotCNonce := authorizationField(got, "cnonce"); gotCNonce == "" {
+					t.Fatal("REGISTER Authorization cnonce = empty")
+				}
+			}
+		})
+	}
+}
+
+func TestBuildRegisterUsesFreshViaBranch(t *testing.T) {
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	first := client.buildRegister(nil, nil)
+	second := client.buildRegister(nil, nil)
+	if viaBranch(first.Header("Via")) == viaBranch(second.Header("Via")) {
+		t.Fatalf("REGISTER Via branch reused: first=%q second=%q", first.Header("Via"), second.Header("Via"))
+	}
+}
+
+func TestAwaitRegisterChallengeSendsLegacyEmptyAuthorization(t *testing.T) {
+	transport := newClientUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+
+	registers := 0
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, "request", data)
+		if req.Method() != "REGISTER" {
+			return
+		}
+		registers++
+		switch registers {
+		case 1:
+			got := req.Header("Authorization")
+			if got == "" || !strings.Contains(got, `nonce=""`) || !strings.Contains(got, `response=""`) {
+				t.Errorf("first REGISTER Authorization = %q, want legacy empty digest", got)
+			}
+			transport.reads = append(transport.reads, newTestResponse(req, 401, "Unauthorized").Bytes())
+		default:
+			t.Errorf("unexpected REGISTER attempt %d", registers)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := client.awaitRegisterChallenge(ctx)
+	if err != nil {
+		t.Fatalf("awaitRegisterChallenge() error = %v", err)
+	}
+	if resp.StatusCode() != 401 {
+		t.Fatalf("awaitRegisterChallenge() status = %d, want 401", resp.StatusCode())
+	}
+	if registers != 1 {
+		t.Fatalf("REGISTER attempts = %d, want 1", registers)
+	}
+}
+
+func TestRegisterBuildsAuthBeforeSecureTransportUpgrade(t *testing.T) {
+	tests := []struct {
+		name           string
+		nonce          string
+		securityServer string
+	}{
+		{
+			name:           "challenged register derives integrity key before secure dial",
+			nonce:          testAuthNonce(0x03),
+			securityServer: "ipsec-3gpp; q=0.1; alg=hmac-md5-96; ealg=null; spi-c=4454867; spi-s=4454866; port-c=32797; port-s=6000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialTransport := newClientTCPTransport()
+			secureTransport := newTCPStubTransport(49625, 6000)
+			client := newTestClient(t, Config{Transport: "tcp"}, initialTransport)
+
+			initialRegisters := 0
+			initialTransport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, "initial register", data)
+				if req.Method() != "REGISTER" {
+					t.Fatalf("initial transport method = %q, want REGISTER", req.Method())
+				}
+				initialRegisters++
+				if initialRegisters > 1 {
+					t.Fatalf("initial REGISTER count = %d, want 1", initialRegisters)
+				}
+				resp := newTestResponse(req, 401, "Unauthorized")
+				resp.AddHeader("WWW-Authenticate", fmt.Sprintf(`Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="%s",algorithm=AKAv1-MD5,qop="auth"`, tt.nonce))
+				resp.AddHeader("Security-Server", tt.securityServer)
+				initialTransport.reads = append(initialTransport.reads, resp.Bytes())
+			}
+
+			var dialCfg SecureTCPConfig
+			client.cfg.DialSecureTCP = func(ctx context.Context, cfg SecureTCPConfig) (Transport, error) {
+				dialCfg = cfg
+				if len(cfg.IntegrityKey) == 0 {
+					t.Fatal("DialSecureTCP() IntegrityKey = empty")
+				}
+				return secureTransport, nil
+			}
+
+			secureWrites := 0
+			secureTransport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, "secure transport request", data)
+				switch req.Method() {
+				case "REGISTER":
+					secureWrites++
+					auth := req.Header("Authorization")
+					if got := authorizationField(auth, "nonce"); got != tt.nonce {
+						t.Fatalf("secure REGISTER nonce = %q, want %q", got, tt.nonce)
+					}
+					if got := authorizationField(auth, "qop"); got != "auth" {
+						t.Fatalf("secure REGISTER qop = %q, want %q", got, "auth")
+					}
+					if got := authorizationField(auth, "nc"); got != "00000001" {
+						t.Fatalf("secure REGISTER nc = %q, want %q", got, "00000001")
+					}
+					if authorizationField(auth, "cnonce") == "" {
+						t.Fatal("secure REGISTER cnonce = empty")
+					}
+					resp := newTestResponse(req, 200, "OK")
+					secureTransport.reads = append(secureTransport.reads, resp.Bytes())
+				case "SUBSCRIBE":
+					secureWrites++
+					resp := newTestResponse(req, 200, "OK")
+					secureTransport.reads = append(secureTransport.reads, resp.Bytes())
+				default:
+					t.Fatalf("secure transport method = %q, want REGISTER or SUBSCRIBE", req.Method())
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := client.Register(ctx); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+			if len(client.authIK) == 0 {
+				t.Fatal("client.authIK = empty")
+			}
+			if len(dialCfg.IntegrityKey) != len(client.authIK) {
+				t.Fatalf("DialSecureTCP() IntegrityKey len = %d, want %d", len(dialCfg.IntegrityKey), len(client.authIK))
+			}
+			if secureWrites != 2 {
+				t.Fatalf("secure transport write count = %d, want 2", secureWrites)
+			}
+		})
+	}
+}
+
+func TestApplySecurityServerRejectsIncompatibleMechanism(t *testing.T) {
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	err := client.applySecurityServer("ipsec-3gpp;alg=hmac-md5-96;ealg=aes-cbc;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20")
+	if err == nil {
+		t.Fatal("applySecurityServer() error = nil, want non-nil")
+	}
+}
+
+func TestApplySecurityServerAcceptsOmittedProtocolDefaults(t *testing.T) {
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	headerValue := "ipsec-3gpp; q=0.1; alg=hmac-md5-96; ealg=null; spi-c=7494433; spi-s=7494432; port-c=32821; port-s=6000"
+	if err := client.applySecurityServer(headerValue); err != nil {
+		t.Fatalf("applySecurityServer() error = %v", err)
+	}
+
+	verify := client.currentSecurityVerify()
+	if verify == nil {
+		t.Fatal("currentSecurityVerify() = nil")
+	}
+	if verify.Prot != "esp" {
+		t.Fatalf("currentSecurityVerify().Prot = %q, want %q", verify.Prot, "esp")
+	}
+	if verify.Mod != "trans" {
+		t.Fatalf("currentSecurityVerify().Mod = %q, want %q", verify.Mod, "trans")
+	}
+	if got := client.securityVerifyValue(verify); got != headerValue {
+		t.Fatalf("securityVerifyValue() = %q, want %q", got, headerValue)
+	}
+}
+
+func TestApplyAssociatedURIStoresTelIdentityForSMS(t *testing.T) {
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	req := client.buildRegister(nil, nil)
+	resp := newTestResponse(req, 200, "OK")
+	resp.AddHeader("P-Associated-URI", "<sip:+15551234567@ims.mnc001.mcc001.3gppnetwork.org>")
+	resp.AddHeader("P-Associated-URI", "<tel:+15551234567>")
+
+	client.applyAssociatedURI(resp)
+
+	if client.cfg.PublicIdentity != "sip:+15551234567@ims.mnc001.mcc001.3gppnetwork.org" {
+		t.Fatalf("PublicIdentity = %q, want %q", client.cfg.PublicIdentity, "sip:+15551234567@ims.mnc001.mcc001.3gppnetwork.org")
+	}
+	if got := client.smsPreferredIdentity(); got != "tel:+15551234567" {
+		t.Fatalf("smsPreferredIdentity() = %q, want %q", got, "tel:+15551234567")
+	}
+}
+
+func TestBuildMessagePrefersTelIdentityForSMS(t *testing.T) {
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	client.telPublicID = "tel:+15551234567"
+
+	msg := client.buildMessage("tel:+15550000000", []byte("hello"), "")
+
+	if got := msg.Header("From"); !strings.Contains(got, "<tel:+15551234567>") {
+		t.Fatalf("MESSAGE From = %q, want tel public identity", got)
+	}
+	if got := msg.Header("P-Preferred-Identity"); got != "<tel:+15551234567>" {
+		t.Fatalf("MESSAGE P-Preferred-Identity = %q, want %q", got, "<tel:+15551234567>")
+	}
+}
+
+func TestApplyRegisterChallengeRequiresSecurityServer(t *testing.T) {
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	req := client.buildRegister(nil, nil)
+	resp := newTestResponse(req, 401, "Unauthorized")
+	resp.AddHeader("WWW-Authenticate", fmt.Sprintf(`Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="%s"`, testAuthNonce(0x01)))
+
+	if _, err := client.applyRegisterChallenge(resp); err == nil {
+		t.Fatal("applyRegisterChallenge() error = nil, want non-nil")
+	}
+}
+
+func TestApplySecurityServerNormalizesIntegrityAlias(t *testing.T) {
+	tests := []struct {
+		name        string
+		headerValue string
+		wantAlg     string
+	}{
+		{
+			name:        "sha1 alias",
+			headerValue: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20",
+			wantAlg:     "hmac-sha1-96",
+		},
+		{
+			name:        "sha256 alias",
+			headerValue: "ipsec-3gpp;alg=hmac-sha-256-128;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20",
+			wantAlg:     "hmac-sha256-128",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestClient(t, Config{}, newClientUDPTransport())
+			if err := client.applySecurityServer(tt.headerValue); err != nil {
+				t.Fatalf("applySecurityServer() error = %v", err)
+			}
+
+			verify := client.currentSecurityVerify()
+			if verify == nil {
+				t.Fatal("currentSecurityVerify() = nil")
+			}
+			if verify.Alg != tt.wantAlg {
+				t.Fatalf("currentSecurityVerify().Alg = %q, want %q", verify.Alg, tt.wantAlg)
+			}
+			if got := client.securityVerifyValue(verify); got != tt.headerValue {
+				t.Fatalf("securityVerifyValue() = %q, want %q", got, tt.headerValue)
+			}
+
+			cfg := client.secureTransportConfig(verify, 5062, 5060, 20, 10)
+			if cfg.Integrity != tt.wantAlg {
+				t.Fatalf("secureTransportConfig().Integrity = %q, want %q", cfg.Integrity, tt.wantAlg)
 			}
 		})
 	}
@@ -1107,7 +1518,7 @@ func TestAppendConcatSMS(t *testing.T) {
 			)
 			for i, step := range tt.steps {
 				got, complete, key = client.appendConcatSMS(
-					IncomingSMS{From: "15551234567", To: "15550000000", Text: step.text},
+					IncomingSMS{From: "+15551234567", To: "15550000000", Text: step.text},
 					smsConcatInfo{Reference: 0x22, Total: step.total, Sequence: step.seq},
 				)
 				if i < len(tt.steps)-1 && complete {
@@ -1170,7 +1581,7 @@ func TestHandleIncomingMultipartSMS(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
-	if got[0].Text != text || got[0].From != "15551234567" {
+	if got[0].Text != text || got[0].From != "+15551234567" {
 		t.Fatalf("got[0] = %+v", got[0])
 	}
 	if len(inboundTransport.writes) != len(parts) {

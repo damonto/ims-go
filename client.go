@@ -429,7 +429,7 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		}
 		c.closeWG.Wait()
 		if active != nil && active.ims != nil {
-			err = errors.Join(err, wrapCloseError("closing IMS client", active.ims.CloseContext(ctx)))
+			err = errors.Join(err, wrapCloseError("closing IMS client", normalizeCloseError(active.ims.CloseContext(ctx))))
 		}
 		if active != nil && active.session != nil {
 			err = errors.Join(err, wrapCloseError("closing session", active.session.CloseContext(ctx)))
@@ -443,6 +443,16 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		close(c.bus.state)
 		close(c.bus.errors)
 	})
+	return err
+}
+
+func normalizeCloseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
 	return err
 }
 

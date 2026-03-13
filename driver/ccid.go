@@ -14,6 +14,7 @@ import (
 )
 
 var ErrReaderNotSelected = errors.New("reader not selected")
+var ErrReaderNotFound = errors.New("reader not found")
 
 type CCID struct {
 	ctx        *goscard.Context
@@ -60,16 +61,16 @@ func (r *CCID) SetReader(name string) error {
 	}
 
 	name = strings.TrimSpace(name)
-	if err := validateReaderName(name); err != nil {
-		return err
+	if name == "" {
+		return errors.New("selecting reader: reader name is empty")
 	}
 
 	readers, err := r.ListReaders()
 	if err != nil {
 		return err
 	}
-	if err := ensureReaderExists(readers, name); err != nil {
-		return err
+	if !slices.Contains(readers, name) {
+		return fmt.Errorf("selecting %q: %w", name, ErrReaderNotFound)
 	}
 	if r.readerName == name && r.card != nil {
 		return nil
@@ -86,20 +87,6 @@ func (r *CCID) SetReader(name string) error {
 
 	r.card = &card
 	r.readerName = name
-	return nil
-}
-
-func validateReaderName(name string) error {
-	if name == "" {
-		return errors.New("selecting reader: reader name is empty")
-	}
-	return nil
-}
-
-func ensureReaderExists(readers []string, wanted string) error {
-	if !slices.Contains(readers, wanted) {
-		return fmt.Errorf("selecting %q: %w", wanted, apdu.ErrReaderNotFound)
-	}
 	return nil
 }
 

@@ -81,6 +81,44 @@ func TestRPEncodeDecode(t *testing.T) {
 	}
 }
 
+func TestEncodeRPAddressEmptyUsesZeroLengthOnly(t *testing.T) {
+	got := encodeRPAddress("")
+
+	if !bytes.Equal(got, []byte{0x00}) {
+		t.Fatalf("encodeRPAddress(\"\") = % X, want 00", got)
+	}
+}
+
+func TestDecodeTPAddressAddsInternationalPrefix(t *testing.T) {
+	got, _, err := decodeTPAddress(encodeTPAddress("+15551234567"))
+	if err != nil {
+		t.Fatalf("decodeTPAddress() error = %v", err)
+	}
+	if got != "+15551234567" {
+		t.Fatalf("decodeTPAddress() = %q, want %q", got, "+15551234567")
+	}
+}
+
+func TestSplitUCS2WordsKeepsSurrogatePairsTogether(t *testing.T) {
+	words := encodeUCS2("你好🙂世界")
+	decoded := make([]uint16, len(words)/2)
+	for i := range decoded {
+		decoded[i] = uint16(words[i*2])<<8 | uint16(words[i*2+1])
+	}
+	parts := splitUCS2Words(decoded, 3)
+	if len(parts) != 3 {
+		t.Fatalf("len(parts) = %d, want 3", len(parts))
+	}
+	last := parts[0][len(parts[0])-1]
+	if last >= 0xD800 && last <= 0xDBFF {
+		t.Fatalf("splitUCS2Words() split after high surrogate: %x", last)
+	}
+	first := parts[1][0]
+	if first >= 0xDC00 && first <= 0xDFFF {
+		t.Fatalf("splitUCS2Words() split before low surrogate: %x", first)
+	}
+}
+
 func TestEncodeDecodeMultipartSMS(t *testing.T) {
 	tests := []struct {
 		name string
@@ -228,8 +266,8 @@ func TestSMSDeliverTPDURoundTrip(t *testing.T) {
 			if err := deliver.UnmarshalBinary(data); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			if deliver.Message.From != "12345" {
-				t.Fatalf("Message.From = %q, want %q", deliver.Message.From, "12345")
+			if deliver.Message.From != "+12345" {
+				t.Fatalf("Message.From = %q, want %q", deliver.Message.From, "+12345")
 			}
 			if deliver.Message.Text != tt.text {
 				t.Fatalf("Message.Text = %q, want %q", deliver.Message.Text, tt.text)

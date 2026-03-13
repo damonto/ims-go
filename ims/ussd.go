@@ -100,8 +100,8 @@ func (c *Client) StartUSSD(ctx context.Context, code string) (*USSDSession, erro
 	}
 	respCh := c.registerPending(invite)
 	defer c.removePending(invite)
-	if err := c.transport.WritePacket(ctx, invite.Bytes()); err != nil {
-		return nil, fmt.Errorf("starting USSD: sending INVITE: %w", err)
+	if err := c.writeRequest(ctx, c.transport, invite); err != nil {
+		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
 	return c.awaitUSSDStart(ctx, start, invite, respCh)
 }
@@ -224,10 +224,10 @@ func (c *Client) startUSSDSession(ctx context.Context, start ussdStart, invite, 
 		remoteCSeqs: make(map[string]struct{}),
 	}
 	c.storeUSSDSession(session)
-	if err := c.transport.WritePacket(ctx, session.buildACK()); err != nil {
+	if err := c.writeRequest(ctx, c.transport, session.buildACK()); err != nil {
 		c.removeUSSDSession(start.callID)
 		session.closeEvents()
-		return nil, fmt.Errorf("starting USSD: sending ACK: %w", err)
+		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
 	c.logger.Debug("started USSD session", "code", start.code, "call_id", start.callID, "target_uri", session.targetURI)
 	return session, nil
@@ -240,7 +240,7 @@ func (c *Client) cancelInvite(parent context.Context, invite Message) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
 	defer cancel()
 	cancelMsg := buildCancel(invite)
-	_ = c.transport.WritePacket(ctx, cancelMsg.Bytes())
+	_ = c.writeRequest(ctx, c.transport, cancelMsg)
 }
 
 func (s *USSDSession) Events() <-chan USSDMessage {
@@ -251,7 +251,7 @@ func (s *USSDSession) Reply(ctx context.Context, text string) error {
 	if err := s.ensureActive("replying USSD"); err != nil {
 		return err
 	}
-	payload, err := s.marshalDialogPayload(USSDMessage{Text: text, Language: s.language, Request: !s.networkInitiated})
+	payload, err := s.marshalDialogPayload(USSDMessage{Text: text, Language: s.currentLanguage(), Request: !s.networkInitiated})
 	if err != nil {
 		return fmt.Errorf("replying USSD: encoding XML payload: %w", err)
 	}
@@ -266,7 +266,7 @@ func (s *USSDSession) ReplyError(ctx context.Context, errorCode int) error {
 	if err := s.ensureActive("replying USSD"); err != nil {
 		return err
 	}
-	payload, err := (ussdXMLBody{Message: USSDMessage{Language: s.language, ErrorCode: normalizeUSSDErrorCode(errorCode)}}).MarshalText()
+	payload, err := (ussdXMLBody{Message: USSDMessage{Language: s.currentLanguage(), ErrorCode: normalizeUSSDErrorCode(errorCode)}}).MarshalText()
 	if err != nil {
 		return fmt.Errorf("replying USSD: encoding error payload: %w", err)
 	}
@@ -283,7 +283,7 @@ func (s *USSDSession) End(ctx context.Context, text string) error {
 	}
 	var payload []byte
 	if strings.TrimSpace(text) != "" {
-		encoded, err := s.marshalDialogPayload(USSDMessage{Text: text, Language: s.language, Final: true})
+		encoded, err := s.marshalDialogPayload(USSDMessage{Text: text, Language: s.currentLanguage(), Final: true})
 		if err != nil {
 			return fmt.Errorf("ending USSD: encoding XML payload: %w", err)
 		}
@@ -304,7 +304,7 @@ func (s *USSDSession) EndError(ctx context.Context, errorCode int) error {
 	if err := s.ensureActive("ending USSD"); err != nil {
 		return err
 	}
-	payload, err := (ussdXMLBody{Message: USSDMessage{Language: s.language, ErrorCode: normalizeUSSDErrorCode(errorCode), Final: true}}).MarshalText()
+	payload, err := (ussdXMLBody{Message: USSDMessage{Language: s.currentLanguage(), ErrorCode: normalizeUSSDErrorCode(errorCode), Final: true}}).MarshalText()
 	if err != nil {
 		return fmt.Errorf("ending USSD: encoding error payload: %w", err)
 	}
@@ -320,7 +320,7 @@ func (s *USSDSession) EndError(ctx context.Context, errorCode int) error {
 func (s *USSDSession) endDirect(ctx context.Context, text string) error {
 	var payload []byte
 	if strings.TrimSpace(text) != "" {
-		encoded, err := s.marshalDialogPayload(USSDMessage{Text: text, Language: s.language, Final: true})
+		encoded, err := s.marshalDialogPayload(USSDMessage{Text: text, Language: s.currentLanguage(), Final: true})
 		if err != nil {
 			return fmt.Errorf("ending USSD: encoding XML payload: %w", err)
 		}
@@ -361,6 +361,21 @@ func (s *USSDSession) dialogKind() ussdDialogKind {
 	return s.responseKind
 }
 
+func (s *USSDSession) currentLanguage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.language
+}
+
+func (s *USSDSession) setLanguage(language string) {
+	if strings.TrimSpace(language) == "" {
+		return
+	}
+	s.mu.Lock()
+	s.language = language
+	s.mu.Unlock()
+}
+
 func (s *USSDSession) ensureActive(action string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -398,8 +413,8 @@ func (s *USSDSession) exchange(ctx context.Context, msg Message, action string) 
 	}
 	respCh := s.client.registerPending(msg)
 	defer s.client.removePending(msg)
-	if err := s.client.transport.WritePacket(ctx, msg.Bytes()); err != nil {
-		return fmt.Errorf("%s: sending %s: %w", action, msg.Method(), err)
+	if err := s.client.writeRequest(ctx, s.client.transport, msg); err != nil {
+		return fmt.Errorf("%s: %w", action, err)
 	}
 	for {
 		select {
@@ -418,7 +433,7 @@ func (s *USSDSession) exchange(ctx context.Context, msg Message, action string) 
 	}
 }
 
-func (s *USSDSession) buildACK() []byte {
+func (s *USSDSession) buildACK() Message {
 	msg := NewRequest("ACK", s.targetURI)
 	msg.AddHeader("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", s.client.transportToken(), net.JoinHostPort(s.client.contactHost, strconv.Itoa(s.client.messageViaPort())), randomAlphaNum(15)))
 	msg.AddHeader("Max-Forwards", "70")
@@ -429,7 +444,7 @@ func (s *USSDSession) buildACK() []byte {
 	msg.AddHeader("To", s.remoteTo)
 	msg.AddHeader("Call-ID", s.callID)
 	msg.AddHeader("CSeq", fmt.Sprintf("%d ACK", s.inviteSeq))
-	return msg.Bytes()
+	return msg
 }
 
 func (s *USSDSession) buildDialogRequest(method string, body []byte) Message {
@@ -471,39 +486,36 @@ func (s *USSDSession) handleRequest(ctx context.Context, transport Transport, ms
 func (s *USSDSession) handleInfo(ctx context.Context, transport Transport, msg Message) error {
 	payload, err := validateInboundUSSDInfo(msg, s.networkInitiated)
 	if err != nil {
-		return writeUSSDStatus(ctx, transport, msg, 415, "Unsupported Media Type")
+		return s.client.writeStatus(ctx, transport, msg, 415, "Unsupported Media Type")
 	}
-	if err := writeUSSDStatus(ctx, transport, msg, 200, "OK"); err != nil {
+	if err := s.client.writeStatus(ctx, transport, msg, 200, "OK"); err != nil {
 		return err
 	}
 	if s.isDuplicateRemote(msg) {
 		s.client.logger.Debug("suppressing duplicate USSD request", "call_id", s.callID, "cseq", msg.Header("CSeq"))
 		return nil
 	}
-	if strings.TrimSpace(payload.Language) != "" {
-		s.language = payload.Language
-	}
+	s.setLanguage(payload.Language)
 	s.setDialogKind(payload)
 	s.emit(payload)
 	return nil
 }
 
 func (s *USSDSession) handleBye(ctx context.Context, transport Transport, msg Message) error {
-	payload, err := decodeUSSDPayload(msg)
-	if err != nil {
-		return writeUSSDStatus(ctx, transport, msg, 415, "Unsupported Media Type")
-	}
-	if err := writeUSSDStatus(ctx, transport, msg, 200, "OK"); err != nil {
+	if err := s.client.writeStatus(ctx, transport, msg, 200, "OK"); err != nil {
 		return err
 	}
 	if s.isDuplicateRemote(msg) {
 		s.client.logger.Debug("suppressing duplicate USSD request", "call_id", s.callID, "cseq", msg.Header("CSeq"))
 		return nil
 	}
-	payload.Final = true
-	if strings.TrimSpace(payload.Language) != "" {
-		s.language = payload.Language
+	payload, err := decodeUSSDPayload(msg)
+	if err != nil {
+		s.finish(true)
+		return nil
 	}
+	payload.Final = true
+	s.setLanguage(payload.Language)
 	s.setDialogKind(payload)
 	if len(msg.Body) > 0 {
 		s.emit(payload)
@@ -605,7 +617,7 @@ func (c *Client) handleUSSDRequest(ctx context.Context, transport Transport, msg
 			return true, session.handleRequest(ctx, transport, msg)
 		}
 		if looksLikeUSSDDialogMessage(msg) {
-			return true, writeUSSDStatus(ctx, transport, msg, 481, "Call/Transaction Does Not Exist")
+			return true, c.writeStatus(ctx, transport, msg, 481, "Call/Transaction Does Not Exist")
 		}
 		return false, nil
 	default:
@@ -619,11 +631,11 @@ func (c *Client) handleIncomingUSSDInvite(ctx context.Context, transport Transpo
 	}
 	payload, err := validateIncomingUSSDInvite(msg)
 	if err != nil {
-		return writeUSSDStatus(ctx, transport, msg, 488, "Not Acceptable Here")
+		return c.writeStatus(ctx, transport, msg, 488, "Not Acceptable Here")
 	}
 	session := c.newIncomingUSSDSession(msg, payload)
 	session.inviteOK = c.buildIncomingUSSDInviteOK(msg, session.localTag)
-	return c.acceptIncomingUSSDInvite(ctx, transport, session, payload)
+	return c.acceptIncomingUSSDInvite(ctx, transport, msg, session, payload)
 }
 
 func (c *Client) handleExistingUSSDInvite(ctx context.Context, transport Transport, msg Message) (bool, error) {
@@ -632,9 +644,9 @@ func (c *Client) handleExistingUSSDInvite(ctx context.Context, transport Transpo
 		return false, nil
 	}
 	if len(session.inviteOK) > 0 {
-		return true, transport.WritePacket(ctx, session.inviteOK)
+		return true, c.writeResponsePacket(ctx, transport, msg, session.inviteOK)
 	}
-	return true, writeUSSDStatus(ctx, transport, msg, 481, "Call/Transaction Does Not Exist")
+	return true, c.writeStatus(ctx, transport, msg, 481, "Call/Transaction Does Not Exist")
 }
 
 func (c *Client) newIncomingUSSDSession(msg Message, payload USSDMessage) *USSDSession {
@@ -675,14 +687,16 @@ func (c *Client) buildIncomingUSSDInviteOK(msg Message, localTag string) []byte 
 	return ok.Bytes()
 }
 
-func (c *Client) acceptIncomingUSSDInvite(ctx context.Context, transport Transport, session *USSDSession, payload USSDMessage) error {
-	if err := transport.WritePacket(ctx, session.inviteOK); err != nil {
+func (c *Client) acceptIncomingUSSDInvite(ctx context.Context, transport Transport, msg Message, session *USSDSession, payload USSDMessage) error {
+	if err := c.writeResponsePacket(ctx, transport, msg, session.inviteOK); err != nil {
 		return fmt.Errorf("handling USSD INVITE: sending 200 OK: %w", err)
 	}
 	c.storeUSSDSession(session)
 	session.emit(payload)
 	if c.onUSSD != nil {
-		c.onUSSD(session, payload)
+		c.startBackgroundTask(func() {
+			c.onUSSD(session, payload)
+		})
 	}
 	c.logger.Debug("accepted network-initiated USSD", "call_id", session.callID, "target_uri", session.targetURI)
 	return nil
@@ -1037,12 +1051,6 @@ func looksLikeUSSDDialogMessage(msg Message) bool {
 		return strings.Contains(strings.ToLower(msg.Header("Content-Type")), ussdContentType)
 	}
 	return false
-}
-
-func writeUSSDStatus(ctx context.Context, transport Transport, req Message, code int, reason string) error {
-	resp := NewResponse(code, reason)
-	resp.Headers = responseHeaders(req, code)
-	return transport.WritePacket(ctx, resp.Bytes())
 }
 
 func upsertHeader(headers []Header, name, value string) []Header {

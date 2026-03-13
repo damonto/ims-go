@@ -2,6 +2,7 @@ package swu
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -362,6 +363,49 @@ func TestPayloadMarshalBinaryRoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestDecodePayloadChainIgnoresUnsupportedNonCriticalPayload(t *testing.T) {
+	nonceBody, err := (&NoncePayload{Data: []byte{0x01, 0x02, 0x03, 0x04}}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(nonce) error = %v", err)
+	}
+	unknown := marshalPayloadBlock(payloadTypeNonce, nil)
+	nonce := marshalPayloadBlock(payloadTypeNone, nonceBody)
+	wire := append(unknown, nonce...)
+	packet := make([]byte, ikeHeaderSize+len(wire))
+	packet[16] = 99
+	packet[17] = ikeVersion20
+	packet[18] = exchangeTypeIKESAInit
+	binary.BigEndian.PutUint32(packet[24:28], uint32(len(packet)))
+	copy(packet[ikeHeaderSize:], wire)
+
+	var parsed IKEPacket
+	if err := parsed.UnmarshalBinary(packet); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+	if len(parsed.Payloads) != 1 {
+		t.Fatalf("len(parsed.Payloads) = %d, want 1", len(parsed.Payloads))
+	}
+	if nonce := findNoncePayload(parsed.Payloads); nonce == nil || !bytes.Equal(nonce.Data, []byte{0x01, 0x02, 0x03, 0x04}) {
+		t.Fatalf("findNoncePayload() = %+v", nonce)
+	}
+}
+
+func TestDecodePayloadChainRejectsUnsupportedCriticalPayload(t *testing.T) {
+	wire := marshalPayloadBlock(payloadTypeNone, nil)
+	wire[1] = 0x80
+	packet := make([]byte, ikeHeaderSize+len(wire))
+	packet[16] = 99
+	packet[17] = ikeVersion20
+	packet[18] = exchangeTypeIKESAInit
+	binary.BigEndian.PutUint32(packet[24:28], uint32(len(packet)))
+	copy(packet[ikeHeaderSize:], wire)
+
+	var parsed IKEPacket
+	if err := parsed.UnmarshalBinary(packet); err == nil {
+		t.Fatal("UnmarshalBinary() error = nil, want non-nil")
 	}
 }
 

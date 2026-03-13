@@ -124,7 +124,10 @@ func (c *ikeCrypto) DeriveIKEKeys(peerPublic []byte) error {
 	binary.BigEndian.PutUint64(spi[8:16], c.responderSPI)
 	seed = append(seed, spi...)
 	total := (3 * c.prfLength()) + (2 * c.integKeyLength()) + (2 * c.encrKeyLength())
-	stream := c.prfPlus(skeyseed, seed, total)
+	stream, err := c.prfPlus(skeyseed, seed, total)
+	if err != nil {
+		return err
+	}
 	c.keys.SKD = append([]byte(nil), stream[:c.prfLength()]...)
 	stream = stream[c.prfLength():]
 	c.keys.SKAI = append([]byte(nil), stream[:c.integKeyLength()]...)
@@ -152,7 +155,10 @@ func (c *ikeCrypto) DeriveESPKeys(encrKeyBits, integ uint16) (ESPKeys, error) {
 		return ESPKeys{}, err
 	}
 	total := (2 * encrKeyLen) + (2 * integKeyLen)
-	stream := c.prfPlus(c.keys.SKD, nonce, total)
+	stream, err := c.prfPlus(c.keys.SKD, nonce, total)
+	if err != nil {
+		return ESPKeys{}, err
+	}
 	keys := ESPKeys{
 		EncryptionInitiator: append([]byte(nil), stream[:encrKeyLen]...),
 	}
@@ -309,21 +315,31 @@ func (c *ikeCrypto) sharedSecret(peerPublic []byte) ([]byte, error) {
 	}
 	peer := new(big.Int).SetBytes(peerPublic)
 	shared := new(big.Int).Exp(peer, c.private, c.groupPrime)
-	return shared.Bytes(), nil
+	return shared.FillBytes(make([]byte, c.groupByteSize)), nil
 }
 
-func (c *ikeCrypto) prfPlus(key, seed []byte, size int) []byte {
+func (c *ikeCrypto) prfPlus(key, seed []byte, size int) ([]byte, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("deriving prf+: invalid size %d", size)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	maxSize := 255 * c.prfLength()
+	if size > maxSize {
+		return nil, fmt.Errorf("deriving prf+: size %d exceeds RFC 7296 limit %d", size, maxSize)
+	}
 	result := make([]byte, 0, size)
 	var last []byte
-	for i := byte(1); len(result) < size; i++ {
+	for i := 1; len(result) < size; i++ {
 		blockInput := make([]byte, 0, len(last)+len(seed)+1)
 		blockInput = append(blockInput, last...)
 		blockInput = append(blockInput, seed...)
-		blockInput = append(blockInput, i)
+		blockInput = append(blockInput, byte(i))
 		last = c.prfHMAC(key, blockInput)
 		result = append(result, last...)
 	}
-	return result[:size]
+	return result[:size], nil
 }
 
 func (c *ikeCrypto) prfHMAC(key, data []byte) []byte {

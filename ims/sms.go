@@ -18,7 +18,7 @@ const (
 )
 
 const (
-	rpCauseInvalidMandatoryInformation  = 96
+	rpCauseInvalidMandatoryInformation = 96
 )
 
 const (
@@ -185,6 +185,7 @@ func decodeTPAddress(data []byte) (string, int, error) {
 		return "", 0, errors.New("decoding TP address: packet too short")
 	}
 	lengthDigits := int(data[0])
+	ton := (data[1] >> 4) & 0x07
 	numberBytes := digitOctetCount(lengthDigits)
 	if len(data) < 2+numberBytes {
 		return "", 0, errors.New("decoding TP address: truncated address")
@@ -193,11 +194,17 @@ func decodeTPAddress(data []byte) (string, int, error) {
 	if len(number) > lengthDigits {
 		number = number[:lengthDigits]
 	}
+	if ton == 0x01 {
+		number = "+" + number
+	}
 	return number, 2 + numberBytes, nil
 }
 
 func encodeRPAddress(number string) []byte {
 	number = strings.TrimPrefix(number, "+")
+	if number == "" {
+		return []byte{0x00}
+	}
 	packed := swapDigits(number)
 	return append([]byte{byte(len(packed) + 1), 0x91}, packed...)
 }
@@ -307,6 +314,12 @@ func splitUCS2Words(words []uint16, limit int) [][]uint16 {
 	parts := make([][]uint16, 0, (len(words)+limit-1)/limit)
 	for len(words) > 0 {
 		end := min(len(words), limit)
+		if end < len(words) && end > 0 && words[end-1] >= 0xD800 && words[end-1] <= 0xDBFF {
+			end--
+		}
+		if end <= 0 {
+			end = min(len(words), limit)
+		}
 		parts = append(parts, append([]uint16(nil), words[:end]...))
 		words = words[end:]
 	}

@@ -149,22 +149,30 @@ type Client struct {
 	callID          string
 	sessionID       string
 	tag             string
-	registerBranch  string
 	cseq            int64
 	rpRef           uint32
+	telPublicID     string
 	authIK          []byte
 	authNonce       string
 	authRealm       string
+	authQOP         string
+	authNonceCount  uint32
 	registerExpires time.Duration
 
-	mu         sync.Mutex
-	pending    map[string]chan Message
-	smsPending map[byte]chan rpMessage
-	recentSMS  map[string]time.Time
-	concatSMS  map[string]concatSMSState
-	ussd       map[string]*USSDSession
-	registered bool
-	closed     bool
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
+
+	mu           sync.Mutex
+	sendMu       sync.Mutex
+	readWG       sync.WaitGroup
+	backgroundWG sync.WaitGroup
+	pending      map[string]chan Message
+	smsPending   map[byte]chan rpMessage
+	recentSMS    map[string]time.Time
+	concatSMS    map[string]concatSMSState
+	ussd         map[string]*USSDSession
+	registered   bool
+	closed       bool
 }
 
 func validateNewClientInput(transport Transport, card cardProvider) error {
@@ -250,30 +258,32 @@ func NewClient(cfg Config, transport Transport, card cardProvider) (*Client, err
 	if err != nil {
 		return nil, fmt.Errorf("creating IMS client: %w", err)
 	}
-	callID, sessionID, tag, registerBranch := newTransaction()
+	callID, sessionID, tag, _ := newTransaction()
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	client := &Client{
-		cfg:             cfg,
-		transport:       transport,
-		card:            card,
-		onSMS:           cfg.OnSMS,
-		onUSSD:          cfg.OnUSSD,
-		logger:          cfg.Logger.With("component", "ims"),
-		privateIdentity: identity.privateIdentity,
-		registerURI:     "sip:" + identity.realm,
-		contactHost:     host,
-		registerPort:    port,
-		viaHostPort:     net.JoinHostPort(host, strconv.Itoa(port)),
-		callID:          callID,
-		sessionID:       sessionID,
-		tag:             tag,
-		registerBranch:  registerBranch,
-		pending:         make(map[string]chan Message),
-		recentSMS:       make(map[string]time.Time),
-		concatSMS:       make(map[string]concatSMSState),
-		ussd:            make(map[string]*USSDSession),
-		smsPending:      make(map[byte]chan rpMessage),
-		registerExpires: cfg.RegisterExpires,
-		securityClient:  newSecurityClient(port),
+		cfg:              cfg,
+		transport:        transport,
+		card:             card,
+		onSMS:            cfg.OnSMS,
+		onUSSD:           cfg.OnUSSD,
+		logger:           cfg.Logger.With("component", "ims"),
+		privateIdentity:  identity.privateIdentity,
+		registerURI:      "sip:" + identity.realm,
+		contactHost:      host,
+		registerPort:     port,
+		viaHostPort:      net.JoinHostPort(host, strconv.Itoa(port)),
+		callID:           callID,
+		sessionID:        sessionID,
+		tag:              tag,
+		pending:          make(map[string]chan Message),
+		recentSMS:        make(map[string]time.Time),
+		concatSMS:        make(map[string]concatSMSState),
+		ussd:             make(map[string]*USSDSession),
+		smsPending:       make(map[byte]chan rpMessage),
+		registerExpires:  cfg.RegisterExpires,
+		securityClient:   newSecurityClient(port),
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
 	}
 	client.logger.Debug("initialized IMS client", "private_identity", identity.privateIdentity, "public_identity", cfg.PublicIdentity, "realm", identity.realm, "transport_protocol", cfg.Transport)
 	return client, nil
@@ -288,14 +298,14 @@ func (c *Client) Register(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("registering IMS: %w", err)
 	}
-	response, err := c.buildRegisterResponse(ctx, challenge.Realm, challenge.Nonce)
+	initialAuth, err := c.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.QOP)
 	if err != nil {
 		return fmt.Errorf("registering IMS: %w", err)
 	}
 	if err := c.upgradeSecureTransport(ctx); err != nil {
 		return fmt.Errorf("registering IMS: %w", err)
 	}
-	if err := c.completeRegistration(ctx, challenge.Nonce, response); err != nil {
+	if err := c.completeRegistration(ctx, challenge, initialAuth); err != nil {
 		return err
 	}
 	return c.Subscribe(ctx)
@@ -304,7 +314,7 @@ func (c *Client) Register(ctx context.Context) error {
 func (c *Client) awaitRegisterChallenge(ctx context.Context) (Message, error) {
 	adjustedExpires := false
 	for {
-		resp, err := c.exchange(ctx, c.buildRegister("", "", nil))
+		resp, err := c.exchange(ctx, c.buildRegister(nil, nil))
 		if err != nil {
 			return Message{}, fmt.Errorf("registering IMS: %w", err)
 		}
@@ -321,10 +331,18 @@ func (c *Client) awaitRegisterChallenge(ctx context.Context) (Message, error) {
 	}
 }
 
-func (c *Client) completeRegistration(ctx context.Context, nonce, response string) error {
+func (c *Client) completeRegistration(ctx context.Context, challenge AuthChallenge, initialAuth *digestAuthorization) error {
 	adjustedExpires := false
+	auth := initialAuth
 	for {
-		resp, err := c.exchange(ctx, c.buildRegister(nonce, response, c.currentSecurityVerify()))
+		if auth == nil {
+			var err error
+			auth, err = c.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.QOP)
+			if err != nil {
+				return fmt.Errorf("registering IMS: %w", err)
+			}
+		}
+		resp, err := c.exchange(ctx, c.buildRegister(auth, c.currentSecurityVerify()))
 		if err != nil {
 			return fmt.Errorf("registering IMS: %w", err)
 		}
@@ -332,6 +350,7 @@ func (c *Client) completeRegistration(ctx context.Context, nonce, response strin
 			if err := c.adjustRegisterExpiresFrom423("registering IMS", resp, &adjustedExpires); err != nil {
 				return err
 			}
+			auth = nil
 			continue
 		}
 		if resp.StatusCode() != 200 {
@@ -343,15 +362,25 @@ func (c *Client) completeRegistration(ctx context.Context, nonce, response strin
 }
 
 func (c *Client) applyAssociatedURI(msg Message) {
+	updated := false
 	for _, value := range msg.HeadersByName("P-Associated-URI") {
 		trimmed := strings.TrimSpace(value)
 		trimmed = strings.TrimPrefix(trimmed, "<")
 		trimmed = strings.TrimSuffix(trimmed, ">")
+		if strings.HasPrefix(strings.ToLower(trimmed), "tel:") {
+			c.telPublicID = trimmed
+			c.logger.Debug("updated associated tel identity", "public_identity", trimmed)
+			updated = true
+			continue
+		}
 		if !strings.HasPrefix(strings.ToLower(trimmed), "sip:") {
 			continue
 		}
 		c.cfg.PublicIdentity = trimmed
 		c.logger.Debug("updated associated public identity", "public_identity", trimmed)
+		updated = true
+	}
+	if updated {
 		return
 	}
 }
@@ -434,27 +463,62 @@ func (c *Client) addSecurityVerifyHeader(msg *Message, verify *SecurityParam) bo
 	return true
 }
 
+func normalizeIntegrityAlg(alg string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(alg)) {
+	case "hmac-md5-96":
+		return "hmac-md5-96", true
+	case "hmac-sha-1-96", "hmac-sha1-96":
+		return "hmac-sha1-96", true
+	case "hmac-sha-256-128", "hmac-sha256-128":
+		return "hmac-sha256-128", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeSecurityParam(param SecurityParam) (SecurityParam, bool) {
+	if !strings.EqualFold(param.Mechanism, "ipsec-3gpp") {
+		return SecurityParam{}, false
+	}
+	if param.Mod == "" {
+		param.Mod = "trans"
+	}
+	if param.Prot == "" {
+		param.Prot = "esp"
+	}
+	if !strings.EqualFold(param.EAlg, "null") || !strings.EqualFold(param.Mod, "trans") || !strings.EqualFold(param.Prot, "esp") {
+		return SecurityParam{}, false
+	}
+	alg, ok := normalizeIntegrityAlg(param.Alg)
+	if !ok || param.PortC == 0 || param.PortS == 0 || param.SPIC == 0 || param.SPIS == 0 {
+		return SecurityParam{}, false
+	}
+	param.Alg = alg
+	return param, true
+}
+
 func (c *Client) applySecurityServer(headerValue string) error {
-	if strings.TrimSpace(headerValue) == "" {
-		return nil
+	headerValue = strings.TrimSpace(headerValue)
+	if headerValue == "" {
+		return fmt.Errorf("applying Security-Server: header is empty")
 	}
 	var params SecurityParams
-	err := params.UnmarshalText([]byte(headerValue))
-	if err != nil {
+	if err := params.UnmarshalText([]byte(headerValue)); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.securityVerifyRaw = strings.TrimSpace(headerValue)
+	c.securityVerifyRaw = ""
 	c.securityVerify = nil
 	for _, param := range params {
-		if param.EAlg == "null" {
-			paramCopy := param
+		if normalized, ok := normalizeSecurityParam(param); ok {
+			paramCopy := normalized
+			c.securityVerifyRaw = headerValue
 			c.securityVerify = &paramCopy
-			break
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("applying Security-Server: no compatible ipsec-3gpp security mechanism")
 }
 
 func (c *Client) applyAuthenticationInfo(msg Message) {
@@ -464,6 +528,7 @@ func (c *Client) applyAuthenticationInfo(msg Message) {
 	}
 	c.mu.Lock()
 	c.authNonce = info.NextNonce
+	c.authNonceCount = 0
 	c.mu.Unlock()
 }
 
@@ -495,17 +560,26 @@ func (c *Client) storeAuthChallenge(challenge AuthChallenge) {
 	c.mu.Lock()
 	c.authRealm = realm
 	c.authNonce = challenge.Nonce
+	c.authQOP = challenge.QOP
+	c.authNonceCount = 0
 	c.mu.Unlock()
 }
 
-func (c *Client) currentAuthState() (string, string) {
+func (c *Client) currentAuthState() (string, string, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	realm := c.authRealm
 	if realm == "" {
 		realm = strings.TrimPrefix(c.registerURI, "sip:")
 	}
-	return realm, c.authNonce
+	return realm, c.authNonce, c.authQOP
+}
+
+func (c *Client) nextAuthNonceCount() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authNonceCount++
+	return fmt.Sprintf("%08x", c.authNonceCount)
 }
 
 func (c *Client) setRegistered(registered bool) {
@@ -520,37 +594,56 @@ func (c *Client) isRegistered() bool {
 	return c.registered
 }
 
-func (c *Client) computeAKAResponseWithKeys(ctx context.Context, realm, nonce string) (string, []byte, error) {
+func (c *Client) computeAKAResponseWithKeys(ctx context.Context, realm, nonce, challengeQOP string) (*digestAuthorization, []byte, error) {
 	nonceBytes, err := base64.StdEncoding.DecodeString(nonce)
 	if err != nil {
-		return "", nil, fmt.Errorf("decoding auth nonce: %w", err)
+		return nil, nil, fmt.Errorf("decoding auth nonce: %w", err)
 	}
 	if len(nonceBytes) < 32 {
-		return "", nil, fmt.Errorf("decoding auth nonce: expected at least 32 bytes")
+		return nil, nil, fmt.Errorf("decoding auth nonce: expected at least 32 bytes")
 	}
 	aka, err := c.card.AKA(ctx, nonceBytes[:16], nonceBytes[16:32])
 	if err != nil {
-		return "", nil, fmt.Errorf("calculating AKA response: %w", err)
+		return nil, nil, fmt.Errorf("calculating AKA response: %w", err)
 	}
 	if strings.TrimSpace(realm) == "" {
 		realm = strings.TrimPrefix(c.registerURI, "sip:")
 	}
-	response, err := computeAKAResponse(c.privateIdentity, realm, c.registerURI, nonce, aka)
-	if err != nil {
-		return "", nil, err
+	auth := &digestAuthorization{
+		Nonce:    nonce,
+		URI:      c.registerURI,
+		Username: c.privateIdentity,
+		Realm:    realm,
 	}
-	return response, append([]byte(nil), aka.IK...), nil
+	qop, err := (AuthChallenge{QOP: challengeQOP}).SelectedQOP()
+	if err != nil {
+		return nil, nil, err
+	}
+	if qop != "" {
+		auth.QOP = qop
+		auth.NonceCount = c.nextAuthNonceCount()
+		auth.CNonce = randomHex(16)
+	}
+	response, err := computeAKAResponse(c.privateIdentity, realm, c.registerURI, nonce, aka, auth.QOP, auth.CNonce, auth.NonceCount)
+	if err != nil {
+		return nil, nil, err
+	}
+	auth.Response = response
+	return auth, append([]byte(nil), aka.IK...), nil
 }
 
-func (c *Client) buildRegisterResponse(ctx context.Context, realm, nonce string) (string, error) {
-	response, authIK, err := c.computeAKAResponseWithKeys(ctx, realm, nonce)
+func (c *Client) buildRegisterAuthorization(ctx context.Context, realm, nonce, qop string) (*digestAuthorization, error) {
+	if nonce == "" {
+		return nil, nil
+	}
+	auth, authIK, err := c.computeAKAResponseWithKeys(ctx, realm, nonce, qop)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(authIK) != 0 {
 		c.authIK = authIK
 	}
-	return response, nil
+	return auth, nil
 }
 
 func isProvisionalResponse(msg Message) bool {
@@ -564,7 +657,7 @@ func (c *Client) logSIPMessage(direction string, msg Message) {
 
 func (c *Client) writeRequest(ctx context.Context, transport Transport, req Message) error {
 	c.logSIPMessage("send", req)
-	if err := transport.WritePacket(ctx, req.Bytes()); err != nil {
+	if err := c.writePacket(ctx, transport, req.Bytes()); err != nil {
 		return fmt.Errorf("sending %s: %w", req.Method(), err)
 	}
 	return nil
@@ -622,10 +715,13 @@ func (c *Client) applyRegisterChallenge(resp Message) (AuthChallenge, error) {
 	if err != nil {
 		return AuthChallenge{}, err
 	}
-	c.storeAuthChallenge(challenge)
+	if _, err := challenge.SelectedQOP(); err != nil {
+		return AuthChallenge{}, err
+	}
 	if err := c.applySecurityServer(resp.Header("Security-Server")); err != nil {
 		return AuthChallenge{}, err
 	}
+	c.storeAuthChallenge(challenge)
 	return challenge, nil
 }
 
@@ -642,20 +738,17 @@ func (c *Client) adjustRegisterExpiresFrom423(action string, resp Message, adjus
 	return nil
 }
 
-func (c *Client) registerResponse(ctx context.Context, realm, nonce string) (string, error) {
-	if nonce == "" {
-		return "", nil
-	}
-	return c.buildRegisterResponse(ctx, realm, nonce)
+func (c *Client) registerAuthorization(ctx context.Context, realm, nonce, qop string) (*digestAuthorization, error) {
+	return c.buildRegisterAuthorization(ctx, realm, nonce, qop)
 }
 
 func (c *Client) buildRefreshRegister(ctx context.Context) (Message, error) {
-	realm, nonce := c.currentAuthState()
-	response, err := c.registerResponse(ctx, realm, nonce)
+	realm, nonce, qop := c.currentAuthState()
+	auth, err := c.registerAuthorization(ctx, realm, nonce, qop)
 	if err != nil {
 		return Message{}, err
 	}
-	return c.buildRegister(nonce, response, c.currentSecurityVerify()), nil
+	return c.buildRegister(auth, c.currentSecurityVerify()), nil
 }
 
 func (c *Client) handleRefreshRegistration(resp Message, state *refreshRegisterState) (bool, error) {
@@ -695,6 +788,8 @@ func (c *Client) resetAuthStateForRefresh() {
 	c.mu.Lock()
 	c.authNonce = ""
 	c.authRealm = strings.TrimPrefix(c.registerURI, "sip:")
+	c.authQOP = ""
+	c.authNonceCount = 0
 	c.mu.Unlock()
 }
 
@@ -725,10 +820,10 @@ func (c *Client) deregister(ctx context.Context) error {
 		return nil
 	}
 	verify := c.currentSecurityVerify()
-	realm, nonce := c.currentAuthState()
+	realm, nonce, qop := c.currentAuthState()
 	challenged := false
 	for range 2 {
-		req, err := c.buildDeregisterMessage(ctx, verify, realm, nonce)
+		req, err := c.buildDeregisterMessage(ctx, verify, realm, nonce, qop)
 		if err != nil {
 			return err
 		}
@@ -736,7 +831,7 @@ func (c *Client) deregister(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("deregistering IMS: %w", err)
 		}
-		done, err := c.handleDeregisterResponse(resp, &challenged, &realm, &nonce)
+		done, err := c.handleDeregisterResponse(resp, &challenged, &realm, &nonce, &qop)
 		if err != nil {
 			return err
 		}
@@ -747,15 +842,15 @@ func (c *Client) deregister(ctx context.Context) error {
 	return errors.New("deregistering IMS: exhausted retries")
 }
 
-func (c *Client) buildDeregisterMessage(ctx context.Context, verify *SecurityParam, realm, nonce string) (Message, error) {
-	response, err := c.registerResponse(ctx, realm, nonce)
+func (c *Client) buildDeregisterMessage(ctx context.Context, verify *SecurityParam, realm, nonce, qop string) (Message, error) {
+	auth, err := c.registerAuthorization(ctx, realm, nonce, qop)
 	if err != nil {
 		return Message{}, fmt.Errorf("deregistering IMS: %w", err)
 	}
-	return c.buildDeregister(nonce, response, verify), nil
+	return c.buildDeregister(auth, verify), nil
 }
 
-func (c *Client) handleDeregisterResponse(resp Message, challenged *bool, realm, nonce *string) (bool, error) {
+func (c *Client) handleDeregisterResponse(resp Message, challenged *bool, realm, nonce, qop *string) (bool, error) {
 	switch resp.StatusCode() {
 	case 200:
 		return true, nil
@@ -768,9 +863,13 @@ func (c *Client) handleDeregisterResponse(resp Message, challenged *bool, realm,
 		if err != nil {
 			return false, fmt.Errorf("deregistering IMS: %w", err)
 		}
+		if _, err := challenge.SelectedQOP(); err != nil {
+			return false, fmt.Errorf("deregistering IMS: %w", err)
+		}
 		c.storeAuthChallenge(challenge)
 		*realm = challenge.Realm
 		*nonce = challenge.Nonce
+		*qop = challenge.QOP
 		*challenged = true
 		return false, nil
 	default:
@@ -958,13 +1057,47 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
+func (c *Client) closeTransport(transport Transport) error {
+	if transport == nil {
+		return nil
+	}
+	return transport.Close()
+}
+
+func (c *Client) startBackgroundTask(task func()) bool {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return false
+	}
+	c.backgroundWG.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.backgroundWG.Done()
+		task()
+	}()
+	return true
+}
+
 func (c *Client) startReadLoops(ctx context.Context, inboundCh chan<- inboundMessage) {
-	go c.readTransport(ctx, c.transport, inboundCh)
+	c.readWG.Add(1)
+	go func() {
+		defer c.readWG.Done()
+		c.readTransport(ctx, c.transport, inboundCh)
+	}()
 	if c.serverTransport != nil {
-		go c.readTransport(ctx, c.serverTransport, inboundCh)
+		c.readWG.Add(1)
+		go func() {
+			defer c.readWG.Done()
+			c.readTransport(ctx, c.serverTransport, inboundCh)
+		}()
 	}
 	if c.serverDatagramTransport != nil {
-		go c.readTransport(ctx, c.serverDatagramTransport, inboundCh)
+		c.readWG.Add(1)
+		go func() {
+			defer c.readWG.Done()
+			c.readTransport(ctx, c.serverDatagramTransport, inboundCh)
+		}()
 	}
 }
 
@@ -997,6 +1130,7 @@ func (c *Client) handleRunInbound(ctx context.Context, inbound inboundMessage) e
 	if inbound.msg.IsRequest() {
 		return c.handleRunRequest(ctx, inbound)
 	}
+	c.logSIPMessage("recv", inbound.msg)
 	c.dispatchResponse(inbound.msg)
 	return nil
 }
@@ -1125,7 +1259,7 @@ func (c *Client) sendSMSSegment(ctx context.Context, segment outboundSMSSegment)
 		return err
 	}
 	if status := resp.StatusCode(); status != 200 && status != 202 {
-		return fmt.Errorf("sending SMS: unexpected status %d", status)
+		return fmt.Errorf("sending SMS: unexpected status %d (%s)", status, strings.TrimSpace(resp.StartLine))
 	}
 	return c.waitSMSSegmentReport(ctx, segment, resp)
 }
@@ -1173,10 +1307,15 @@ func (c *Client) CloseContext(ctx context.Context) error {
 	c.mu.Unlock()
 
 	defer c.setRegistered(false)
+	if c.backgroundCancel != nil {
+		c.backgroundCancel()
+	}
 
-	_ = c.closeUSSDSessions(ctx)
-	_ = c.deregister(ctx)
-	return nil
+	err := errors.Join(c.closeUSSDSessions(ctx), c.deregister(ctx))
+	err = errors.Join(err, c.closeTransport(c.transport), c.closeTransport(c.serverTransport), c.closeTransport(c.serverDatagramTransport))
+	c.backgroundWG.Wait()
+	c.readWG.Wait()
+	return err
 }
 
 func (c *Client) exchange(ctx context.Context, req Message) (Message, error) {
@@ -1192,7 +1331,7 @@ func (c *Client) exchange(ctx context.Context, req Message) (Message, error) {
 
 func (c *Client) handleRequest(ctx context.Context, transport Transport, msg Message) error {
 	if strings.EqualFold(msg.Method(), "NOTIFY") {
-		return writeStatus(ctx, transport, msg, 200, "OK")
+		return c.writeStatus(ctx, transport, msg, 200, "OK")
 	}
 	if handled, err := c.handleUSSDRequest(ctx, transport, msg); handled || err != nil {
 		return err
@@ -1201,31 +1340,40 @@ func (c *Client) handleRequest(ctx context.Context, transport Transport, msg Mes
 		return nil
 	}
 	if !strings.EqualFold(msg.Method(), "MESSAGE") {
-		return writeStatus(ctx, transport, msg, 405, "Method Not Allowed")
+		return c.writeStatus(ctx, transport, msg, 405, "Method Not Allowed")
 	}
 	return c.handleMessageRequest(ctx, transport, msg)
 }
 
-func writeStatus(ctx context.Context, transport Transport, req Message, code int, reason string) error {
+func (c *Client) writeStatus(ctx context.Context, transport Transport, req Message, code int, reason string) error {
 	resp := NewResponse(code, reason)
 	resp.Headers = responseHeaders(req, code)
-	return writeResponsePacket(ctx, transport, req, resp.Bytes())
+	return c.writeResponsePacket(ctx, transport, req, resp.Bytes())
 }
 
 type targetedPacketWriter interface {
 	WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error
 }
 
-func writeResponsePacket(ctx context.Context, transport Transport, req Message, data []byte) error {
+func (c *Client) writePacket(ctx context.Context, transport Transport, data []byte) error {
+	return c.writePacketTo(ctx, transport, data, nil)
+}
+
+func (c *Client) writePacketTo(ctx context.Context, transport Transport, data []byte, addr net.Addr) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if addr == nil {
+		return transport.WritePacket(ctx, data)
+	}
 	writer, ok := transport.(targetedPacketWriter)
 	if !ok {
 		return transport.WritePacket(ctx, data)
 	}
-	addr := responseDestination(transport.RemoteAddr(), req.Header("Via"))
-	if addr == nil {
-		return transport.WritePacket(ctx, data)
-	}
 	return writer.WritePacketTo(ctx, data, addr)
+}
+
+func (c *Client) writeResponsePacket(ctx context.Context, transport Transport, req Message, data []byte) error {
+	return c.writePacketTo(ctx, transport, data, responseDestination(transport.RemoteAddr(), req.Header("Via")))
 }
 
 func responseDestination(remote net.Addr, _ string) net.Addr {
@@ -1242,7 +1390,7 @@ func (c *Client) handleMessageRequest(ctx context.Context, transport Transport, 
 		responseAddr = transport.RemoteAddr()
 	}
 	c.logger.Debug("sending MESSAGE response", "status_code", 200, "reason", "OK", "target_addr", responseAddr, "transport_remote_addr", transport.RemoteAddr(), "via", msg.Header("Via"), "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"))
-	if err := writeStatus(ctx, transport, msg, 200, "OK"); err != nil {
+	if err := c.writeStatus(ctx, transport, msg, 200, "OK"); err != nil {
 		return err
 	}
 	var rp rpMessage
@@ -1288,11 +1436,17 @@ func (c *Client) sendSMSDeliveryReport(msg Message, report rpMessage) {
 	}
 	reportMsg := c.buildMessage(target, reportPayload, msg.Header("Call-ID"))
 	c.logger.Debug("sending sms delivery report", "target", target, "call_id", reportMsg.Header("Call-ID"), "in_reply_to", reportMsg.Header("In-Reply-To"))
-	go c.sendSMSDeliveryReportRequest(reportMsg)
+	c.startBackgroundTask(func() {
+		c.sendSMSDeliveryReportRequest(reportMsg)
+	})
 }
 
 func (c *Client) sendSMSDeliveryReportRequest(req Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	baseCtx := c.backgroundCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 	defer cancel()
 	resp, err := c.sendPending(ctx, req)
 	if err != nil {
@@ -1340,31 +1494,32 @@ func (c *Client) deliverSingleSMS(msg Message, incoming IncomingSMS) {
 	c.logger.Debug("suppressing duplicate sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "from", incoming.From, "text", incoming.Text)
 }
 
-func (c *Client) buildRegister(nonce, response string, verify *SecurityParam) Message {
+func (c *Client) buildRegister(auth *digestAuthorization, verify *SecurityParam) Message {
 	port := c.registerPort
-	if verify != nil || nonce != "" {
+	if verify != nil || auth != nil {
 		port = c.securityClient.PortS
 	}
-	return c.buildRegisterRequest(nonce, response, verify, c.registerContactValue(port), c.registerExpiresSeconds(), port)
+	legacyAuthorization := ""
+	if auth == nil {
+		legacyAuthorization = c.legacyEmptyAuthorizationValue()
+	}
+	return c.buildRegisterRequest(auth, legacyAuthorization, verify, c.registerContactValue(port), c.registerExpiresSeconds(), port)
 }
 
-func (c *Client) buildDeregister(nonce, response string, verify *SecurityParam) Message {
+func (c *Client) buildDeregister(auth *digestAuthorization, verify *SecurityParam) Message {
 	port := c.registerPort
-	if verify != nil || nonce != "" {
+	if verify != nil || auth != nil {
 		port = c.securityClient.PortS
 	}
-	return c.buildRegisterRequest(nonce, response, verify, "*", 0, port)
+	return c.buildRegisterRequest(auth, "", verify, "*", 0, port)
 }
 
-func (c *Client) registerRealm(nonce string) string {
+func (c *Client) registerRealm(auth *digestAuthorization) string {
 	realm := strings.TrimPrefix(c.registerURI, "sip:")
-	if nonce == "" {
+	if auth == nil || strings.TrimSpace(auth.Realm) == "" {
 		return realm
 	}
-	if authRealm, _ := c.currentAuthState(); authRealm != "" {
-		return authRealm
-	}
-	return realm
+	return auth.Realm
 }
 
 func (c *Client) addClientRequestHeaders(msg *Message) {
@@ -1386,8 +1541,19 @@ func (c *Client) addServiceRoutes(msg *Message) {
 	}
 }
 
-func (c *Client) buildRegisterRequest(nonce, response string, verify *SecurityParam, contact string, expiresSeconds, port int) Message {
-	realm := c.registerRealm(nonce)
+func (c *Client) legacyEmptyAuthorizationValue() string {
+	return (&digestAuthorization{
+		Nonce:    "",
+		URI:      c.registerURI,
+		Response: "",
+		Username: c.privateIdentity,
+		Realm:    c.registerRealm(nil),
+	}).HeaderValue()
+}
+
+func (c *Client) buildRegisterRequest(auth *digestAuthorization, legacyAuthorization string, verify *SecurityParam, contact string, expiresSeconds, port int) Message {
+	realm := c.registerRealm(auth)
+	branch := randomAlphaNum(15)
 	msg := NewRequest("REGISTER", c.registerURI)
 	msg.AddHeader("To", fmt.Sprintf("<%s>", c.cfg.PublicIdentity))
 	msg.AddHeader("From", fmt.Sprintf("<%s>;tag=%s", c.cfg.PublicIdentity, c.tag))
@@ -1399,9 +1565,13 @@ func (c *Client) buildRegisterRequest(nonce, response string, verify *SecurityPa
 	msg.AddHeader("Geolocation", fmt.Sprintf("<cid:%s@%s>", c.card.IMSI(), realm))
 	msg.AddHeader("Geolocation-Routing", "yes")
 	msg.AddHeader("Contact", contact)
-	msg.AddHeader("Authorization", fmt.Sprintf(`Digest nonce="%s",uri="%s",response="%s",username="%s",algorithm=AKAv1-MD5,realm="%s"`, nonce, c.registerURI, response, c.privateIdentity, realm))
+	if auth != nil {
+		msg.AddHeader("Authorization", auth.HeaderValue())
+	} else if legacyAuthorization != "" {
+		msg.AddHeader("Authorization", legacyAuthorization)
+	}
 	msg.AddHeader("CSeq", fmt.Sprintf("%d REGISTER", atomic.AddInt64(&c.cseq, 1)))
-	msg.AddHeader("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", c.transportToken(), net.JoinHostPort(c.contactHost, strconv.Itoa(port)), c.registerBranch))
+	msg.AddHeader("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", c.transportToken(), net.JoinHostPort(c.contactHost, strconv.Itoa(port)), branch))
 	c.addClientRequestHeaders(&msg)
 	c.addSecurityVerifyHeader(&msg, verify)
 	msg.AddHeader("Content-Type", "application/pidf+xml")
@@ -1437,15 +1607,16 @@ func (c *Client) buildMessage(target string, body []byte, inReplyTo string) Mess
 		target = "tel:" + c.card.SMSC()
 	}
 	callID, _, tag, branch := newTransaction()
+	senderIdentity := c.smsPreferredIdentity()
 	msg := NewRequest("MESSAGE", target)
 	msg.AddHeader("Call-ID", callID)
-	msg.AddHeader("From", fmt.Sprintf("<%s>;tag=%s", c.cfg.PublicIdentity, tag))
+	msg.AddHeader("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, tag))
 	msg.AddHeader("To", fmt.Sprintf("<%s>", target))
 	msg.AddHeader("Request-Disposition", "no-fork")
 	msg.AddHeader("Accept-Contact", "*;+g.3gpp.smsip")
 	msg.AddHeader("CSeq", fmt.Sprintf("%d MESSAGE", atomic.AddInt64(&c.cseq, 1)))
 	msg.AddHeader("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", c.transportToken(), net.JoinHostPort(c.contactHost, strconv.Itoa(c.messageViaPort())), branch))
-	msg.AddHeader("P-Preferred-Identity", fmt.Sprintf("<%s>", c.cfg.PublicIdentity))
+	msg.AddHeader("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
 	c.addClientRequestHeaders(&msg)
 	c.addServiceRoutes(&msg)
 	c.addSecurityVerifyHeader(&msg, c.currentSecurityVerify())
@@ -1457,6 +1628,13 @@ func (c *Client) buildMessage(target string, body []byte, inReplyTo string) Mess
 	}
 	msg.Body = body
 	return msg
+}
+
+func (c *Client) smsPreferredIdentity() string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.telPublicID)), "tel:") {
+		return c.telPublicID
+	}
+	return c.cfg.PublicIdentity
 }
 
 func (c *Client) registerPending(msg Message) <-chan Message {

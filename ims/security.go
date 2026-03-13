@@ -30,10 +30,53 @@ type AuthChallenge struct {
 	Realm     string
 	Nonce     string
 	Algorithm string
+	QOP       string
 }
 
 type AuthInfo struct {
 	NextNonce string
+}
+
+type digestAuthorization struct {
+	Nonce      string
+	URI        string
+	Response   string
+	Username   string
+	Realm      string
+	QOP        string
+	NonceCount string
+	CNonce     string
+}
+
+func (a *digestAuthorization) HeaderValue() string {
+	if a == nil {
+		return ""
+	}
+	value := fmt.Sprintf(`Digest nonce="%s",uri="%s",response="%s",username="%s",algorithm=AKAv1-MD5,realm="%s"`, a.Nonce, a.URI, a.Response, a.Username, a.Realm)
+	if a.QOP != "" {
+		value += fmt.Sprintf(`,qop=%s,nc=%s,cnonce="%s"`, a.QOP, a.NonceCount, a.CNonce)
+	}
+	return value
+}
+
+func splitHeaderFields(value string) []string {
+	fields := make([]string, 0, strings.Count(value, ",")+1)
+	start := 0
+	inQuotes := false
+	for i := range len(value) {
+		switch value[i] {
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if inQuotes {
+				continue
+			}
+			fields = append(fields, value[start:i])
+			start = i + 1
+		}
+	}
+	fields = append(fields, value[start:])
+	return fields
 }
 
 func (c *AuthChallenge) UnmarshalText(text []byte) error {
@@ -42,12 +85,12 @@ func (c *AuthChallenge) UnmarshalText(text []byte) error {
 		return fmt.Errorf("parsing auth challenge: unsupported scheme")
 	}
 	challenge := AuthChallenge{}
-	for _, field := range strings.Split(value[len("Digest "):], ",") {
+	for _, field := range splitHeaderFields(value[len("Digest "):]) {
 		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !ok {
 			continue
 		}
-		value := strings.Trim(rawValue, "\"")
+		value := strings.Trim(strings.TrimSpace(rawValue), "\"")
 		switch strings.ToLower(name) {
 		case "realm":
 			challenge.Realm = value
@@ -55,6 +98,8 @@ func (c *AuthChallenge) UnmarshalText(text []byte) error {
 			challenge.Nonce = value
 		case "algorithm":
 			challenge.Algorithm = value
+		case "qop":
+			challenge.QOP = value
 		}
 	}
 	if challenge.Nonce == "" {
@@ -66,7 +111,7 @@ func (c *AuthChallenge) UnmarshalText(text []byte) error {
 
 func (i *AuthInfo) UnmarshalText(text []byte) error {
 	info := AuthInfo{}
-	for _, field := range strings.Split(string(text), ",") {
+	for _, field := range splitHeaderFields(string(text)) {
 		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !ok || !strings.EqualFold(name, "nextnonce") {
 			continue
@@ -76,6 +121,18 @@ func (i *AuthInfo) UnmarshalText(text []byte) error {
 	}
 	*i = info
 	return nil
+}
+
+func (c AuthChallenge) SelectedQOP() (string, error) {
+	if strings.TrimSpace(c.QOP) == "" {
+		return "", nil
+	}
+	for _, candidate := range strings.Split(c.QOP, ",") {
+		if strings.EqualFold(strings.TrimSpace(candidate), "auth") {
+			return "auth", nil
+		}
+	}
+	return "", fmt.Errorf("selecting auth qop: unsupported qop %q", c.QOP)
 }
 
 func minExpiresSeconds(value string) (int, error) {
@@ -168,7 +225,7 @@ func (p SecurityParam) String() string {
 	return value
 }
 
-func computeAKAResponse(privateIdentity, realm, registerURI, nonce string, result usim.AKAResult) (string, error) {
+func computeAKAResponse(privateIdentity, realm, registerURI, nonce string, result usim.AKAResult, qop, cnonce, nonceCount string) (string, error) {
 	nonceBytes, err := base64.StdEncoding.DecodeString(nonce)
 	if err != nil {
 		return "", fmt.Errorf("decoding nonce: %w", err)
@@ -180,6 +237,14 @@ func computeAKAResponse(privateIdentity, realm, registerURI, nonce string, resul
 	a2 := "REGISTER:" + registerURI
 	h1 := md5.Sum([]byte(a1))
 	h2 := md5.Sum([]byte(a2))
-	h3 := md5.Sum([]byte(hex.EncodeToString(h1[:]) + ":" + nonce + ":" + hex.EncodeToString(h2[:])))
+	data := hex.EncodeToString(h1[:]) + ":" + nonce + ":"
+	if qop != "" {
+		if cnonce == "" || nonceCount == "" {
+			return "", fmt.Errorf("computing AKA response: qop requires cnonce and nonce count")
+		}
+		data += nonceCount + ":" + cnonce + ":" + qop + ":"
+	}
+	data += hex.EncodeToString(h2[:])
+	h3 := md5.Sum([]byte(data))
 	return hex.EncodeToString(h3[:]), nil
 }

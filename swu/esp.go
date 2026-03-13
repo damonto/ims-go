@@ -200,6 +200,12 @@ func (c ESPCodec) Decode(data []byte) (ESPPacket, error) {
 	if len(body) < 2+padLen {
 		return ESPPacket{}, errors.New("decoding ESP: invalid padding")
 	}
+	padStart := len(body) - 2 - padLen
+	for i := range padLen {
+		if body[padStart+i] != byte(i+1) {
+			return ESPPacket{}, errors.New("decoding ESP: invalid padding")
+		}
+	}
 	pkt.Payload = append([]byte(nil), body[:len(body)-2-padLen]...)
 	return pkt, nil
 }

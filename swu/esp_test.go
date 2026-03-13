@@ -2,6 +2,7 @@ package swu
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"testing"
 )
@@ -76,5 +77,19 @@ func TestESPSequenceOverflow(t *testing.T) {
 	esp.seq = math.MaxUint32
 	if _, err := esp.Seal([]byte("payload")); err == nil {
 		t.Fatal("Seal() overflow error = nil, want non-nil")
+	}
+}
+
+func TestESPDecodeRejectsInvalidPadding(t *testing.T) {
+	codec := ESPCodec{SPI: 7, Encryption: EncryptionNull, Integrity: IntegrityNone}
+	packet := make([]byte, 0, 16)
+	header := make([]byte, 8)
+	binary.BigEndian.PutUint32(header[:4], codec.SPI)
+	binary.BigEndian.PutUint32(header[4:8], 1)
+	packet = append(packet, header...)
+	packet = append(packet, []byte("ok")...)
+	packet = append(packet, 0x00, 0x00, 0x02, 0x11)
+	if _, err := codec.Decode(packet); err == nil {
+		t.Fatal("Decode() error = nil, want non-nil")
 	}
 }

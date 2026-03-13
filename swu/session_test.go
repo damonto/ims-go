@@ -116,11 +116,15 @@ func mustSealIKE(t *testing.T, label string, crypto *ikeCrypto, header IKEHeader
 }
 
 func testIKESAInitResponse(initiatorSPI uint64, publicKey, responderNonce []byte) IKEPacket {
+	return testIKESAInitResponseForGroup(initiatorSPI, transformDH1024MODP, publicKey, responderNonce)
+}
+
+func testIKESAInitResponseForGroup(initiatorSPI uint64, dhGroup uint16, publicKey, responderNonce []byte) IKEPacket {
 	return IKEPacket{
 		Header: IKEHeader{InitiatorSPI: initiatorSPI, ResponderSPI: testResponderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKESAInit, Flags: flagResponse, MessageID: 0},
 		Payloads: []Payload{
-			&SecurityAssociationPayload{Proposals: []Proposal{{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}}}},
-			&KeyExchangePayload{DHGroup: transformDH1024MODP, Data: publicKey},
+			&SecurityAssociationPayload{Proposals: []Proposal{{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: dhGroup}}}}},
+			&KeyExchangePayload{DHGroup: dhGroup, Data: publicKey},
 			&NoncePayload{Data: responderNonce},
 		},
 	}
@@ -631,6 +635,60 @@ func TestExchangeIKE(t *testing.T) {
 				t.Fatalf("write = %v, want %v", conn.writes[0], tt.wantWrite)
 			}
 		})
+	}
+}
+
+func TestExchangeIKESAInitRetriesWithResponderDHGroup(t *testing.T) {
+	state, err := newConnectState("356789012345678", testCard{imsi: "001010123456789", mcc: "001", mnc: "01"})
+	if err != nil {
+		t.Fatalf("newConnectState() error = %v", err)
+	}
+	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 500}
+	serverCrypto, err := newIKECrypto(transformDH2048MODP)
+	if err != nil {
+		t.Fatalf("newIKECrypto() error = %v", err)
+	}
+	responderNonce := bytes.Repeat([]byte{0x44}, 16)
+	notifyData := make([]byte, 2)
+	binary.BigEndian.PutUint16(notifyData, transformDH2048MODP)
+	invalidKE, err := (IKEPacket{
+		Header: IKEHeader{InitiatorSPI: state.initiatorSPI, ResponderSPI: testResponderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKESAInit, Flags: flagResponse, MessageID: 0},
+		Payloads: []Payload{
+			&NotifyPayload{NotifyType: notifyTypeInvalidKEPayload, Data: notifyData},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(INVALID_KE_PAYLOAD) error = %v", err)
+	}
+	valid, err := testIKESAInitResponseForGroup(state.initiatorSPI, transformDH2048MODP, serverCrypto.PublicKey(), responderNonce).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(valid SA_INIT) error = %v", err)
+	}
+	conn := &exchangePacketConn{
+		reads: []scriptedRead{
+			{data: invalidKE, addr: peer},
+			{data: valid, addr: peer},
+		},
+	}
+	session := &Session{conn: conn, logger: testLogger(), outerRemote: peer}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.exchangeIKESAInit(ctx, state); err != nil {
+		t.Fatalf("exchangeIKESAInit() error = %v", err)
+	}
+	if len(conn.writes) != 2 {
+		t.Fatalf("len(conn.writes) = %d, want 2", len(conn.writes))
+	}
+	firstReq := mustUnmarshalIKEPacket(t, "sa-init-1", conn.writes[0])
+	secondReq := mustUnmarshalIKEPacket(t, "sa-init-2", conn.writes[1])
+	if ke := findKEPayload(firstReq.Payloads, 0); ke == nil || ke.DHGroup != transformDH1024MODP {
+		t.Fatalf("first request KE = %+v, want group %d", ke, transformDH1024MODP)
+	}
+	if ke := findKEPayload(secondReq.Payloads, 0); ke == nil || ke.DHGroup != transformDH2048MODP {
+		t.Fatalf("second request KE = %+v, want group %d", ke, transformDH2048MODP)
+	}
+	if state.crypto.dhGroup != transformDH2048MODP {
+		t.Fatalf("state.crypto.dhGroup = %d, want %d", state.crypto.dhGroup, transformDH2048MODP)
 	}
 }
 

@@ -54,6 +54,7 @@ type TCPTransport struct {
 	inboundReplay replayWindow
 
 	mu          sync.Mutex
+	writeMu     sync.Mutex
 	established bool
 	closed      bool
 	sendSeq     uint32
@@ -251,6 +252,9 @@ func (t *TCPTransport) DialSecure(ctx context.Context, cfg SecureTCPConfig) (*TC
 }
 
 func (t *TCPTransport) WritePacket(ctx context.Context, data []byte) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -509,6 +513,11 @@ func (t *TCPTransport) handleSegment(segment tcpSegment) {
 		select {
 		case t.msgCh <- msg:
 		default:
+			select {
+			case t.errCh <- errors.New("reading tcp packet: message queue is full"):
+			default:
+			}
+			return
 		}
 	}
 }

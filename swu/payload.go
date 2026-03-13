@@ -54,6 +54,7 @@ const (
 )
 
 const (
+	notifyTypeInvalidKEPayload      uint16 = 17
 	notifyTypeNATDetectionSourceIP  uint16 = 16388
 	notifyTypeNATDetectionDestIP    uint16 = 16389
 	notifyTypeEAPOnlyAuthentication uint16 = 16417
@@ -818,6 +819,7 @@ func decodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 			return nil, fmt.Errorf("parsing payload chain: truncated payload")
 		}
 		next := remaining[0]
+		critical := remaining[1]&0x80 != 0
 		length := int(binary.BigEndian.Uint16(remaining[2:4]))
 		if length < 4 {
 			return nil, fmt.Errorf("parsing payload chain: invalid payload length %d", length)
@@ -826,11 +828,13 @@ func decodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 			return nil, fmt.Errorf("parsing payload chain: invalid payload length %d", length)
 		}
 		body := remaining[4:length]
-		payload, err := decodePayload(nextType, next, body)
+		payload, err := decodePayload(nextType, next, body, critical)
 		if err != nil {
 			return nil, err
 		}
-		payloads = append(payloads, payload)
+		if payload != nil {
+			payloads = append(payloads, payload)
+		}
 		remaining = remaining[length:]
 		if nextType == payloadTypeEncrypted {
 			break
@@ -843,7 +847,7 @@ func decodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 	return payloads, nil
 }
 
-func decodePayload(payloadType, next byte, body []byte) (Payload, error) {
+func decodePayload(payloadType, next byte, body []byte, critical bool) (Payload, error) {
 	switch payloadType {
 	case payloadTypeSA:
 		return decodeSecurityAssociationPayload(body)
@@ -868,7 +872,10 @@ func decodePayload(payloadType, next byte, body []byte) (Payload, error) {
 	case payloadTypeEAP:
 		return decodeEAPPayload(body)
 	default:
-		return nil, fmt.Errorf("parsing payload chain: unsupported payload type %d", payloadType)
+		if !critical {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("parsing payload chain: unsupported critical payload type %d", payloadType)
 	}
 }
 

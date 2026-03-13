@@ -243,7 +243,7 @@ func (s *Session) ensureConnectable() error {
 
 func newConnectState(imei string, card Card) (*connectState, error) {
 	identity, realm, initialAKAState := initialAKAIdentity(card)
-	crypto, initiatorSPI, espInitiatorSPI, nonceI, err := newConnectCryptoState()
+	crypto, initiatorSPI, espInitiatorSPI, nonceI, err := newConnectCryptoState(transformDH1024MODP)
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +260,8 @@ func newConnectState(imei string, card Card) (*connectState, error) {
 	}, nil
 }
 
-func newConnectCryptoState() (*ikeCrypto, uint64, uint32, []byte, error) {
-	crypto, err := newIKECrypto(transformDH1024MODP)
+func newConnectCryptoState(dhGroup uint16) (*ikeCrypto, uint64, uint32, []byte, error) {
+	crypto, err := newIKECrypto(dhGroup)
 	if err != nil {
 		return nil, 0, 0, nil, err
 	}
@@ -280,6 +280,22 @@ func newConnectCryptoState() (*ikeCrypto, uint64, uint32, []byte, error) {
 	crypto.SetSPIs(initiatorSPI, 0)
 	crypto.SetNonces(nonceI, nil)
 	return crypto, initiatorSPI, espInitiatorSPI, nonceI, nil
+}
+
+func (state *connectState) resetDHGroup(dhGroup uint16) error {
+	crypto, err := newIKECrypto(dhGroup)
+	if err != nil {
+		return err
+	}
+	nonceI, err := randomBytes(16)
+	if err != nil {
+		return fmt.Errorf("generating nonce: %w", err)
+	}
+	crypto.SetSPIs(state.initiatorSPI, 0)
+	crypto.SetNonces(nonceI, nil)
+	state.crypto = crypto
+	state.nonceI = nonceI
+	return nil
 }
 
 func (state *connectState) buildIKESAInitRequest(outerLocal, outerRemote *net.UDPAddr) ([]byte, error) {
@@ -310,7 +326,7 @@ func (state *connectState) applyIKESAInitResponse(response IKEPacket, request []
 	if response.Header.ResponderSPI == 0 {
 		return fmt.Errorf("responder spi is empty")
 	}
-	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, transformDH1024MODP)
+	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, state.crypto.dhGroup)
 	if err != nil {
 		return err
 	}
@@ -327,23 +343,39 @@ func (state *connectState) applyIKESAInitResponse(response IKEPacket, request []
 }
 
 func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) error {
-	outerLocal, err := resolveOuterLocalAddr(s.conn, s.outerRemote)
-	if err != nil {
-		s.logger.Debug("resolving local outer address failed", "err", err)
+	triedGroups := map[uint16]struct{}{state.crypto.dhGroup: {}}
+	for {
+		outerLocal, err := resolveOuterLocalAddr(s.conn, s.outerRemote)
+		if err != nil {
+			s.logger.Debug("resolving local outer address failed", "err", err)
+		}
+		request, err := state.buildIKESAInitRequest(outerLocal, s.outerRemote)
+		if err != nil {
+			return err
+		}
+		responseRaw, _, err := s.exchangeIKE(ctx, s.outerRemote, request, false, 0)
+		if err != nil {
+			return err
+		}
+		response, err := decodeIKESAInitPacket(responseRaw)
+		if err != nil {
+			return err
+		}
+		group, retry, err := invalidKEPayloadGroup(response.Payloads)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			return state.applyIKESAInitResponse(response, request)
+		}
+		if _, ok := triedGroups[group]; ok {
+			return fmt.Errorf("parsing ike_sa_init response: repeated INVALID_KE_PAYLOAD group %d", group)
+		}
+		if err := state.resetDHGroup(group); err != nil {
+			return fmt.Errorf("updating ike_sa_init dh group: %w", err)
+		}
+		triedGroups[group] = struct{}{}
 	}
-	request, err := state.buildIKESAInitRequest(outerLocal, s.outerRemote)
-	if err != nil {
-		return err
-	}
-	responseRaw, _, err := s.exchangeIKE(ctx, s.outerRemote, request, false, 0)
-	if err != nil {
-		return err
-	}
-	response, err := decodeIKESAInitPacket(responseRaw)
-	if err != nil {
-		return err
-	}
-	return state.applyIKESAInitResponse(response, request)
 }
 
 func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) error {
@@ -485,11 +517,11 @@ func (s *Session) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	_ = s.sendDeleteRequest(ctx)
 	if s.closeCancel != nil {
 		s.closeCancel()
 	}
 	s.wg.Wait()
-	_ = s.sendDeleteRequest(ctx)
 	s.discardSecurityAssociations(nil)
 	if !s.owned {
 		return nil
@@ -1722,6 +1754,17 @@ func negotiatedIKESAFromPayloads(payloads []Payload, dhGroup uint16) (negotiated
 	return proposal, nonce.Data, ke.Data, nil
 }
 
+func invalidKEPayloadGroup(payloads []Payload) (uint16, bool, error) {
+	notify := findNotifyPayload(payloads, notifyTypeInvalidKEPayload)
+	if notify == nil {
+		return 0, false, nil
+	}
+	if len(notify.Data) != 2 {
+		return 0, false, fmt.Errorf("parsing ike_sa_init response: invalid INVALID_KE_PAYLOAD length %d", len(notify.Data))
+	}
+	return binary.BigEndian.Uint16(notify.Data), true, nil
+}
+
 func negotiatedIKESAFromProposal(proposal Proposal) (negotiatedIKESA, error) {
 	parsed := negotiatedIKESA{}
 	for _, transform := range proposal.Transforms {
@@ -1842,18 +1885,18 @@ func tunnelAddresses(attrs []Attribute) (internalIPv4, internalIPv6, pcscfIPv4, 
 
 func defaultIKESAInitPayloads(crypto *ikeCrypto, local, remote *net.UDPAddr) []Payload {
 	proposals := []Proposal{
-		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypePRF, ID: transformPRFHMACMD5}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypePRF, ID: transformPRFHMACMD5}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA256}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA256}, {TransformType: transformTypeDH, ID: transformDH1024MODP}}},
+		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypePRF, ID: transformPRFHMACMD5}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
+		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypePRF, ID: transformPRFHMACMD5}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
+		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
+		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
+		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA256}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
+		{ProtocolID: proposalProtocolIKE, Transforms: []Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA256}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
 	}
 	natSourceHash := natDetectionHash(crypto.initiatorSPI, crypto.responderSPI, local)
 	natDestHash := natDetectionHash(crypto.initiatorSPI, crypto.responderSPI, remote)
 	return []Payload{
 		&SecurityAssociationPayload{Proposals: proposals},
-		&KeyExchangePayload{DHGroup: transformDH1024MODP, Data: crypto.PublicKey()},
+		&KeyExchangePayload{DHGroup: crypto.dhGroup, Data: crypto.PublicKey()},
 		&NoncePayload{Data: append([]byte(nil), crypto.nonceI...)},
 		&NotifyPayload{ProtocolID: 0, NotifyType: notifyTypeNATDetectionSourceIP, Data: natSourceHash[:]},
 		&NotifyPayload{ProtocolID: 0, NotifyType: notifyTypeNATDetectionDestIP, Data: natDestHash[:]},

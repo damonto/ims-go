@@ -198,9 +198,11 @@ func TestNetworkInitiatedUSSDRequest(t *testing.T) {
 	transport := newClientTCPTransport()
 	var callbackSession *USSDSession
 	var callbackMsg USSDMessage
+	callbackCh := make(chan struct{}, 1)
 	client := newTestUSSDClient(t, Config{OnUSSD: func(session *USSDSession, msg USSDMessage) {
 		callbackSession = session
 		callbackMsg = msg
+		callbackCh <- struct{}{}
 	}}, transport)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -222,6 +224,11 @@ func TestNetworkInitiatedUSSDRequest(t *testing.T) {
 	invite := buildNetworkUSSDInvite(t, client, "Enter PIN", true)
 	if err := client.handleRequest(ctx, transport, invite); err != nil {
 		t.Fatalf("handleRequest(INVITE) error = %v", err)
+	}
+	select {
+	case <-callbackCh:
+	case <-ctx.Done():
+		t.Fatal("waiting for USSD callback")
 	}
 	if callbackSession == nil {
 		t.Fatal("USSD callback session = nil")
@@ -292,6 +299,100 @@ func TestNetworkInitiatedUSSDRequest(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("waiting for final USSD event")
+	}
+}
+
+func TestCloseContextWaitsForOnUSSDCallback(t *testing.T) {
+	transport := newClientTCPTransport()
+	callbackStarted := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	client := newTestUSSDClient(t, Config{OnUSSD: func(session *USSDSession, msg USSDMessage) {
+		close(callbackStarted)
+		<-callbackRelease
+	}}, transport)
+
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		if req.Method() != "BYE" {
+			return
+		}
+		transport.reads = append(transport.reads, newTestResponse(req, 200, "OK").Bytes())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	invite := buildNetworkUSSDInvite(t, client, "Enter PIN", true)
+	if err := client.handleRequest(ctx, transport, invite); err != nil {
+		t.Fatalf("handleRequest(INVITE) error = %v", err)
+	}
+
+	select {
+	case <-callbackStarted:
+	case <-ctx.Done():
+		t.Fatal("waiting for OnUSSD callback start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- client.CloseContext(ctx)
+	}()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("CloseContext() returned before callback release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(callbackRelease)
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("CloseContext() error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("waiting for CloseContext to finish")
+	}
+}
+
+func TestNetworkInitiatedUSSDByeAlwaysReturns200(t *testing.T) {
+	transport := newClientTCPTransport()
+	client := newTestUSSDClient(t, Config{}, transport)
+	session := &USSDSession{
+		client:           client,
+		callID:           "bye-call",
+		sessionID:        "bye-session",
+		localTag:         "local",
+		remoteTag:        "remote",
+		remoteTo:         fmt.Sprintf("<%s>;tag=remote", testPublicIdentity),
+		targetURI:        "sip:ussias@example.com",
+		networkInitiated: true,
+		ackCh:            make(chan struct{}),
+		events:           make(chan USSDMessage, 1),
+		remoteCSeqs:      map[string]struct{}{},
+	}
+	client.storeUSSDSession(session)
+
+	bye := newUSSDDialogRequest("BYE", session.targetURI, "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-bye", "<sip:remote@example.com>;tag=remote", fmt.Sprintf("<%s>;tag=%s", testPublicIdentity, session.localTag), session.callID, "2 BYE")
+	bye.AddHeader("Content-Type", "text/plain")
+	bye.Body = []byte("bad payload")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.handleRequest(ctx, transport, bye); err != nil {
+		t.Fatalf("handleRequest(BYE) error = %v", err)
+	}
+	resp := mustParseMessage(t, "BYE response", transport.writes[0])
+	if resp.StatusCode() != 200 {
+		t.Fatalf("resp.StatusCode() = %d, want 200", resp.StatusCode())
+	}
+	if !session.isClosed() {
+		t.Fatal("session.isClosed() = false, want true")
 	}
 }
 

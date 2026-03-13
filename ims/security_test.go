@@ -31,12 +31,39 @@ func TestParseSecurityHeader(t *testing.T) {
 func TestComputeAKAResponse(t *testing.T) {
 	res := usim.AKAResult{RES: bytes.Repeat([]byte{0x11}, 8)}
 	nonce := "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
-	got, err := computeAKAResponse("001010123456789@ims.mnc001.mcc001.3gppnetwork.org", "ims.mnc001.mcc001.3gppnetwork.org", "sip:ims.mnc001.mcc001.3gppnetwork.org", nonce, res)
+	got, err := computeAKAResponse("001010123456789@ims.mnc001.mcc001.3gppnetwork.org", "ims.mnc001.mcc001.3gppnetwork.org", "sip:ims.mnc001.mcc001.3gppnetwork.org", nonce, res, "", "", "")
 	if err != nil {
 		t.Fatalf("computeAKAResponse() error = %v", err)
 	}
 	if got == "" {
 		t.Fatal("computeAKAResponse() = empty, want non-empty")
+	}
+}
+
+func TestComputeAKAResponseWithQOP(t *testing.T) {
+	res := usim.AKAResult{RES: bytes.Repeat([]byte{0x22}, 8)}
+	nonce := "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
+	got, err := computeAKAResponse("001010123456789@ims.mnc001.mcc001.3gppnetwork.org", "ims.mnc001.mcc001.3gppnetwork.org", "sip:ims.mnc001.mcc001.3gppnetwork.org", nonce, res, "auth", "abcdef0123456789", "00000001")
+	if err != nil {
+		t.Fatalf("computeAKAResponse() error = %v", err)
+	}
+	if got == "" {
+		t.Fatal("computeAKAResponse() = empty, want non-empty")
+	}
+}
+
+func TestParseAuthChallengeQOPList(t *testing.T) {
+	var challenge AuthChallenge
+	err := challenge.UnmarshalText([]byte(`Digest realm="ims.example",nonce="abc",algorithm=AKAv1-MD5,qop="auth,auth-int"`))
+	if err != nil {
+		t.Fatalf("UnmarshalText() error = %v", err)
+	}
+	got, err := challenge.SelectedQOP()
+	if err != nil {
+		t.Fatalf("SelectedQOP() error = %v", err)
+	}
+	if got != "auth" {
+		t.Fatalf("SelectedQOP() = %q, want %q", got, "auth")
 	}
 }
 

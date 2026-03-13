@@ -7,7 +7,6 @@ import (
 
 var (
 	ErrMalformedResponse = errors.New("malformed APDU response")
-	ErrReaderNotFound    = errors.New("reader not found")
 )
 
 type StatusError struct {
@@ -24,14 +23,4 @@ func IsStatus(err error, sw uint16) bool {
 		return false
 	}
 	return statusErr.SW == sw
-}
-
-func checkResponse(res Response) error {
-	if len(res) < 2 {
-		return ErrMalformedResponse
-	}
-	if !res.OK() {
-		return StatusError{SW: res.SW()}
-	}
-	return nil
 }
