@@ -67,7 +67,7 @@ func buildInnerUDPPacket(src, dst *net.UDPAddr, payload []byte) ([]byte, byte, e
 	return buildInnerIPPacket(src16, dst16, 17, udp)
 }
 
-func decodeUDPDatagram(srcIP, dstIP net.IP, payload []byte, localPort int) ([]byte, net.Addr, error) {
+func decodeUDPDatagram(srcIP net.IP, payload []byte, localPort int) ([]byte, net.Addr, error) {
 	if len(payload) < 8 {
 		return nil, nil, fmt.Errorf("parsing udp datagram: packet too short")
 	}
@@ -136,7 +136,7 @@ func decodeInnerPacket(payload []byte, nextHeader byte, localPort int) (innerPac
 	if proto != 17 {
 		return innerPacket{}, fmt.Errorf("parsing inner udp packet: unsupported protocol %d", proto)
 	}
-	payloadData, source, err := decodeUDPDatagram(srcIP, nil, data, localPort)
+	payloadData, source, err := decodeUDPDatagram(srcIP, data, localPort)
 	if err != nil {
 		return innerPacket{}, err
 	}

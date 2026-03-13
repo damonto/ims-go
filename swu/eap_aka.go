@@ -32,12 +32,6 @@ const (
 	akaAttrEncryptedData byte = 130
 )
 
-const (
-	attrRAND = akaAttrRAND
-	attrAUTN = akaAttrAUTN
-	attrRES  = akaAttrRES
-)
-
 var (
 	_ encoding.BinaryMarshaler   = EAPPacket{}
 	_ encoding.BinaryUnmarshaler = (*EAPPacket)(nil)

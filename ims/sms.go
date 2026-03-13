@@ -18,10 +18,7 @@ const (
 )
 
 const (
-	rpCauseSemanticallyIncorrectMessage = 95
 	rpCauseInvalidMandatoryInformation  = 96
-	rpCauseMessageTypeNotImplemented    = 97
-	rpCauseProtocolStateMismatch        = 98
 )
 
 const (
@@ -31,7 +28,6 @@ const (
 	smsConcatUCS2Units = 67
 	smsConcatIEI8Bit   = 0x00
 	smsConcatIEI16Bit  = 0x08
-	smsConcatStateTTL  = 10 * 60
 )
 
 type IncomingSMS struct {
@@ -133,11 +129,6 @@ func buildUCS2UserDataParts(runes []rune) []smsUserDataPart {
 	return parts
 }
 
-func (p smsUserDataPart) marshalSubmit(reference byte, to string) []byte {
-	payload, _ := newSMSSubmitTPDU(reference, to, p).MarshalBinary()
-	return payload
-}
-
 func (p smsUserDataPart) marshalDeliver(from string) []byte {
 	payload, _ := newSMSDeliverTPDU(from, p).MarshalBinary()
 	return payload
@@ -160,21 +151,6 @@ func buildSMSDeliver(from, text string) ([]byte, error) {
 		return nil, fmt.Errorf("building SMS-DELIVER: message requires %d segments", len(parts))
 	}
 	return newSMSDeliverTPDU(from, parts[0]).MarshalBinary()
-}
-
-func encodeRPData(reference byte, smsc string, tpdu []byte) []byte {
-	payload, _ := newRPDataMessage(reference, smsc, tpdu).MarshalBinary()
-	return payload
-}
-
-func encodeRPAck(reference byte) []byte {
-	payload, _ := newRPAckMessage(reference).MarshalBinary()
-	return payload
-}
-
-func encodeRPError(reference byte, cause byte) []byte {
-	payload, _ := newRPErrorMessage(reference, cause).MarshalBinary()
-	return payload
 }
 
 func decodeRPUserData(data []byte) ([]byte, error) {

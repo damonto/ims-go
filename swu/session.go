@@ -822,7 +822,7 @@ func (s *Session) handleESPPacket(packet []byte) {
 func (s *Session) handleInnerPacket(proto byte, srcIP, dstIP net.IP, innerPayload []byte, localUDPPort int) {
 	switch proto {
 	case 17:
-		s.handleInnerUDPPacket(srcIP, dstIP, innerPayload, localUDPPort)
+		s.handleInnerUDPPacket(srcIP, innerPayload, localUDPPort)
 	case 6:
 		s.handleInnerTCPPacket(srcIP, dstIP, innerPayload)
 	case 50:
@@ -832,8 +832,8 @@ func (s *Session) handleInnerPacket(proto byte, srcIP, dstIP net.IP, innerPayloa
 	}
 }
 
-func (s *Session) handleInnerUDPPacket(srcIP, dstIP net.IP, innerPayload []byte, localUDPPort int) {
-	payload, peer, err := decodeUDPDatagram(srcIP, dstIP, innerPayload, localUDPPort)
+func (s *Session) handleInnerUDPPacket(srcIP net.IP, innerPayload []byte, localUDPPort int) {
+	payload, peer, err := decodeUDPDatagram(srcIP, innerPayload, localUDPPort)
 	if err != nil {
 		s.logger.Debug("parsing inner UDP packet failed", "err", err)
 		return
@@ -880,7 +880,7 @@ func (s *Session) handleInnerSecurePacket(srcIP, dstIP net.IP, innerPayload []by
 	if s.handleSecureTCPPacket(srcIP, dstIP, innerPayload, spi, tcpServer) {
 		return
 	}
-	if s.handleSecureUDPPacket(srcIP, dstIP, innerPayload, spi, udpServer) {
+	if s.handleSecureUDPPacket(srcIP, innerPayload, spi, udpServer) {
 		return
 	}
 	s.logger.Debug("dropping secure packet", "spi", spi, "src_ip", srcIP, "dst_ip", dstIP)
@@ -921,7 +921,7 @@ func (s *Session) handleSecureTCPPacket(srcIP, dstIP net.IP, innerPayload []byte
 	return true
 }
 
-func (s *Session) handleSecureUDPPacket(srcIP, dstIP net.IP, innerPayload []byte, spi uint32, candidate *SecureUDPTransport) bool {
+func (s *Session) handleSecureUDPPacket(srcIP net.IP, innerPayload []byte, spi uint32, candidate *SecureUDPTransport) bool {
 	if candidate == nil {
 		return false
 	}
@@ -937,7 +937,7 @@ func (s *Session) handleSecureUDPPacket(srcIP, dstIP net.IP, innerPayload []byte
 		s.logger.Debug("secure ESP packet", "next_header", espPacket.NextHeader, "spi", spi, "local_addr", candidate.local, "remote_addr", candidate.remote)
 		return false
 	}
-	payload, peer, err := decodeUDPDatagram(srcIP, dstIP, espPacket.Payload, candidate.local.Port)
+	payload, peer, err := decodeUDPDatagram(srcIP, espPacket.Payload, candidate.local.Port)
 	if err != nil {
 		s.logger.Debug("parsing secure UDP packet failed", "spi", spi, "local_addr", candidate.local, "remote_addr", candidate.remote, "err", err)
 		return false

@@ -1228,86 +1228,12 @@ func writeResponsePacket(ctx context.Context, transport Transport, req Message, 
 	return writer.WritePacketTo(ctx, data, addr)
 }
 
-type viaHop struct {
-	host net.IP
-	port int
-}
-
 func responseDestination(remote net.Addr, _ string) net.Addr {
 	udpRemote, ok := remote.(*net.UDPAddr)
 	if !ok || udpRemote == nil {
 		return nil
 	}
 	return &net.UDPAddr{IP: append(net.IP(nil), udpRemote.IP...), Port: udpRemote.Port, Zone: udpRemote.Zone}
-}
-
-func parseTopVia(value string) (viaHop, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return viaHop{}, false
-	}
-	part, _, _ := strings.Cut(value, ",")
-	fields := strings.Fields(strings.TrimSpace(part))
-	if len(fields) < 2 {
-		return viaHop{}, false
-	}
-	sentBy, _, _ := strings.Cut(fields[1], ";")
-	host, port, ok := splitHostPortDefault(strings.TrimSpace(sentBy), defaultViaPort(fields[0]))
-	if !ok {
-		return viaHop{}, false
-	}
-	return viaHop{host: parseLiteralIP(host), port: port}, true
-}
-
-func defaultViaPort(protocol string) int {
-	if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(protocol)), "/TLS") {
-		return 5061
-	}
-	return 5060
-}
-
-func splitHostPortDefault(value string, defaultPort int) (string, int, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", 0, false
-	}
-	if strings.HasPrefix(value, "[") {
-		host, portText, err := net.SplitHostPort(value)
-		if err != nil {
-			return "", 0, false
-		}
-		port, err := strconv.Atoi(portText)
-		if err != nil {
-			return "", 0, false
-		}
-		return host, port, true
-	}
-	if strings.Count(value, ":") == 1 {
-		host, portText, err := net.SplitHostPort(value)
-		if err == nil {
-			port, err := strconv.Atoi(portText)
-			if err != nil {
-				return "", 0, false
-			}
-			return host, port, true
-		}
-	}
-	return strings.Trim(value, "[]"), defaultPort, true
-}
-
-func parseLiteralIP(host string) net.IP {
-	host = strings.Trim(strings.TrimSpace(host), "[]")
-	if host == "" {
-		return nil
-	}
-	if zone, _, ok := strings.Cut(host, "%"); ok {
-		host = zone
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil
-	}
-	return append(net.IP(nil), ip...)
 }
 
 func (c *Client) handleMessageRequest(ctx context.Context, transport Transport, msg Message) error {
@@ -1323,10 +1249,10 @@ func (c *Client) handleMessageRequest(ctx context.Context, transport Transport, 
 	if err := rp.UnmarshalBinary(msg.Body); err != nil {
 		return err
 	}
-	return c.handleInboundRP(ctx, transport, msg, rp)
+	return c.handleInboundRP(msg, rp)
 }
 
-func (c *Client) handleInboundRP(ctx context.Context, transport Transport, msg Message, rp rpMessage) error {
+func (c *Client) handleInboundRP(msg Message, rp rpMessage) error {
 	if isSMSReport(rp) {
 		c.completeSMSPending(rp)
 		return nil

@@ -16,7 +16,6 @@ const (
 
 const (
 	flagInitiator = 0x08
-	flagVersion   = 0x10
 	flagResponse  = 0x20
 )
 

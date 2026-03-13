@@ -28,10 +28,6 @@ go.work.sum
 /.idea
 /.vscode
 
-# AI
-AGENTS.md
-REVIEW.md
-
 # Other
 refs/
 scripts/

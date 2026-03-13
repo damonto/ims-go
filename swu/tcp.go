@@ -541,14 +541,6 @@ func nextSIPMessage(stream []byte) ([]byte, []byte, bool, error) {
 	return append([]byte(nil), stream[:total]...), append([]byte(nil), stream[total:]...), true, nil
 }
 
-func (t *TCPTransport) sendSegment(ctx context.Context, flags byte, payload []byte) error {
-	t.mu.Lock()
-	seq := t.sendSeq
-	ack := t.recvSeq
-	t.mu.Unlock()
-	return t.sendSegmentWithSeq(ctx, seq, ack, flags, payload)
-}
-
 func (t *TCPTransport) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags byte, payload []byte) error {
 	options := tcpOptionsForFlags(flags)
 	t.session.logger.Debug("sending TCP segment", "src_addr", t.local, "dst_addr", t.remote, "tcp_flags", flags, "seq", seq, "ack", ack, "payload_len", len(payload), "secure", t.secure)

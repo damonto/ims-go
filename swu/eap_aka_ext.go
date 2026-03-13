@@ -27,15 +27,12 @@ const (
 	akaAttrClientErrorCode byte = 22
 	akaAttrNextPseudonym   byte = 132
 	akaAttrNextReauthID    byte = 133
-	akaAttrCheckcode       byte = 134
 	akaAttrResultInd       byte = 135
 )
 
 const (
-	akaNotificationGeneralFailureAfterAuth uint16 = 0
-	akaNotificationGeneralFailure          uint16 = 16384
-	akaNotificationSuccess                 uint16 = 32768
-	akaClientErrorUnableToProcessPacket    uint16 = 0
+	akaNotificationSuccess              uint16 = 32768
+	akaClientErrorUnableToProcessPacket uint16 = 0
 )
 
 type AKANotification struct {

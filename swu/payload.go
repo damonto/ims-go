@@ -50,12 +50,10 @@ const (
 
 const (
 	protocolIDIKE byte = 1
-	protocolIDAH  byte = 2
 	protocolIDESP byte = 3
 )
 
 const (
-	notifyTypeNoProposalChosen      uint16 = 14
 	notifyTypeNATDetectionSourceIP  uint16 = 16388
 	notifyTypeNATDetectionDestIP    uint16 = 16389
 	notifyTypeEAPOnlyAuthentication uint16 = 16417

@@ -584,9 +584,3 @@ func integLength(integ uint16) (int, error) {
 		return 0, fmt.Errorf("integrity length: unsupported transform %d", integ)
 	}
 }
-
-func (c *ikeCrypto) deriveIKEKeys(nonceI, nonceR []byte, spiI, spiR uint64, peerPublic []byte) error {
-	c.SetSPIs(spiI, spiR)
-	c.SetNonces(nonceI, nonceR)
-	return c.DeriveIKEKeys(peerPublic)
-}

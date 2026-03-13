@@ -977,14 +977,6 @@ func normalizeUSSDErrorCode(code int) int {
 	}
 }
 
-func splitMultipartBody(boundary string, body []byte) ([]multipartBodyPart, error) {
-	parsed := multipartBody{Boundary: boundary}
-	if err := parsed.UnmarshalBinary(body); err != nil {
-		return nil, err
-	}
-	return parsed.Parts, nil
-}
-
 func buildCancel(invite Message) Message {
 	cancelMsg := NewRequest("CANCEL", requestURI(invite))
 	cancelMsg.AddHeader("Via", invite.Header("Via"))
