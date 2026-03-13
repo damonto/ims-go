@@ -320,6 +320,22 @@ func waitForWriteEvents(t *testing.T, ch <-chan struct{}, want int) {
 	}
 }
 
+func waitForTransportMessage(t *testing.T, transport *stubTransport, label string, match func(Message) bool) Message {
+	t.Helper()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, data := range transport.writes {
+			msg := mustParseMessage(t, label, data)
+			if match(msg) {
+				return msg
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("waiting for %s", label)
+	return Message{}
+}
+
 func newTestResponse(req Message, code int, reason string) Message {
 	resp := NewResponse(code, reason)
 	resp.Headers = responseHeaders(req, code)
@@ -338,7 +354,7 @@ func newInboundSMSRequest(callID, cseq string, rpdu []byte) Message {
 	return msg
 }
 
-func newSMSNetworkRequest(target, branch, callID, cseq string, body []byte) Message {
+func newSMSNetworkRequest(target, branch, callID, cseq, inReplyTo string, body []byte) Message {
 	msg := NewRequest("MESSAGE", target)
 	msg.AddHeader("Via", fmt.Sprintf("SIP/2.0/UDP 127.0.0.1:5060;branch=%s", branch))
 	msg.AddHeader("From", "<sip:smsc@example.com>;tag=1")
@@ -346,6 +362,9 @@ func newSMSNetworkRequest(target, branch, callID, cseq string, body []byte) Mess
 	msg.AddHeader("Call-ID", callID)
 	msg.AddHeader("CSeq", cseq)
 	msg.AddHeader("P-Asserted-Identity", "<tel:+15550000000>")
+	if inReplyTo != "" {
+		msg.AddHeader("In-Reply-To", inReplyTo)
+	}
 	msg.Body = body
 	return msg
 }
@@ -487,6 +506,85 @@ func TestHandleRequestDispatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandleMalformedSMSMessageReturns200(t *testing.T) {
+	transport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, newClientUDPTransport())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	msg := newInboundSMSRequest("malformed-sms-1", "1 MESSAGE", []byte{0x03})
+	if err := client.handleRequest(ctx, transport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	if len(transport.writes) != 1 {
+		t.Fatalf("len(transport.writes) = %d, want 1", len(transport.writes))
+	}
+	resp := mustParseMessage(t, "malformed sms response", transport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+}
+
+func TestHandleMalformedInboundRPDataSendsRPError(t *testing.T) {
+	transport := newClientUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+	inboundTransport := newInboundUDPTransport()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	msg := newInboundSMSRequest("malformed-rp-data-1", "1 MESSAGE", []byte{rpDataNetworkToMS, 7})
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(inboundTransport.writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, "malformed rp-data response", inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(transport.writes) > 0 {
+			report := mustParseMessage(t, "malformed rp-data report", transport.writes[0])
+			if got := report.Header("In-Reply-To"); got != "malformed-rp-data-1" {
+				t.Fatalf("In-Reply-To = %q, want %q", got, "malformed-rp-data-1")
+			}
+			var rpErr rpMessage
+			if err := rpErr.UnmarshalBinary(report.Body); err != nil {
+				t.Fatalf("UnmarshalBinary(report) error = %v", err)
+			}
+			if rpErr.Type != rpErrorMSToNetwork {
+				t.Fatalf("Type = 0x%02X, want 0x%02X", rpErr.Type, rpErrorMSToNetwork)
+			}
+			if rpErr.Reference != 7 {
+				t.Fatalf("Reference = %d, want 7", rpErr.Reference)
+			}
+			if !rpErr.HasCause || rpErr.Cause != rpCauseInvalidMandatoryInformation {
+				t.Fatalf("Cause = %d (has=%v), want %d", rpErr.Cause, rpErr.HasCause, rpCauseInvalidMandatoryInformation)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("waiting for RP-ERROR delivery report")
 }
 
 func TestClientSerializesRequestAndResponseWrites(t *testing.T) {
@@ -934,9 +1032,10 @@ func TestSendSMS(t *testing.T) {
 			return
 		}
 		rpRef := req.Body[1]
+		callID := req.Header("Call-ID")
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			ack := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", "sms-ack-1", "1 MESSAGE", []byte{rpAckNetworkToMS, rpRef})
+			ack := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", "sms-ack-1", "1 MESSAGE", callID, []byte{rpAckNetworkToMS, rpRef})
 			if err := client.handleRequest(context.Background(), inboundTransport, ack); err != nil {
 				t.Errorf("handleRequest(rp-ack) error = %v", err)
 			}
@@ -998,9 +1097,8 @@ func TestHandleIncomingMessageSameBodyDifferentTransaction(t *testing.T) {
 	}
 }
 
-func TestSendSMSRPError(t *testing.T) {
+func TestSendSMSBufferedRPErrorReturnsError(t *testing.T) {
 	transport := newClientUDPTransport()
-	inboundTransport := newInboundUDPTransport()
 	client := newTestClient(t, Config{}, transport)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -1011,25 +1109,917 @@ func TestSendSMSRPError(t *testing.T) {
 			t.Errorf("ParseMessage(request) error = %v", err)
 			return
 		}
-		resp := newTestResponse(req, 202, "Accepted")
-		go client.dispatchResponse(resp)
 		if req.Method() != "MESSAGE" || len(req.Body) < 2 {
 			return
 		}
 		rpRef := req.Body[1]
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			report := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-error", "sms-error-1", "1 MESSAGE", []byte{rpErrorNetworkToMS, rpRef, 0x01, rpCauseInvalidMandatoryInformation})
-			if err := client.handleRequest(context.Background(), inboundTransport, report); err != nil {
-				t.Errorf("handleRequest(rp-error) error = %v", err)
-			}
-		}()
+		report := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-error", "sms-error-1", "1 MESSAGE", req.Header("Call-ID"), []byte{rpErrorNetworkToMS, rpRef, 0x01, rpCauseInvalidMandatoryInformation})
+		client.completeSMSPending(report, rpMessage{Type: rpErrorNetworkToMS, Reference: rpRef, Cause: rpCauseInvalidMandatoryInformation, HasCause: true})
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
 	}
 
 	err := client.SendSMS(ctx, "777", "BAL")
+	if err == nil {
+		t.Fatal("SendSMS() error = nil, want non-nil")
+	}
 	var rpErr *RPError
-	if !errors.As(err, &rpErr) || rpErr.Cause != rpCauseInvalidMandatoryInformation {
-		t.Fatalf("SendSMS() error = %v, want RP cause %d", err, rpCauseInvalidMandatoryInformation)
+	if !errors.As(err, &rpErr) {
+		t.Fatalf("SendSMS() error = %v, want RPError", err)
+	}
+	if rpErr.Cause != rpCauseInvalidMandatoryInformation {
+		t.Fatalf("RPError.Cause = %d, want %d", rpErr.Cause, rpCauseInvalidMandatoryInformation)
+	}
+}
+
+func TestSendSMSLateRPErrorCallsOnError(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	errCh := make(chan error, 1)
+	client := newTestClient(t, Config{OnError: func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || len(req.Body) < 2 {
+			return
+		}
+		rpRef := req.Body[1]
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: rpRef}:
+		default:
+		}
+		go func(callID string, rpRef byte) {
+			time.Sleep(10 * time.Millisecond)
+			report := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-error", "sms-error-1", "1 MESSAGE", callID, []byte{rpErrorNetworkToMS, rpRef, 0x01, rpCauseInvalidMandatoryInformation})
+			if err := client.handleRequest(context.Background(), inboundTransport, report); err != nil {
+				t.Errorf("handleRequest(rp-error) error = %v", err)
+			}
+		}(req.Header("Call-ID"), rpRef)
+	}
+
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	default:
+	}
+	if reportInfo.rpRef == 0 || reportInfo.callID == "" {
+		t.Fatal("RP reference = 0, want non-zero")
+	}
+
+	select {
+	case err := <-errCh:
+		var rpErr *RPError
+		if !errors.As(err, &rpErr) {
+			t.Fatalf("OnError err = %v, want RPError", err)
+		}
+		if rpErr.Cause != rpCauseInvalidMandatoryInformation {
+			t.Fatalf("RPError.Cause = %d, want %d", rpErr.Cause, rpCauseInvalidMandatoryInformation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for async RP-ERROR")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending := client.smsPending[reportInfo.callID]
+		client.mu.Unlock()
+		if !pending {
+			client.mu.Lock()
+			_, activeRef := client.smsRefs[reportInfo.rpRef]
+			client.mu.Unlock()
+			if activeRef {
+				t.Fatalf("smsRefs[%d] still present after RP-ERROR", reportInfo.rpRef)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("smsPending[%s] still present after RP-ERROR", reportInfo.callID)
+}
+
+func TestSendSMSDoesNotWaitForSubmitReport(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := client.SendSMS(ctx, "777", "BAL")
+	if err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	default:
+	}
+	if reportInfo.rpRef == 0 || reportInfo.callID == "" {
+		t.Fatal("RP reference = 0, want non-zero")
+	}
+
+	client.mu.Lock()
+	_, pending := client.smsPending[reportInfo.callID]
+	_, activeRef := client.smsRefs[reportInfo.rpRef]
+	client.mu.Unlock()
+	if !pending {
+		t.Fatalf("smsPending[%s] missing, want late report tracking", reportInfo.callID)
+	}
+	if activeRef {
+		t.Fatalf("smsRefs[%d] still present, want released after SIP acceptance", reportInfo.rpRef)
+	}
+
+	ack := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", "sms-ack-late", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, reportInfo.rpRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, ack); err != nil {
+		t.Fatalf("handleRequest(rp-ack) error = %v", err)
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending = client.smsPending[reportInfo.callID]
+		client.mu.Unlock()
+		if !pending {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("smsPending[%s] still present after late report", reportInfo.callID)
+}
+
+func TestSendSMSSubmitReportRejectsMismatchedInReplyTo(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for submit report info")
+	}
+
+	badReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", "sms-ack-bad", "1 MESSAGE", "wrong-call-id", []byte{rpAckNetworkToMS, reportInfo.rpRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, badReport); err != nil {
+		t.Fatalf("handleRequest(bad-rp-ack) error = %v", err)
+	}
+	if len(inboundTransport.writes) == 0 {
+		t.Fatal("len(inboundTransport.writes) = 0, want response")
+	}
+	resp := mustParseMessage(t, "bad submit report response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 488 {
+		t.Fatalf("StatusCode() = %d, want 488", got)
+	}
+
+	client.mu.Lock()
+	_, pending := client.smsPending[reportInfo.callID]
+	client.mu.Unlock()
+	if !pending {
+		t.Fatalf("smsPending[%s] missing after mismatched submit report", reportInfo.callID)
+	}
+
+	goodReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", "sms-ack-good", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, reportInfo.rpRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, goodReport); err != nil {
+		t.Fatalf("handleRequest(good-rp-ack) error = %v", err)
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending = client.smsPending[reportInfo.callID]
+		client.mu.Unlock()
+		if !pending {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("smsPending[%s] still present after matching submit report", reportInfo.callID)
+}
+
+func TestSendSMSSubmitReportRejectsMismatchedRPReference(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || req.Header("In-Reply-To") != "" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for submit report info")
+	}
+
+	wrongRef := reportInfo.rpRef + 1
+	badReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack-bad-rpref", "sms-ack-bad-rpref", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, wrongRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, badReport); err != nil {
+		t.Fatalf("handleRequest(bad-rp-ack) error = %v", err)
+	}
+	resp := mustParseMessage(t, "bad rp-ref response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	rpErrorReq := waitForTransportMessage(t, transport, "rp-error invalid reference", func(msg Message) bool {
+		return msg.Header("In-Reply-To") == "sms-ack-bad-rpref"
+	})
+	var rpErr rpMessage
+	if err := rpErr.UnmarshalBinary(rpErrorReq.Body); err != nil {
+		t.Fatalf("UnmarshalBinary(rp-error) error = %v", err)
+	}
+	if rpErr.Type != rpErrorMSToNetwork {
+		t.Fatalf("Type = 0x%02X, want 0x%02X", rpErr.Type, rpErrorMSToNetwork)
+	}
+	if rpErr.Reference != wrongRef {
+		t.Fatalf("Reference = %d, want %d", rpErr.Reference, wrongRef)
+	}
+	if rpErr.Cause != rpCauseInvalidShortMessageTransferReference {
+		t.Fatalf("Cause = %d, want %d", rpErr.Cause, rpCauseInvalidShortMessageTransferReference)
+	}
+
+	client.mu.Lock()
+	_, pending := client.smsPending[reportInfo.callID]
+	client.mu.Unlock()
+	if !pending {
+		t.Fatalf("smsPending[%s] missing after mismatched rpRef", reportInfo.callID)
+	}
+
+	goodReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack-good-rpref", "sms-ack-good-rpref", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, reportInfo.rpRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, goodReport); err != nil {
+		t.Fatalf("handleRequest(good-rp-ack) error = %v", err)
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending = client.smsPending[reportInfo.callID]
+		client.mu.Unlock()
+		if !pending {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("smsPending[%s] still present after matching submit report", reportInfo.callID)
+}
+
+func TestSendSMSMalformedRPACKSubmitReportReturnsRPError(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || req.Header("In-Reply-To") != "" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for submit report info")
+	}
+
+	badReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack-malformed", "sms-ack-malformed", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, reportInfo.rpRef, 0x41})
+	if err := client.handleRequest(context.Background(), inboundTransport, badReport); err != nil {
+		t.Fatalf("handleRequest(malformed-rp-ack) error = %v", err)
+	}
+	resp := mustParseMessage(t, "malformed rp-ack response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	rpErrorReq := waitForTransportMessage(t, transport, "rp-error invalid mandatory info", func(msg Message) bool {
+		return msg.Header("In-Reply-To") == "sms-ack-malformed"
+	})
+	var rpErr rpMessage
+	if err := rpErr.UnmarshalBinary(rpErrorReq.Body); err != nil {
+		t.Fatalf("UnmarshalBinary(rp-error) error = %v", err)
+	}
+	if rpErr.Type != rpErrorMSToNetwork {
+		t.Fatalf("Type = 0x%02X, want 0x%02X", rpErr.Type, rpErrorMSToNetwork)
+	}
+	if rpErr.Reference != reportInfo.rpRef {
+		t.Fatalf("Reference = %d, want %d", rpErr.Reference, reportInfo.rpRef)
+	}
+	if rpErr.Cause != rpCauseInvalidMandatoryInformation {
+		t.Fatalf("Cause = %d, want %d", rpErr.Cause, rpCauseInvalidMandatoryInformation)
+	}
+}
+
+func TestSendSMSMalformedRPErrorSubmitReportUsesCause111(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	errCh := make(chan error, 1)
+	client := newTestClient(t, Config{OnError: func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || req.Header("In-Reply-To") != "" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for submit report info")
+	}
+
+	badReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-error-malformed", "sms-error-malformed", "1 MESSAGE", reportInfo.callID, []byte{rpErrorNetworkToMS, reportInfo.rpRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, badReport); err != nil {
+		t.Fatalf("handleRequest(malformed-rp-error) error = %v", err)
+	}
+	resp := mustParseMessage(t, "malformed rp-error response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	select {
+	case err := <-errCh:
+		var rpErr *RPError
+		if !errors.As(err, &rpErr) {
+			t.Fatalf("OnError err = %v, want RPError", err)
+		}
+		if rpErr.Cause != rpCauseProtocolErrorUnspecified {
+			t.Fatalf("RPError.Cause = %d, want %d", rpErr.Cause, rpCauseProtocolErrorUnspecified)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for malformed RP-ERROR handling")
+	}
+}
+
+func TestSendSMSSubmitReportTimeoutDoesNotCallOnError(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	errCh := make(chan error, 1)
+	client := newTestClient(t, Config{OnError: func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	oldTimeout := smsSubmitReportTimeout
+	smsSubmitReportTimeout = 20 * time.Millisecond
+	defer func() {
+		smsSubmitReportTimeout = oldTimeout
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for RP reference")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	cleared := false
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending := client.smsPending[reportInfo.callID]
+		_, activeRef := client.smsRefs[reportInfo.rpRef]
+		client.mu.Unlock()
+		if !pending {
+			if activeRef {
+				t.Fatalf("smsRefs[%d] still present after submit report timeout", reportInfo.rpRef)
+			}
+			cleared = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cleared {
+		t.Fatalf("smsPending[%s] still present after submit report timeout", reportInfo.callID)
+	}
+
+	lateReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", "sms-ack-timeout", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, reportInfo.rpRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, lateReport); err != nil {
+		t.Fatalf("handleRequest(late-rp-ack) error = %v", err)
+	}
+	if len(inboundTransport.writes) == 0 {
+		t.Fatal("len(inboundTransport.writes) = 0, want response")
+	}
+	resp := mustParseMessage(t, "late submit report response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("OnError err = %v, want no timeout error", err)
+	default:
+	}
+}
+
+func TestSendSMSLateRPErrorAfterTimeoutCallsOnError(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	errCh := make(chan error, 1)
+	client := newTestClient(t, Config{OnError: func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	oldTimeout := smsSubmitReportTimeout
+	smsSubmitReportTimeout = 20 * time.Millisecond
+	defer func() {
+		smsSubmitReportTimeout = oldTimeout
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || req.Header("In-Reply-To") != "" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for RP reference")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	cleared := false
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending := client.smsPending[reportInfo.callID]
+		client.mu.Unlock()
+		if !pending {
+			cleared = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cleared {
+		t.Fatalf("smsPending[%s] still present after submit report timeout", reportInfo.callID)
+	}
+
+	lateReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-error-timeout", "sms-error-timeout", "1 MESSAGE", reportInfo.callID, []byte{rpErrorNetworkToMS, reportInfo.rpRef, 0x01, rpCauseInvalidMandatoryInformation})
+	if err := client.handleRequest(context.Background(), inboundTransport, lateReport); err != nil {
+		t.Fatalf("handleRequest(late-rp-error) error = %v", err)
+	}
+	if len(inboundTransport.writes) == 0 {
+		t.Fatal("len(inboundTransport.writes) = 0, want response")
+	}
+	resp := mustParseMessage(t, "late rp-error response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	select {
+	case err := <-errCh:
+		var rpErr *RPError
+		if !errors.As(err, &rpErr) {
+			t.Fatalf("OnError err = %v, want RPError", err)
+		}
+		if rpErr.Cause != rpCauseInvalidMandatoryInformation {
+			t.Fatalf("RPError.Cause = %d, want %d", rpErr.Cause, rpCauseInvalidMandatoryInformation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for late RP-ERROR event")
+	}
+}
+
+func TestSendSMSLateSubmitReportRejectsMismatchedRPReference(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	oldTimeout := smsSubmitReportTimeout
+	smsSubmitReportTimeout = 20 * time.Millisecond
+	defer func() {
+		smsSubmitReportTimeout = oldTimeout
+	}()
+
+	type submitReportInfo struct {
+		callID string
+		rpRef  byte
+	}
+	reportInfoCh := make(chan submitReportInfo, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+		if req.Method() != "MESSAGE" || req.Header("In-Reply-To") != "" || len(req.Body) < 2 {
+			return
+		}
+		select {
+		case reportInfoCh <- submitReportInfo{callID: req.Header("Call-ID"), rpRef: req.Body[1]}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", "BAL"); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+
+	var reportInfo submitReportInfo
+	select {
+	case reportInfo = <-reportInfoCh:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for RP reference")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		client.mu.Lock()
+		_, pending := client.smsPending[reportInfo.callID]
+		client.mu.Unlock()
+		if !pending {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	wrongRef := reportInfo.rpRef + 1
+	badReport := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack-timeout-bad-rpref", "sms-ack-timeout-bad-rpref", "1 MESSAGE", reportInfo.callID, []byte{rpAckNetworkToMS, wrongRef})
+	if err := client.handleRequest(context.Background(), inboundTransport, badReport); err != nil {
+		t.Fatalf("handleRequest(late bad-rp-ack) error = %v", err)
+	}
+	resp := mustParseMessage(t, "late bad rp-ref response", inboundTransport.writes[len(inboundTransport.writes)-1])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+
+	rpErrorReq := waitForTransportMessage(t, transport, "late rp-error invalid reference", func(msg Message) bool {
+		return msg.Header("In-Reply-To") == "sms-ack-timeout-bad-rpref"
+	})
+	var rpErr rpMessage
+	if err := rpErr.UnmarshalBinary(rpErrorReq.Body); err != nil {
+		t.Fatalf("UnmarshalBinary(rp-error) error = %v", err)
+	}
+	if rpErr.Type != rpErrorMSToNetwork {
+		t.Fatalf("Type = 0x%02X, want 0x%02X", rpErr.Type, rpErrorMSToNetwork)
+	}
+	if rpErr.Reference != wrongRef {
+		t.Fatalf("Reference = %d, want %d", rpErr.Reference, wrongRef)
+	}
+	if rpErr.Cause != rpCauseInvalidShortMessageTransferReference {
+		t.Fatalf("Cause = %d, want %d", rpErr.Cause, rpCauseInvalidShortMessageTransferReference)
+	}
+}
+
+func TestSendSMSWithoutSubmitReportsDoesNotExhaustRPReferences(t *testing.T) {
+	transport := newClientUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	oldTimeout := smsSubmitReportTimeout
+	smsSubmitReportTimeout = 5 * time.Second
+	defer func() {
+		smsSubmitReportTimeout = oldTimeout
+	}()
+
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	for i := range 300 {
+		if err := client.SendSMS(context.Background(), "777", "BAL"); err != nil {
+			t.Fatalf("SendSMS(%d) error = %v", i, err)
+		}
+	}
+
+	client.mu.Lock()
+	activeRefs := len(client.smsRefs)
+	pending := len(client.smsPending)
+	client.mu.Unlock()
+	if activeRefs != 0 {
+		t.Fatalf("len(client.smsRefs) = %d, want 0", activeRefs)
+	}
+	if pending != 300 {
+		t.Fatalf("len(client.smsPending) = %d, want 300", pending)
+	}
+}
+
+func TestSendMultipartSMSDoesNotStopAtPendingSubmitReport(t *testing.T) {
+	transport := newClientUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	text := strings.Repeat("A", 200)
+	parts, err := buildSMSUserDataParts(text)
+	if err != nil {
+		t.Fatalf("buildSMSUserDataParts() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := client.SendSMS(ctx, "777", text); err != nil {
+		t.Fatalf("SendSMS() error = %v", err)
+	}
+	if len(transport.writes) != len(parts) {
+		t.Fatalf("len(transport.writes) = %d, want %d", len(transport.writes), len(parts))
+	}
+
+	client.mu.Lock()
+	pending := len(client.smsPending)
+	activeRefs := len(client.smsRefs)
+	client.mu.Unlock()
+	if pending != len(parts) {
+		t.Fatalf("len(client.smsPending) = %d, want %d", pending, len(parts))
+	}
+	if activeRefs != 0 {
+		t.Fatalf("len(client.smsRefs) = %d, want 0", activeRefs)
+	}
+}
+
+func TestSendMultipartSMSStopsAtBufferedRPError(t *testing.T) {
+	transport := newClientUDPTransport()
+	client := newTestClient(t, Config{}, transport)
+	text := strings.Repeat("A", 200)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	transport.onWrite = func(data []byte) {
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(request) error = %v", err)
+			return
+		}
+		if req.Method() != "MESSAGE" || len(req.Body) < 2 {
+			return
+		}
+		rpRef := req.Body[1]
+		report := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-error", "sms-error-1", "1 MESSAGE", req.Header("Call-ID"), []byte{rpErrorNetworkToMS, rpRef, 0x01, rpCauseInvalidMandatoryInformation})
+		client.completeSMSPending(report, rpMessage{Type: rpErrorNetworkToMS, Reference: rpRef, Cause: rpCauseInvalidMandatoryInformation, HasCause: true})
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	err := client.SendSMS(ctx, "777", text)
+	if err == nil {
+		t.Fatal("SendSMS() error = nil, want non-nil")
+	}
+	if len(transport.writes) != 1 {
+		t.Fatalf("len(transport.writes) = %d, want 1", len(transport.writes))
+	}
+	var rpErr *RPError
+	if !errors.As(err, &rpErr) {
+		t.Fatalf("SendSMS() error = %v, want RPError", err)
 	}
 }
 
@@ -1668,9 +2658,10 @@ func TestSendMultipartSMS(t *testing.T) {
 			return
 		}
 		rpRef := req.Body[1]
+		callID := req.Header("Call-ID")
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			ack := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", fmt.Sprintf("sms-ack-%d", rpRef), fmt.Sprintf("%d MESSAGE", rpRef), []byte{rpAckNetworkToMS, rpRef})
+			ack := newSMSNetworkRequest(client.cfg.PublicIdentity, "z9hG4bK-sms-ack", fmt.Sprintf("sms-ack-%d", rpRef), fmt.Sprintf("%d MESSAGE", rpRef), callID, []byte{rpAckNetworkToMS, rpRef})
 			if err := client.handleRequest(context.Background(), inboundTransport, ack); err != nil {
 				t.Errorf("handleRequest(rp-ack) error = %v", err)
 			}

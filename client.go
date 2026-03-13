@@ -153,7 +153,7 @@ func newClient(cfg Config, card Card) (*Client, error) {
 		state:  make(chan RegistrationState, 16),
 		errors: make(chan error, 16),
 	}
-	client := &Client{cfg: normalized, card: card, logger: normalized.Logger.With("component", "vowifi"), bus: bus}
+	client := &Client{cfg: normalized, card: card, logger: normalized.Logger.With("component", "ims-client"), bus: bus}
 	client.sms.client = client
 	return client, nil
 }
@@ -186,6 +186,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	imsCfg.OnSMS = c.handleSMS
 	imsCfg.OnUSSD = c.handleUSSD
+	imsCfg.OnError = c.emitError
 	imsClient, err := ims.NewClient(imsCfg, transport, c.card)
 	if err != nil {
 		wrapped := fmt.Errorf("creating IMS client: %w", err)

@@ -3,6 +3,7 @@ package imsclient
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -106,6 +107,45 @@ func TestClientConnectAndSendSMS(t *testing.T) {
 	}
 }
 
+func TestClientSendSMSLateRPErrorEmitsEvent(t *testing.T) {
+	server := mustListenUDP(t, "server")
+	defer server.Close()
+
+	reportSeen := make(chan struct{}, 1)
+	go runFakeIMSSubmitReportError(t, server, reportSeen)
+
+	client := newTestClient(t, server.LocalAddr().String())
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := client.SMS().Send(ctx, "+8613700000000", "hello"); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case <-reportSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RP-ERROR request not observed")
+	}
+
+	select {
+	case err := <-client.Events().Errors:
+		var rpErr *ims.RPError
+		if !errors.As(err, &rpErr) {
+			t.Fatalf("Events().Errors err = %v, want RPError", err)
+		}
+		if rpErr.Cause != 96 {
+			t.Fatalf("RPError.Cause = %d, want 96", rpErr.Cause)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiting for async SMS error event")
+	}
+}
+
 func runFakeIMS(t *testing.T, server net.PacketConn, messageSeen chan<- struct{}) {
 	t.Helper()
 	nonce := testNonce()
@@ -139,6 +179,7 @@ func runFakeIMS(t *testing.T, server net.PacketConn, messageSeen chan<- struct{}
 				rpAck.AddHeader("To", msg.Header("From"))
 				rpAck.AddHeader("Call-ID", "sms-rp-ack")
 				rpAck.AddHeader("CSeq", "1 MESSAGE")
+				rpAck.AddHeader("In-Reply-To", msg.Header("Call-ID"))
 				rpAck.AddHeader("P-Asserted-Identity", fmt.Sprintf("<tel:%s>", stubCard{}.SMSC()))
 				rpAck.Body = []byte{0x03, msg.Body[1]}
 				_, _ = server.WriteTo(rpAck.Bytes(), addr)
@@ -148,6 +189,56 @@ func runFakeIMS(t *testing.T, server net.PacketConn, messageSeen chan<- struct{}
 			default:
 			}
 			return
+		}
+	}
+}
+
+func runFakeIMSSubmitReportError(t *testing.T, server net.PacketConn, reportSeen chan<- struct{}) {
+	t.Helper()
+	nonce := testNonce()
+	buf := make([]byte, 64*1024)
+	for {
+		n, addr, err := server.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		msg, err := ims.ParseMessage(buf[:n])
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch msg.Method() {
+		case "REGISTER":
+			res := newUnauthorizedRegisterResponse(msg, nonce)
+			authorization := msg.Header("Authorization")
+			if authorization != "" && !strings.Contains(authorization, `nonce=""`) && !strings.Contains(authorization, `response=""`) {
+				res = newIMSResponse(msg, 200, "OK")
+			}
+			_, _ = server.WriteTo(res.Bytes(), addr)
+		case "SUBSCRIBE":
+			_, _ = server.WriteTo(newIMSResponse(msg, 200, "OK").Bytes(), addr)
+		case "MESSAGE":
+			_, _ = server.WriteTo(newIMSResponse(msg, 202, "Accepted").Bytes(), addr)
+			if len(msg.Body) < 2 {
+				continue
+			}
+			go func(req ims.Message, remote net.Addr) {
+				time.Sleep(10 * time.Millisecond)
+				rpErr := ims.NewRequest("MESSAGE", req.Header("From"))
+				rpErr.AddHeader("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-rp-error")
+				rpErr.AddHeader("From", "<sip:smsc@example.com>;tag=1")
+				rpErr.AddHeader("To", req.Header("From"))
+				rpErr.AddHeader("Call-ID", "sms-rp-error")
+				rpErr.AddHeader("CSeq", "1 MESSAGE")
+				rpErr.AddHeader("In-Reply-To", req.Header("Call-ID"))
+				rpErr.AddHeader("P-Asserted-Identity", fmt.Sprintf("<tel:%s>", stubCard{}.SMSC()))
+				rpErr.Body = []byte{0x05, req.Body[1], 0x01, 96}
+				_, _ = server.WriteTo(rpErr.Bytes(), remote)
+				select {
+				case reportSeen <- struct{}{}:
+				default:
+				}
+			}(msg, addr)
 		}
 	}
 }

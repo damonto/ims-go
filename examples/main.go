@@ -143,12 +143,12 @@ func run(opt options) error {
 	}
 
 	if opt.sendTo != "" {
-		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		sendCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		if err := client.SendSMS(sendCtx, opt.sendTo, opt.sendText); err != nil {
 			return fmt.Errorf("sending SMS: %w", err)
 		}
-		slog.Info("sent SMS", "to", opt.sendTo)
+		slog.Info("submitted SMS", "to", opt.sendTo)
 	}
 	if opt.ussdCode != "" {
 		if err := runUSSD(ctx, client, opt.ussdCode); err != nil {

@@ -18,7 +18,9 @@ const (
 )
 
 const (
-	rpCauseInvalidMandatoryInformation = 96
+	rpCauseInvalidShortMessageTransferReference = 81
+	rpCauseInvalidMandatoryInformation          = 96
+	rpCauseProtocolErrorUnspecified             = 111
 )
 
 const (
