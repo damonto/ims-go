@@ -1,0 +1,301 @@
+package sms
+
+import (
+	"context"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/damonto/ims-client/ims/registration"
+	"github.com/damonto/ims-client/ims/session"
+	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/ims-client/usim"
+)
+
+type serviceStubTransport struct {
+	local   net.Addr
+	remote  net.Addr
+	readCh  chan []byte
+	writes  [][]byte
+	onWrite func([]byte)
+}
+
+type serviceStubCard struct{}
+
+func (t *serviceStubTransport) LocalAddr() net.Addr  { return t.local }
+func (t *serviceStubTransport) RemoteAddr() net.Addr { return t.remote }
+func (t *serviceStubTransport) WritePacket(ctx context.Context, data []byte) error {
+	t.writes = append(t.writes, append([]byte(nil), data...))
+	if t.onWrite != nil {
+		t.onWrite(data)
+	}
+	return nil
+}
+func (t *serviceStubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case pkt := <-t.readCh:
+		return pkt, t.remote, nil
+	}
+}
+func (t *serviceStubTransport) Close() error          { return nil }
+func (t *serviceStubTransport) queue(msg sip.Message) { t.readCh <- msg.Bytes() }
+
+func (serviceStubCard) IMSI() string { return "001010123456789" }
+func (serviceStubCard) MCC() string  { return "001" }
+func (serviceStubCard) MNC() string  { return "001" }
+func (serviceStubCard) SMSC() string { return "+15550000000" }
+func (serviceStubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{
+		RES: []byte("password"),
+		IK:  []byte("client-test-ik"),
+	}, nil
+}
+
+func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		if got := req.HeadersByName("Route"); len(got) != 1 || got[0] != "<sip:pcscf.example.com;lr>" {
+			t.Fatalf("Route = %v", got)
+		}
+		if got := req.Header("P-Preferred-Identity"); got != "<tel:+15551234567>" {
+			t.Fatalf("P-Preferred-Identity = %q", got)
+		}
+		if got := req.Header("User-Agent"); got == "" {
+			t.Fatal("User-Agent = empty")
+		}
+		if got := req.Header("P-Access-Network-Info"); got == "" {
+			t.Fatal("P-Access-Network-Info = empty")
+		}
+		if got := req.Header("Security-Verify"); got == "" {
+			t.Fatal("Security-Verify = empty")
+		}
+		transport.queue(newSMSResponse(req, 202, "Accepted"))
+	}
+
+	got, err := svc.Send(context.Background(), "777", "BAL")
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(Send()) = %d, want 1", len(got))
+	}
+	if got[0].CallID == "" {
+		t.Fatal("Send()[0].CallID = empty")
+	}
+}
+
+func TestHandleMalformedInboundSMSReturns200(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	inboundTransport := newServiceTransport()
+	req := session.Request{Message: newInboundSMSRequest("call-1", "1 MESSAGE", []byte{0x03}), Transport: inboundTransport}
+	handled, err := svc.HandleRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseSMSMessage(t, inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+}
+
+func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	gotCh := make(chan Incoming, 1)
+	svc, err := New(Config{OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	inboundTransport := newServiceTransport()
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	rpdu, err := (rpMessage{
+		Type:       rpDataNetworkToMS,
+		Reference:  0x01,
+		Originator: "+15550000000",
+		TPDU:       tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	req := session.Request{Message: newInboundSMSRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport}
+	handled, err := svc.HandleRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	select {
+	case got := <-gotCh:
+		if got.Text != "hello" || got.From != "+15551234567" || got.ServiceCenter != "+15550000000" {
+			t.Fatalf("Incoming = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for incoming sms callback")
+	}
+}
+
+func TestSendRetriesOnSubmitReportTimeout(t *testing.T) {
+	oldTimeout := currentSMSSubmitReportTimeout()
+	setSMSSubmitReportTimeout(20 * time.Millisecond)
+	defer setSMSSubmitReportTimeout(oldTimeout)
+
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	requests := make(chan []byte, 4)
+	transport.onWrite = func(data []byte) {
+		req, err := sip.ParseMessage(data)
+		if err != nil {
+			panic(err)
+		}
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		requests <- append([]byte(nil), data...)
+		transport.queue(newSMSResponse(req, 202, "Accepted"))
+	}
+
+	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	first := mustParseSMSMessage(t, <-requests)
+	var firstRP rpMessage
+	if err := firstRP.UnmarshalBinary(first.Body); err != nil {
+		t.Fatalf("first RP unmarshal error = %v", err)
+	}
+
+	var second sip.Message
+	select {
+	case data := <-requests:
+		second = mustParseSMSMessage(t, data)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("waiting for retried MESSAGE")
+	}
+
+	var secondRP rpMessage
+	if err := secondRP.UnmarshalBinary(second.Body); err != nil {
+		t.Fatalf("second RP unmarshal error = %v", err)
+	}
+	if len(firstRP.TPDU) < 2 || len(secondRP.TPDU) < 2 {
+		t.Fatal("sms submit TPDU too short")
+	}
+	if firstRP.TPDU[1] != secondRP.TPDU[1] {
+		t.Fatalf("TP-MR = %d then %d, want same value across retry", firstRP.TPDU[1], secondRP.TPDU[1])
+	}
+	if firstRP.TPDU[0]&0x04 != 0 {
+		t.Fatalf("first TP-RD bit = 1, want 0")
+	}
+	if secondRP.TPDU[0]&0x04 == 0 {
+		t.Fatal("second TP-RD bit = 0, want 1")
+	}
+}
+
+func newServiceTransport() *serviceStubTransport {
+	return &serviceStubTransport{
+		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+		remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+		readCh: make(chan []byte, 16),
+	}
+}
+
+func registeredService(t *testing.T, transport *serviceStubTransport) (*session.Session, *registration.Service) {
+	t.Helper()
+	sess, err := session.Open(session.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		switch req.Method() {
+		case "REGISTER":
+			if len(transport.writes) == 1 {
+				transport.queue(newSMSResponse(req, 401, "Unauthorized",
+					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+				))
+				return
+			}
+			transport.queue(newSMSResponse(req, 200, "OK",
+				sip.Header{Name: "P-Associated-URI", Value: "<tel:+15551234567>"},
+				sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"},
+			))
+		}
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return sess, reg
+}
+
+func newInboundSMSRequest(callID, cseq string, body []byte) sip.Message {
+	msg := sip.NewRequest("MESSAGE", "sip:test@example.com")
+	msg.Headers = sip.Headers{
+		{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1"},
+		{Name: "From", Value: "<tel:+15551234567>;tag=remote"},
+		{Name: "To", Value: "<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>"},
+		{Name: "Call-ID", Value: callID},
+		{Name: "CSeq", Value: cseq},
+		{Name: "Content-Type", Value: "application/vnd.3gpp.sms"},
+	}
+	msg.Body = body
+	return msg
+}
+
+func newSMSResponse(req sip.Message, code int, reason string, extra ...sip.Header) sip.Message {
+	resp := sip.NewResponse(code, reason)
+	resp.Headers = sip.ResponseHeaders(req, code)
+	resp.Headers = append(resp.Headers, extra...)
+	return resp
+}
+
+func mustParseSMSMessage(t *testing.T, data []byte) sip.Message {
+	t.Helper()
+	msg, err := sip.ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	return msg
+}

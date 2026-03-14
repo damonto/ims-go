@@ -1,0 +1,381 @@
+package ussd
+
+import (
+	"context"
+	"encoding/xml"
+	"net"
+	"net/textproto"
+	"testing"
+	"time"
+
+	"github.com/damonto/ims-client/ims/registration"
+	"github.com/damonto/ims-client/ims/session"
+	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/ims-client/usim"
+)
+
+type stubTransport struct {
+	local   net.Addr
+	remote  net.Addr
+	readCh  chan []byte
+	writes  [][]byte
+	onWrite func([]byte)
+}
+
+type stubCard struct{}
+
+func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
+func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
+func (t *stubTransport) WritePacket(ctx context.Context, data []byte) error {
+	t.writes = append(t.writes, append([]byte(nil), data...))
+	if t.onWrite != nil {
+		t.onWrite(data)
+	}
+	return nil
+}
+func (t *stubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case pkt := <-t.readCh:
+		return pkt, t.remote, nil
+	}
+}
+func (t *stubTransport) Close() error          { return nil }
+func (t *stubTransport) queue(msg sip.Message) { t.readCh <- msg.Bytes() }
+
+func (stubCard) IMSI() string { return "001010123456789" }
+func (stubCard) MCC() string  { return "001" }
+func (stubCard) MNC() string  { return "001" }
+func (stubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{RES: []byte("password"), IK: []byte("client-test-ik")}, nil
+}
+
+func TestUSSDXMLRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+		want Message
+	}{
+		{name: "plain", msg: Message{Text: "*100#", Language: "en"}, want: Message{Text: "*100#", Language: "en"}},
+		{name: "request", msg: Message{Text: "Enter PIN", Language: "en", Request: true}, want: Message{Text: "Enter PIN", Language: "en", Request: true}},
+		{name: "notify", msg: Message{Text: "Done", Language: "en", Notify: true}, want: Message{Text: "Done", Language: "en", Notify: true}},
+		{name: "error", msg: Message{Language: "en", ErrorCode: 2}, want: Message{Language: "en", ErrorCode: 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := (ussdXMLBody{Message: tt.msg}).MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			got, err := decodeUSSDXML(body)
+			if err != nil {
+				t.Fatalf("decodeUSSDXML() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("decodeUSSDXML() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMultipartBodyRoundTrip(t *testing.T) {
+	payload, err := (ussdXMLBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	body, err := (multipartBody{
+		Boundary: "outer",
+		Parts: []multipartBodyPart{
+			{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")},
+			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	msg := sip.Message{Headers: sip.Headers{{Name: "Content-Type", Value: "multipart/mixed; boundary=outer"}}, Body: body}
+	got, err := decodeUSSDPayload(msg)
+	if err != nil {
+		t.Fatalf("decodeUSSDPayload() error = %v", err)
+	}
+	if got.Text != "Balance" || got.Language != "en" {
+		t.Fatalf("decodeUSSDPayload() = %+v", got)
+	}
+}
+
+func TestStartUSSDSessionFlow(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "INVITE":
+			transport.queue(newUSSDResponse(req, 200, "OK",
+				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
+				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
+				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
+				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
+				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
+				sip.Header{Name: "Content-Type", Value: "application/sdp"},
+			))
+		case "INFO", "BYE":
+			transport.queue(newUSSDResponse(req, 200, "OK", nil))
+		}
+	}
+
+	session, err := svc.Start(context.Background(), "*100#")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := session.Reply(context.Background(), "1"); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	last := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+	if last.Method() != "INFO" {
+		t.Fatalf("last.Method() = %q, want INFO", last.Method())
+	}
+}
+
+func TestStartUSSDSessionINFOGate(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "INVITE":
+			transport.queue(newUSSDResponse(req, 200, "OK",
+				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
+				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
+				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
+				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
+				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
+				sip.Header{Name: "Content-Type", Value: "application/sdp"},
+			))
+		case "INFO", "BYE":
+			transport.queue(newUSSDResponse(req, 200, "OK", nil))
+		}
+	}
+
+	us, err := svc.Start(context.Background(), "*100#")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := us.Reply(context.Background(), "1"); err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if err := us.Reply(context.Background(), "2"); err == nil {
+		t.Fatal("Reply(with pending INFO) error = nil, want non-nil")
+	}
+
+	info := newDialogRequest("INFO", us.targetURI, us.remoteTo, "<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>;tag="+us.localTag, us.callID, "2 INFO")
+	info.Headers.Add("Info-Package", ussdInfoPackage)
+	info.Headers.Add("Content-Disposition", "info-package")
+	info.Headers.Add("Content-Type", ussdContentType)
+	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest(INFO) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(INFO) handled = false, want true")
+	}
+	if err := us.Reply(context.Background(), "3"); err != nil {
+		t.Fatalf("Reply(after remote INFO) error = %v", err)
+	}
+}
+
+func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	callbackCh := make(chan Message, 1)
+	svc, err := New(Config{OnIncoming: func(session *Session, msg Message) { callbackCh <- msg }}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		if req.Method() == "INFO" || req.Method() == "BYE" {
+			transport.queue(newUSSDResponse(req, 200, "OK", nil))
+		}
+	}
+
+	invite := buildNetworkUSSDInvite(t)
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest(INVITE) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(INVITE) handled = false, want true")
+	}
+	select {
+	case got := <-callbackCh:
+		if !got.Request || got.Text != "Enter PIN" {
+			t.Fatalf("callback message = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for callback")
+	}
+
+	us := svc.lookupSessionByCallID(invite.Header("Call-ID"))
+	if us == nil {
+		t.Fatal("lookupSessionByCallID() = nil")
+	}
+
+	replyCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := us.Reply(replyCtx, "1"); err == nil {
+		t.Fatal("Reply(before ACK) error = nil, want non-nil")
+	}
+
+	ack := newDialogRequest("ACK", us.targetURI, invite.Header("From"), sip.WithTag(invite.Header("To"), "", us.localTag), invite.Header("Call-ID"), "1 ACK")
+	handled, err = svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest(ACK) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(ACK) handled = false, want true")
+	}
+	if err := us.Reply(context.Background(), "1"); err != nil {
+		t.Fatalf("Reply(after ACK) error = %v", err)
+	}
+}
+
+func TestUnknownDialogGets481(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	info := newDialogRequest("INFO", "sip:uss@example.com", "<sip:a@example.com>;tag=a", "<sip:b@example.com>;tag=b", "missing-call", "1 INFO")
+	info.Headers.Add("Info-Package", ussdInfoPackage)
+	info.Headers.Add("Content-Disposition", "info-package")
+	info.Headers.Add("Content-Type", ussdContentType)
+	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>1</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
+
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+	if got := resp.StatusCode(); got != 481 {
+		t.Fatalf("StatusCode() = %d, want 481", got)
+	}
+}
+
+func newTransport() *stubTransport {
+	return &stubTransport{
+		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+		remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+		readCh: make(chan []byte, 16),
+	}
+}
+
+func registeredService(t *testing.T, transport *stubTransport) (*session.Session, *registration.Service) {
+	t.Helper()
+	sess, err := session.Open(session.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "REGISTER":
+			if len(transport.writes) == 1 {
+				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
+					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+				))
+				return
+			}
+			transport.queue(newUSSDResponse(req, 200, "OK", nil, sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"}))
+		}
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return sess, reg
+}
+
+func buildNetworkUSSDInvite(t *testing.T) sip.Message {
+	t.Helper()
+	payload, err := (ussdXMLBody{Message: Message{Text: "Enter PIN", Language: "en", Request: true}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	body, err := (multipartBody{
+		Boundary: "invite",
+		Parts: []multipartBodyPart{
+			{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")},
+			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	msg := sip.NewRequest("INVITE", "sip:*100%23;phone-context=ims.example@ims.example;user=dialstring")
+	msg.Headers = sip.Headers{
+		{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1"},
+		{Name: "From", Value: "<sip:network@example.com>;tag=remote"},
+		{Name: "To", Value: "<sip:user@example.com>"},
+		{Name: "Call-ID", Value: "call-1"},
+		{Name: "Session-ID", Value: "session-1"},
+		{Name: "CSeq", Value: "1 INVITE"},
+		{Name: "Recv-Info", Value: ussdInfoPackage},
+		{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
+		{Name: "Content-Type", Value: "multipart/mixed; boundary=invite"},
+	}
+	msg.Body = body
+	return msg
+}
+
+func newDialogRequest(method, target, from, to, callID, cseq string) sip.Message {
+	msg := sip.NewRequest(method, target)
+	msg.Headers = sip.Headers{
+		{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2"},
+		{Name: "From", Value: from},
+		{Name: "To", Value: to},
+		{Name: "Call-ID", Value: callID},
+		{Name: "CSeq", Value: cseq},
+	}
+	return msg
+}
+
+func newUSSDResponse(req sip.Message, code int, reason string, body []byte, extra ...sip.Header) sip.Message {
+	resp := sip.NewResponse(code, reason)
+	resp.Headers = sip.ResponseHeaders(req, code)
+	resp.Headers = append(resp.Headers, extra...)
+	resp.Body = body
+	return resp
+}
+
+func mustParseUSSDMessage(t *testing.T, data []byte) sip.Message {
+	t.Helper()
+	msg, err := sip.ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	return msg
+}

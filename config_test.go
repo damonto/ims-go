@@ -4,70 +4,97 @@ import (
 	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/damonto/ims-client/ims"
 )
 
 func TestConfigNormalized(t *testing.T) {
 	logger := slog.Default()
 	tests := []struct {
-		name               string
-		cfg                Config
-		wantErr            bool
-		wantIMEI           string
-		wantPCSCFAddress   string
-		wantIMSProxyAddr   string
-		wantIMSUserAgent   string
-		wantIMSIMEI        string
-		wantIMSRegisterExp time.Duration
+		name            string
+		cfg             Config
+		wantErr         bool
+		wantIMEI        string
+		wantEPDG        string
+		wantTransport   string
+		wantIMSIMEI     string
+		wantReconnect   time.Duration
+		wantRegisterExp time.Duration
 	}{
 		{
-			name: "propagates defaults",
+			name: "defaults build epdg from card",
 			cfg: Config{
-				Logger:          logger,
-				IMEI:            " 12345 ",
-				PCSCFAddress:    " 127.0.0.1:5060 ",
-				UserAgent:       " test-agent ",
-				RegisterExpires: 1,
-				IMS:             ims.Config{},
+				Logger: logger,
+				IMEI:   " 12345 ",
+				IMS:    IMSConfig{},
 			},
-			wantIMEI:           "12345",
-			wantPCSCFAddress:   "127.0.0.1:5060",
-			wantIMSProxyAddr:   "127.0.0.1:5060",
-			wantIMSUserAgent:   "test-agent",
-			wantIMSIMEI:        "12345",
-			wantIMSRegisterExp: 1,
+			wantIMEI:        "12345",
+			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:   "tcp",
+			wantIMSIMEI:     "12345",
+			wantReconnect:   defaultReconnectDelay,
+			wantRegisterExp: 10 * time.Minute,
 		},
 		{
-			name: "keeps explicit ims values",
+			name: "explicit epdg wins over automatic default",
 			cfg: Config{
-				IMEI:            "root-imei",
-				PCSCFAddress:    "root.proxy:5060",
-				UserAgent:       "root-agent",
-				RegisterExpires: time.Minute,
-				IMS: ims.Config{
-					ProxyAddr:       "ims.proxy:5060",
-					UserAgent:       "ims-agent",
-					IMEI:            "ims-imei",
-					RegisterExpires: 2 * time.Minute,
+				IMEI: "root-imei",
+				EPDG: " epdg.example.com ",
+			},
+			wantIMEI:        "root-imei",
+			wantEPDG:        "epdg.example.com",
+			wantTransport:   "tcp",
+			wantIMSIMEI:     "root-imei",
+			wantReconnect:   defaultReconnectDelay,
+			wantRegisterExp: 10 * time.Minute,
+		},
+		{
+			name: "cfg nil clone still normalizes as zero config",
+			cfg: func() Config {
+				cfg := cloneConfig(nil)
+				cfg.IMEI = testIMEI
+				return cfg
+			}(),
+			wantIMEI:        testIMEI,
+			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:   "tcp",
+			wantIMSIMEI:     testIMEI,
+			wantReconnect:   defaultReconnectDelay,
+			wantRegisterExp: 10 * time.Minute,
+		},
+		{
+			name: "explicit ims transport is preserved",
+			cfg: Config{
+				IMEI: testIMEI,
+				IMS: IMSConfig{
+					Transport: "udp",
 				},
 			},
-			wantIMEI:           "root-imei",
-			wantPCSCFAddress:   "root.proxy:5060",
-			wantIMSProxyAddr:   "ims.proxy:5060",
-			wantIMSUserAgent:   "ims-agent",
-			wantIMSIMEI:        "ims-imei",
-			wantIMSRegisterExp: 2 * time.Minute,
+			wantIMEI:        testIMEI,
+			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:   "udp",
+			wantIMSIMEI:     testIMEI,
+			wantReconnect:   defaultReconnectDelay,
+			wantRegisterExp: 10 * time.Minute,
 		},
 		{
-			name:    "rejects negative register expires",
-			cfg:     Config{RegisterExpires: -1},
+			name: "missing imei fails",
+			cfg: Config{
+				Logger: logger,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative reconnect delay fails",
+			cfg: Config{
+				IMEI:           testIMEI,
+				ReconnectDelay: -time.Second,
+			},
 			wantErr: true,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.cfg.normalized()
+			got, err := tt.cfg.normalized(stubCard{})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("normalized() error = nil, want non-nil")
@@ -83,20 +110,20 @@ func TestConfigNormalized(t *testing.T) {
 			if got.IMEI != tt.wantIMEI {
 				t.Fatalf("IMEI = %q, want %q", got.IMEI, tt.wantIMEI)
 			}
-			if got.PCSCFAddress != tt.wantPCSCFAddress {
-				t.Fatalf("PCSCFAddress = %q, want %q", got.PCSCFAddress, tt.wantPCSCFAddress)
+			if got.EPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
 			}
-			if got.IMS.ProxyAddr != tt.wantIMSProxyAddr {
-				t.Fatalf("IMS.ProxyAddr = %q, want %q", got.IMS.ProxyAddr, tt.wantIMSProxyAddr)
-			}
-			if got.IMS.UserAgent != tt.wantIMSUserAgent {
-				t.Fatalf("IMS.UserAgent = %q, want %q", got.IMS.UserAgent, tt.wantIMSUserAgent)
+			if got.IMS.Transport != tt.wantTransport {
+				t.Fatalf("IMS.Transport = %q, want %q", got.IMS.Transport, tt.wantTransport)
 			}
 			if got.IMS.IMEI != tt.wantIMSIMEI {
 				t.Fatalf("IMS.IMEI = %q, want %q", got.IMS.IMEI, tt.wantIMSIMEI)
 			}
-			if got.IMS.RegisterExpires != tt.wantIMSRegisterExp {
-				t.Fatalf("IMS.RegisterExpires = %v, want %v", got.IMS.RegisterExpires, tt.wantIMSRegisterExp)
+			if got.ReconnectDelay != tt.wantReconnect {
+				t.Fatalf("ReconnectDelay = %v, want %v", got.ReconnectDelay, tt.wantReconnect)
+			}
+			if got.IMS.RegisterExpires != tt.wantRegisterExp {
+				t.Fatalf("IMS.RegisterExpires = %v, want %v", got.IMS.RegisterExpires, tt.wantRegisterExp)
 			}
 		})
 	}
