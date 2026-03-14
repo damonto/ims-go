@@ -3,8 +3,10 @@ package registration
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -168,6 +170,115 @@ func TestRegisterAppliesChallengeAndSuccessState(t *testing.T) {
 	}
 	if state.RegisterExpires != 10*time.Minute {
 		t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 10*time.Minute)
+	}
+}
+
+func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
+	tests := []struct {
+		name       string
+		headersFor func(sip.Message) []sip.Header
+		checkState func(*testing.T, State)
+	}{
+		{
+			name: "keeps first associated uri as default public identity",
+			headersFor: func(sip.Message) []sip.Header {
+				return []sip.Header{
+					{Name: "P-Associated-URI", Value: "<sip:alice@example.com>,<tel:+15551234567>"},
+				}
+			},
+			checkState: func(t *testing.T, state State) {
+				t.Helper()
+				if state.DefaultPublicID != "sip:alice@example.com" {
+					t.Fatalf("DefaultPublicID = %q, want sip:alice@example.com", state.DefaultPublicID)
+				}
+				if state.TelPublicID != "tel:+15551234567" {
+					t.Fatalf("TelPublicID = %q, want tel:+15551234567", state.TelPublicID)
+				}
+			},
+		},
+		{
+			name: "prefers matching contact expires over top level expires",
+			headersFor: func(req sip.Message) []sip.Header {
+				return []sip.Header{
+					{Name: "Contact", Value: req.Header("Contact") + `;expires=120`},
+					{Name: "Expires", Value: "600"},
+				}
+			},
+			checkState: func(t *testing.T, state State) {
+				t.Helper()
+				if state.RegisterExpires != 2*time.Minute {
+					t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 2*time.Minute)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newUDPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				switch countWrites(transport) {
+				case 1:
+					transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
+				case 2:
+					transport.queue(newResponse(req, 200, "OK", tt.headersFor(req)...))
+				default:
+					t.Fatalf("unexpected write count %d", countWrites(transport))
+				}
+			}
+
+			if err := svc.Register(context.Background()); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+
+			tt.checkState(t, svc.State())
+		})
+	}
+}
+
+func TestBuildSubscribeUsesSubscriptionIdentity(t *testing.T) {
+	tests := []struct {
+		name            string
+		publicIdentity  string
+		defaultPublicID string
+		wantIdentity    string
+	}{
+		{
+			name:            "prefers default public identity from registration success",
+			publicIdentity:  "sip:530011120348761@ims.mnc001.mcc530.3gppnetwork.org",
+			defaultPublicID: "sip:+64210647889@ims.mnc001.mcc530.3gppnetwork.org",
+			wantIdentity:    "sip:+64210647889@ims.mnc001.mcc530.3gppnetwork.org",
+		},
+		{
+			name:           "falls back to registration identity when default is absent",
+			publicIdentity: "sip:alice@example.com",
+			wantIdentity:   "sip:alice@example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{}, newTCPTransport(5062, 5060), stubCard{})
+			svc.mu.Lock()
+			svc.state.PublicIdentity = tt.publicIdentity
+			svc.state.DefaultPublicID = tt.defaultPublicID
+			svc.mu.Unlock()
+
+			msg := svc.buildSubscribe()
+			if msg.StartLine != fmt.Sprintf("SUBSCRIBE %s SIP/2.0", tt.wantIdentity) {
+				t.Fatalf("StartLine = %q, want SUBSCRIBE %s SIP/2.0", msg.StartLine, tt.wantIdentity)
+			}
+			if got := msg.Header("To"); got != fmt.Sprintf("<%s>", tt.wantIdentity) {
+				t.Fatalf("To = %q, want <%s>", got, tt.wantIdentity)
+			}
+			from := msg.Header("From")
+			if !strings.HasPrefix(from, fmt.Sprintf("<%s>;tag=", tt.wantIdentity)) {
+				t.Fatalf("From = %q, want prefix <%s>;tag=", from, tt.wantIdentity)
+			}
+		})
 	}
 }
 

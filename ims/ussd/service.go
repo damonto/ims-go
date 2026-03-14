@@ -65,6 +65,7 @@ type Session struct {
 	service          *Service
 	callID           string
 	sessionID        string
+	localURI         string
 	localTag         string
 	remoteTag        string
 	remoteTo         string
@@ -80,6 +81,8 @@ type Session struct {
 	awaitingInfo     bool
 	events           chan Message
 	remoteCSeqs      map[string]struct{}
+	pendingInitial   *queuedUSSDRequest
+	deliveringInvite bool
 
 	mu     sync.Mutex
 	closed bool
@@ -111,6 +114,13 @@ type ussdAnyExt struct {
 type multipartBodyPart struct {
 	Header textproto.MIMEHeader
 	Body   []byte
+}
+
+type queuedUSSDRequest struct {
+	ctx    context.Context
+	msg    sip.Message
+	action string
+	final  bool
 }
 
 type ussdStart struct {
@@ -255,7 +265,7 @@ func (s *Service) newUSSDStart(code string) (ussdStart, sip.Message, error) {
 }
 
 func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, error) {
-	payload, err := (ussdXMLBody{Message: Message{Text: code, Language: language, Request: true}}).MarshalText()
+	payload, err := (ussdXMLBody{Message: Message{Text: code, Language: language}}).MarshalText()
 	if err != nil {
 		return "", nil, fmt.Errorf("starting USSD: encoding XML payload: %w", err)
 	}
@@ -281,19 +291,20 @@ func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, er
 
 func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte) sip.Message {
 	state := s.reg.State()
+	senderIdentity := ussdPreferredIdentity(state)
 	msg := sip.NewRequest("INVITE", start.target)
 	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), start.branch))
 	msg.Headers.Add("Max-Forwards", "70")
 	for _, route := range state.ServiceRoutes {
 		msg.Headers.Add("Route", route)
 	}
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, start.localTag))
+	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, start.localTag))
 	msg.Headers.Add("To", fmt.Sprintf("<%s>", start.target))
 	msg.Headers.Add("Call-ID", start.callID)
 	msg.Headers.Add("Session-ID", start.sessionID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d INVITE", start.inviteSeq))
 	msg.Headers.Add("Accept-Contact", `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`)
-	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", state.PublicIdentity))
+	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
 	msg.Headers.Add("Contact", contactValue(state))
 	msg.Headers.Add("Allow", "INVITE,ACK,CANCEL,BYE,PRACK,UPDATE,REFER,MESSAGE,INFO")
 	msg.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
@@ -321,6 +332,7 @@ func (s *Service) startUSSDSession(ctx context.Context, start ussdStart, invite,
 		service:      s,
 		callID:       start.callID,
 		sessionID:    start.sessionID,
+		localURI:     nonEmpty(sip.AddressURI(invite.Header("From")), ussdPreferredIdentity(s.reg.State())),
 		localTag:     start.localTag,
 		remoteTag:    sip.HeaderTag(resp.Header("To")),
 		remoteTo:     nonEmpty(resp.Header("To"), invite.Header("To")),
@@ -360,16 +372,17 @@ func (s *Service) handleIncomingUSSDInvite(ctx context.Context, req session.Requ
 		return s.sess.WriteStatus(ctx, req, 488, "Not Acceptable Here")
 	}
 	ussdSession := s.newIncomingUSSDSession(req.Message, payload)
-	ussdSession.inviteOK = s.buildIncomingUSSDInviteOK(req.Message, ussdSession.localTag)
-	if err := s.sess.WriteResponse(ctx, req, ussdSession.inviteOK); err != nil {
-		return fmt.Errorf("handling USSD INVITE: sending 200 OK: %w", err)
-	}
+	ussdSession.inviteOK = s.buildIncomingUSSDInviteOK(req.Message, ussdSession.localURI, ussdSession.localTag)
 	s.storeSession(ussdSession)
 	ussdSession.emit(payload)
+	ussdSession.setDeliveringInvite(true)
 	if s.cfg.OnIncoming != nil {
-		s.startBackgroundTask(func() {
-			s.cfg.OnIncoming(ussdSession, payload)
-		})
+		s.cfg.OnIncoming(ussdSession, payload)
+	}
+	ussdSession.setDeliveringInvite(false)
+	if err := s.sess.WriteResponse(ctx, req, ussdSession.inviteOK); err != nil {
+		ussdSession.finish(false)
+		return fmt.Errorf("handling USSD INVITE: sending 200 OK: %w", err)
 	}
 	s.logger.Debug("accepted network-initiated USSD", "call_id", ussdSession.callID, "target_uri", ussdSession.targetURI)
 	return nil
@@ -398,6 +411,7 @@ func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Sess
 		service:          s,
 		callID:           msg.Header("Call-ID"),
 		sessionID:        nonEmpty(msg.Header("Session-ID"), randomHex(32)),
+		localURI:         nonEmpty(sip.AddressURI(msg.Header("To")), ussdPreferredIdentity(state)),
 		localTag:         localTag,
 		remoteTag:        sip.HeaderTag(remoteTo),
 		remoteTo:         remoteTo,
@@ -413,10 +427,10 @@ func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Sess
 	}
 }
 
-func (s *Service) buildIncomingUSSDInviteOK(msg sip.Message, localTag string) sip.Message {
+func (s *Service) buildIncomingUSSDInviteOK(msg sip.Message, localURI, localTag string) sip.Message {
 	ok := sip.NewResponse(200, "OK")
 	ok.Headers = sip.ResponseHeaders(msg, 200)
-	ok.Headers = sip.UpsertHeader(ok.Headers, "To", sip.WithTag(msg.Header("To"), s.reg.State().PublicIdentity, localTag))
+	ok.Headers = sip.UpsertHeader(ok.Headers, "To", sip.WithTag(msg.Header("To"), localURI, localTag))
 	ok.Headers.Add("Contact", contactValue(s.reg.State()))
 	ok.Headers.Add("Recv-Info", ussdInfoPackage)
 	ok.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
@@ -500,6 +514,9 @@ func (s *Session) Reply(ctx context.Context, text string) error {
 	msg.Headers.Add("Info-Package", ussdInfoPackage)
 	msg.Headers.Add("Content-Disposition", "info-package")
 	msg.Headers.Add("Content-Type", ussdContentType)
+	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
+		return err
+	}
 	return s.exchange(ctx, msg, "replying USSD")
 }
 
@@ -515,6 +532,9 @@ func (s *Session) ReplyError(ctx context.Context, errorCode int) error {
 	msg.Headers.Add("Info-Package", ussdInfoPackage)
 	msg.Headers.Add("Content-Disposition", "info-package")
 	msg.Headers.Add("Content-Type", ussdContentType)
+	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
+		return err
+	}
 	return s.exchange(ctx, msg, "replying USSD")
 }
 
@@ -534,6 +554,9 @@ func (s *Session) End(ctx context.Context, text string) error {
 	if len(payload) > 0 {
 		msg.Headers.Add("Content-Type", ussdContentType)
 	}
+	if queued, err := s.queueInitialRequest(ctx, msg, "ending USSD", true); queued || err != nil {
+		return err
+	}
 	if err := s.exchange(ctx, msg, "ending USSD"); err != nil {
 		return err
 	}
@@ -551,6 +574,9 @@ func (s *Session) EndError(ctx context.Context, errorCode int) error {
 	}
 	msg := s.buildDialogRequest("BYE", payload)
 	msg.Headers.Add("Content-Type", ussdContentType)
+	if queued, err := s.queueInitialRequest(ctx, msg, "ending USSD", true); queued || err != nil {
+		return err
+	}
 	if err := s.exchange(ctx, msg, "ending USSD"); err != nil {
 		return err
 	}
@@ -677,13 +703,14 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action string) 
 
 func (s *Session) buildACK() sip.Message {
 	state := s.service.reg.State()
+	senderIdentity := s.localDialogURI()
 	msg := sip.NewRequest("ACK", s.targetURI)
 	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.service.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), randomAlphaNum(15)))
 	msg.Headers.Add("Max-Forwards", "70")
 	for _, route := range s.routeSet {
 		msg.Headers.Add("Route", route)
 	}
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, s.localTag))
+	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, s.localTag))
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d ACK", s.inviteSeq))
@@ -692,13 +719,14 @@ func (s *Session) buildACK() sip.Message {
 
 func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 	state := s.service.reg.State()
+	senderIdentity := s.localDialogURI()
 	msg := sip.NewRequest(method, s.targetURI)
 	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.service.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), randomAlphaNum(15)))
 	msg.Headers.Add("Max-Forwards", "70")
 	for _, route := range s.routeSet {
 		msg.Headers.Add("Route", route)
 	}
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, s.localTag))
+	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, s.localTag))
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("Session-ID", s.sessionID)
@@ -720,7 +748,7 @@ func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 func (s *Session) handleRequest(ctx context.Context, req session.Request) error {
 	switch strings.ToUpper(req.Message.Method()) {
 	case "ACK":
-		s.markACK()
+		s.handleACK()
 		return nil
 	case "INFO":
 		return s.handleInfo(ctx, req)
@@ -729,6 +757,22 @@ func (s *Session) handleRequest(ctx context.Context, req session.Request) error 
 	default:
 		return nil
 	}
+}
+
+func (s *Session) handleACK() {
+	pending := s.markACK()
+	if pending == nil {
+		return
+	}
+	s.service.startBackgroundTask(func() {
+		if err := s.exchange(pending.ctx, pending.msg, pending.action); err != nil {
+			s.service.logger.Warn("sending queued ussd response", "call_id", s.callID, "method", pending.msg.Method(), "err", err)
+			return
+		}
+		if pending.final {
+			s.finish(false)
+		}
+	})
 }
 
 func (s *Session) handleInfo(ctx context.Context, req session.Request) error {
@@ -793,16 +837,19 @@ func (s *Session) isDuplicateRemote(msg sip.Message) bool {
 	return false
 }
 
-func (s *Session) markACK() {
+func (s *Session) markACK() *queuedUSSDRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.acked {
-		return
+		return nil
 	}
 	s.acked = true
+	pending := s.pendingInitial
+	s.pendingInitial = nil
 	if s.ackCh != nil {
 		close(s.ackCh)
 	}
+	return pending
 }
 
 func (s *Session) setDialogKind(payload Message) {
@@ -838,6 +885,8 @@ func (s *Session) finish(fromNetwork bool) {
 		return
 	}
 	s.closed = true
+	s.deliveringInvite = false
+	s.pendingInitial = nil
 	if !s.acked && s.ackCh != nil {
 		close(s.ackCh)
 		s.acked = true
@@ -851,6 +900,41 @@ func (s *Session) finish(fromNetwork bool) {
 func (s *Session) closeEvents() {
 	defer func() { _ = recover() }()
 	close(s.events)
+}
+
+func (s *Session) setDeliveringInvite(active bool) {
+	s.mu.Lock()
+	s.deliveringInvite = active
+	s.mu.Unlock()
+}
+
+func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, action string, final bool) (bool, error) {
+	ctx = normalizeContext(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.networkInitiated || s.acked || s.ackCh == nil {
+		return false, nil
+	}
+	if s.pendingInitial != nil {
+		return false, fmt.Errorf("%s: initial response already queued", action)
+	}
+	if !s.deliveringInvite {
+		return false, nil
+	}
+	s.pendingInitial = &queuedUSSDRequest{
+		ctx:    ctx,
+		msg:    msg,
+		action: action,
+		final:  final,
+	}
+	return true, nil
+}
+
+func (s *Session) localDialogURI() string {
+	if uri := strings.TrimSpace(s.localURI); uri != "" {
+		return uri
+	}
+	return ussdPreferredIdentity(s.service.reg.State())
 }
 
 func (s *Session) matchesDialog(msg sip.Message) bool {
@@ -1182,6 +1266,13 @@ func contactValue(state registration.State) string {
 	}
 	params = append(params, "text")
 	return fmt.Sprintf("<sip:%s:%d>;%s", state.ContactHost, state.MessagePort, strings.Join(params, ";"))
+}
+
+func ussdPreferredIdentity(state registration.State) string {
+	if identity := strings.TrimSpace(state.DefaultPublicID); identity != "" {
+		return identity
+	}
+	return state.PublicIdentity
 }
 
 func transportToken(addr net.Addr) string {

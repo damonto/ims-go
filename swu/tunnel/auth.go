@@ -483,7 +483,7 @@ func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapDa
 			}
 		}
 	}
-	data, err := eapaka.BuildNotificationResponsePacket(message.Identifier, notification, f.currentCounter, f.currentAuthKey, f.currentEncrKey)
+	data, err := eapaka.BuildNotificationResponsePacket(message.Identifier, notification, f.fastReauth, f.currentCounter, f.currentAuthKey, f.currentEncrKey)
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("connecting swu session: building notification response: %w", err)
 	}

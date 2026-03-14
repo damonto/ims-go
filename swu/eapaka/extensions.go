@@ -305,9 +305,9 @@ func BuildReauthenticationResponsePacket(identifier byte, counter uint16, counte
 	return buildAKAMessage(eapCodeResponse, identifier, akaSubtypeReauthentication, attrs, autKey, nonceS)
 }
 
-func BuildNotificationResponsePacket(identifier byte, notification AKANotification, counter uint16, autKey, encrKey []byte) ([]byte, error) {
+func BuildNotificationResponsePacket(identifier byte, notification AKANotification, fastReauth bool, counter uint16, autKey, encrKey []byte) ([]byte, error) {
 	attrs := make([]AKAAttribute, 0, 2)
-	if notification.Protected && len(encrKey) != 0 {
+	if notification.Protected && fastReauth {
 		encrypted, err := encryptAKAAttributes([]AKAAttribute{buildAKAUint16Attribute(akaAttrCounter, counter)}, encrKey)
 		if err != nil {
 			return nil, err

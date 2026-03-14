@@ -3,6 +3,7 @@ package sms
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,33 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 	}
 }
 
+func TestSendPrefersDefaultPublicIdentityWhenNoTelURI(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredServiceWithAssociatedURIs(t, transport, "<sip:alice@example.com>", "<sip:alias@example.com>")
+	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		if got := req.Header("P-Preferred-Identity"); got != "<sip:alice@example.com>" {
+			t.Fatalf("P-Preferred-Identity = %q, want <sip:alice@example.com>", got)
+		}
+		if got := req.Header("From"); !strings.Contains(got, "<sip:alice@example.com>;") {
+			t.Fatalf("From = %q, want default public identity", got)
+		}
+		transport.queue(newSMSResponse(req, 202, "Accepted"))
+	}
+
+	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+}
+
 func TestHandleMalformedInboundSMSReturns200(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
@@ -160,6 +188,88 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
+	}
+}
+
+func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	callbackStarted := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	reportCh := make(chan sip.Message, 1)
+	svc, err := New(Config{
+		OnIncoming: func(in Incoming) {
+			close(callbackStarted)
+			<-callbackRelease
+		},
+	}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		reportCh <- req
+		transport.queue(newSMSResponse(req, 202, "Accepted"))
+	}
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	rpdu, err := (rpMessage{
+		Type:       rpDataNetworkToMS,
+		Reference:  0x01,
+		Originator: "+15550000000",
+		TPDU:       tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	inboundTransport := newServiceTransport()
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.HandleRequest(context.Background(), session.Request{
+			Message:   newInboundSMSRequest("call-1", "1 MESSAGE", rpdu),
+			Transport: inboundTransport,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for callback start")
+	}
+
+	select {
+	case req := <-reportCh:
+		t.Fatalf("delivery report sent before callback returned: %s", req.StartLine)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(callbackRelease)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("HandleRequest() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for HandleRequest()")
+	}
+
+	select {
+	case req := <-reportCh:
+		if req.Header("In-Reply-To") != "call-1" {
+			t.Fatalf("In-Reply-To = %q, want call-1", req.Header("In-Reply-To"))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for delivery report")
 	}
 }
 
@@ -262,6 +372,40 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 				sip.Header{Name: "P-Associated-URI", Value: "<tel:+15551234567>"},
 				sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"},
 			))
+		}
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return sess, reg
+}
+
+func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTransport, associatedURIs ...string) (*session.Session, *registration.Service) {
+	t.Helper()
+	sess, err := session.Open(session.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		switch req.Method() {
+		case "REGISTER":
+			if len(transport.writes) == 1 {
+				transport.queue(newSMSResponse(req, 401, "Unauthorized",
+					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+				))
+				return
+			}
+			headers := []sip.Header{{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"}}
+			if len(associatedURIs) > 0 {
+				headers = append(headers, sip.Header{Name: "P-Associated-URI", Value: strings.Join(associatedURIs, ",")})
+			}
+			transport.queue(newSMSResponse(req, 200, "OK", headers...))
 		}
 	}
 	if err := reg.Register(context.Background()); err != nil {

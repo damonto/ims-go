@@ -772,10 +772,10 @@ func (s *Service) handleInboundRP(msg sip.Message, rp rpMessage) error {
 			_ = s.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 			return nil
 		}
+		s.deliverIncomingSMS(msg, rp, tpdu)
 		if ok := s.sendInboundSMSDeliveryReport(msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
 			return nil
 		}
-		s.deliverIncomingSMS(msg, rp, tpdu)
 	case tpduMTISMSStatusReport:
 		var tpdu smsStatusReportTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
@@ -783,10 +783,10 @@ func (s *Service) handleInboundRP(msg sip.Message, rp rpMessage) error {
 			_ = s.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 			return nil
 		}
+		s.deliverIncomingSMSStatusReport(msg, rp, tpdu.Message)
 		if ok := s.sendInboundSMSDeliveryReport(msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
 			return nil
 		}
-		s.deliverIncomingSMSStatusReport(msg, rp, tpdu.Message)
 	default:
 		_ = s.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 	}
@@ -937,6 +937,9 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip
 func smsPreferredIdentity(state registration.State) string {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(state.TelPublicID)), "tel:") {
 		return state.TelPublicID
+	}
+	if identity := strings.TrimSpace(state.DefaultPublicID); identity != "" {
+		return identity
 	}
 	return state.PublicIdentity
 }

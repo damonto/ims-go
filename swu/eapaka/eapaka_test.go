@@ -264,3 +264,64 @@ func TestParseAKAChallenge(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildNotificationResponsePacket(t *testing.T) {
+	autKey := bytes.Repeat([]byte{0x11}, 16)
+	encrKey := bytes.Repeat([]byte{0x22}, 16)
+
+	tests := []struct {
+		name          string
+		notification  AKANotification
+		fastReauth    bool
+		wantMAC       bool
+		wantEncrypted bool
+	}{
+		{
+			name:          "protected full auth omits encrypted counter attrs",
+			notification:  AKANotification{Code: akaNotificationSuccess, Protected: true},
+			fastReauth:    false,
+			wantMAC:       true,
+			wantEncrypted: false,
+		},
+		{
+			name:          "protected fast reauth includes encrypted counter attrs",
+			notification:  AKANotification{Code: akaNotificationSuccess, Protected: true},
+			fastReauth:    true,
+			wantMAC:       true,
+			wantEncrypted: true,
+		},
+		{
+			name:          "unprotected notification omits protection attrs",
+			notification:  AKANotification{Code: akaNotificationSuccess, Protected: false},
+			fastReauth:    false,
+			wantMAC:       false,
+			wantEncrypted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := BuildNotificationResponsePacket(7, tt.notification, tt.fastReauth, 3, autKey, encrKey)
+			if err != nil {
+				t.Fatalf("BuildNotificationResponsePacket() error = %v", err)
+			}
+
+			var got AKAMessage
+			if err := got.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			if hasMAC := HasAttribute(got.Attributes, akaAttrMAC); hasMAC != tt.wantMAC {
+				t.Fatalf("HasAttribute(AT_MAC) = %v, want %v", hasMAC, tt.wantMAC)
+			}
+			hasIV := HasAttribute(got.Attributes, akaAttrIV)
+			hasEncrypted := HasAttribute(got.Attributes, akaAttrEncryptedData)
+			if hasIV != tt.wantEncrypted {
+				t.Fatalf("HasAttribute(AT_IV) = %v, want %v", hasIV, tt.wantEncrypted)
+			}
+			if hasEncrypted != tt.wantEncrypted {
+				t.Fatalf("HasAttribute(AT_ENCR_DATA) = %v, want %v", hasEncrypted, tt.wantEncrypted)
+			}
+		})
+	}
+}
