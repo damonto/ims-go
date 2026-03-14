@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -19,8 +20,16 @@ const (
 
 const (
 	rpCauseInvalidShortMessageTransferReference = 81
+	rpCauseMessageTypeNonExistent               = 97
 	rpCauseInvalidMandatoryInformation          = 96
 	rpCauseProtocolErrorUnspecified             = 111
+)
+
+const (
+	tpduMTISMSDeliver      = 0x00
+	tpduMTISMSSubmitReport = 0x01
+	tpduMTISMSStatusReport = 0x02
+	tpduMTIReserved        = 0x03
 )
 
 const (
@@ -37,6 +46,24 @@ type IncomingSMS struct {
 	To            string
 	ServiceCenter string
 	Text          string
+}
+
+type SMSStatusReport struct {
+	ServiceCenter         string
+	Recipient             string
+	MessageReference      byte
+	Status                byte
+	MoreMessagesWaiting   bool
+	LoopPrevention        bool
+	FromCommand           bool
+	HasUserDataHeader     bool
+	ServiceCenterTime     time.Time
+	DischargeTime         time.Time
+	ProtocolIdentifier    byte
+	HasProtocolIdentifier bool
+	DataCodingScheme      byte
+	HasDataCodingScheme   bool
+	UserData              []byte
 }
 
 type rpMessage struct {
@@ -146,6 +173,14 @@ func decodeSMSDeliver(data []byte) (IncomingSMS, error) {
 	return deliver.Message, nil
 }
 
+func decodeSMSStatusReport(data []byte) (SMSStatusReport, error) {
+	var report smsStatusReportTPDU
+	if err := report.UnmarshalBinary(data); err != nil {
+		return SMSStatusReport{}, err
+	}
+	return report.Message, nil
+}
+
 func buildSMSDeliver(from, text string) ([]byte, error) {
 	parts, err := buildSMSUserDataParts(text)
 	if err != nil {
@@ -172,6 +207,97 @@ func decodeRPUserData(data []byte) ([]byte, error) {
 		return nil, errors.New("decoding RP user data: truncated payload")
 	}
 	return append([]byte(nil), data[2:2+length]...), nil
+}
+
+func smsTPDUMessageType(data []byte) (byte, error) {
+	if len(data) == 0 {
+		return 0, errors.New("decoding SMS-TPDU: packet too short")
+	}
+	return data[0] & 0x03, nil
+}
+
+func decodeSMSDecimalByte(b byte) int {
+	tens := int(b & 0x0F)
+	ones := int((b >> 4) & 0x0F)
+	if tens > 9 {
+		tens = 0
+	}
+	if ones > 9 {
+		ones = 0
+	}
+	return tens*10 + ones
+}
+
+func decodeSMSTimestamp(data []byte) (time.Time, error) {
+	if len(data) < 7 {
+		return time.Time{}, errors.New("decoding SMS timestamp: packet too short")
+	}
+	year := decodeSMSDecimalByte(data[0])
+	if year >= 70 {
+		year += 1900
+	} else {
+		year += 2000
+	}
+	month := decodeSMSDecimalByte(data[1])
+	if month < 1 || month > 12 {
+		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid month %d", month)
+	}
+	day := decodeSMSDecimalByte(data[2])
+	if day < 1 || day > 31 {
+		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid day %d", day)
+	}
+	hour := decodeSMSDecimalByte(data[3])
+	if hour > 23 {
+		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid hour %d", hour)
+	}
+	minute := decodeSMSDecimalByte(data[4])
+	if minute > 59 {
+		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid minute %d", minute)
+	}
+	second := decodeSMSDecimalByte(data[5])
+	if second > 59 {
+		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid second %d", second)
+	}
+
+	zone := data[6]
+	negative := zone&0x08 != 0
+	quarters := decodeSMSDecimalByte(zone & 0xF7)
+	offset := quarters * 15 * 60
+	if negative {
+		offset = -offset
+	}
+	location := time.FixedZone("", offset)
+	ts := time.Date(year, time.Month(month), day, hour, minute, second, 0, location)
+	if ts.Year() != year || ts.Month() != time.Month(month) || ts.Day() != day || ts.Hour() != hour || ts.Minute() != minute || ts.Second() != second {
+		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid calendar date %04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
+	}
+	return ts, nil
+}
+
+func encodeSMSTimestamp(ts time.Time) []byte {
+	_, offset := ts.Zone()
+	negative := offset < 0
+	if negative {
+		offset = -offset
+	}
+	quarters := offset / (15 * 60)
+	timeZone := byte(0x00)
+	if digits := swapDigits(fmt.Sprintf("%02d", quarters)); len(digits) > 0 {
+		timeZone = digits[0]
+	}
+	if negative {
+		timeZone |= 0x08
+	}
+
+	return []byte{
+		swapDigits(fmt.Sprintf("%02d", ts.Year()%100))[0],
+		swapDigits(fmt.Sprintf("%02d", ts.Month()))[0],
+		swapDigits(fmt.Sprintf("%02d", ts.Day()))[0],
+		swapDigits(fmt.Sprintf("%02d", ts.Hour()))[0],
+		swapDigits(fmt.Sprintf("%02d", ts.Minute()))[0],
+		swapDigits(fmt.Sprintf("%02d", ts.Second()))[0],
+		timeZone,
+	}
 }
 
 func encodeTPAddress(number string) []byte {

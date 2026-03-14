@@ -4,16 +4,19 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEncodeDecodeSMS(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
+		dcs  byte
 	}{
-		{"gsm7", "hello"},
-		{"gsm7 newline", "hello\nworld"},
-		{"ucs2", "你好"},
+		{"gsm7", "hello", 0x00},
+		{"gsm7 newline", "hello\nworld", 0x00},
+		{"gsm7 class 1", "hello", 0xF1},
+		{"ucs2", "你好", 0x08},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -25,13 +28,13 @@ func TestEncodeDecodeSMS(t *testing.T) {
 				t.Fatal("encodeSMSSubmit() returned empty TPDU")
 			}
 
-			encoded, dcs, udl, err := encodeUserData(tt.text)
+			encoded, _, udl, err := encodeUserData(tt.text)
 			if err != nil {
 				t.Fatalf("encodeUserData() error = %v", err)
 			}
 			deliver := []byte{0x00}
 			deliver = append(deliver, encodeTPAddress("+12345")...)
-			deliver = append(deliver, 0x00, dcs)
+			deliver = append(deliver, 0x00, tt.dcs)
 			deliver = append(deliver, bytes.Repeat([]byte{0x00}, 7)...)
 			deliver = append(deliver, udl)
 			deliver = append(deliver, encoded...)
@@ -306,6 +309,113 @@ func TestSMSDeliverTPDURoundTrip(t *testing.T) {
 				t.Fatalf("Message.Text = %q, want %q", deliver.Message.Text, tt.text)
 			}
 		})
+	}
+}
+
+func TestSMSStatusReportTPDURoundTrip(t *testing.T) {
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+	want := SMSStatusReport{
+		Recipient:         "+12345",
+		MessageReference:  7,
+		Status:            0x00,
+		ServiceCenterTime: serviceCenterTime,
+		DischargeTime:     dischargeTime,
+	}
+
+	data, err := (smsStatusReportTPDU{Message: want}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	got, err := decodeSMSStatusReport(data)
+	if err != nil {
+		t.Fatalf("decodeSMSStatusReport() error = %v", err)
+	}
+	if got.Recipient != want.Recipient {
+		t.Fatalf("Recipient = %q, want %q", got.Recipient, want.Recipient)
+	}
+	if got.MessageReference != want.MessageReference {
+		t.Fatalf("MessageReference = %d, want %d", got.MessageReference, want.MessageReference)
+	}
+	if got.Status != want.Status {
+		t.Fatalf("Status = 0x%02X, want 0x%02X", got.Status, want.Status)
+	}
+	if got.ServiceCenterTime.Format(time.RFC3339) != want.ServiceCenterTime.Format(time.RFC3339) {
+		t.Fatalf("ServiceCenterTime = %q, want %q", got.ServiceCenterTime.Format(time.RFC3339), want.ServiceCenterTime.Format(time.RFC3339))
+	}
+	if got.DischargeTime.Format(time.RFC3339) != want.DischargeTime.Format(time.RFC3339) {
+		t.Fatalf("DischargeTime = %q, want %q", got.DischargeTime.Format(time.RFC3339), want.DischargeTime.Format(time.RFC3339))
+	}
+}
+
+func TestSMSStatusReportTPDUParsesExtendedFields(t *testing.T) {
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+
+	raw := []byte{0x6E, 0x07}
+	raw = append(raw, encodeTPAddress("+12345")...)
+	raw = append(raw, encodeSMSTimestamp(serviceCenterTime)...)
+	raw = append(raw, encodeSMSTimestamp(dischargeTime)...)
+	raw = append(raw, 0x20)
+	raw = append(raw, 0x87, 0x00, 0x7F, 0xF6, 0x03, 0xAA, 0xBB, 0xCC)
+
+	got, err := decodeSMSStatusReport(raw)
+	if err != nil {
+		t.Fatalf("decodeSMSStatusReport() error = %v", err)
+	}
+	if got.Recipient != "+12345" {
+		t.Fatalf("Recipient = %q, want %q", got.Recipient, "+12345")
+	}
+	if got.MessageReference != 7 {
+		t.Fatalf("MessageReference = %d, want 7", got.MessageReference)
+	}
+	if got.Status != 0x20 {
+		t.Fatalf("Status = 0x%02X, want 0x20", got.Status)
+	}
+	if got.MoreMessagesWaiting {
+		t.Fatal("MoreMessagesWaiting = true, want false")
+	}
+	if !got.LoopPrevention {
+		t.Fatal("LoopPrevention = false, want true")
+	}
+	if !got.FromCommand {
+		t.Fatal("FromCommand = false, want true")
+	}
+	if !got.HasUserDataHeader {
+		t.Fatal("HasUserDataHeader = false, want true")
+	}
+	if !got.HasProtocolIdentifier || got.ProtocolIdentifier != 0x7F {
+		t.Fatalf("ProtocolIdentifier = 0x%02X, has = %t, want 0x7F/true", got.ProtocolIdentifier, got.HasProtocolIdentifier)
+	}
+	if !got.HasDataCodingScheme || got.DataCodingScheme != 0xF6 {
+		t.Fatalf("DataCodingScheme = 0x%02X, has = %t, want 0xF6/true", got.DataCodingScheme, got.HasDataCodingScheme)
+	}
+	if !bytes.Equal(got.UserData, []byte{0xAA, 0xBB, 0xCC}) {
+		t.Fatalf("UserData = % X, want AA BB CC", got.UserData)
+	}
+}
+
+func TestDecodeSMSStatusReportNormalizesNonIntegerTimestampDigits(t *testing.T) {
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+
+	raw := []byte{byte(tpduMTISMSStatusReport), 0x07}
+	raw = append(raw, encodeTPAddress("+12345")...)
+	raw = append(raw, encodeSMSTimestamp(serviceCenterTime)...)
+	raw = append(raw, encodeSMSTimestamp(dischargeTime)...)
+	raw = append(raw, 0x00)
+
+	addrLen := len(encodeTPAddress("+12345"))
+	sctsOffset := 2 + addrLen
+	raw[sctsOffset+1] = 0x3A
+
+	got, err := decodeSMSStatusReport(raw)
+	if err != nil {
+		t.Fatalf("decodeSMSStatusReport() error = %v", err)
+	}
+	if got.ServiceCenterTime.Format(time.RFC3339) != serviceCenterTime.Format(time.RFC3339) {
+		t.Fatalf("ServiceCenterTime = %q, want %q", got.ServiceCenterTime.Format(time.RFC3339), serviceCenterTime.Format(time.RFC3339))
 	}
 }
 

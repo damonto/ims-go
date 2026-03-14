@@ -53,6 +53,7 @@ type Config struct {
 	IMEI              string
 	Logger            *slog.Logger
 	OnSMS             func(IncomingSMS)
+	OnSMSStatusReport func(SMSStatusReport)
 	OnUSSD            func(*USSDSession, USSDMessage)
 	OnError           func(error)
 	DialSecureTCP     func(ctx context.Context, cfg SecureTCPConfig) (Transport, error)
@@ -80,7 +81,19 @@ const (
 	smsSubmitRetention  = 5 * time.Minute
 )
 
-var smsSubmitReportTimeout = 40 * time.Second
+var smsSubmitReportTimeoutNanos atomic.Int64
+
+func init() {
+	setSMSSubmitReportTimeout(40 * time.Second)
+}
+
+func currentSMSSubmitReportTimeout() time.Duration {
+	return time.Duration(smsSubmitReportTimeoutNanos.Load())
+}
+
+func setSMSSubmitReportTimeout(timeout time.Duration) {
+	smsSubmitReportTimeoutNanos.Store(int64(timeout))
+}
 
 type concatSMSState struct {
 	total     int
@@ -136,6 +149,7 @@ type Client struct {
 	serverDatagramTransport Transport
 	card                    cardProvider
 	onSMS                   func(IncomingSMS)
+	onSMSStatusReport       func(SMSStatusReport)
 	onUSSD                  func(*USSDSession, USSDMessage)
 	onError                 func(error)
 	logger                  *slog.Logger
@@ -289,32 +303,33 @@ func NewClient(cfg Config, transport Transport, card cardProvider) (*Client, err
 	callID, sessionID, tag, _ := newTransaction()
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	client := &Client{
-		cfg:              cfg,
-		transport:        transport,
-		card:             card,
-		onSMS:            cfg.OnSMS,
-		onUSSD:           cfg.OnUSSD,
-		onError:          cfg.OnError,
-		logger:           cfg.Logger.With("component", "ims"),
-		privateIdentity:  identity.privateIdentity,
-		registerURI:      "sip:" + identity.realm,
-		contactHost:      host,
-		registerPort:     port,
-		viaHostPort:      net.JoinHostPort(host, strconv.Itoa(port)),
-		callID:           callID,
-		sessionID:        sessionID,
-		tag:              tag,
-		pending:          make(map[string]chan Message),
-		recentSMS:        make(map[string]time.Time),
-		concatSMS:        make(map[string]concatSMSState),
-		ussd:             make(map[string]*USSDSession),
-		smsRefs:          make(map[byte]struct{}),
-		smsPending:       make(map[string]smsPendingEntry),
-		smsSubmitted:     make(map[string]smsSubmittedEntry),
-		registerExpires:  cfg.RegisterExpires,
-		securityClient:   newSecurityClient(port),
-		backgroundCtx:    backgroundCtx,
-		backgroundCancel: backgroundCancel,
+		cfg:               cfg,
+		transport:         transport,
+		card:              card,
+		onSMS:             cfg.OnSMS,
+		onSMSStatusReport: cfg.OnSMSStatusReport,
+		onUSSD:            cfg.OnUSSD,
+		onError:           cfg.OnError,
+		logger:            cfg.Logger.With("component", "ims"),
+		privateIdentity:   identity.privateIdentity,
+		registerURI:       "sip:" + identity.realm,
+		contactHost:       host,
+		registerPort:      port,
+		viaHostPort:       net.JoinHostPort(host, strconv.Itoa(port)),
+		callID:            callID,
+		sessionID:         sessionID,
+		tag:               tag,
+		pending:           make(map[string]chan Message),
+		recentSMS:         make(map[string]time.Time),
+		concatSMS:         make(map[string]concatSMSState),
+		ussd:              make(map[string]*USSDSession),
+		smsRefs:           make(map[byte]struct{}),
+		smsPending:        make(map[string]smsPendingEntry),
+		smsSubmitted:      make(map[string]smsSubmittedEntry),
+		registerExpires:   cfg.RegisterExpires,
+		securityClient:    newSecurityClient(port),
+		backgroundCtx:     backgroundCtx,
+		backgroundCancel:  backgroundCancel,
 	}
 	client.startBackgroundTask(client.runSMSSubmitCleanup)
 	client.logger.Debug("initialized IMS client", "private_identity", identity.privateIdentity, "public_identity", cfg.PublicIdentity, "realm", identity.realm, "transport_protocol", cfg.Transport)
@@ -979,7 +994,7 @@ func (c *Client) completeSMSSubmitted(callID string) {
 }
 
 func smsSubmitSweepInterval() time.Duration {
-	interval := smsSubmitReportTimeout / 4
+	interval := currentSMSSubmitReportTimeout() / 4
 	if interval < 10*time.Millisecond {
 		return 10 * time.Millisecond
 	}
@@ -1048,7 +1063,7 @@ func (c *Client) activateSMSPendingAsync(segment outboundSMSSegment, response sm
 	}
 	entry.segment = segment
 	entry.response = response
-	entry.expiresAt = now.Add(smsSubmitReportTimeout)
+	entry.expiresAt = now.Add(currentSMSSubmitReportTimeout())
 	entry.async = true
 	c.smsPending[segment.callID] = entry
 	select {
@@ -1123,7 +1138,7 @@ func (c *Client) completeSMSPending(msg Message, report rpMessage) bool {
 func (c *Client) handleUnexpectedSMSSubmitReference(msg Message, report rpMessage, expected byte) {
 	c.logger.Debug("submit report reference mismatch", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", msg.Header("In-Reply-To"), "rp_ref", report.Reference, "expected_rp_ref", expected)
 	if report.Type == rpAckNetworkToMS {
-		c.sendSMSDeliveryReport(msg, newRPErrorMessage(report.Reference, rpCauseInvalidShortMessageTransferReference))
+		c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(report.Reference, rpCauseInvalidShortMessageTransferReference))
 	}
 }
 
@@ -1307,18 +1322,28 @@ func (c *Client) closeTransport(transport Transport) error {
 }
 
 func (c *Client) startBackgroundTask(task func()) bool {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
+	done, ok := c.reserveBackgroundTask()
+	if !ok {
 		return false
 	}
-	c.backgroundWG.Add(1)
-	c.mu.Unlock()
 	go func() {
-		defer c.backgroundWG.Done()
+		defer done()
 		task()
 	}()
 	return true
+}
+
+func (c *Client) reserveBackgroundTask() (func(), bool) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, false
+	}
+	c.backgroundWG.Add(1)
+	c.mu.Unlock()
+	return func() {
+		c.backgroundWG.Done()
+	}, true
 }
 
 func (c *Client) startReadLoops(ctx context.Context, inboundCh chan<- inboundMessage) {
@@ -1672,7 +1697,7 @@ func (c *Client) handleMessageRequest(ctx context.Context, transport Transport, 
 			switch report.Type {
 			case rpAckNetworkToMS:
 				c.logger.Debug("submit report invalid mandatory information", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", callID, "rp_ref", report.Reference, "err", err)
-				c.sendSMSDeliveryReport(msg, newRPErrorMessage(report.Reference, rpCauseInvalidMandatoryInformation))
+				c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(report.Reference, rpCauseInvalidMandatoryInformation))
 			case rpErrorNetworkToMS:
 				c.logger.Debug("submit report protocol error", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", callID, "rp_ref", report.Reference, "cause", rpCauseProtocolErrorUnspecified, "err", err)
 				c.completeSMSPending(msg, report)
@@ -1682,8 +1707,8 @@ func (c *Client) handleMessageRequest(ctx context.Context, transport Transport, 
 		if err := c.writeMessageStatus(ctx, transport, msg, 200, "OK"); err != nil {
 			return err
 		}
-		if len(msg.Body) >= 2 && msg.Body[0] == rpDataNetworkToMS && c.markSMSDeliveryReportSent(msg) {
-			c.sendSMSDeliveryReport(msg, newRPErrorMessage(msg.Body[1], rpCauseInvalidMandatoryInformation))
+		if len(msg.Body) >= 2 && msg.Body[0] == rpDataNetworkToMS {
+			c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(msg.Body[1], rpCauseInvalidMandatoryInformation))
 		}
 		c.logger.Debug("ignoring malformed sms message", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
 		return nil
@@ -1710,16 +1735,36 @@ func (c *Client) writeMessageStatus(ctx context.Context, transport Transport, ms
 }
 
 func (c *Client) handleInboundRP(msg Message, rp rpMessage) error {
-	var tpdu smsDeliverTPDU
-	if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
-		if c.markSMSDeliveryReportSent(msg) {
-			c.sendSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
-		}
+	mti, err := smsTPDUMessageType(rp.TPDU)
+	if err != nil {
+		c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 		return nil
 	}
-	c.deliverIncomingSMS(msg, rp, tpdu)
-	if c.markSMSDeliveryReportSent(msg) {
-		c.sendSMSDeliveryReport(msg, newRPAckDeliverReportMessage(rp.Reference))
+	switch mti {
+	case tpduMTISMSDeliver, tpduMTIReserved:
+		var tpdu smsDeliverTPDU
+		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
+			c.logger.Debug("rejecting inbound sms deliver", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
+			c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+			return nil
+		}
+		if !c.sendInboundSMSDeliveryReport(msg, newRPAckDeliverReportMessage(rp.Reference)) {
+			return nil
+		}
+		c.deliverIncomingSMS(msg, rp, tpdu)
+	case tpduMTISMSStatusReport:
+		var tpdu smsStatusReportTPDU
+		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
+			c.logger.Debug("rejecting inbound sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
+			c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+			return nil
+		}
+		if !c.sendInboundSMSDeliveryReport(msg, newRPAckDeliverReportMessage(rp.Reference)) {
+			return nil
+		}
+		c.deliverIncomingSMSStatusReport(msg, rp, tpdu.Message)
+	default:
+		c.sendInboundSMSDeliveryReport(msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 	}
 	return nil
 }
@@ -1728,32 +1773,58 @@ func isSMSReport(rp rpMessage) bool {
 	return rp.Type == rpAckNetworkToMS || rp.Type == rpErrorNetworkToMS
 }
 
-func (c *Client) sendSMSDeliveryReport(msg Message, report rpMessage) {
+func (c *Client) sendInboundSMSDeliveryReport(msg Message, report rpMessage) bool {
+	if !c.markSMSDeliveryReportSent(msg) {
+		return true
+	}
+	if err := c.sendSMSDeliveryReport(msg, report); err != nil {
+		c.clearSMSDeliveryReportSent(msg)
+		c.logger.Warn("sending inbound sms delivery report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
+		return false
+	}
+	return true
+}
+
+func (c *Client) sendSMSDeliveryReport(msg Message, report rpMessage) error {
 	target := c.smsReportTarget(msg)
 	if target == "" {
-		c.logger.Debug("skipping sms delivery report", "reason", "target is empty", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"))
-		return
+		return errors.New("delivery report target is empty")
 	}
 	reportPayload, err := report.MarshalBinary()
 	if err != nil {
-		c.logger.Debug("building sms delivery report failed", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
-		return
+		return fmt.Errorf("building sms delivery report: %w", err)
 	}
 	reportMsg := c.buildMessage(target, reportPayload, msg.Header("Call-ID"))
 	c.logger.Debug("sending sms delivery report", "target", target, "call_id", reportMsg.Header("Call-ID"), "in_reply_to", reportMsg.Header("In-Reply-To"))
-	c.startBackgroundTask(func() {
-		c.sendSMSDeliveryReportRequest(reportMsg)
-	})
-}
-
-func (c *Client) sendSMSDeliveryReportRequest(req Message) {
 	baseCtx := c.backgroundCtx
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
-	defer cancel()
-	resp, err := c.sendPending(ctx, req)
+	respCh := c.registerPending(reportMsg)
+	done, ok := c.reserveBackgroundTask()
+	if !ok {
+		c.removePending(reportMsg)
+		cancel()
+		return errors.New("client is closed")
+	}
+	if err := c.writeRequest(ctx, c.transport, reportMsg); err != nil {
+		c.removePending(reportMsg)
+		cancel()
+		done()
+		return fmt.Errorf("sending sms delivery report: %w", err)
+	}
+	go func() {
+		defer done()
+		defer cancel()
+		defer c.removePending(reportMsg)
+		c.awaitSMSDeliveryReportResponse(ctx, reportMsg, respCh)
+	}()
+	return nil
+}
+
+func (c *Client) awaitSMSDeliveryReportResponse(ctx context.Context, req Message, respCh <-chan Message) {
+	resp, err := awaitPendingFinalResponse(ctx, respCh)
 	if err != nil {
 		c.logger.Debug("sending sms delivery report failed", "call_id", req.Header("Call-ID"), "in_reply_to", req.Header("In-Reply-To"), "err", err)
 		return
@@ -1774,6 +1845,18 @@ func (c *Client) deliverIncomingSMS(msg Message, rp rpMessage, tpdu smsDeliverTP
 		return
 	}
 	c.deliverSingleSMS(msg, incoming)
+}
+
+func (c *Client) deliverIncomingSMSStatusReport(msg Message, rp rpMessage, report SMSStatusReport) {
+	if c.onSMSStatusReport == nil {
+		return
+	}
+	report.ServiceCenter = rp.Originator
+	if c.markSMSSeen(msg) {
+		c.onSMSStatusReport(report)
+		return
+	}
+	c.logger.Debug("suppressing duplicate sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "message_reference", report.MessageReference, "status", report.Status)
 }
 
 func incomingSMSRecipient(msg Message) string {
@@ -2002,6 +2085,15 @@ func (c *Client) markRecentSMSKey(key string, ttl time.Duration) bool {
 	return true
 }
 
+func (c *Client) clearRecentSMSKey(key string) {
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.recentSMS, key)
+	c.mu.Unlock()
+}
+
 func (c *Client) markConcatSMSSeen(key string) bool {
 	return c.markRecentSMSKey("concat|"+key, concatSMSRetention)
 }
@@ -2054,6 +2146,14 @@ func (c *Client) markSMSDeliveryReportSent(msg Message) bool {
 		return true
 	}
 	return c.markRecentSMSKey("report|"+key, 2*time.Minute)
+}
+
+func (c *Client) clearSMSDeliveryReportSent(msg Message) {
+	key, ok := smsSeenKey(msg)
+	if !ok {
+		return
+	}
+	c.clearRecentSMSKey("report|" + key)
 }
 
 func smsSeenKey(msg Message) (string, bool) {

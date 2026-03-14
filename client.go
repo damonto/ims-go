@@ -23,6 +23,7 @@ type Config struct {
 	PCSCFAddress    string
 	UserAgent       string
 	RegisterExpires time.Duration
+	ReconnectDelay  time.Duration
 	Logger          *slog.Logger
 	Tunnel          swu.Config
 	IMS             ims.Config
@@ -55,6 +56,25 @@ type IncomingSMS struct {
 	ReceivedAt    time.Time
 }
 
+type SMSStatusReport struct {
+	ServiceCenter         string
+	Recipient             string
+	MessageReference      byte
+	Status                byte
+	MoreMessagesWaiting   bool
+	LoopPrevention        bool
+	FromCommand           bool
+	HasUserDataHeader     bool
+	ServiceCenterTime     time.Time
+	DischargeTime         time.Time
+	ProtocolIdentifier    byte
+	HasProtocolIdentifier bool
+	DataCodingScheme      byte
+	HasDataCodingScheme   bool
+	UserData              []byte
+	ReceivedAt            time.Time
+}
+
 type IncomingUSSD struct {
 	Session    *USSDSession
 	Message    USSDMessage
@@ -66,10 +86,11 @@ type USSDMessage = ims.USSDMessage
 type USSDSession = ims.USSDSession
 
 type Events struct {
-	SMS    <-chan IncomingSMS
-	USSD   <-chan IncomingUSSD
-	State  <-chan RegistrationState
-	Errors <-chan error
+	SMS        <-chan IncomingSMS
+	SMSReports <-chan SMSStatusReport
+	USSD       <-chan IncomingUSSD
+	State      <-chan RegistrationState
+	Errors     <-chan error
 }
 
 type Client struct {
@@ -77,13 +98,18 @@ type Client struct {
 	card   Card
 	logger *slog.Logger
 
-	mu      sync.Mutex
-	closed  bool
-	active  *activeConn
-	bus     eventBus
-	sms     SMSService
-	closeWG sync.WaitGroup
-	close   sync.Once
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+
+	mu           sync.Mutex
+	closed       bool
+	connecting   bool
+	reconnecting bool
+	active       *activeConn
+	bus          eventBus
+	sms          SMSService
+	closeWG      sync.WaitGroup
+	close        sync.Once
 }
 
 type SMSService struct {
@@ -95,19 +121,24 @@ type USSDService struct {
 }
 
 type eventBus struct {
-	sms    chan IncomingSMS
-	ussd   chan IncomingUSSD
-	state  chan RegistrationState
-	errors chan error
+	sms        chan IncomingSMS
+	smsReports chan SMSStatusReport
+	ussd       chan IncomingUSSD
+	state      chan RegistrationState
+	errors     chan error
 }
 
 type activeConn struct {
+	runCtx  context.Context
 	cancel  context.CancelFunc
 	session *swu.Session
 	ims     *ims.Client
 }
 
 type connectSetup struct {
+	client    *Client
+	setupCtx  context.Context
+	setupStop context.CancelFunc
 	runCtx    context.Context
 	cancel    context.CancelFunc
 	tunnelCfg swu.Config
@@ -123,6 +154,9 @@ type cardCloser interface {
 }
 
 const defaultCloseTimeout = 5 * time.Second
+const defaultReconnectDelay = 3 * time.Second
+
+var reconnectAttemptTimeout = 30 * time.Second
 
 func NewClient(ctx context.Context, cfg Config, drv apdu.Driver) (*Client, error) {
 	if ctx == nil {
@@ -148,12 +182,21 @@ func newClient(cfg Config, card Card) (*Client, error) {
 		return nil, fmt.Errorf("creating client: %w", err)
 	}
 	bus := eventBus{
-		sms:    make(chan IncomingSMS, 16),
-		ussd:   make(chan IncomingUSSD, 16),
-		state:  make(chan RegistrationState, 16),
-		errors: make(chan error, 16),
+		sms:        make(chan IncomingSMS, 16),
+		smsReports: make(chan SMSStatusReport, 16),
+		ussd:       make(chan IncomingUSSD, 16),
+		state:      make(chan RegistrationState, 16),
+		errors:     make(chan error, 16),
 	}
-	client := &Client{cfg: normalized, card: card, logger: normalized.Logger.With("component", "ims-client"), bus: bus}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	client := &Client{
+		cfg:             normalized,
+		card:            card,
+		logger:          normalized.Logger.With("component", "ims-client"),
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
+		bus:             bus,
+	}
 	client.sms.client = client
 	return client, nil
 }
@@ -163,61 +206,72 @@ func (c *Client) Connect(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	setup, err := c.prepareConnect(ctx)
+	done, ok := c.reserveCloseTask()
+	if !ok {
+		return fmt.Errorf("connecting client: already closed")
+	}
+
+	active, err := c.connectOnce(ctx, false)
 	if err != nil {
+		done()
 		return err
+	}
+
+	go c.runIMS(active, done)
+	return nil
+}
+
+func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, error) {
+	setup, err := c.prepareConnect(ctx, internal)
+	if err != nil {
+		return nil, err
 	}
 	defer setup.rollback()
 
 	c.emitState(StateConnecting)
 	tunnelInfo, err := c.openTunnel(setup)
 	if err != nil {
-		c.emitError(err)
-		c.emitState(StateFailed)
-		return err
+		c.emitConnectFailure(ctx, err)
+		return nil, err
 	}
 
 	imsCfg, transport, err := c.buildIMSTransport(setup, tunnelInfo)
 	if err != nil {
-		c.emitError(err)
-		c.emitState(StateFailed)
-		return err
+		c.emitConnectFailure(ctx, err)
+		return nil, err
 	}
 
 	imsCfg.OnSMS = c.handleSMS
+	imsCfg.OnSMSStatusReport = c.handleSMSStatusReport
 	imsCfg.OnUSSD = c.handleUSSD
 	imsCfg.OnError = c.emitError
 	imsClient, err := ims.NewClient(imsCfg, transport, c.card)
 	if err != nil {
 		wrapped := fmt.Errorf("creating IMS client: %w", err)
-		c.emitError(wrapped)
-		c.emitState(StateFailed)
-		return wrapped
+		c.emitConnectFailure(ctx, wrapped)
+		return nil, wrapped
 	}
 	setup.imsClient = imsClient
 
 	c.logger.Debug("registering IMS", "proxy_addr", imsCfg.ProxyAddr)
-	if err := imsClient.Register(setup.runCtx); err != nil {
+	if err := imsClient.Register(setup.setupCtx); err != nil {
 		wrapped := fmt.Errorf("registering IMS: %w", err)
-		c.emitError(wrapped)
-		c.emitState(StateFailed)
-		return wrapped
+		c.emitConnectFailure(ctx, wrapped)
+		return nil, wrapped
 	}
 
 	active, err := c.commitConnect(setup)
 	if err != nil {
-		c.emitError(err)
-		c.emitState(StateFailed)
-		return err
+		c.emitConnectFailure(ctx, err)
+		return nil, err
 	}
-	go c.runIMS(setup.runCtx, active)
 
 	c.logger.Debug("ims registered")
 	c.emitState(StateRegistered)
-	return nil
+	return active, nil
 }
 
-func (c *Client) prepareConnect(ctx context.Context) (*connectSetup, error) {
+func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSetup, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -227,9 +281,18 @@ func (c *Client) prepareConnect(ctx context.Context) (*connectSetup, error) {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("connecting client: already connected")
 	}
+	if c.connecting || (!internal && c.reconnecting) {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("connecting client: connection in progress")
+	}
+	c.connecting = true
 	c.mu.Unlock()
 
-	runCtx, cancel := context.WithCancel(ctx)
+	setupCtx, setupStop := c.newSetupContext(ctx, internal)
+
+	// The setup context may time out, but a successful registration should keep running
+	// until the client is closed or the active connection is canceled.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	proxyAddr := c.cfg.PCSCFAddress
 	if proxyAddr == "" {
 		proxyAddr = c.cfg.IMS.ProxyAddr
@@ -246,11 +309,19 @@ func (c *Client) prepareConnect(ctx context.Context) (*connectSetup, error) {
 	}
 	tunnelCfg, err := tunnelCfg.Normalized()
 	if err != nil {
+		if setupStop != nil {
+			setupStop()
+		}
 		cancel()
+		c.finishConnectAttempt()
 		return nil, fmt.Errorf("preparing connect: %w", err)
 	}
 	if tunnelCfg.RemoteAddr == "" {
+		if setupStop != nil {
+			setupStop()
+		}
 		cancel()
+		c.finishConnectAttempt()
 		return nil, fmt.Errorf("preparing connect: tunnel remote address is empty")
 	}
 
@@ -260,11 +331,18 @@ func (c *Client) prepareConnect(ctx context.Context) (*connectSetup, error) {
 	}
 	imsCfg, err = imsCfg.Normalized()
 	if err != nil {
+		if setupStop != nil {
+			setupStop()
+		}
 		cancel()
+		c.finishConnectAttempt()
 		return nil, fmt.Errorf("preparing connect: %w", err)
 	}
 
 	return &connectSetup{
+		client:    c,
+		setupCtx:  setupCtx,
+		setupStop: setupStop,
 		runCtx:    runCtx,
 		cancel:    cancel,
 		tunnelCfg: tunnelCfg,
@@ -275,7 +353,7 @@ func (c *Client) prepareConnect(ctx context.Context) (*connectSetup, error) {
 }
 
 func (c *Client) openTunnel(setup *connectSetup) (swu.TunnelInfo, error) {
-	session, err := swu.Dial(setup.runCtx, setup.tunnelCfg)
+	session, err := swu.Dial(setup.setupCtx, setup.tunnelCfg)
 	if err != nil {
 		return swu.TunnelInfo{}, fmt.Errorf("dialing tunnel: %w", err)
 	}
@@ -288,7 +366,7 @@ func (c *Client) openTunnel(setup *connectSetup) (swu.TunnelInfo, error) {
 	if !setup.useSWu {
 		return tunnelInfo, nil
 	}
-	if err := session.Connect(setup.runCtx, c.cfg.IMEI, c.card); err != nil {
+	if err := session.Connect(setup.setupCtx, c.cfg.IMEI, c.card); err != nil {
 		return swu.TunnelInfo{}, fmt.Errorf("connecting swu: %w", err)
 	}
 	tunnelInfo = session.Tunnel()
@@ -310,7 +388,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swu.TunnelInf
 		return imsCfg, transport, nil
 	}
 
-	tcpTransport, err := setup.session.DialTCP(setup.runCtx, setup.tunnelCfg.LocalSIPPort, setup.tunnelCfg.SIPPort)
+	tcpTransport, err := setup.session.DialTCP(setup.setupCtx, setup.tunnelCfg.LocalSIPPort, setup.tunnelCfg.SIPPort)
 	if err != nil {
 		return ims.Config{}, nil, fmt.Errorf("dialing ims tcp transport: %w", err)
 	}
@@ -349,7 +427,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swu.TunnelInf
 }
 
 func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
-	active := &activeConn{cancel: setup.cancel, session: setup.session, ims: setup.imsClient}
+	active := &activeConn{runCtx: setup.runCtx, cancel: setup.cancel, session: setup.session, ims: setup.imsClient}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -360,7 +438,12 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 		return nil, fmt.Errorf("connecting client: already connected")
 	}
 	c.active = active
-	c.closeWG.Add(1)
+	c.connecting = false
+	if setup.setupStop != nil {
+		setup.setupStop()
+		setup.setupStop = nil
+	}
+	setup.client = nil
 	setup.cancel = nil
 	setup.session = nil
 	setup.imsClient = nil
@@ -368,6 +451,12 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 }
 
 func (s *connectSetup) rollback() {
+	if s.client != nil {
+		s.client.finishConnectAttempt()
+	}
+	if s.setupStop != nil {
+		s.setupStop()
+	}
 	if s.cancel == nil {
 		return
 	}
@@ -380,26 +469,143 @@ func (s *connectSetup) rollback() {
 	}
 }
 
-func (c *Client) runIMS(runCtx context.Context, active *activeConn) {
-	defer c.closeWG.Done()
-	if err := active.ims.Run(runCtx); err != nil && runCtx.Err() == nil {
-		active.cancel()
+func (c *Client) finishConnectAttempt() {
+	c.mu.Lock()
+	c.connecting = false
+	c.mu.Unlock()
+}
 
-		c.mu.Lock()
-		sameConn := c.active == active && !c.closed
-		if sameConn {
-			c.active = nil
-		}
+func (c *Client) reserveCloseTask() (func(), bool) {
+	c.mu.Lock()
+	if c.closed {
 		c.mu.Unlock()
+		return nil, false
+	}
+	c.closeWG.Add(1)
+	c.mu.Unlock()
+	return func() {
+		c.closeWG.Done()
+	}, true
+}
 
-		if sameConn {
-			_ = active.ims.Close()
-			_ = active.session.Close()
+func (c *Client) newSetupContext(ctx context.Context, internal bool) (context.Context, context.CancelFunc) {
+	setupCtx, setupCancel := context.WithCancel(ctx)
+	stopLifecycle := context.AfterFunc(c.lifecycleCtx, setupCancel)
+	stop := func() {
+		stopLifecycle()
+		setupCancel()
+	}
+	if !internal || reconnectAttemptTimeout <= 0 {
+		return setupCtx, stop
+	}
+	timeoutCtx, timeoutCancel := context.WithTimeout(setupCtx, reconnectAttemptTimeout)
+	return timeoutCtx, func() {
+		timeoutCancel()
+		stop()
+	}
+}
+
+func (c *Client) emitConnectFailure(ctx context.Context, err error) {
+	if err == nil || ctx.Err() != nil || c.isClosed() {
+		return
+	}
+	c.emitError(err)
+	c.emitState(StateFailed)
+}
+
+func (c *Client) runIMS(active *activeConn, done func()) {
+	defer done()
+	for {
+		err := active.ims.Run(active.runCtx)
+		if err == nil || active.runCtx.Err() != nil {
+			return
 		}
 
+		active.cancel()
+		if !c.detachActive(active) {
+			return
+		}
+
+		_ = active.ims.Close()
+		_ = active.session.Close()
 		c.emitError(fmt.Errorf("running IMS loop: %w", err))
 		c.emitState(StateFailed)
+
+		if !c.startReconnect() {
+			return
+		}
+		next, reconnectErr := c.reconnect()
+		c.finishReconnect()
+		if reconnectErr != nil {
+			return
+		}
+		active = next
 	}
+}
+
+func (c *Client) detachActive(active *activeConn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.active != active {
+		return false
+	}
+	c.active = nil
+	return true
+}
+
+func (c *Client) startReconnect() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.reconnecting {
+		return false
+	}
+	c.reconnecting = true
+	return true
+}
+
+func (c *Client) finishReconnect() {
+	c.mu.Lock()
+	c.reconnecting = false
+	c.mu.Unlock()
+}
+
+func (c *Client) reconnect() (*activeConn, error) {
+	if err := sleepContext(c.lifecycleCtx, c.cfg.ReconnectDelay); err != nil {
+		return nil, err
+	}
+	for {
+		active, err := c.connectOnce(c.lifecycleCtx, true)
+		if err == nil {
+			return active, nil
+		}
+		if c.lifecycleCtx.Err() != nil {
+			return nil, c.lifecycleCtx.Err()
+		}
+		if err := sleepContext(c.lifecycleCtx, c.cfg.ReconnectDelay); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *Client) isClosed() bool {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	return closed
 }
 
 func (c *Client) Close() error {
@@ -421,11 +627,16 @@ func (c *Client) CloseContext(ctx context.Context) error {
 			return
 		}
 		c.closed = true
+		c.connecting = false
+		c.reconnecting = false
 		active := c.active
 		card := c.card
 		c.active = nil
 		c.mu.Unlock()
 
+		if c.lifecycleCancel != nil {
+			c.lifecycleCancel()
+		}
 		if active != nil && active.cancel != nil {
 			active.cancel()
 		}
@@ -441,6 +652,7 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		}
 		c.emitState(StateClosed)
 		close(c.bus.sms)
+		close(c.bus.smsReports)
 		close(c.bus.ussd)
 		close(c.bus.state)
 		close(c.bus.errors)
@@ -466,7 +678,7 @@ func wrapCloseError(action string, err error) error {
 }
 
 func (c *Client) Events() Events {
-	return Events{SMS: c.bus.sms, USSD: c.bus.ussd, State: c.bus.state, Errors: c.bus.errors}
+	return Events{SMS: c.bus.sms, SMSReports: c.bus.smsReports, USSD: c.bus.ussd, State: c.bus.state, Errors: c.bus.errors}
 }
 
 func (c *Client) Tunnel() swu.TunnelInfo {
@@ -535,6 +747,32 @@ func (c *Client) handleSMS(msg ims.IncomingSMS) {
 	case c.bus.sms <- event:
 	default:
 		c.logger.Debug("dropping sms event", "from", event.From, "to", event.To, "service_center", event.ServiceCenter)
+	}
+}
+
+func (c *Client) handleSMSStatusReport(report ims.SMSStatusReport) {
+	event := SMSStatusReport{
+		ServiceCenter:         report.ServiceCenter,
+		Recipient:             report.Recipient,
+		MessageReference:      report.MessageReference,
+		Status:                report.Status,
+		MoreMessagesWaiting:   report.MoreMessagesWaiting,
+		LoopPrevention:        report.LoopPrevention,
+		FromCommand:           report.FromCommand,
+		HasUserDataHeader:     report.HasUserDataHeader,
+		ServiceCenterTime:     report.ServiceCenterTime,
+		DischargeTime:         report.DischargeTime,
+		ProtocolIdentifier:    report.ProtocolIdentifier,
+		HasProtocolIdentifier: report.HasProtocolIdentifier,
+		DataCodingScheme:      report.DataCodingScheme,
+		HasDataCodingScheme:   report.HasDataCodingScheme,
+		UserData:              append([]byte(nil), report.UserData...),
+		ReceivedAt:            time.Now(),
+	}
+	select {
+	case c.bus.smsReports <- event:
+	default:
+		c.logger.Debug("dropping sms status report event", "recipient", event.Recipient, "service_center", event.ServiceCenter, "message_reference", event.MessageReference, "status", event.Status)
 	}
 }
 

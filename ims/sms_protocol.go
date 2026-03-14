@@ -10,6 +10,8 @@ var (
 	_ encoding.BinaryMarshaler   = smsSubmitTPDU{}
 	_ encoding.BinaryMarshaler   = smsDeliverTPDU{}
 	_ encoding.BinaryUnmarshaler = (*smsDeliverTPDU)(nil)
+	_ encoding.BinaryMarshaler   = smsStatusReportTPDU{}
+	_ encoding.BinaryUnmarshaler = (*smsStatusReportTPDU)(nil)
 	_ encoding.BinaryMarshaler   = rpMessage{}
 	_ encoding.BinaryUnmarshaler = (*rpMessage)(nil)
 )
@@ -47,6 +49,10 @@ type smsDeliverTPDU struct {
 	Concat  *smsConcatInfo
 }
 
+type smsStatusReportTPDU struct {
+	Message SMSStatusReport
+}
+
 func newSMSDeliverTPDU(from string, part smsUserDataPart) smsDeliverTPDU {
 	return smsDeliverTPDU{From: from, Part: part}
 }
@@ -71,9 +77,48 @@ type smsDeliverFields struct {
 	part smsUserDataPart
 }
 
+type smsUserDataEncoding byte
+
+const (
+	smsUserDataEncodingGSM7 smsUserDataEncoding = iota
+	smsUserDataEncoding8Bit
+	smsUserDataEncodingUCS2
+)
+
+func smsUserDataEncodingFromAlphabetBits(bits, dcs byte) (smsUserDataEncoding, error) {
+	switch bits {
+	case 0x00:
+		return smsUserDataEncodingGSM7, nil
+	case 0x01:
+		return smsUserDataEncoding8Bit, nil
+	case 0x02:
+		return smsUserDataEncodingUCS2, nil
+	default:
+		return 0, fmt.Errorf("decoding SMS DCS: reserved alphabet bits in dcs 0x%02X", dcs)
+	}
+}
+
+func smsUserDataEncodingFromDCS(dcs byte) (smsUserDataEncoding, error) {
+	switch {
+	case dcs&0xC0 == 0x00:
+		if dcs&0x20 != 0 {
+			return 0, fmt.Errorf("decoding SMS DCS: compressed dcs 0x%02X is unsupported", dcs)
+		}
+		return smsUserDataEncodingFromAlphabetBits((dcs>>2)&0x03, dcs)
+	case dcs&0xF0 == 0xF0:
+		return smsUserDataEncodingFromAlphabetBits((dcs>>2)&0x03, dcs)
+	default:
+		return 0, fmt.Errorf("decoding SMS DCS: unsupported dcs 0x%02X", dcs)
+	}
+}
+
 func decodeSMSDeliverFields(data []byte) (smsDeliverFields, error) {
-	if len(data) < 1 {
+	mti, err := smsTPDUMessageType(data)
+	if err != nil {
 		return smsDeliverFields{}, errors.New("decoding SMS-DELIVER: packet too short")
+	}
+	if mti != tpduMTISMSDeliver && mti != tpduMTIReserved {
+		return smsDeliverFields{}, fmt.Errorf("decoding SMS-DELIVER: unexpected tp-mti 0x%02X", mti)
 	}
 	part := smsUserDataPart{udhi: (data[0]>>6)&0x01 == 1}
 	idx := 1
@@ -142,13 +187,17 @@ func decodeSMSDeliverUCS2(part smsUserDataPart) (string, *smsConcatInfo, error) 
 }
 
 func decodeSMSDeliverUserData(part smsUserDataPart) (string, *smsConcatInfo, error) {
-	switch part.dcs {
-	case 0x00:
+	encoding, err := smsUserDataEncodingFromDCS(part.dcs)
+	if err != nil {
+		return "", nil, fmt.Errorf("decoding SMS-DELIVER: %w", err)
+	}
+	switch encoding {
+	case smsUserDataEncodingGSM7:
 		return decodeSMSDeliverGSM7(part)
-	case 0x08:
+	case smsUserDataEncodingUCS2:
 		return decodeSMSDeliverUCS2(part)
 	default:
-		return "", nil, fmt.Errorf("decoding SMS-DELIVER: unsupported dcs 0x%02X", part.dcs)
+		return "", nil, fmt.Errorf("decoding SMS-DELIVER: 8-bit dcs 0x%02X is unsupported", part.dcs)
 	}
 }
 
@@ -167,6 +216,159 @@ func (tp *smsDeliverTPDU) UnmarshalBinary(data []byte) error {
 		Message: IncomingSMS{From: fields.from, Text: text},
 		Concat:  concat,
 	}
+	return nil
+}
+
+func (tp smsStatusReportTPDU) MarshalBinary() ([]byte, error) {
+	msg := tp.Message
+	if len(msg.UserData) > 0 && !msg.HasDataCodingScheme {
+		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD requires TP-DCS")
+	}
+	if len(msg.UserData) > 0 && msg.DataCodingScheme == 0x00 {
+		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD with GSM7 DCS is unsupported")
+	}
+	payload := make([]byte, 0, 32)
+	firstOctet := byte(tpduMTISMSStatusReport)
+	if !msg.MoreMessagesWaiting {
+		firstOctet |= 0x04
+	}
+	if msg.LoopPrevention {
+		firstOctet |= 0x08
+	}
+	if msg.FromCommand {
+		firstOctet |= 0x20
+	}
+	if msg.HasUserDataHeader {
+		firstOctet |= 0x40
+	}
+	payload = append(payload, firstOctet)
+	payload = append(payload, msg.MessageReference)
+	payload = append(payload, encodeTPAddress(msg.Recipient)...)
+	payload = append(payload, encodeSMSTimestamp(msg.ServiceCenterTime)...)
+	payload = append(payload, encodeSMSTimestamp(msg.DischargeTime)...)
+	payload = append(payload, msg.Status)
+	var pi byte
+	if msg.HasProtocolIdentifier {
+		pi |= 0x01
+	}
+	if msg.HasDataCodingScheme {
+		pi |= 0x02
+	}
+	if len(msg.UserData) > 0 {
+		pi |= 0x04
+	}
+	if pi == 0 {
+		return payload, nil
+	}
+	payload = append(payload, pi)
+	if msg.HasProtocolIdentifier {
+		payload = append(payload, msg.ProtocolIdentifier)
+	}
+	if msg.HasDataCodingScheme {
+		payload = append(payload, msg.DataCodingScheme)
+	}
+	if len(msg.UserData) == 0 {
+		return payload, nil
+	}
+	payload = append(payload, byte(len(msg.UserData)))
+	payload = append(payload, msg.UserData...)
+	return payload, nil
+}
+
+func (tp *smsStatusReportTPDU) UnmarshalBinary(data []byte) error {
+	mti, err := smsTPDUMessageType(data)
+	if err != nil {
+		return errors.New("decoding SMS-STATUS-REPORT: packet too short")
+	}
+	if mti != tpduMTISMSStatusReport {
+		return fmt.Errorf("decoding SMS-STATUS-REPORT: unexpected tp-mti 0x%02X", mti)
+	}
+	if len(data) < 2 {
+		return errors.New("decoding SMS-STATUS-REPORT: packet too short")
+	}
+	idx := 1
+	firstOctet := data[0]
+	report := SMSStatusReport{
+		MessageReference:    data[idx],
+		MoreMessagesWaiting: firstOctet&0x04 == 0,
+		LoopPrevention:      firstOctet&0x08 != 0,
+		FromCommand:         firstOctet&0x20 != 0,
+		HasUserDataHeader:   firstOctet&0x40 != 0,
+	}
+	idx++
+	var n int
+	report.Recipient, n, err = decodeTPAddress(data[idx:])
+	if err != nil {
+		return err
+	}
+	idx += n
+	if len(data[idx:]) < 15 {
+		return errors.New("decoding SMS-STATUS-REPORT: truncated mandatory fields")
+	}
+	report.ServiceCenterTime, err = decodeSMSTimestamp(data[idx : idx+7])
+	if err != nil {
+		return err
+	}
+	idx += 7
+	report.DischargeTime, err = decodeSMSTimestamp(data[idx : idx+7])
+	if err != nil {
+		return err
+	}
+	idx += 7
+	report.Status = data[idx]
+	idx++
+
+	if len(data[idx:]) > 0 {
+		piOctets := make([]byte, 0, 1)
+		for {
+			if len(data[idx:]) < 1 {
+				return errors.New("decoding SMS-STATUS-REPORT: missing parameter indicator")
+			}
+			pi := data[idx]
+			idx++
+			piOctets = append(piOctets, pi)
+			if pi&0x80 == 0 {
+				break
+			}
+		}
+		pi := piOctets[0]
+		if pi&0x01 != 0 {
+			if len(data[idx:]) < 1 {
+				return errors.New("decoding SMS-STATUS-REPORT: missing protocol identifier")
+			}
+			report.ProtocolIdentifier = data[idx]
+			report.HasProtocolIdentifier = true
+			idx++
+		}
+		dcs := byte(0x00)
+		if pi&0x02 != 0 {
+			if len(data[idx:]) < 1 {
+				return errors.New("decoding SMS-STATUS-REPORT: missing data coding scheme")
+			}
+			dcs = data[idx]
+			report.DataCodingScheme = dcs
+			report.HasDataCodingScheme = true
+			idx++
+		}
+		if pi&0x04 != 0 {
+			if len(data[idx:]) < 1 {
+				return errors.New("decoding SMS-STATUS-REPORT: missing user data length")
+			}
+			userDataLength := int(data[idx])
+			idx++
+			octets := userDataLength
+			if encoding, err := smsUserDataEncodingFromDCS(dcs); err == nil && encoding == smsUserDataEncodingGSM7 {
+				octets = gsm7OctetCount(userDataLength)
+			}
+			if len(data[idx:]) < octets {
+				return errors.New("decoding SMS-STATUS-REPORT: truncated user data")
+			}
+			report.UserData = append([]byte(nil), data[idx:idx+octets]...)
+			idx += octets
+		}
+	}
+
+	tp.Message = report
 	return nil
 }
 

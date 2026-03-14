@@ -19,6 +19,9 @@ func (cfg Config) normalized() (Config, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.ReconnectDelay == 0 {
+		cfg.ReconnectDelay = defaultReconnectDelay
+	}
 
 	tunnelCfg, err := cfg.normalizedTunnel()
 	if err != nil {
@@ -46,6 +49,9 @@ func (cfg Config) trimmed() Config {
 func (cfg Config) validate() error {
 	if cfg.RegisterExpires < 0 {
 		return fmt.Errorf("normalizing client config: register expires must be >= 0")
+	}
+	if cfg.ReconnectDelay < 0 {
+		return fmt.Errorf("normalizing client config: reconnect delay must be >= 0")
 	}
 	return nil
 }

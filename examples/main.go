@@ -294,6 +294,11 @@ func logEvents(events imsclient.Events) {
 				return
 			}
 			slog.Info("incoming sms", "from", sms.From, "to", sms.To, "service_center", sms.ServiceCenter, "text", sms.Text, "received_at", sms.ReceivedAt.Format(time.RFC3339))
+		case report, ok := <-events.SMSReports:
+			if !ok {
+				return
+			}
+			slog.Info("sms status report", "recipient", report.Recipient, "service_center", report.ServiceCenter, "message_reference", report.MessageReference, "status", report.Status, "service_center_time", report.ServiceCenterTime.Format(time.RFC3339), "discharge_time", report.DischargeTime.Format(time.RFC3339), "received_at", report.ReceivedAt.Format(time.RFC3339))
 		case err, ok := <-events.Errors:
 			if !ok {
 				return

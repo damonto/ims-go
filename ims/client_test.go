@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -638,9 +639,11 @@ func TestHandleIncomingMessage(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
+		dcs  byte
 	}{
-		{name: "gsm7", text: "hello"},
-		{name: "ucs2", text: "你好"},
+		{name: "gsm7", text: "hello", dcs: 0x00},
+		{name: "gsm7 class 1", text: "hello", dcs: 0xF1},
+		{name: "ucs2", text: "你好", dcs: 0x08},
 	}
 
 	for _, tt := range tests {
@@ -661,9 +664,18 @@ func TestHandleIncomingMessage(t *testing.T) {
 				go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
 			}
 
-			tpdu, err := buildSMSDeliver("+15551234567", tt.text)
+			encoded, _, udl, err := encodeUserData(tt.text)
 			if err != nil {
-				t.Fatalf("buildSMSDeliver() error = %v", err)
+				t.Fatalf("encodeUserData() error = %v", err)
+			}
+			tpdu := []byte{0x00}
+			tpdu = append(tpdu, encodeTPAddress("+15551234567")...)
+			tpdu = append(tpdu, 0x00, tt.dcs)
+			tpdu = append(tpdu, bytes.Repeat([]byte{0x00}, 7)...)
+			tpdu = append(tpdu, udl)
+			tpdu = append(tpdu, encoded...)
+			if len(tpdu) == 0 {
+				t.Fatal("tpdu is empty")
 			}
 			rpdu := append([]byte{rpDataNetworkToMS, 0x01}, 0x00)
 			rpdu = append(rpdu, encodeRPAddress("+15550000000")...)
@@ -705,6 +717,414 @@ func TestHandleIncomingMessage(t *testing.T) {
 				t.Fatalf("ack Content-Transfer-Encoding = %q, want binary", ack.Header("Content-Transfer-Encoding"))
 			}
 		})
+	}
+}
+
+func TestHandleIncomingStatusReport(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+	var got SMSStatusReport
+	count := 0
+	client := newTestClient(t, Config{OnSMSStatusReport: func(report SMSStatusReport) {
+		got = report
+		count++
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	reportCh := make(chan struct{}, 1)
+	transport.onWrite = func(data []byte) {
+		reportCh <- struct{}{}
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	tpdu, err := (smsStatusReportTPDU{Message: SMSStatusReport{
+		Recipient:         "+15551234567",
+		MessageReference:  7,
+		Status:            0x00,
+		ServiceCenterTime: serviceCenterTime,
+		DischargeTime:     dischargeTime,
+	}}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(status-report) error = %v", err)
+	}
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, encodeRPAddress("")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	msg := newInboundSMSRequest("status-report-1", "1 MESSAGE", rpdu)
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+
+	waitForWriteEvents(t, reportCh, 1)
+	if count != 1 {
+		t.Fatalf("status report callback count = %d, want 1", count)
+	}
+	if got.ServiceCenter != "+15550000000" {
+		t.Fatalf("ServiceCenter = %q, want %q", got.ServiceCenter, "+15550000000")
+	}
+	if got.Recipient != "+15551234567" {
+		t.Fatalf("Recipient = %q, want %q", got.Recipient, "+15551234567")
+	}
+	if got.MessageReference != 7 {
+		t.Fatalf("MessageReference = %d, want 7", got.MessageReference)
+	}
+	if got.Status != 0x00 {
+		t.Fatalf("Status = 0x%02X, want 0x00", got.Status)
+	}
+	if got.ServiceCenterTime.Format(time.RFC3339) != serviceCenterTime.Format(time.RFC3339) {
+		t.Fatalf("ServiceCenterTime = %q, want %q", got.ServiceCenterTime.Format(time.RFC3339), serviceCenterTime.Format(time.RFC3339))
+	}
+	if got.DischargeTime.Format(time.RFC3339) != dischargeTime.Format(time.RFC3339) {
+		t.Fatalf("DischargeTime = %q, want %q", got.DischargeTime.Format(time.RFC3339), dischargeTime.Format(time.RFC3339))
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(inboundTransport.writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, "status report response", inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+	if len(transport.writes) != 1 {
+		t.Fatalf("len(transport.writes) = %d, want 1", len(transport.writes))
+	}
+	ack := mustParseMessage(t, "status report ack", transport.writes[0])
+	if got := ack.Header("In-Reply-To"); got != "status-report-1" {
+		t.Fatalf("In-Reply-To = %q, want %q", got, "status-report-1")
+	}
+	var rpAck rpMessage
+	if err := rpAck.UnmarshalBinary(ack.Body); err != nil {
+		t.Fatalf("UnmarshalBinary(ack) error = %v", err)
+	}
+	if rpAck.Type != rpAckMSToNetwork {
+		t.Fatalf("Type = 0x%02X, want 0x%02X", rpAck.Type, rpAckMSToNetwork)
+	}
+	if rpAck.Reference != 0x01 {
+		t.Fatalf("Reference = %d, want %d", rpAck.Reference, 0x01)
+	}
+}
+
+func TestHandleIncomingReservedTPMTITreatsMessageAsSMSDeliver(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	count := 0
+	var got IncomingSMS
+	client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) {
+		got = msg
+		count++
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	tpdu[0] = (tpdu[0] &^ 0x03) | tpduMTIReserved
+
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, 0x00)
+	rpdu = append(rpdu, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	msg := newInboundSMSRequest("call-reserved", "1 MESSAGE", rpdu)
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf("sms callback count = %d, want 1", count)
+	}
+	if got.From != "+15551234567" || got.Text != "hello" {
+		t.Fatalf("incoming sms = %+v", got)
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(inboundTransport.writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, "reserved tp-mti response", inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+	if len(transport.writes) != 1 {
+		t.Fatalf("len(transport.writes) = %d, want 1", len(transport.writes))
+	}
+	report := mustParseMessage(t, "reserved tp-mti report", transport.writes[0])
+	var rpAck rpMessage
+	if err := rpAck.UnmarshalBinary(report.Body); err != nil {
+		t.Fatalf("UnmarshalBinary(report) error = %v", err)
+	}
+	if rpAck.Type != rpAckMSToNetwork {
+		t.Fatalf("Type = 0x%02X, want 0x%02X", rpAck.Type, rpAckMSToNetwork)
+	}
+	if rpAck.Reference != 0x01 {
+		t.Fatalf("Reference = %d, want 1", rpAck.Reference)
+	}
+}
+
+func TestHandleIncomingSMSSendsDeliveryReportBeforeOnSMSReturns(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	callbackEntered := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	callbackErrCh := make(chan error, 1)
+	reportWritten := make(chan struct{})
+	client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) {
+		close(callbackEntered)
+		select {
+		case <-reportWritten:
+		default:
+			callbackErrCh <- errors.New("delivery report not written before OnSMS callback")
+		}
+		<-callbackRelease
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	var reportWrittenOnce sync.Once
+	transport.onWrite = func(data []byte) {
+		reportWrittenOnce.Do(func() {
+			close(reportWritten)
+		})
+		req, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage(delivery-report) error = %v", err)
+			return
+		}
+		go client.dispatchResponse(newTestResponse(req, 202, "Accepted"))
+	}
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, 0x00)
+	rpdu = append(rpdu, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handleRequest(ctx, inboundTransport, newInboundSMSRequest("call-blocking", "1 MESSAGE", rpdu))
+	}()
+
+	select {
+	case <-callbackEntered:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("waiting for OnSMS callback")
+	}
+	select {
+	case err := <-callbackErrCh:
+		t.Fatal(err)
+	default:
+	}
+
+	select {
+	case <-reportWritten:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("delivery report not sent before OnSMS returned")
+	}
+
+	close(callbackRelease)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handleRequest() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for handleRequest completion")
+	}
+}
+
+func TestHandleIncomingSMSSuppressesCallbackWithoutDeliveryReportTarget(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	callbackCount := 0
+	client := newTestClient(t, Config{OnSMS: func(msg IncomingSMS) {
+		callbackCount++
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
+	}
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, 0x00)
+	rpdu = append(rpdu, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	msg := newInboundSMSRequest("call-no-target", "1 MESSAGE", rpdu)
+	msg.Headers = upsertHeader(msg.Headers, "P-Asserted-Identity", "<tel:+15550000000>")
+	msg.Headers = upsertHeader(msg.Headers, "From", "<tel:+15550000000>;tag=remote-1")
+	msg.Headers = upsertHeader(msg.Headers, "Via", "broken")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	if callbackCount != 0 {
+		t.Fatalf("callbackCount = %d, want 0", callbackCount)
+	}
+	if len(transport.writes) != 0 {
+		t.Fatalf("len(transport.writes) = %d, want 0", len(transport.writes))
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(inboundTransport.writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, "no-target response", inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+}
+
+func TestHandleIncomingStatusReportSuppressesCallbackWithoutDeliveryReportTarget(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	callbackCount := 0
+	client := newTestClient(t, Config{OnSMSStatusReport: func(report SMSStatusReport) {
+		callbackCount++
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+	tpdu, err := (smsStatusReportTPDU{Message: SMSStatusReport{
+		Recipient:         "+15551234567",
+		MessageReference:  7,
+		Status:            0x00,
+		ServiceCenterTime: serviceCenterTime,
+		DischargeTime:     dischargeTime,
+	}}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(status-report) error = %v", err)
+	}
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, encodeRPAddress("")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	msg := newInboundSMSRequest("status-report-no-target", "1 MESSAGE", rpdu)
+	msg.Headers = upsertHeader(msg.Headers, "P-Asserted-Identity", "<tel:+15550000000>")
+	msg.Headers = upsertHeader(msg.Headers, "From", "<tel:+15550000000>;tag=remote-1")
+	msg.Headers = upsertHeader(msg.Headers, "Via", "broken")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	if callbackCount != 0 {
+		t.Fatalf("callbackCount = %d, want 0", callbackCount)
+	}
+	if len(transport.writes) != 0 {
+		t.Fatalf("len(transport.writes) = %d, want 0", len(transport.writes))
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(inboundTransport.writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, "status-report no-target response", inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+}
+
+func TestHandleIncomingStatusReportWithInvalidTimestampSendsRPError(t *testing.T) {
+	transport := newClientUDPTransport()
+	inboundTransport := newInboundUDPTransport()
+	callbackCount := 0
+	client := newTestClient(t, Config{OnSMSStatusReport: func(report SMSStatusReport) {
+		callbackCount++
+	}}, transport)
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+	tpdu, err := (smsStatusReportTPDU{Message: SMSStatusReport{
+		Recipient:         "+15551234567",
+		MessageReference:  7,
+		Status:            0x00,
+		ServiceCenterTime: serviceCenterTime,
+		DischargeTime:     dischargeTime,
+	}}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(status-report) error = %v", err)
+	}
+	addrLen := len(encodeTPAddress("+15551234567"))
+	sctsOffset := 2 + addrLen
+	tpdu[sctsOffset+1] = 0x31
+
+	rpdu := append([]byte{rpDataNetworkToMS, 0x01}, encodeRPAddress("+15550000000")...)
+	rpdu = append(rpdu, encodeRPAddress("")...)
+	rpdu = append(rpdu, byte(len(tpdu)))
+	rpdu = append(rpdu, tpdu...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	msg := newInboundSMSRequest("status-report-invalid-ts", "1 MESSAGE", rpdu)
+	if err := client.handleRequest(ctx, inboundTransport, msg); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+
+	if callbackCount != 0 {
+		t.Fatalf("callbackCount = %d, want 0", callbackCount)
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("len(inboundTransport.writes) = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, "invalid timestamp response", inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", got)
+	}
+	if len(transport.writes) != 1 {
+		t.Fatalf("len(transport.writes) = %d, want 1", len(transport.writes))
+	}
+	report := mustParseMessage(t, "invalid timestamp report", transport.writes[0])
+	var rpErr rpMessage
+	if err := rpErr.UnmarshalBinary(report.Body); err != nil {
+		t.Fatalf("UnmarshalBinary(report) error = %v", err)
+	}
+	if rpErr.Type != rpErrorMSToNetwork {
+		t.Fatalf("Type = 0x%02X, want 0x%02X", rpErr.Type, rpErrorMSToNetwork)
+	}
+	if !rpErr.HasCause || rpErr.Cause != rpCauseInvalidMandatoryInformation {
+		t.Fatalf("Cause = %d (has=%v), want %d", rpErr.Cause, rpErr.HasCause, rpCauseInvalidMandatoryInformation)
 	}
 }
 
@@ -1635,10 +2055,10 @@ func TestSendSMSSubmitReportTimeoutDoesNotCallOnError(t *testing.T) {
 		}
 	}()
 
-	oldTimeout := smsSubmitReportTimeout
-	smsSubmitReportTimeout = 20 * time.Millisecond
+	oldTimeout := currentSMSSubmitReportTimeout()
+	setSMSSubmitReportTimeout(20 * time.Millisecond)
 	defer func() {
-		smsSubmitReportTimeout = oldTimeout
+		setSMSSubmitReportTimeout(oldTimeout)
 	}()
 
 	type submitReportInfo struct {
@@ -1730,10 +2150,10 @@ func TestSendSMSLateRPErrorAfterTimeoutCallsOnError(t *testing.T) {
 		}
 	}()
 
-	oldTimeout := smsSubmitReportTimeout
-	smsSubmitReportTimeout = 20 * time.Millisecond
+	oldTimeout := currentSMSSubmitReportTimeout()
+	setSMSSubmitReportTimeout(20 * time.Millisecond)
 	defer func() {
-		smsSubmitReportTimeout = oldTimeout
+		setSMSSubmitReportTimeout(oldTimeout)
 	}()
 
 	type submitReportInfo struct {
@@ -1822,10 +2242,10 @@ func TestSendSMSLateSubmitReportRejectsMismatchedRPReference(t *testing.T) {
 		}
 	}()
 
-	oldTimeout := smsSubmitReportTimeout
-	smsSubmitReportTimeout = 20 * time.Millisecond
+	oldTimeout := currentSMSSubmitReportTimeout()
+	setSMSSubmitReportTimeout(20 * time.Millisecond)
 	defer func() {
-		smsSubmitReportTimeout = oldTimeout
+		setSMSSubmitReportTimeout(oldTimeout)
 	}()
 
 	type submitReportInfo struct {
@@ -1910,10 +2330,10 @@ func TestSendSMSWithoutSubmitReportsDoesNotExhaustRPReferences(t *testing.T) {
 		}
 	}()
 
-	oldTimeout := smsSubmitReportTimeout
-	smsSubmitReportTimeout = 5 * time.Second
+	oldTimeout := currentSMSSubmitReportTimeout()
+	setSMSSubmitReportTimeout(5 * time.Second)
 	defer func() {
-		smsSubmitReportTimeout = oldTimeout
+		setSMSSubmitReportTimeout(oldTimeout)
 	}()
 
 	transport.onWrite = func(data []byte) {
