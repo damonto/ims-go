@@ -55,7 +55,7 @@ func (u *Card) SetAKAIdentityState(state AKAIdentityState) { u.akaState = state.
 
 func Load(ctx context.Context, tx usimreader.Reader, logger *slog.Logger) (*Card, error) {
 	if tx == nil {
-		return nil, fmt.Errorf("loading USIM: reader is nil")
+		return nil, errors.New("loading USIM: reader is nil")
 	}
 	if logger == nil {
 		logger = slog.Default()

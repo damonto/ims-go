@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -148,7 +149,7 @@ func (c *ikeCrypto) DeriveIKEKeys(peerPublic []byte) error {
 
 func (c *ikeCrypto) DeriveESPKeys(encrKeyBits, integ uint16) (ESPKeys, error) {
 	if len(c.keys.SKD) == 0 {
-		return ESPKeys{}, fmt.Errorf("deriving esp keys: ike keys are empty")
+		return ESPKeys{}, errors.New("deriving esp keys: ike keys are empty")
 	}
 	nonce := append(append([]byte(nil), c.nonceI...), c.nonceR...)
 	encrKeyLen := encrKeyLengthFromBits(encrKeyBits)
@@ -193,7 +194,7 @@ func (c *ikeCrypto) DeriveEAPKeys(identity, res, ik, ck []byte) error {
 
 func (c *ikeCrypto) ComputeInitiatorAuth(saInitRequest, responderNonce, idiRaw []byte) ([]byte, error) {
 	if len(c.eap.MSK) == 0 {
-		return nil, fmt.Errorf("computing initiator auth: eap msk is empty")
+		return nil, errors.New("computing initiator auth: eap msk is empty")
 	}
 	inner := c.prfHMAC(c.keys.SKPI, idiRaw)
 	data := make([]byte, 0, len(saInitRequest)+len(responderNonce)+len(inner))
@@ -241,11 +242,11 @@ func (c *ikeCrypto) SealIKE(header ike.IKEHeader, payloads []ike.Payload, initia
 
 func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.Payload, error) {
 	if len(packet.Payloads) != 1 {
-		return nil, fmt.Errorf("opening ike packet: expected encrypted payload container")
+		return nil, errors.New("opening ike packet: expected encrypted payload container")
 	}
 	container, ok := packet.Payloads[0].(*ike.EncryptedPayload)
 	if !ok {
-		return nil, fmt.Errorf("opening ike packet: missing encrypted payload")
+		return nil, errors.New("opening ike packet: missing encrypted payload")
 	}
 	ivLen := aes.BlockSize
 	icvLen, err := integLength(c.integ)
@@ -253,13 +254,13 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 		return nil, err
 	}
 	if len(container.Raw) < ivLen+icvLen {
-		return nil, fmt.Errorf("opening ike packet: encrypted body too short")
+		return nil, errors.New("opening ike packet: encrypted body too short")
 	}
 	body := container.Raw
 	wantICV := body[len(body)-icvLen:]
 	gotICV := c.integHMAC(c.integrityKey(senderInitiator), packet.Raw[:len(packet.Raw)-icvLen])
 	if !hmac.Equal(gotICV, wantICV) {
-		return nil, fmt.Errorf("opening ike packet: integrity check failed")
+		return nil, errors.New("opening ike packet: integrity check failed")
 	}
 	iv := body[:ivLen]
 	ciphertext := body[ivLen : len(body)-icvLen]
@@ -268,11 +269,11 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 		return nil, err
 	}
 	if len(plain) == 0 {
-		return nil, fmt.Errorf("opening ike packet: plaintext is empty")
+		return nil, errors.New("opening ike packet: plaintext is empty")
 	}
 	padLen := int(plain[len(plain)-1])
 	if len(plain) < padLen+1 {
-		return nil, fmt.Errorf("opening ike packet: invalid padding")
+		return nil, errors.New("opening ike packet: invalid padding")
 	}
 	plain = plain[:len(plain)-1-padLen]
 	payloads, err := ike.DecodePayloadChain(container.NextPayload, plain)
@@ -313,7 +314,7 @@ func (c *ikeCrypto) integrityKey(senderInitiator bool) []byte {
 
 func (c *ikeCrypto) sharedSecret(peerPublic []byte) ([]byte, error) {
 	if len(peerPublic) == 0 {
-		return nil, fmt.Errorf("deriving shared secret: peer public key is empty")
+		return nil, errors.New("deriving shared secret: peer public key is empty")
 	}
 	peer := new(big.Int).SetBytes(peerPublic)
 	shared := new(big.Int).Exp(peer, c.private, c.groupPrime)
@@ -415,7 +416,7 @@ func (c *ikeCrypto) encryptCBC(key, iv, plain []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encrypting ike packet: %w", err)
 	}
 	if len(plain)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("encrypting ike packet: plaintext is not block aligned")
+		return nil, errors.New("encrypting ike packet: plaintext is not block aligned")
 	}
 	out := make([]byte, len(plain))
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, plain)
@@ -427,7 +428,7 @@ func (c *ikeCrypto) decryptCBC(key, iv, ciphertext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decrypting ike packet: unsupported encryption transform %d", c.encr)
 	}
 	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("decrypting ike packet: ciphertext is not block aligned")
+		return nil, errors.New("decrypting ike packet: ciphertext is not block aligned")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -559,7 +560,7 @@ func modpGroup(group uint16) (*big.Int, int, error) {
 	}
 	prime, ok := new(big.Int).SetString(hexPrime, 16)
 	if !ok {
-		return nil, 0, fmt.Errorf("loading dh group: invalid prime")
+		return nil, 0, errors.New("loading dh group: invalid prime")
 	}
 	return prime, len(hexPrime) / 2, nil
 }

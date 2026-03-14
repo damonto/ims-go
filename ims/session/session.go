@@ -95,7 +95,7 @@ type targetedPacketWriter interface {
 
 func Open(cfg Config, primary Transport) (*Session, error) {
 	if primary == nil {
-		return nil, fmt.Errorf("opening session: primary transport is nil")
+		return nil, errors.New("opening session: primary transport is nil")
 	}
 	cfg, err := cfg.Normalized()
 	if err != nil {
@@ -138,12 +138,12 @@ func (s *Session) RemoteAddr() net.Addr {
 
 func (s *Session) Attach(h Handler) (Attachment, error) {
 	if h == nil {
-		return nil, fmt.Errorf("attaching handler: handler is nil")
+		return nil, errors.New("attaching handler: handler is nil")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, fmt.Errorf("attaching handler: session is closed")
+		return nil, errors.New("attaching handler: session is closed")
 	}
 	entry := &handlerEntry{session: s, handler: h}
 	s.handlers = append(s.handlers, entry)
@@ -152,15 +152,15 @@ func (s *Session) Attach(h Handler) (Attachment, error) {
 
 func (s *Session) AddTransport(t Transport) (Attachment, error) {
 	if t == nil {
-		return nil, fmt.Errorf("adding transport: transport is nil")
+		return nil, errors.New("adding transport: transport is nil")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, fmt.Errorf("adding transport: session is closed")
+		return nil, errors.New("adding transport: session is closed")
 	}
 	if s.started {
-		return nil, fmt.Errorf("adding transport: session has already started")
+		return nil, errors.New("adding transport: session has already started")
 	}
 	s.aux = append(s.aux, t)
 	return &transportAttachment{session: s, transport: t}, nil
@@ -168,16 +168,16 @@ func (s *Session) AddTransport(t Transport) (Attachment, error) {
 
 func (s *Session) ReplacePrimary(t Transport) error {
 	if t == nil {
-		return fmt.Errorf("replacing primary transport: transport is nil")
+		return errors.New("replacing primary transport: transport is nil")
 	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("replacing primary transport: session is closed")
+		return errors.New("replacing primary transport: session is closed")
 	}
 	if s.started {
 		s.mu.Unlock()
-		return fmt.Errorf("replacing primary transport: session has already started")
+		return errors.New("replacing primary transport: session has already started")
 	}
 	old := s.primary
 	s.primary = t
@@ -240,11 +240,11 @@ func (s *Session) Run(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("running session: session is closed")
+		return errors.New("running session: session is closed")
 	}
 	if s.started {
 		s.mu.Unlock()
-		return fmt.Errorf("running session: already started")
+		return errors.New("running session: already started")
 	}
 	s.started = true
 	s.running = true
@@ -607,7 +607,7 @@ func (a *transportAttachment) Close() error {
 		return nil
 	}
 	if a.session.started {
-		return fmt.Errorf("closing transport attachment: session has already started")
+		return errors.New("closing transport attachment: session has already started")
 	}
 	a.closed = true
 	filtered := a.session.aux[:0]

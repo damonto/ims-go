@@ -1,6 +1,7 @@
 package imsclient
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -31,7 +32,7 @@ func (cfg Config) normalized(card Card) (Config, error) {
 	}
 
 	if cfg.IMEI == "" {
-		return Config{}, fmt.Errorf("normalizing client config: imei is empty")
+		return Config{}, errors.New("normalizing client config: imei is empty")
 	}
 	if cfg.EPDG == "" {
 		epdg, err := defaultEPDGAddress(card)
@@ -64,7 +65,7 @@ func (cfg Config) trimmed() Config {
 
 func (cfg Config) validate() error {
 	if cfg.ReconnectDelay < 0 {
-		return fmt.Errorf("normalizing client config: reconnect delay must be >= 0")
+		return errors.New("normalizing client config: reconnect delay must be >= 0")
 	}
 	return nil
 }
@@ -125,7 +126,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 		cfg.UserAgent = "IMSClient/1.0 Linux"
 	}
 	if cfg.RegisterExpires < 0 {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: register expires must be >= 0")
+		return IMSConfig{}, errors.New("normalizing ims config: register expires must be >= 0")
 	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 10 * time.Minute
@@ -135,7 +136,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 
 func defaultEPDGAddress(card Card) (string, error) {
 	if card == nil {
-		return "", fmt.Errorf("normalizing client config: card is nil")
+		return "", errors.New("normalizing client config: card is nil")
 	}
 
 	mcc := strings.TrimSpace(card.MCC())

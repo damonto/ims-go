@@ -22,14 +22,12 @@ const (
 
 const (
 	rpCauseInvalidShortMessageTransferReference = 81
-	rpCauseMessageTypeNonExistent               = 97
 	rpCauseInvalidMandatoryInformation          = 96
 	rpCauseProtocolErrorUnspecified             = 111
 )
 
 const (
 	tpduMTISMSDeliver      = 0x00
-	tpduMTISMSSubmitReport = 0x01
 	tpduMTISMSStatusReport = 0x02
 	tpduMTIReserved        = 0x03
 )
@@ -174,7 +172,7 @@ func buildSMSUserDataParts(text string) ([]smsUserDataPart, error) {
 	}
 	parts := buildUCS2UserDataParts(UCS2(text))
 	if parts == nil {
-		return nil, fmt.Errorf("encoding SMS-SUBMIT: UCS2 message exceeds 255-part limit")
+		return nil, errors.New("encoding SMS-SUBMIT: UCS2 message exceeds 255-part limit")
 	}
 	return parts, nil
 }

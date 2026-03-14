@@ -3,6 +3,7 @@ package ike
 import (
 	"encoding"
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -66,7 +67,7 @@ func (h IKEHeader) MarshalBinary() ([]byte, error) {
 
 func (h *IKEHeader) UnmarshalBinary(data []byte) error {
 	if len(data) < ikeHeaderSize {
-		return fmt.Errorf("parse ike header: packet too short")
+		return errors.New("parse ike header: packet too short")
 	}
 	*h = IKEHeader{
 		InitiatorSPI: binary.BigEndian.Uint64(data[0:8]),

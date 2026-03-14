@@ -174,11 +174,11 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 	}
 	if c.active != nil {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("connecting client: already connected")
+		return nil, errors.New("connecting client: already connected")
 	}
 	if c.connecting || (!internal && c.reconnecting) {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("connecting client: connection in progress")
+		return nil, errors.New("connecting client: connection in progress")
 	}
 	c.connecting = true
 	c.mu.Unlock()
@@ -207,7 +207,7 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 		}
 		cancel()
 		c.finishConnectAttempt()
-		return nil, fmt.Errorf("preparing connect: tunnel remote address is empty")
+		return nil, errors.New("preparing connect: tunnel remote address is empty")
 	}
 
 	imsCfg := c.cfg.IMS
@@ -339,10 +339,10 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return nil, fmt.Errorf("connecting client: client closed during setup")
+		return nil, errors.New("connecting client: client closed during setup")
 	}
 	if c.active != nil {
-		return nil, fmt.Errorf("connecting client: already connected")
+		return nil, errors.New("connecting client: already connected")
 	}
 	c.active = active
 	c.connecting = false

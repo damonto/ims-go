@@ -3,6 +3,7 @@ package ike
 import (
 	"encoding"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 )
@@ -143,7 +144,7 @@ func (a Attribute) Uint16() (uint16, bool) {
 
 func decodeAttribute(data []byte) (Attribute, int, error) {
 	if len(data) < 4 {
-		return Attribute{}, 0, fmt.Errorf("parsing attribute: truncated body")
+		return Attribute{}, 0, errors.New("parsing attribute: truncated body")
 	}
 	rawType := binary.BigEndian.Uint16(data[0:2])
 	attr := Attribute{Format: byte(rawType >> 15), Type: rawType & 0x7fff}
@@ -202,7 +203,7 @@ func (t Transform) marshalBinary(next byte) ([]byte, error) {
 
 func (t *Transform) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing transform: truncated body")
+		return errors.New("parsing transform: truncated body")
 	}
 	attrs, err := decodeAttributes(data[4:])
 	if err != nil {
@@ -255,21 +256,21 @@ func (p Proposal) marshalBinary(next byte) ([]byte, error) {
 
 func (p *Proposal) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing proposal: truncated body")
+		return errors.New("parsing proposal: truncated body")
 	}
 	proposal := Proposal{
 		Number:     data[0],
 		ProtocolID: data[1],
 	}
 	if len(data) < 4+int(data[2]) {
-		return fmt.Errorf("parsing proposal: truncated spi")
+		return errors.New("parsing proposal: truncated spi")
 	}
 	proposal.SPI = append([]byte(nil), data[4:4+int(data[2])]...)
 	remaining := data[4+int(data[2]):]
 	transformType := payloadTypeTransform
 	for i := 0; i < int(data[3]); i++ {
 		if len(remaining) < 4 {
-			return fmt.Errorf("parsing proposal: truncated transform")
+			return errors.New("parsing proposal: truncated transform")
 		}
 		next := remaining[0]
 		length := int(binary.BigEndian.Uint16(remaining[2:4]))
@@ -332,7 +333,7 @@ func (p *SecurityAssociationPayload) UnmarshalBinary(data []byte) error {
 	proposalType := payloadTypeProposal
 	for len(remaining) > 0 {
 		if len(remaining) < 4 {
-			return fmt.Errorf("parsing security association: truncated proposal")
+			return errors.New("parsing security association: truncated proposal")
 		}
 		next := remaining[0]
 		length := int(binary.BigEndian.Uint16(remaining[2:4]))
@@ -387,7 +388,7 @@ func (p *KeyExchangePayload) MarshalBinary() ([]byte, error) {
 
 func (p *KeyExchangePayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing key exchange: truncated body")
+		return errors.New("parsing key exchange: truncated body")
 	}
 	p.DHGroup = binary.BigEndian.Uint16(data[0:2])
 	p.Data = append([]byte(nil), data[4:]...)
@@ -444,7 +445,7 @@ func (p *NotifyPayload) MarshalBinary() ([]byte, error) {
 
 func (p *NotifyPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing notify: truncated body")
+		return errors.New("parsing notify: truncated body")
 	}
 	spiLen := int(data[1])
 	if len(data) < 4+spiLen {
@@ -478,7 +479,7 @@ func (p *DeletePayload) MarshalBinary() ([]byte, error) {
 		spiSize = len(p.SPIs[0])
 		for _, spi := range p.SPIs[1:] {
 			if len(spi) != spiSize {
-				return nil, fmt.Errorf("marshalling delete payload: spi length mismatch")
+				return nil, errors.New("marshalling delete payload: spi length mismatch")
 			}
 		}
 	}
@@ -495,7 +496,7 @@ func (p *DeletePayload) MarshalBinary() ([]byte, error) {
 
 func (p *DeletePayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing delete payload: truncated body")
+		return errors.New("parsing delete payload: truncated body")
 	}
 	spiSize := int(data[1])
 	count := int(binary.BigEndian.Uint16(data[2:4]))
@@ -538,7 +539,7 @@ func (p *IDPayload) MarshalBinary() ([]byte, error) {
 
 func (p *IDPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing identification: truncated body")
+		return errors.New("parsing identification: truncated body")
 	}
 	p.IDType = data[0]
 	p.Data = append([]byte(nil), data[4:]...)
@@ -573,7 +574,7 @@ func (p *AuthPayload) MarshalBinary() ([]byte, error) {
 
 func (p *AuthPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing authentication: truncated body")
+		return errors.New("parsing authentication: truncated body")
 	}
 	p.Method = data[0]
 	p.Data = append([]byte(nil), data[4:]...)
@@ -609,7 +610,7 @@ func (p *ConfigPayload) MarshalBinary() ([]byte, error) {
 
 func (p *ConfigPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing configuration: truncated body")
+		return errors.New("parsing configuration: truncated body")
 	}
 	attrs, err := decodeAttributes(data[4:])
 	if err != nil {
@@ -656,7 +657,7 @@ func (s *TrafficSelector) UnmarshalBinary(data []byte) error {
 
 func decodeTrafficSelector(data []byte) (TrafficSelector, int, error) {
 	if len(data) < 4 {
-		return TrafficSelector{}, 0, fmt.Errorf("parsing traffic selector: truncated selector")
+		return TrafficSelector{}, 0, errors.New("parsing traffic selector: truncated selector")
 	}
 	length := int(binary.BigEndian.Uint16(data[2:4]))
 	if length < 4 {
@@ -703,7 +704,7 @@ func (p *TrafficSelectorPayload) MarshalBinary() ([]byte, error) {
 
 func (p *TrafficSelectorPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
-		return fmt.Errorf("parsing traffic selectors: truncated body")
+		return errors.New("parsing traffic selectors: truncated body")
 	}
 	count := int(data[0])
 	selectors, err := decodeTrafficSelectors(data[4:])
@@ -816,7 +817,7 @@ func DecodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 	remaining := data
 	for nextType != payloadTypeNone {
 		if len(remaining) < 4 {
-			return nil, fmt.Errorf("parsing payload chain: truncated payload")
+			return nil, errors.New("parsing payload chain: truncated payload")
 		}
 		next := remaining[0]
 		critical := remaining[1]&0x80 != 0
@@ -960,7 +961,7 @@ func FindDeletePayload(payloads []Payload) *DeletePayload {
 
 func DecodeDeviceIdentity(data []byte) (byte, []byte, error) {
 	if len(data) < 3 {
-		return 0, nil, fmt.Errorf("parsing device identity: data too short")
+		return 0, nil, errors.New("parsing device identity: data too short")
 	}
 	length := int(binary.BigEndian.Uint16(data[:2]))
 	if length < 1 {
@@ -980,7 +981,7 @@ func DecodeDeviceIdentity(data []byte) (byte, []byte, error) {
 
 func EncodeDeviceIdentityForType(identity string, requestedType byte) ([]byte, error) {
 	if identity == "" {
-		return nil, fmt.Errorf("encoding device identity: identity is empty")
+		return nil, errors.New("encoding device identity: identity is empty")
 	}
 	digits := []byte(identity)
 	for _, digit := range digits {

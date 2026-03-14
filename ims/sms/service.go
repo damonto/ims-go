@@ -123,13 +123,13 @@ func init() {
 
 func New(cfg Config, sess *session.Session, reg *registration.Service, card Card) (*Service, error) {
 	if sess == nil {
-		return nil, fmt.Errorf("creating sms service: session is nil")
+		return nil, errors.New("creating sms service: session is nil")
 	}
 	if reg == nil {
-		return nil, fmt.Errorf("creating sms service: registration service is nil")
+		return nil, errors.New("creating sms service: registration service is nil")
 	}
 	if card == nil {
-		return nil, fmt.Errorf("creating sms service: card is nil")
+		return nil, errors.New("creating sms service: card is nil")
 	}
 	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
@@ -518,7 +518,7 @@ func (s *Service) resolveSMSC() (string, error) {
 		smsc = strings.TrimSpace(s.card.SMSC())
 	}
 	if smsc == "" {
-		return "", fmt.Errorf("sending SMS: SMSC is empty")
+		return "", errors.New("sending SMS: SMSC is empty")
 	}
 	return smsc, nil
 }

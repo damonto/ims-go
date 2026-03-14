@@ -252,7 +252,7 @@ func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, e
 
 func newClient(cfg Config, card Card) (*Client, error) {
 	if card == nil {
-		return nil, fmt.Errorf("creating client: card is nil")
+		return nil, errors.New("creating client: card is nil")
 	}
 
 	normalized, err := cfg.normalized(card)

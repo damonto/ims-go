@@ -3,7 +3,7 @@ package ussd
 import (
 	"context"
 	"encoding/xml"
-	"fmt"
+	"errors"
 	"net"
 	"net/textproto"
 	"strings"
@@ -407,7 +407,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 			return
 		}
 		if !handled {
-			done <- fmt.Errorf("HandleRequest(INVITE) handled = false")
+			done <- errors.New("HandleRequest(INVITE) handled = false")
 			return
 		}
 		done <- nil

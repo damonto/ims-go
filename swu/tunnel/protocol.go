@@ -67,11 +67,6 @@ const (
 )
 
 const (
-	deviceIdentityIMEI   byte = 0x01
-	deviceIdentityIMEISV byte = 0x02
-)
-
-const (
 	configTypeRequest byte = 1
 	configTypeReply   byte = 2
 )
@@ -89,42 +84,29 @@ const (
 const attributeFormatTLV byte = 0
 
 const (
-	eapCodeRequest  byte = 1
-	eapCodeResponse byte = 2
-	eapCodeSuccess  byte = 3
-	eapCodeFailure  byte = 4
+	eapCodeRequest byte = 1
+	eapCodeSuccess byte = 3
+	eapCodeFailure byte = 4
 
-	akaSubtypeChallenge              byte = 1
-	akaSubtypeAuthenticationReject   byte = 2
-	akaSubtypeSynchronizationFailure byte = 4
-	akaSubtypeIdentity               byte = 5
-	akaSubtypeNotification           byte = 12
-	akaSubtypeReauthentication       byte = 13
+	akaSubtypeChallenge        byte = 1
+	akaSubtypeIdentity         byte = 5
+	akaSubtypeNotification     byte = 12
+	akaSubtypeReauthentication byte = 13
 
-	akaAttrRAND            byte = 1
-	akaAttrAUTN            byte = 2
-	akaAttrRES             byte = 3
-	akaAttrAUTS            byte = 4
-	akaAttrPadding         byte = 6
-	akaAttrMAC             byte = 11
-	akaAttrPermanentIDReq  byte = 10
-	akaAttrNotification    byte = 12
-	akaAttrAnyIDReq        byte = 13
-	akaAttrIdentity        byte = 14
-	akaAttrFullAuthIDReq   byte = 17
-	akaAttrCounter         byte = 19
-	akaAttrCounterTooSmall byte = 20
-	akaAttrNonceS          byte = 21
-	akaAttrClientErrorCode byte = 22
-	akaAttrIV              byte = 129
-	akaAttrEncryptedData   byte = 130
-	akaAttrNextPseudonym   byte = 132
-	akaAttrNextReauthID    byte = 133
-	akaAttrCheckcode       byte = 134
-	akaAttrResultInd       byte = 135
+	akaAttrRAND           byte = 1
+	akaAttrAUTN           byte = 2
+	akaAttrMAC            byte = 11
+	akaAttrPermanentIDReq byte = 10
+	akaAttrAnyIDReq       byte = 13
+	akaAttrIdentity       byte = 14
+	akaAttrFullAuthIDReq  byte = 17
+	akaAttrCounter        byte = 19
+	akaAttrIV             byte = 129
+	akaAttrEncryptedData  byte = 130
+	akaAttrNextPseudonym  byte = 132
+	akaAttrNextReauthID   byte = 133
+	akaAttrCheckcode      byte = 134
+	akaAttrResultInd      byte = 135
 )
 
-const (
-	akaNotificationSuccess              uint16 = 32768
-	akaClientErrorUnableToProcessPacket uint16 = 0
-)
+const akaClientErrorUnableToProcessPacket uint16 = 0

@@ -2,6 +2,7 @@ package imsclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -128,7 +129,7 @@ func newSession(client *Client) *Session {
 
 func (c *Client) bindUSSDSession(low *imsussd.Session, skipFirst bool) (*Session, error) {
 	if low == nil {
-		return nil, fmt.Errorf("binding ussd session: session is nil")
+		return nil, errors.New("binding ussd session: session is nil")
 	}
 
 	c.mu.Lock()

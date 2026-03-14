@@ -99,7 +99,7 @@ type ESP struct {
 
 func NewESP(cfg Config) (*ESP, error) {
 	if len(cfg.Key) != 16 {
-		return nil, fmt.Errorf("creating ESP: expected 16-byte AES key")
+		return nil, errors.New("creating ESP: expected 16-byte AES key")
 	}
 	return &ESP{
 		codec: Codec{

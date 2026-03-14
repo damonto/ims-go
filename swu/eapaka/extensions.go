@@ -6,6 +6,7 @@ import (
 	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 )
@@ -89,10 +90,10 @@ func buildAKAUint16Attribute(attrType byte, value uint16) AKAAttribute {
 
 func Uint16Value(attr *AKAAttribute) (uint16, error) {
 	if attr == nil {
-		return 0, fmt.Errorf("parsing aka uint16 attribute: attribute is nil")
+		return 0, errors.New("parsing aka uint16 attribute: attribute is nil")
 	}
 	if len(attr.Value) < 2 {
-		return 0, fmt.Errorf("parsing aka uint16 attribute: value too short")
+		return 0, errors.New("parsing aka uint16 attribute: value too short")
 	}
 	return binary.BigEndian.Uint16(attr.Value[:2]), nil
 }
@@ -110,10 +111,10 @@ func buildAKAStringAttribute(attrType byte, value string) AKAAttribute {
 
 func StringValue(attr *AKAAttribute) (string, error) {
 	if attr == nil {
-		return "", fmt.Errorf("parsing aka string attribute: attribute is nil")
+		return "", errors.New("parsing aka string attribute: attribute is nil")
 	}
 	if len(attr.Value) < 2 {
-		return "", fmt.Errorf("parsing aka string attribute: value too short")
+		return "", errors.New("parsing aka string attribute: value too short")
 	}
 	length := int(binary.BigEndian.Uint16(attr.Value[:2]))
 	if len(attr.Value) < 2+length {
@@ -125,7 +126,7 @@ func StringValue(attr *AKAAttribute) (string, error) {
 func (n *AKANotification) UnmarshalAttributes(attrs []AKAAttribute) error {
 	attr := FindAttribute(attrs, akaAttrNotification)
 	if attr == nil {
-		return fmt.Errorf("parsing aka notification: AT_NOTIFICATION is missing")
+		return errors.New("parsing aka notification: AT_NOTIFICATION is missing")
 	}
 	code, err := Uint16Value(attr)
 	if err != nil {
@@ -145,7 +146,7 @@ func DecodeNotification(attrs []AKAAttribute) (AKANotification, error) {
 
 func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byte) error {
 	if message.Code != eapCodeRequest || message.Subtype != akaSubtypeReauthentication {
-		return fmt.Errorf("parsing aka reauthentication: unsupported packet")
+		return errors.New("parsing aka reauthentication: unsupported packet")
 	}
 	nested, err := DecryptAttributes(message.Attributes, encrKey)
 	if err != nil {
@@ -157,7 +158,7 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 	}
 	nonceAttr := FindAttribute(nested, akaAttrNonceS)
 	if nonceAttr == nil || len(nonceAttr.Value) < 18 {
-		return fmt.Errorf("parsing aka reauthentication: AT_NONCE_S is missing")
+		return errors.New("parsing aka reauthentication: AT_NONCE_S is missing")
 	}
 	req := AKAReauthentication{
 		Identifier:   message.Identifier,
@@ -205,17 +206,17 @@ func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, er
 	ivAttr := FindAttribute(attrs, akaAttrIV)
 	encrAttr := FindAttribute(attrs, akaAttrEncryptedData)
 	if ivAttr == nil || encrAttr == nil {
-		return nil, fmt.Errorf("decrypting aka attributes: AT_IV or AT_ENCR_DATA is missing")
+		return nil, errors.New("decrypting aka attributes: AT_IV or AT_ENCR_DATA is missing")
 	}
 	if len(ivAttr.Value) < 18 {
-		return nil, fmt.Errorf("decrypting aka attributes: AT_IV is truncated")
+		return nil, errors.New("decrypting aka attributes: AT_IV is truncated")
 	}
 	if len(encrAttr.Value) < 2 {
-		return nil, fmt.Errorf("decrypting aka attributes: AT_ENCR_DATA is truncated")
+		return nil, errors.New("decrypting aka attributes: AT_ENCR_DATA is truncated")
 	}
 	ciphertext := encrAttr.Value[2:]
 	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("decrypting aka attributes: ciphertext is not block aligned")
+		return nil, errors.New("decrypting aka attributes: ciphertext is not block aligned")
 	}
 	block, err := aes.NewCipher(encrKey)
 	if err != nil {
@@ -235,7 +236,7 @@ func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, er
 		}
 		for _, b := range attr.Value {
 			if b != 0 {
-				return nil, fmt.Errorf("decrypting aka attributes: padding is not zero")
+				return nil, errors.New("decrypting aka attributes: padding is not zero")
 			}
 		}
 	}
@@ -326,7 +327,7 @@ func BuildClientErrorPacket(identifier byte, code uint16) ([]byte, error) {
 
 func DeriveFastReauthKeys(identity []byte, counter uint16, nonceS, mk []byte) ([]byte, []byte, error) {
 	if len(identity) == 0 || len(nonceS) != 16 || len(mk) == 0 {
-		return nil, nil, fmt.Errorf("deriving fast reauth keys: invalid inputs")
+		return nil, nil, errors.New("deriving fast reauth keys: invalid inputs")
 	}
 	seed := make([]byte, 0, len(identity)+2+len(nonceS)+len(mk))
 	seed = append(seed, identity...)

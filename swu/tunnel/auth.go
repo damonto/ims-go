@@ -123,13 +123,13 @@ func identityRequestType(attrs []eapaka.AKAAttribute) (byte, error) {
 				requestType = attr.Type
 				continue
 			}
-			return 0, fmt.Errorf("selecting aka identity: duplicate or conflicting identity request attributes")
+			return 0, errors.New("selecting aka identity: duplicate or conflicting identity request attributes")
 		default:
 			return 0, fmt.Errorf("selecting aka identity: unexpected attribute %d", attr.Type)
 		}
 	}
 	if requests != 1 {
-		return 0, fmt.Errorf("selecting aka identity: expected exactly one identity request attribute")
+		return 0, errors.New("selecting aka identity: expected exactly one identity request attribute")
 	}
 	return requestType, nil
 }
@@ -160,11 +160,11 @@ func selectAKAIdentity(card Card, realm string, state usim.AKAIdentityState, req
 func (f *akaAuthFlow) validateIdentityRequest(requestType byte) error {
 	switch {
 	case f.identityRounds >= 3:
-		return fmt.Errorf("validating aka identity request: too many identity rounds")
+		return errors.New("validating aka identity request: too many identity rounds")
 	case f.identityRounds > 0 && requestType == akaAttrAnyIDReq:
-		return fmt.Errorf("validating aka identity request: AT_ANY_ID_REQ is only valid in the first round")
+		return errors.New("validating aka identity request: AT_ANY_ID_REQ is only valid in the first round")
 	case f.lastIdentityReq == akaAttrPermanentIDReq && requestType == akaAttrFullAuthIDReq:
-		return fmt.Errorf("validating aka identity request: AT_FULLAUTH_ID_REQ cannot follow AT_PERMANENT_ID_REQ")
+		return errors.New("validating aka identity request: AT_FULLAUTH_ID_REQ cannot follow AT_PERMANENT_ID_REQ")
 	default:
 		return nil
 	}
@@ -211,7 +211,7 @@ func (f *akaAuthFlow) run(serverPayloads []ike.Payload) ([]ike.Payload, uint32, 
 	for {
 		eapPayload := ike.FindEAPPayload(serverPayloads)
 		if eapPayload == nil {
-			return nil, 0, fmt.Errorf("connecting swu session: eap payload is missing")
+			return nil, 0, errors.New("connecting swu session: eap payload is missing")
 		}
 		var eapPacket eapaka.EAPPacket
 		if err := eapPacket.UnmarshalBinary(eapPayload.Data); err != nil {

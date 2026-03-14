@@ -136,10 +136,10 @@ type ussdStart struct {
 
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
 	if sess == nil {
-		return nil, fmt.Errorf("creating ussd service: session is nil")
+		return nil, errors.New("creating ussd service: session is nil")
 	}
 	if reg == nil {
-		return nil, fmt.Errorf("creating ussd service: registration service is nil")
+		return nil, errors.New("creating ussd service: registration service is nil")
 	}
 	cfg.Language = strings.TrimSpace(cfg.Language)
 	s := &Service{
@@ -171,7 +171,7 @@ func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
 	if status := resp.StatusCode(); status == 404 {
-		return nil, fmt.Errorf("starting USSD: missing network support")
+		return nil, errors.New("starting USSD: missing network support")
 	} else if status != 200 {
 		return nil, fmt.Errorf("starting USSD: unexpected status %d", status)
 	}
@@ -245,7 +245,7 @@ func (s *Service) HandleError(err error) {
 func (s *Service) newUSSDStart(code string) (ussdStart, sip.Message, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return ussdStart{}, sip.Message{}, fmt.Errorf("starting USSD: code is empty")
+		return ussdStart{}, sip.Message{}, errors.New("starting USSD: code is empty")
 	}
 	start := ussdStart{
 		code:      code,
@@ -955,7 +955,7 @@ func validateUSSDInviteOK(msg sip.Message) error {
 		return fmt.Errorf("missing Recv-Info %q", ussdInfoPackage)
 	}
 	if !acceptsUSSDMedia(msg.Header("Accept")) {
-		return fmt.Errorf("missing required Accept media types")
+		return errors.New("missing required Accept media types")
 	}
 	if err := validateMessageSDP(msg); err != nil {
 		return fmt.Errorf("validating SDP answer: %w", err)
@@ -968,17 +968,17 @@ func validateIncomingUSSDInvite(msg sip.Message) (Message, error) {
 		return Message{}, fmt.Errorf("missing Recv-Info %q", ussdInfoPackage)
 	}
 	if !acceptsUSSDMedia(msg.Header("Accept")) {
-		return Message{}, fmt.Errorf("missing required Accept media types")
+		return Message{}, errors.New("missing required Accept media types")
 	}
 	payload, hasSDP, err := decodeUSSDInvitePayload(msg)
 	if err != nil {
 		return Message{}, err
 	}
 	if !hasSDP {
-		return Message{}, fmt.Errorf("missing SDP offer")
+		return Message{}, errors.New("missing SDP offer")
 	}
 	if !payload.Request && !payload.Notify {
-		return Message{}, fmt.Errorf("missing network initiated USSD marker")
+		return Message{}, errors.New("missing network initiated USSD marker")
 	}
 	return payload, nil
 }
@@ -988,14 +988,14 @@ func validateInboundUSSDInfo(msg sip.Message, requireRequestMarker bool) (Messag
 		return Message{}, fmt.Errorf("missing Info-Package %q", ussdInfoPackage)
 	}
 	if !strings.EqualFold(contentDispositionType(msg.Header("Content-Disposition")), "info-package") {
-		return Message{}, fmt.Errorf("missing Content-Disposition info-package")
+		return Message{}, errors.New("missing Content-Disposition info-package")
 	}
 	payload, err := decodeUSSDPayload(msg)
 	if err != nil {
 		return Message{}, err
 	}
 	if requireRequestMarker && !payload.Request && !payload.Notify {
-		return Message{}, fmt.Errorf("missing network initiated USSD marker")
+		return Message{}, errors.New("missing network initiated USSD marker")
 	}
 	return payload, nil
 }
@@ -1107,14 +1107,14 @@ func validateSDPBody(body []byte) error {
 		haveMedia = true
 		fields := strings.Fields(strings.TrimPrefix(line, "m="))
 		if len(fields) < 2 {
-			return fmt.Errorf("malformed media description")
+			return errors.New("malformed media description")
 		}
 		if fields[1] != "0" {
 			return fmt.Errorf("media port %q is not zero", fields[1])
 		}
 	}
 	if !haveMedia {
-		return fmt.Errorf("missing media description")
+		return errors.New("missing media description")
 	}
 	return nil
 }
@@ -1125,7 +1125,7 @@ func decodeUSSDPayload(msg sip.Message) (Message, error) {
 		if len(msg.Body) == 0 {
 			return Message{}, nil
 		}
-		return Message{}, fmt.Errorf("parsing USSD payload: content type is empty")
+		return Message{}, errors.New("parsing USSD payload: content type is empty")
 	}
 	mediaType, params, err := splitContentTypeHeader("parsing USSD payload", contentType)
 	if err != nil {

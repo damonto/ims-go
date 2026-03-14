@@ -3,6 +3,7 @@ package sip
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -337,7 +338,7 @@ func (m *Message) parseBytes(data []byte) error {
 func splitMessageSections(data []byte) ([]byte, []byte, error) {
 	parts := bytes.SplitN(data, []byte("\r\n\r\n"), 2)
 	if len(parts) != 2 {
-		return nil, nil, fmt.Errorf("parsing SIP message: missing header separator")
+		return nil, nil, errors.New("parsing SIP message: missing header separator")
 	}
 	return parts[0], parts[1], nil
 }
@@ -366,7 +367,7 @@ func parseMessageHeaderBlock(data []byte) (string, Headers, error) {
 		if err := scanner.Err(); err != nil {
 			return "", nil, fmt.Errorf("parsing SIP message: %w", err)
 		}
-		return "", nil, fmt.Errorf("parsing SIP message: missing start line")
+		return "", nil, errors.New("parsing SIP message: missing start line")
 	}
 	startLine := scanner.Text()
 	headers := make(Headers, 0, 8)
@@ -407,7 +408,7 @@ func readHeaderSection(br *bufio.Reader) (string, Headers, int64, error) {
 	startLine, n, err := readLine(br)
 	if err != nil {
 		if err == io.EOF {
-			return "", nil, n, fmt.Errorf("parsing SIP message: missing start line")
+			return "", nil, n, errors.New("parsing SIP message: missing start line")
 		}
 		return "", nil, n, fmt.Errorf("parsing SIP message: %w", err)
 	}

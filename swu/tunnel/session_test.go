@@ -138,6 +138,8 @@ func mustDialSession(t *testing.T, conn net.PacketConn) *Session {
 }
 
 func TestBoundaryNilContext(t *testing.T) {
+	var nilCtx context.Context
+
 	tests := []struct {
 		name string
 		run  func(t *testing.T)
@@ -146,7 +148,7 @@ func TestBoundaryNilContext(t *testing.T) {
 			name: "dial",
 			run: func(t *testing.T) {
 				conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
-				session, err := Dial(nil, Config{
+				session, err := Dial(nilCtx, Config{
 					RemoteAddr: "127.0.0.1:4500",
 					PacketConn: conn,
 					Logger:     testLogger(),
@@ -166,7 +168,7 @@ func TestBoundaryNilContext(t *testing.T) {
 					local:    &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 					writeErr: errors.New("write failed"),
 				})
-				err := session.Connect(nil, "356789012345678", sessionTestCard{})
+				err := session.Connect(nilCtx, "356789012345678", sessionTestCard{})
 				if err == nil || !strings.Contains(err.Error(), "write failed") {
 					t.Fatalf("Connect(nil) error = %v, want wrapped write failure", err)
 				}
@@ -177,7 +179,7 @@ func TestBoundaryNilContext(t *testing.T) {
 			run: func(t *testing.T) {
 				conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 				session := mustDialSession(t, conn)
-				if err := session.WritePacket(nil, []byte("ping")); err != nil {
+				if err := session.WritePacket(nilCtx, []byte("ping")); err != nil {
 					t.Fatalf("WritePacket(nil) error = %v", err)
 				}
 				if len(conn.writes) != 1 {
@@ -195,7 +197,7 @@ func TestBoundaryNilContext(t *testing.T) {
 						{err: io.EOF},
 					},
 				})
-				_, _, err := session.ReadPacket(nil)
+				_, _, err := session.ReadPacket(nilCtx)
 				if err == nil || !strings.Contains(err.Error(), "EOF") {
 					t.Fatalf("ReadPacket(nil) error = %v, want EOF", err)
 				}

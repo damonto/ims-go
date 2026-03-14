@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -81,12 +82,12 @@ func (s *Session) prepareConnect(imei string, card Card) (*connectState, func(),
 
 func (s *Session) beginConnect() (func(), error) {
 	if s.isClosed() {
-		return nil, fmt.Errorf("session is closed")
+		return nil, errors.New("session is closed")
 	}
 	s.mu.Lock()
 	if s.connected {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("already connected")
+		return nil, errors.New("already connected")
 	}
 	if err := s.disconnectedTunnelErrLocked(); err != nil {
 		s.mu.Unlock()
@@ -94,7 +95,7 @@ func (s *Session) beginConnect() (func(), error) {
 	}
 	if s.connecting {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("connect already in progress")
+		return nil, errors.New("connect already in progress")
 	}
 	s.connecting = true
 	s.mu.Unlock()
@@ -193,7 +194,7 @@ func decodeIKESAInitPacket(raw []byte) (ike.IKEPacket, error) {
 
 func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, request []byte) error {
 	if response.Header.ResponderSPI == 0 {
-		return fmt.Errorf("responder spi is empty")
+		return errors.New("responder spi is empty")
 	}
 	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, state.crypto.dhGroup)
 	if err != nil {
@@ -408,10 +409,10 @@ func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16) (negoti
 	sa := ike.FindSAPayload(payloads)
 	ke := ike.FindKEPayload(payloads, dhGroup)
 	if nonce == nil || sa == nil || ke == nil {
-		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: required payload is missing")
+		return negotiatedIKESA{}, nil, nil, errors.New("parsing ike_sa_init response: required payload is missing")
 	}
 	if len(sa.Proposals) == 0 {
-		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: security association is empty")
+		return negotiatedIKESA{}, nil, nil, errors.New("parsing ike_sa_init response: security association is empty")
 	}
 	proposal, err := negotiatedIKESAFromProposal(sa.Proposals[0])
 	if err != nil {
@@ -451,7 +452,7 @@ func negotiatedIKESAFromProposal(proposal ike.Proposal) (negotiatedIKESA, error)
 		}
 	}
 	if parsed.Encryption == 0 || parsed.EncryptionKeyLen == 0 || parsed.Integrity == 0 || parsed.PRF == 0 {
-		return negotiatedIKESA{}, fmt.Errorf("parsing ike_sa_init response: negotiated transform is incomplete")
+		return negotiatedIKESA{}, errors.New("parsing ike_sa_init response: negotiated transform is incomplete")
 	}
 	return parsed, nil
 }
@@ -475,7 +476,7 @@ func childSAConfig(payloads []ike.Payload) (*ike.ConfigPayload, ike.Proposal, er
 	config := ike.FindConfigPayload(payloads)
 	sa := ike.FindSAPayload(payloads)
 	if config == nil || sa == nil || len(sa.Proposals) == 0 {
-		return nil, ike.Proposal{}, fmt.Errorf("parsing ike_auth response: missing child sa or configuration")
+		return nil, ike.Proposal{}, errors.New("parsing ike_auth response: missing child sa or configuration")
 	}
 	return config, sa.Proposals[0], nil
 }
@@ -502,14 +503,14 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 		}
 	}
 	if tunnel.Encryption == 0 || tunnel.EncryptionKeyLen == 0 || tunnel.Integrity == 0 {
-		return Info{}, fmt.Errorf("parsing ike_auth response: negotiated esp transform is incomplete")
+		return Info{}, errors.New("parsing ike_auth response: negotiated esp transform is incomplete")
 	}
 	return tunnel, nil
 }
 
 func applyTunnelAddresses(tunnel *Info, config *ike.ConfigPayload) error {
 	if tunnel == nil || config == nil {
-		return fmt.Errorf("parsing ike_auth response: missing child sa or configuration")
+		return errors.New("parsing ike_auth response: missing child sa or configuration")
 	}
 	internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 := tunnelAddresses(config.Attributes)
 	switch {
@@ -520,7 +521,7 @@ func applyTunnelAddresses(tunnel *Info, config *ike.ConfigPayload) error {
 		tunnel.InnerIP = internalIPv4
 		tunnel.PCSCFIP = pcscfIPv4
 	default:
-		return fmt.Errorf("parsing ike_auth response: p-cscf and internal ip families do not match")
+		return errors.New("parsing ike_auth response: p-cscf and internal ip families do not match")
 	}
 	return nil
 }
@@ -601,7 +602,7 @@ func defaultIKEAuthInitPayloads(identity string, espSPI uint32) ([]ike.Payload, 
 
 func resolveOuterLocalAddr(conn net.PacketConn, remote *net.UDPAddr) (*net.UDPAddr, error) {
 	if conn == nil {
-		return nil, fmt.Errorf("resolving outer local addr: conn is nil")
+		return nil, errors.New("resolving outer local addr: conn is nil")
 	}
 	local, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {

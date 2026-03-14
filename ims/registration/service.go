@@ -91,10 +91,10 @@ type Service struct {
 
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	if sess == nil {
-		return nil, fmt.Errorf("creating registration service: session is nil")
+		return nil, errors.New("creating registration service: session is nil")
 	}
 	if card == nil {
-		return nil, fmt.Errorf("creating registration service: card is nil")
+		return nil, errors.New("creating registration service: card is nil")
 	}
 	cfg = normalizeConfig(cfg)
 
@@ -560,7 +560,7 @@ func (s *Service) addSecurityVerifyHeader(msg *sip.Message, verify *security.Par
 func (s *Service) applySecurityServer(headerValue string) error {
 	headerValue = strings.TrimSpace(headerValue)
 	if headerValue == "" {
-		return fmt.Errorf("applying Security-Server: header is empty")
+		return errors.New("applying Security-Server: header is empty")
 	}
 	var params security.Params
 	if err := params.UnmarshalText([]byte(headerValue)); err != nil {
@@ -579,7 +579,7 @@ func (s *Service) applySecurityServer(headerValue string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("applying Security-Server: no compatible ipsec-3gpp security mechanism")
+	return errors.New("applying Security-Server: no compatible ipsec-3gpp security mechanism")
 }
 
 func (s *Service) applyAuthenticationInfo(msg sip.Message) {
@@ -718,7 +718,7 @@ func (s *Service) handleRefreshRegistration(resp sip.Message, state *refreshRegi
 		return true, nil
 	case 401:
 		if state.challenged {
-			return false, fmt.Errorf("refreshing IMS registration: repeated 401 response")
+			return false, errors.New("refreshing IMS registration: repeated 401 response")
 		}
 		if _, err := s.applyRegisterChallenge(resp); err != nil {
 			return false, fmt.Errorf("refreshing IMS registration: %w", err)
@@ -767,7 +767,7 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 		return true, nil
 	case 401:
 		if *challenged {
-			return false, fmt.Errorf("deregistering IMS: repeated 401 response")
+			return false, errors.New("deregistering IMS: repeated 401 response")
 		}
 		var challenge security.Challenge
 		if err := challenge.UnmarshalText([]byte(resp.Header("WWW-Authenticate"))); err != nil {
@@ -1061,7 +1061,7 @@ func resolveIdentity(cfg Config, card Card) clientIdentity {
 
 func resolveLocalAddr(addr net.Addr) (string, int, error) {
 	if addr == nil {
-		return "", 0, fmt.Errorf("session has no local address")
+		return "", 0, errors.New("session has no local address")
 	}
 	host, portStr, err := net.SplitHostPort(addr.String())
 	if err != nil {

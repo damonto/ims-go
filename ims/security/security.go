@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -104,7 +105,7 @@ func BuildAKAAuthorization(ctx context.Context, card AKAProvider, id Identity, c
 		return AKAResult{}, fmt.Errorf("decoding auth nonce: %w", err)
 	}
 	if len(nonceBytes) < 32 {
-		return AKAResult{}, fmt.Errorf("decoding auth nonce: expected at least 32 bytes")
+		return AKAResult{}, errors.New("decoding auth nonce: expected at least 32 bytes")
 	}
 	aka, err := card.AKA(ctx, nonceBytes[:16], nonceBytes[16:32])
 	if err != nil {
@@ -169,7 +170,7 @@ func (ps *Params) UnmarshalText(text []byte) error {
 func (c *Challenge) UnmarshalText(text []byte) error {
 	value := string(text)
 	if !strings.HasPrefix(value, "Digest ") {
-		return fmt.Errorf("parsing auth challenge: unsupported scheme")
+		return errors.New("parsing auth challenge: unsupported scheme")
 	}
 	challenge := Challenge{}
 	for _, field := range splitHeaderFields(value[len("Digest "):]) {
@@ -190,7 +191,7 @@ func (c *Challenge) UnmarshalText(text []byte) error {
 		}
 	}
 	if challenge.Nonce == "" {
-		return fmt.Errorf("parsing auth challenge: nonce is empty")
+		return errors.New("parsing auth challenge: nonce is empty")
 	}
 	*c = challenge
 	return nil
@@ -329,7 +330,7 @@ func computeAKAResponse(privateIdentity, realm, registerURI, nonce string, resul
 	data := hex.EncodeToString(h1[:]) + ":" + nonce + ":"
 	if qop != "" {
 		if cnonce == "" || nonceCount == "" {
-			return "", fmt.Errorf("computing AKA response: qop requires cnonce and nonce count")
+			return "", errors.New("computing AKA response: qop requires cnonce and nonce count")
 		}
 		data += nonceCount + ":" + cnonce + ":" + qop + ":"
 	}
