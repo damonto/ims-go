@@ -165,22 +165,3 @@ func TestRun(t *testing.T) {
 		})
 	}
 }
-
-func TestTransmitNilContext(t *testing.T) {
-	port := &scriptPort{readData: "\r\nAT+CSIM=8,\"00A40000\"\r\n+CSIM: 4,\"9000\"\r\nOK\r\n"}
-	reader := &Reader{
-		port:   port,
-		reader: bufio.NewReader(port),
-	}
-
-	got, err := reader.Transmit(nil, []byte{0x00, 0xA4, 0x00, 0x00})
-	if err != nil {
-		t.Fatalf("Transmit(nil) error = %v", err)
-	}
-	if string(got) != string([]byte{0x90, 0x00}) {
-		t.Fatalf("Transmit(nil) = % X, want 90 00", got)
-	}
-	if string(port.written) != "AT+CSIM=8,\"00A40000\"\r\n" {
-		t.Fatalf("Transmit(nil) wrote %q, want %q", string(port.written), "AT+CSIM=8,\"00A40000\"\r\n")
-	}
-}

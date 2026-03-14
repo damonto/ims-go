@@ -221,6 +221,10 @@ func (s *Session) handleNonESPPacket(packet []byte, addr net.Addr) {
 	if handled {
 		return
 	}
+	if header, ok := decodeIKEHeader(packet); ok && header.ExchangeType == exchangeTypeInformational && header.Flags&flagResponse != 0 {
+		s.logger.Debug("ignoring unmatched informational response", "message_id", header.MessageID, "initiator_spi", header.InitiatorSPI, "responder_spi", header.ResponderSPI)
+		return
+	}
 	s.logger.Debug("ignoring unexpected non-ESP marker packet")
 }
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/damonto/ims-client/usim"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
@@ -33,7 +34,7 @@ type csimResponse struct {
 	raw     []byte
 }
 
-func New(device string, baudRate int) (*Reader, error) {
+func New(device string, baudRate int) (usimreader.Reader, error) {
 	device = strings.TrimSpace(device)
 	if device == "" {
 		return nil, errors.New("opening AT reader: device is empty")
@@ -54,10 +55,10 @@ func New(device string, baudRate int) (*Reader, error) {
 			return nil, fmt.Errorf("running init command %q: %w", command, err)
 		}
 	}
-	return reader, nil
+	return usim.New(reader), nil
 }
 
-func Open(device string, baudRate int) (*Reader, error) {
+func Open(device string, baudRate int) (usimreader.Reader, error) {
 	return New(device, baudRate)
 }
 
@@ -140,9 +141,6 @@ func (c csimResponse) MarshalBinary() ([]byte, error) {
 }
 
 func (d *Reader) Transmit(ctx context.Context, req []byte) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	command, err := newCSIMCommand(req)
 	if err != nil {
 		return nil, fmt.Errorf("transmitting APDU: %w", err)
@@ -229,4 +227,4 @@ func (d *Reader) Close() error {
 	return d.port.Close()
 }
 
-var _ usimreader.Reader = (*Reader)(nil)
+var _ usimreader.Transmitter = (*Reader)(nil)

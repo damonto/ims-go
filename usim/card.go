@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/damonto/ims-client/usim/command"
+	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
 var (
@@ -25,7 +26,7 @@ var (
 )
 
 type Card struct {
-	tx     Reader
+	tx     usimreader.Reader
 	logger *slog.Logger
 
 	aid             []byte
@@ -52,10 +53,7 @@ func (u *Card) HomeDomain() string                         { return u.homeDomain
 func (u *Card) AKAIdentityState() AKAIdentityState         { return u.akaState.clone() }
 func (u *Card) SetAKAIdentityState(state AKAIdentityState) { u.akaState = state.clone() }
 
-func Load(ctx context.Context, tx Reader, logger *slog.Logger) (*Card, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func Load(ctx context.Context, tx usimreader.Reader, logger *slog.Logger) (*Card, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("loading USIM: reader is nil")
 	}
@@ -78,14 +76,15 @@ func (u *Card) Close() error {
 }
 
 func (u *Card) AKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(rand) != 16 || len(autn) != 16 {
 		return AKAResult{}, errors.New("authenticating USIM: rand and autn must be 16 bytes")
 	}
 
-	result, err := command.Execute(ctx, u.tx, command.Authenticate3G{Rand: rand, AUTN: autn})
+	payload, err := u.tx.Authenticate3G(ctx, usimreader.AuthenticateRequest{Rand: rand, AUTN: autn})
+	if err != nil {
+		return AKAResult{}, fmt.Errorf("authenticating USIM: %w", err)
+	}
+	result, err := command.Authenticate3G{}.Decode(payload)
 	if err != nil {
 		return AKAResult{}, fmt.Errorf("authenticating USIM: %w", err)
 	}
@@ -108,9 +107,10 @@ func (u *Card) load(ctx context.Context) error {
 		return fmt.Errorf("loading USIM: %w", err)
 	}
 	u.aid = aid
+	rootApp := command.App{Reader: u.tx}
 	usimApp := command.App{Reader: u.tx, AID: u.aid}
 
-	iccid, err := usimApp.ReadICCID(ctx, fileEFICCID)
+	iccid, err := rootApp.ReadICCID(ctx, fileEFICCID)
 	if err != nil {
 		return fmt.Errorf("loading ICCID: %w", err)
 	}

@@ -16,8 +16,9 @@ import (
 	imsclient "github.com/damonto/ims-client"
 	atdriver "github.com/damonto/ims-client/driver/at"
 	cciddriver "github.com/damonto/ims-client/driver/ccid"
+	qmidriver "github.com/damonto/ims-client/driver/qmi"
 	swutunnel "github.com/damonto/ims-client/swu/tunnel"
-	"github.com/damonto/ims-client/usim"
+	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
 type options struct {
@@ -26,6 +27,7 @@ type options struct {
 	listReaders bool
 	readerName  string
 	device      string
+	slot        int
 	imei        string
 	epdgAddr    string
 	country     string
@@ -53,10 +55,11 @@ func main() {
 func parseFlags() options {
 	opt := options{}
 	flag.BoolVar(&opt.debug, "debug", false, "enable verbose debug logs")
-	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc or at")
+	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, at, qmi, or qrtr")
 	flag.BoolVar(&opt.listReaders, "list-readers", false, "list available PC/SC readers and exit")
 	flag.StringVar(&opt.readerName, "reader", "", "PC/SC reader name; required for -driver pcsc")
-	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device, for example /dev/ttyUSB7")
+	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device or qmi-proxy modem path, for example /dev/ttyUSB7")
+	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi")
 	flag.StringVar(&opt.imei, "imei", "", "UE IMEI used for SWu authentication")
 	flag.StringVar(&opt.epdgAddr, "epdg", "", "optional ePDG host:port or host; default uses MCC/MNC from the card")
 	flag.StringVar(&opt.country, "country", "IE", "PIDF civic country code, for example NZ")
@@ -88,7 +91,7 @@ func run(opt options) error {
 		return errors.New("running example: choose either SMS flags or -ussd")
 	}
 
-	reader, err := openDriver(opt)
+	reader, err := openDriver(ctx, opt)
 	if err != nil {
 		return err
 	}
@@ -231,7 +234,7 @@ func availableCCIDReaders() ([]string, error) {
 	return readers, nil
 }
 
-func openDriver(opt options) (usim.Reader, error) {
+func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 	switch strings.ToLower(strings.TrimSpace(opt.driverKind)) {
 	case "pcsc":
 		if opt.readerName == "" {
@@ -256,6 +259,21 @@ func openDriver(opt options) (usim.Reader, error) {
 		drv, err := atdriver.New(opt.device, 0)
 		if err != nil {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
+		}
+		return drv, nil
+	case "qmi":
+		if opt.device == "" {
+			return nil, errors.New("opening QMI driver: -device is required")
+		}
+		drv, err := qmidriver.Open(ctx, opt.device, opt.slot)
+		if err != nil {
+			return nil, fmt.Errorf("opening QMI driver: %w", err)
+		}
+		return drv, nil
+	case "qrtr":
+		drv, err := qmidriver.OpenQRTR(ctx, opt.slot)
+		if err != nil {
+			return nil, fmt.Errorf("opening QRTR driver: %w", err)
 		}
 		return drv, nil
 	default:

@@ -85,8 +85,8 @@ func (c ReadIMSI) APDU() []byte {
 	return ReadBinary{Length: byte(c.FileSize)}.APDU()
 }
 
-func (c ReadIMSI) DecodeResponse(resp apdu.Response) (IMSI, error) {
-	data := resp.Data()
+func (c ReadIMSI) Decode(data []byte) (IMSI, error) {
+	data = slices.Clone(data)
 	if len(data) == 0 {
 		return IMSI{}, errors.New("reading EF_IMSI: empty payload")
 	}
@@ -107,48 +107,68 @@ func (c ReadIMSI) DecodeResponse(resp apdu.Response) (IMSI, error) {
 	}, nil
 }
 
+func (c ReadIMSI) DecodeResponse(resp apdu.Response) (IMSI, error) {
+	return c.Decode(resp.Data())
+}
+
 func (c ReadICCID) APDU() []byte {
 	return ReadBinary{Length: byte(c.FileSize)}.APDU()
 }
 
+func (c ReadICCID) Decode(data []byte) (string, error) {
+	return decodeSwappedBCD(data, true), nil
+}
+
 func (c ReadICCID) DecodeResponse(resp apdu.Response) (string, error) {
-	return decodeSwappedBCD(resp.Data(), true), nil
+	return c.Decode(resp.Data())
 }
 
 func (c ReadEFDirRecord) APDU() []byte {
 	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.APDU()
 }
 
-func (c ReadEFDirRecord) DecodeResponse(resp apdu.Response) (simfile.EFDirRecord, error) {
+func (c ReadEFDirRecord) Decode(data []byte) (simfile.EFDirRecord, error) {
 	var record simfile.EFDirRecord
-	if err := record.UnmarshalBinary(resp.Data()); err != nil {
+	if err := record.UnmarshalBinary(data); err != nil {
 		return simfile.EFDirRecord{}, err
 	}
 	return record, nil
+}
+
+func (c ReadEFDirRecord) DecodeResponse(resp apdu.Response) (simfile.EFDirRecord, error) {
+	return c.Decode(resp.Data())
 }
 
 func (c ReadTextBinary) APDU() []byte {
 	return ReadBinary{Length: byte(c.FileSize)}.APDU()
 }
 
+func (c ReadTextBinary) Decode(data []byte) (string, error) {
+	return simfile.DecodeText(data)
+}
+
 func (c ReadTextBinary) DecodeResponse(resp apdu.Response) (string, error) {
-	return simfile.DecodeText(resp.Data())
+	return c.Decode(resp.Data())
 }
 
 func (c ReadTextRecord) APDU() []byte {
 	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.APDU()
 }
 
+func (c ReadTextRecord) Decode(data []byte) (string, error) {
+	return simfile.DecodeText(data)
+}
+
 func (c ReadTextRecord) DecodeResponse(resp apdu.Response) (string, error) {
-	return simfile.DecodeText(resp.Data())
+	return c.Decode(resp.Data())
 }
 
 func (c ReadSMSCRecord) APDU() []byte {
 	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.APDU()
 }
 
-func (c ReadSMSCRecord) DecodeResponse(resp apdu.Response) (string, error) {
-	data := resp.Data()
+func (c ReadSMSCRecord) Decode(data []byte) (string, error) {
+	data = slices.Clone(data)
 	y := int(c.RecordSize) - 28
 	if len(data) != int(c.RecordSize) || y < 0 || y+26 > len(data) {
 		return "", errors.New("reading EF_SMSP: malformed record")
@@ -173,6 +193,10 @@ func (c ReadSMSCRecord) DecodeResponse(resp apdu.Response) (string, error) {
 		return "", nil
 	}
 	return "+" + number, nil
+}
+
+func (c ReadSMSCRecord) DecodeResponse(resp apdu.Response) (string, error) {
+	return c.Decode(resp.Data())
 }
 
 func decodeSwappedBCD(data []byte, stripLeadingNine bool) string {

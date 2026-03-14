@@ -3,8 +3,8 @@ package simfile
 import (
 	"errors"
 
-	"github.com/damonto/ims-client/tlv"
 	"github.com/damonto/ims-client/usim/apdu"
+	"github.com/damonto/ims-client/usim/tlv"
 )
 
 const (

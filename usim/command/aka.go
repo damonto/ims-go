@@ -49,12 +49,16 @@ func (c Authenticate3G) APDU() []byte {
 	}.APDU()
 }
 
-func (c Authenticate3G) DecodeResponse(resp apdu.Response) (Authenticate3GResult, error) {
+func (c Authenticate3G) Decode(data []byte) (Authenticate3GResult, error) {
 	var result Authenticate3GResult
-	if err := result.UnmarshalBinary(resp.Data()); err != nil {
+	if err := result.UnmarshalBinary(data); err != nil {
 		return Authenticate3GResult{}, err
 	}
 	return result, nil
+}
+
+func (c Authenticate3G) DecodeResponse(resp apdu.Response) (Authenticate3GResult, error) {
+	return c.Decode(resp.Data())
 }
 
 func (r *Authenticate3GResult) UnmarshalBinary(data []byte) error {

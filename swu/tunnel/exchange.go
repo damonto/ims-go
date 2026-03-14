@@ -58,17 +58,28 @@ var (
 	ErrIKETimeout = handshake.ErrIKETimeout
 )
 
-const ikeRetransmitAttempts = 6
+const (
+	ikeRetransmitAttempts           = 6
+	informationalRetransmitAttempts = 8
+)
 
 func ikeRetransmitDelay(attempt int) time.Duration {
+	return retransmitDelay(attempt, 8*time.Second)
+}
+
+func informationalRetransmitDelay(attempt int) time.Duration {
+	return retransmitDelay(attempt, 32*time.Second)
+}
+
+func retransmitDelay(attempt int, maxDelay time.Duration) time.Duration {
 	if attempt < 0 {
 		attempt = 0
 	}
 	delay := 500 * time.Millisecond
 	for range attempt {
 		delay *= 2
-		if delay >= 8*time.Second {
-			return 8 * time.Second
+		if delay >= maxDelay {
+			return maxDelay
 		}
 	}
 	return delay

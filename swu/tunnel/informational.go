@@ -171,7 +171,7 @@ func (s *Session) sendInformational(ctx context.Context, payloads []ike.Payload)
 }
 
 func (s *Session) exchangeInformational(ctx context.Context, state informationalState, messageID uint32, wire []byte, waiter <-chan inboundIKE) ([]ike.Payload, error) {
-	for attempt := range ikeRetransmitAttempts {
+	for attempt := range informationalRetransmitAttempts {
 		if err := s.writeInformationalRequest(ctx, state.peer, wire); err != nil {
 			return nil, err
 		}
@@ -196,7 +196,7 @@ func (s *Session) writeInformationalRequest(ctx context.Context, peer *net.UDPAd
 }
 
 func (s *Session) awaitInformationalResponse(ctx context.Context, crypto *ikeCrypto, waiter <-chan inboundIKE, attempt int) ([]ike.Payload, bool, error) {
-	timer := time.NewTimer(ikeRetransmitDelay(attempt))
+	timer := time.NewTimer(informationalRetransmitDelay(attempt))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -481,4 +481,12 @@ func (s *Session) handleIKEPacket(data []byte, addr net.Addr) (bool, error) {
 		return s.handleInformationalResponse(state.ike, packet, data, addr)
 	}
 	return s.handleInformationalRequest(state, packet, addr)
+}
+
+func decodeIKEHeader(data []byte) (ike.IKEHeader, bool) {
+	var header ike.IKEHeader
+	if err := header.UnmarshalBinary(data); err != nil {
+		return ike.IKEHeader{}, false
+	}
+	return header, true
 }

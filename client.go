@@ -13,6 +13,7 @@ import (
 	imsussd "github.com/damonto/ims-client/ims/ussd"
 	swutunnel "github.com/damonto/ims-client/swu/tunnel"
 	"github.com/damonto/ims-client/usim"
+	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
 type Config struct {
@@ -229,7 +230,7 @@ type Session struct {
 	watchOnce sync.Once
 }
 
-func New(ctx context.Context, reader usim.Reader, cfg *Config) (*Client, error) {
+func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

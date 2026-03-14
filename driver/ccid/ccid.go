@@ -10,6 +10,7 @@ import (
 
 	"github.com/ElMostafaIdrassi/goscard"
 
+	"github.com/damonto/ims-client/usim"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
@@ -41,7 +42,7 @@ func ListReaders() ([]string, error) {
 	return slices.Clone(readers), nil
 }
 
-func Open(readerName string) (*Reader, error) {
+func Open(readerName string) (usimreader.Reader, error) {
 	readerName = strings.TrimSpace(readerName)
 	if readerName == "" {
 		return nil, errors.New("opening reader: reader name is empty")
@@ -68,10 +69,10 @@ func Open(readerName string) (*Reader, error) {
 		return nil, fmt.Errorf("connecting to %s: %w", readerName, err)
 	}
 
-	return &Reader{
+	return usim.New(&Reader{
 		ctx:  &ctx,
 		card: &card,
-	}, nil
+	}), nil
 }
 
 func newContext() (goscard.Context, error) {
@@ -120,9 +121,6 @@ func (r *Reader) Transmit(ctx context.Context, req []byte) ([]byte, error) {
 	if r.card == nil {
 		return nil, errors.New("transmitting APDU: reader is closed")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -141,4 +139,4 @@ func (r *Reader) Transmit(ctx context.Context, req []byte) ([]byte, error) {
 	return recv, nil
 }
 
-var _ usimreader.Reader = (*Reader)(nil)
+var _ usimreader.Transmitter = (*Reader)(nil)
