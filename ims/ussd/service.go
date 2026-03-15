@@ -25,10 +25,11 @@ import (
 )
 
 const (
-	ussdInfoPackage   = "g.3gpp.ussd"
-	ussdContentType   = "application/vnd.3gpp.ussd+xml"
-	ussdMultipartType = "multipart/mixed"
-	defaultUSSDLang   = "en"
+	ussdInfoPackage          = "g.3gpp.ussd"
+	ussdContentType          = "application/vnd.3gpp.ussd+xml"
+	ussdMultipartType        = "multipart/mixed"
+	defaultUSSDLang          = "en"
+	queuedUSSDRequestTimeout = 30 * time.Second
 )
 
 type Config struct {
@@ -48,11 +49,13 @@ type Message struct {
 type USSDMessage = Message
 
 type Service struct {
-	cfg        Config
-	sess       *session.Session
-	reg        *registration.Service
-	logger     *slog.Logger
-	attachment session.Attachment
+	cfg           Config
+	sess          *session.Session
+	reg           *registration.Service
+	logger        *slog.Logger
+	attachment    session.Attachment
+	cleanupCtx    context.Context
+	cleanupCancel context.CancelFunc
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -117,10 +120,10 @@ type multipartBodyPart struct {
 }
 
 type queuedUSSDRequest struct {
-	ctx    context.Context
-	msg    sip.Message
-	action string
-	final  bool
+	msg     sip.Message
+	action  string
+	final   bool
+	timeout time.Duration
 }
 
 type ussdStart struct {
@@ -142,12 +145,15 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		return nil, errors.New("creating ussd service: registration service is nil")
 	}
 	cfg.Language = strings.TrimSpace(cfg.Language)
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	s := &Service{
-		cfg:      cfg,
-		sess:     sess,
-		reg:      reg,
-		logger:   slog.Default().With("component", "ims-ussd"),
-		sessions: make(map[string]*Session),
+		cfg:           cfg,
+		sess:          sess,
+		reg:           reg,
+		logger:        slog.Default().With("component", "ims-ussd"),
+		sessions:      make(map[string]*Session),
+		cleanupCtx:    cleanupCtx,
+		cleanupCancel: cleanupCancel,
 	}
 	attachment, err := sess.Attach(s)
 	if err != nil {
@@ -193,6 +199,9 @@ func (s *Service) CloseContext(ctx context.Context) error {
 	s.sessions = make(map[string]*Session)
 	s.mu.Unlock()
 
+	if s.cleanupCancel != nil {
+		s.cleanupCancel()
+	}
 	if s.attachment != nil {
 		_ = s.attachment.Close()
 	}
@@ -372,6 +381,9 @@ func (s *Service) handleIncomingUSSDInvite(ctx context.Context, req session.Requ
 		return s.sess.WriteStatus(ctx, req, 488, "Not Acceptable Here")
 	}
 	ussdSession := s.newIncomingUSSDSession(req.Message, payload)
+	if err := s.sess.WriteStatus(ctx, req, 100, "Trying"); err != nil {
+		return fmt.Errorf("handling USSD INVITE: sending 100 Trying: %w", err)
+	}
 	ussdSession.inviteOK = s.buildIncomingUSSDInviteOK(req.Message, ussdSession.localURI, ussdSession.localTag)
 	s.storeSession(ussdSession)
 	ussdSession.emit(payload)
@@ -506,7 +518,7 @@ func (s *Session) Reply(ctx context.Context, text string) error {
 	if err := s.ensureActive("replying USSD"); err != nil {
 		return err
 	}
-	payload, err := s.marshalDialogPayload(Message{Text: text, Language: s.currentLanguage(), Request: !s.networkInitiated})
+	payload, err := s.marshalDialogPayload(Message{Text: text, Language: s.currentLanguage()})
 	if err != nil {
 		return fmt.Errorf("replying USSD: encoding XML payload: %w", err)
 	}
@@ -608,9 +620,6 @@ func (s *Session) endDirect(ctx context.Context, text string) error {
 }
 
 func (s *Session) marshalDialogPayload(msg Message) ([]byte, error) {
-	if !s.networkInitiated && !msg.Final && !msg.Notify && msg.ErrorCode == 0 {
-		msg.Request = true
-	}
 	if s.networkInitiated {
 		switch s.dialogKind() {
 		case ussdDialogKindRequest:
@@ -765,7 +774,9 @@ func (s *Session) handleACK() {
 		return
 	}
 	s.service.startBackgroundTask(func() {
-		if err := s.exchange(pending.ctx, pending.msg, pending.action); err != nil {
+		ctx, cancel := context.WithTimeout(s.service.cleanupCtx, pending.timeout)
+		defer cancel()
+		if err := s.exchange(ctx, pending.msg, pending.action); err != nil {
 			s.service.logger.Warn("sending queued ussd response", "call_id", s.callID, "method", pending.msg.Method(), "err", err)
 			return
 		}
@@ -795,6 +806,7 @@ func (s *Session) handleInfo(ctx context.Context, req session.Request) error {
 }
 
 func (s *Session) handleBye(ctx context.Context, req session.Request) error {
+	s.releaseInfoExchange()
 	if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
 		return err
 	}
@@ -910,6 +922,10 @@ func (s *Session) setDeliveringInvite(active bool) {
 
 func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, action string, final bool) (bool, error) {
 	ctx = normalizeContext(ctx)
+	timeout, err := queuedRequestTimeout(ctx)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", action, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.networkInitiated || s.acked || s.ackCh == nil {
@@ -922,10 +938,10 @@ func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, acti
 		return false, nil
 	}
 	s.pendingInitial = &queuedUSSDRequest{
-		ctx:    ctx,
-		msg:    msg,
-		action: action,
-		final:  final,
+		msg:     msg,
+		action:  action,
+		final:   final,
+		timeout: timeout,
 	}
 	return true, nil
 }
@@ -1313,4 +1329,16 @@ func normalizeContext(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return ctx
+}
+
+func queuedRequestTimeout(ctx context.Context) (time.Duration, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return queuedUSSDRequestTimeout, nil
+	}
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	return timeout, nil
 }

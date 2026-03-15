@@ -141,7 +141,7 @@ func newConnectCryptoState(dhGroup uint16) (*ikeCrypto, uint64, uint32, []byte, 
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("generating child spi: %w", err)
 	}
-	nonceI, err := randomBytes(16)
+	nonceI, err := randomBytes(32)
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("generating nonce: %w", err)
 	}
@@ -155,7 +155,7 @@ func (state *connectState) resetDHGroup(dhGroup uint16) error {
 	if err != nil {
 		return err
 	}
-	nonceI, err := randomBytes(16)
+	nonceI, err := randomBytes(32)
 	if err != nil {
 		return fmt.Errorf("generating nonce: %w", err)
 	}

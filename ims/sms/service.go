@@ -363,6 +363,7 @@ func (s *Service) runSMSSubmitCleanup() {
 func (s *Service) expireSMSSubmitState(now time.Time) {
 	var expired []smsPendingEntry
 	s.mu.Lock()
+	s.evictExpiredConcatSMS(now)
 	for callID, entry := range s.smsSubmitted {
 		if !entry.expiresAt.After(now) {
 			delete(s.smsSubmitted, callID)
@@ -819,8 +820,8 @@ func (s *Service) sendSMSDeliveryReport(msg sip.Message, report rpMessage) error
 		return fmt.Errorf("building sms delivery report: %w", err)
 	}
 	reportMsg := s.buildMessage(target, payload, msg.Header("Call-ID"))
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	s.startBackgroundTask(func() {
+		ctx, cancel := context.WithTimeout(s.cleanupCtx, 10*time.Second)
 		defer cancel()
 		resp, err := s.sess.Exchange(ctx, reportMsg)
 		if err != nil {
@@ -830,7 +831,7 @@ func (s *Service) sendSMSDeliveryReport(msg sip.Message, report rpMessage) error
 		if status := resp.StatusCode(); status != 200 && status != 202 {
 			s.logger.Debug("sms delivery report rejected", "call_id", reportMsg.Header("Call-ID"), "in_reply_to", reportMsg.Header("In-Reply-To"), "status_code", status)
 		}
-	}()
+	})
 	return nil
 }
 

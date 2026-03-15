@@ -70,6 +70,27 @@ func TestBuildAKAIdentityResponse(t *testing.T) {
 	}
 }
 
+func TestBuildAKAResponsePadsATRESValueToFourByteBoundary(t *testing.T) {
+	wire, err := BuildAKAResponse(3, []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, nil)
+	if err != nil {
+		t.Fatalf("BuildAKAResponse() error = %v", err)
+	}
+
+	var message AKAMessage
+	if err := message.UnmarshalBinary(wire); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+	if len(message.Attributes) != 1 {
+		t.Fatalf("len(Attributes) = %d, want 1", len(message.Attributes))
+	}
+	if got, want := len(message.Attributes[0].Value), 10; got != want {
+		t.Fatalf("len(AT_RES value) = %d, want %d", got, want)
+	}
+	if tail := message.Attributes[0].Value[8:]; !bytes.Equal(tail, []byte{0x00, 0x00}) {
+		t.Fatalf("AT_RES padding = % X, want 00 00", tail)
+	}
+}
+
 func TestParseAKAChallenge(t *testing.T) {
 	randValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)
 	autnValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x22}, 16)...)

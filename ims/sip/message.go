@@ -213,6 +213,11 @@ func (m *Message) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func PendingKey(msg Message) string {
+	if branch := TopViaBranch(msg.Header("Via")); branch != "" {
+		if method := CSeqMethod(msg.Header("CSeq")); method != "" {
+			return branch + "|" + method
+		}
+	}
 	return msg.Header("Call-ID") + "|" + msg.Header("CSeq")
 }
 
@@ -311,6 +316,40 @@ func CSeqNumber(value string) int64 {
 	return n
 }
 
+func CSeqMethod(value string) string {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
+func TopViaBranch(value string) string {
+	return viaParam(topViaValue(value), "branch")
+}
+
+func TopViaReceived(value string) string {
+	return viaParam(topViaValue(value), "received")
+}
+
+func TopViaRPort(value string) string {
+	return viaParam(topViaValue(value), "rport")
+}
+
+func TopViaHasRPort(value string) bool {
+	_, ok := topViaParam(topViaValue(value), "rport")
+	return ok
+}
+
+func TopViaSentBy(value string) string {
+	fields := strings.Fields(topViaValue(value))
+	if len(fields) < 2 {
+		return ""
+	}
+	sentBy, _, _ := strings.Cut(fields[1], ";")
+	return strings.TrimSpace(sentBy)
+}
+
 func TokenListContains(value, want string) bool {
 	for _, token := range strings.Split(value, ",") {
 		if strings.EqualFold(strings.TrimSpace(token), want) {
@@ -318,6 +357,34 @@ func TokenListContains(value, want string) bool {
 		}
 	}
 	return false
+}
+
+func topViaValue(value string) string {
+	value, _, _ = strings.Cut(value, ",")
+	return strings.TrimSpace(value)
+}
+
+func viaParam(value, want string) string {
+	param, _ := topViaParam(value, want)
+	return param
+}
+
+func topViaParam(value, want string) (string, bool) {
+	idx := strings.IndexByte(value, ';')
+	if idx < 0 {
+		return "", false
+	}
+	for _, field := range strings.Split(value[idx+1:], ";") {
+		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if !strings.EqualFold(name, want) {
+			continue
+		}
+		if !ok {
+			return "", true
+		}
+		return strings.Trim(strings.TrimSpace(rawValue), `"`), true
+	}
+	return "", false
 }
 
 func (m *Message) parseBytes(data []byte) error {
@@ -432,12 +499,13 @@ func readHeaderSection(br *bufio.Reader) (string, Headers, int64, error) {
 
 func readLine(br *bufio.Reader) (string, int64, error) {
 	line, err := br.ReadString('\n')
+	consumed := int64(len(line))
 	if err != nil {
-		return "", int64(len(line)), err
+		return "", consumed, err
 	}
 	line = strings.TrimSuffix(line, "\n")
 	line = strings.TrimSuffix(line, "\r")
-	return line, int64(len(line)) + 2, nil
+	return line, consumed, nil
 }
 
 func readBody(br *bufio.Reader, headers Headers) ([]byte, int64, error) {

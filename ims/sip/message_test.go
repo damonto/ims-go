@@ -224,6 +224,22 @@ func TestMessageReadFromWithoutContentLengthUsesRemainingBytes(t *testing.T) {
 	}
 }
 
+func TestMessageReadFromCountsLFLineEndings(t *testing.T) {
+	raw := "MESSAGE sip:+123@example.com SIP/2.0\nVia: SIP/2.0/TCP 127.0.0.1:5060\nContent-Length: 5\n\nhello"
+
+	var msg Message
+	read, err := msg.ReadFrom(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	if read != int64(len(raw)) {
+		t.Fatalf("ReadFrom() bytes = %d, want %d", read, len(raw))
+	}
+	if got := string(msg.Body); got != "hello" {
+		t.Fatalf("Body = %q, want %q", got, "hello")
+	}
+}
+
 func TestResponseHelpers(t *testing.T) {
 	req := NewRequest("MESSAGE", "sip:+123@example.com")
 	req.Headers = Headers{
@@ -267,5 +283,69 @@ func TestHelpers(t *testing.T) {
 	}
 	if !TokenListContains("path, sec-agree", "sec-agree") {
 		t.Fatal("TokenListContains() = false, want true")
+	}
+}
+
+func TestPendingKeyUsesTopViaBranchAndMethod(t *testing.T) {
+	messageReq := NewRequest("MESSAGE", "sip:bob@example.com")
+	messageReq.Headers = Headers{
+		{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1"},
+		{Name: "Call-ID", Value: "call-1"},
+		{Name: "CSeq", Value: "7 MESSAGE"},
+	}
+	cancelReq := NewRequest("CANCEL", "sip:bob@example.com")
+	cancelReq.Headers = Headers{
+		{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1"},
+		{Name: "Call-ID", Value: "call-1"},
+		{Name: "CSeq", Value: "7 CANCEL"},
+	}
+
+	messageKey := PendingKey(messageReq)
+	cancelKey := PendingKey(cancelReq)
+	if messageKey != "z9hG4bK-1|MESSAGE" {
+		t.Fatalf("PendingKey(MESSAGE) = %q, want z9hG4bK-1|MESSAGE", messageKey)
+	}
+	if cancelKey != "z9hG4bK-1|CANCEL" {
+		t.Fatalf("PendingKey(CANCEL) = %q, want z9hG4bK-1|CANCEL", cancelKey)
+	}
+	if messageKey == cancelKey {
+		t.Fatalf("PendingKey() keys are equal: %q", messageKey)
+	}
+}
+
+func TestTopViaHasRPortDistinguishesBareParameter(t *testing.T) {
+	tests := []struct {
+		name string
+		via  string
+		want string
+		has  bool
+	}{
+		{
+			name: "bare rport",
+			via:  "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1;rport",
+			has:  true,
+		},
+		{
+			name: "valued rport",
+			via:  "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1;rport=5070",
+			want: "5070",
+			has:  true,
+		},
+		{
+			name: "missing rport",
+			via:  "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1",
+			has:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TopViaRPort(tt.via); got != tt.want {
+				t.Fatalf("TopViaRPort() = %q, want %q", got, tt.want)
+			}
+			if got := TopViaHasRPort(tt.via); got != tt.has {
+				t.Fatalf("TopViaHasRPort() = %t, want %t", got, tt.has)
+			}
+		})
 	}
 }

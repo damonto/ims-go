@@ -351,6 +351,9 @@ func BuildAKAResponse(id byte, res, autKey []byte) ([]byte, error) {
 	value := make([]byte, 2+len(res))
 	binary.BigEndian.PutUint16(value[:2], uint16(len(res)*8))
 	copy(value[2:], res)
+	if rem := (len(value) + 2) % 4; rem != 0 {
+		value = append(value, make([]byte, 4-rem)...)
+	}
 	attrs := []AKAAttribute{{Type: akaAttrRES, Value: value}}
 	macIndex := -1
 	if len(autKey) != 0 {

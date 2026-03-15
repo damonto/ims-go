@@ -34,6 +34,25 @@ func TestESPPacketRoundTrip(t *testing.T) {
 	}
 }
 
+func TestESPPacketMarshalBinaryAddsSequentialPadding(t *testing.T) {
+	wire, err := (ESPPacket{
+		SPI:        0x11223344,
+		Sequence:   7,
+		NextHeader: 17,
+		Payload:    []byte{0xAA, 0xBB, 0xCC},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	if got, want := wire[len(wire)-2], byte(3); got != want {
+		t.Fatalf("PadLen = %d, want %d", got, want)
+	}
+	if got := wire[11:14]; string(got) != string([]byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("padding = % X, want 01 02 03", got)
+	}
+}
+
 func TestReplayWindowAccept(t *testing.T) {
 	tests := []struct {
 		name      string

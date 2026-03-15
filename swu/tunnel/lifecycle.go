@@ -34,6 +34,7 @@ func (s *Session) commitConnect(state *connectState) {
 	s.livenessTimeout = state.established.LivenessTimeout
 	s.natKeepaliveInterval = 20 * time.Second
 	s.informWaiters = make(map[uint32]chan inboundIKE)
+	s.informResponses = make(map[uint32][]byte)
 	s.outboundESP = state.outboundESPCodec()
 	s.inboundESP = state.inboundESPCodec()
 	s.dataPlaneDone = make(chan struct{})
@@ -101,6 +102,7 @@ func (s *Session) discardSecurityAssociations(cause error) {
 	s.lastProtectedTx = time.Time{}
 	s.livenessTimeout = 0
 	s.natKeepaliveInterval = 0
+	s.informResponses = nil
 	s.mu.Unlock()
 
 	s.notifyDetachedAttachments(s.detachAllAttachments(), cause)

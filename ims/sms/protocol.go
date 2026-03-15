@@ -136,7 +136,7 @@ func decodeSMSDeliverFields(data []byte) (smsDeliverFields, error) {
 		return smsDeliverFields{}, err
 	}
 	idx += n
-	if len(data[idx:]) < 9 {
+	if len(data[idx:]) < 10 {
 		return smsDeliverFields{}, errors.New("decoding SMS-DELIVER: truncated mandatory fields")
 	}
 	idx++
@@ -400,7 +400,7 @@ func newRPErrorMessage(reference, cause byte) rpMessage {
 func (m rpMessage) MarshalBinary() ([]byte, error) {
 	switch m.Type {
 	case rpDataMSToNetwork, rpDataNetworkToMS:
-		if len(m.TPDU) > 255 {
+		if len(m.TPDU) > 233 {
 			return nil, fmt.Errorf("marshalling RP-DATA: tpdu too long %d", len(m.TPDU))
 		}
 		payload := []byte{m.Type, m.Reference}

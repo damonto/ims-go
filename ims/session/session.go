@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -496,12 +498,19 @@ func (s *Session) writeResponsePacket(ctx context.Context, transport Transport, 
 	return s.writePacketTo(ctx, transport, data, responseDestination(transport.RemoteAddr(), req.Header("Via")))
 }
 
-func responseDestination(remote net.Addr, _ string) net.Addr {
+func responseDestination(remote net.Addr, via string) net.Addr {
 	udpRemote, ok := remote.(*net.UDPAddr)
 	if !ok || udpRemote == nil {
 		return nil
 	}
-	return &net.UDPAddr{IP: append(net.IP(nil), udpRemote.IP...), Port: udpRemote.Port, Zone: udpRemote.Zone}
+	target := &net.UDPAddr{IP: append(net.IP(nil), udpRemote.IP...), Port: udpRemote.Port, Zone: udpRemote.Zone}
+	if received := sip.TopViaReceived(via); received != "" {
+		if ip := net.ParseIP(stripHostBrackets(received)); ip != nil {
+			target.IP = ip
+		}
+		target.Port = topViaResponsePort(via, udpRemote.Port)
+	}
+	return target
 }
 
 func (s *Session) registerPending(msg sip.Message) <-chan sip.Message {
@@ -531,8 +540,38 @@ func (s *Session) dispatchResponse(msg sip.Message) bool {
 	select {
 	case ch <- msg:
 	default:
+		s.logger.Warn("dropping buffered response", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "status", msg.StatusCode())
 	}
 	return true
+}
+
+func topViaResponsePort(via string, remotePort int) int {
+	if rport := sip.TopViaRPort(via); rport != "" {
+		if port, err := strconv.Atoi(rport); err == nil && port > 0 {
+			return port
+		}
+	}
+	if sip.TopViaHasRPort(via) && remotePort > 0 {
+		return remotePort
+	}
+	sentBy := sip.TopViaSentBy(via)
+	if sentBy == "" {
+		return 5060
+	}
+	_, portText, err := net.SplitHostPort(sentBy)
+	if err != nil {
+		return 5060
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 {
+		return 5060
+	}
+	return port
+}
+
+func stripHostBrackets(host string) string {
+	host = strings.TrimPrefix(host, "[")
+	return strings.TrimSuffix(host, "]")
 }
 
 func (s *Session) handlerSnapshot() []*handlerEntry {

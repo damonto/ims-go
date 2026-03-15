@@ -437,6 +437,7 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 
 func (s *Service) completeRegistration(ctx context.Context, challenge security.Challenge, initialAuth *security.Authorization) error {
 	adjustedExpires := false
+	rechallenged := false
 	auth := initialAuth
 	for {
 		if auth == nil {
@@ -454,6 +455,20 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			if err := s.adjustRegisterExpiresFrom423("registering IMS", resp, &adjustedExpires); err != nil {
 				return err
 			}
+			rechallenged = false
+			auth = nil
+			continue
+		}
+		if resp.StatusCode() == 401 {
+			if rechallenged {
+				return errors.New("registering IMS: repeated 401 response")
+			}
+			nextChallenge, err := s.applyRegisterChallenge(resp)
+			if err != nil {
+				return fmt.Errorf("registering IMS: %w", err)
+			}
+			challenge = nextChallenge
+			rechallenged = true
 			auth = nil
 			continue
 		}
@@ -484,11 +499,8 @@ func (s *Service) applyAssociatedURI(msg sip.Message) {
 
 func (s *Service) applyServiceRoutes(msg sip.Message) {
 	routes := msg.HeadersByName("Service-Route")
-	if len(routes) == 0 {
-		return
-	}
 	s.mu.Lock()
-	s.state.ServiceRoutes = append(s.state.ServiceRoutes[:0], routes...)
+	s.state.ServiceRoutes = append([]string(nil), routes...)
 	s.mu.Unlock()
 }
 
@@ -1089,7 +1101,7 @@ func normalizeConfig(cfg Config) Config {
 		cfg.UserAgent = "IMSClient/1.0 Linux"
 	}
 	if cfg.RegisterExpires == 0 {
-		cfg.RegisterExpires = 10 * time.Minute
+		cfg.RegisterExpires = 600000 * time.Second
 	}
 	return cfg
 }
@@ -1139,7 +1151,7 @@ func newSecurityClient(registerPort int) security.Param {
 	}
 	return security.Param{
 		Mechanism: "ipsec-3gpp",
-		Alg:       "hmac-md5-96",
+		Alg:       "hmac-sha-1-96",
 		EAlg:      "null",
 		Mod:       "trans",
 		PortC:     clientPort,

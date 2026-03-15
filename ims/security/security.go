@@ -284,8 +284,6 @@ func (p *Param) unmarshalText(text string) error {
 
 func normalizeIntegrityAlg(alg string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
-	case "hmac-md5-96":
-		return "hmac-md5-96", true
 	case "hmac-sha-1-96", "hmac-sha1-96":
 		return "hmac-sha1-96", true
 	case "hmac-sha-256-128", "hmac-sha256-128":

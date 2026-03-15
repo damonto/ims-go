@@ -47,7 +47,11 @@ func (p ESPPacket) MarshalBinary() ([]byte, error) {
 	binary.BigEndian.PutUint32(buf[:4], p.SPI)
 	binary.BigEndian.PutUint32(buf[4:8], p.Sequence)
 	buf = append(buf, p.Payload...)
-	buf = append(buf, 0x00, p.NextHeader)
+	padLen := paddingLength(len(p.Payload)+2, 4)
+	for i := 1; i <= padLen; i++ {
+		buf = append(buf, byte(i))
+	}
+	buf = append(buf, byte(padLen), p.NextHeader)
 	return buf, nil
 }
 

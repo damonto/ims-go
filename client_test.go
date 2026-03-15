@@ -105,7 +105,7 @@ func (t *gatedCancelTransport) writeCount() int {
 
 const (
 	testIMEI              = "356789012345678"
-	fakeIMSSecurityServer = "ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20"
+	fakeIMSSecurityServer = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20"
 )
 
 func newStandaloneClient(t *testing.T) *Client {

@@ -191,8 +191,19 @@ func TestDecodeTPAddressSemiOctetSpecialDigits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeTPAddress() error = %v", err)
 	}
-	if got != "+123#45*" {
-		t.Fatalf("decodeTPAddress() = %q, want %q", got, "+123#45*")
+	if got != "123#45*" {
+		t.Fatalf("decodeTPAddress() = %q, want %q", got, "123#45*")
+	}
+}
+
+func TestEncodeTPAddressShortCodeUsesUnknownTypeOfNumber(t *testing.T) {
+	got := encodeTPAddress("777")
+
+	if len(got) < 2 {
+		t.Fatalf("len(encodeTPAddress()) = %d, want at least 2", len(got))
+	}
+	if got[1] != 0x81 {
+		t.Fatalf("ToA = 0x%02X, want 0x81", got[1])
 	}
 }
 

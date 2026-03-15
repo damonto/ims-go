@@ -173,6 +173,28 @@ func TestRegisterAppliesChallengeAndSuccessState(t *testing.T) {
 	}
 }
 
+func TestBuildRegisterUsesSpecDefaultExpires(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+
+	msg := svc.buildRegister(nil, nil)
+	if got := msg.Header("Expires"); got != "600000" {
+		t.Fatalf("Expires = %q, want 600000", got)
+	}
+}
+
+func TestApplyServiceRoutesReplacesStoredRoutesWithEmptyList(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+	svc.mu.Lock()
+	svc.state.ServiceRoutes = []string{"<sip:old.example.com;lr>"}
+	svc.mu.Unlock()
+
+	svc.applyServiceRoutes(sip.Message{})
+
+	if got := svc.State().ServiceRoutes; len(got) != 0 {
+		t.Fatalf("ServiceRoutes = %v, want empty", got)
+	}
+}
+
 func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -303,6 +325,40 @@ func TestRegisterRetries423MinExpires(t *testing.T) {
 
 	if err := svc.Register(context.Background()); err != nil {
 		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestRegisterHandlesRechallenge401(t *testing.T) {
+	transport := newUDPTransport(5062, 5060)
+	svc := newTestService(t, Config{}, transport, stubCard{})
+
+	firstNonce := "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
+	secondNonce := "AgICAgICAgICAgICAgICAQMDAwMDAwMDAwMDAwMDAwM="
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		switch countWrites(transport) {
+		case 1:
+			transport.queue(newUnauthorizedRegisterResponse(req, firstNonce, 0))
+		case 2:
+			if got := req.Header("Authorization"); !strings.Contains(got, `nonce="`+firstNonce+`"`) {
+				t.Fatalf("Authorization = %q, want first nonce", got)
+			}
+			transport.queue(newUnauthorizedRegisterResponse(req, secondNonce, 0))
+		case 3:
+			if got := req.Header("Authorization"); !strings.Contains(got, `nonce="`+secondNonce+`"`) {
+				t.Fatalf("Authorization = %q, want second nonce", got)
+			}
+			transport.queue(newResponse(req, 200, "OK"))
+		default:
+			t.Fatalf("unexpected write count %d", countWrites(transport))
+		}
+	}
+
+	if err := svc.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if !svc.State().Registered {
+		t.Fatal("Registered = false, want true")
 	}
 }
 
@@ -532,9 +588,9 @@ func mustParseMessage(t *testing.T, data []byte) sip.Message {
 }
 
 func newUnauthorizedRegisterResponse(req sip.Message, nonce string, portC int) sip.Message {
-	securityServer := `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`
+	securityServer := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`
 	if portC != 0 {
-		securityServer = `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=` + strconv.Itoa(portC) + `;port-s=4060;prot=esp;spi-c=111;spi-s=222`
+		securityServer = `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=` + strconv.Itoa(portC) + `;port-s=4060;prot=esp;spi-c=111;spi-s=222`
 	}
 	return newResponse(req, 401, "Unauthorized",
 		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + nonce + `",algorithm=AKAv1-MD5,qop="auth"`},

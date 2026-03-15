@@ -73,6 +73,7 @@ type Session struct {
 	livenessTimeout      time.Duration
 	natKeepaliveInterval time.Duration
 	informWaiters        map[uint32]chan inboundIKE
+	informResponses      map[uint32][]byte
 
 	attachmentsMu sync.RWMutex
 	attachments   []*sessionAttachment

@@ -422,6 +422,45 @@ func TestWriteResponseTargetsUDPSourceAndFallsBack(t *testing.T) {
 	}
 }
 
+func TestResponseDestinationUsesTopViaReceivedAndPort(t *testing.T) {
+	tests := []struct {
+		name string
+		via  string
+		want *net.UDPAddr
+	}{
+		{
+			name: "uses received and rport",
+			via:  "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1;received=198.51.100.10;rport=5070",
+			want: &net.UDPAddr{IP: net.ParseIP("198.51.100.10"), Port: 5070},
+		},
+		{
+			name: "falls back to sent-by port when rport missing",
+			via:  "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1;received=198.51.100.10",
+			want: &net.UDPAddr{IP: net.ParseIP("198.51.100.10"), Port: 5062},
+		},
+		{
+			name: "uses source port when rport has no value",
+			via:  "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1;received=198.51.100.10;rport",
+			want: &net.UDPAddr{IP: net.ParseIP("198.51.100.10"), Port: 5060},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 5060}
+
+			gotAddr := responseDestination(remote, tt.via)
+			got, ok := gotAddr.(*net.UDPAddr)
+			if !ok {
+				t.Fatalf("responseDestination() = %T, want *net.UDPAddr", gotAddr)
+			}
+			if !got.IP.Equal(tt.want.IP) || got.Port != tt.want.Port {
+				t.Fatalf("responseDestination() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 	tests := []struct {
 		name       string

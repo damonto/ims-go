@@ -364,7 +364,7 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 			if len(transport.writes) == 1 {
 				transport.queue(newSMSResponse(req, 401, "Unauthorized",
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
 				))
 				return
 			}
@@ -397,7 +397,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 			if len(transport.writes) == 1 {
 				transport.queue(newSMSResponse(req, 401, "Unauthorized",
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
 				))
 				return
 			}

@@ -143,6 +143,13 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	if last.Method() != "INFO" {
 		t.Fatalf("last.Method() = %q, want INFO", last.Method())
 	}
+	payload, err := decodeUSSDPayload(last)
+	if err != nil {
+		t.Fatalf("decodeUSSDPayload() error = %v", err)
+	}
+	if payload.Request {
+		t.Fatalf("payload.Request = %t, want false", payload.Request)
+	}
 }
 
 func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
@@ -342,8 +349,11 @@ func TestNetworkInitiatedUSSDWaitsForCallbackBefore200OK(t *testing.T) {
 
 	select {
 	case msg := <-writeCh:
-		t.Fatalf("wrote response before callback returned: %s", msg.StartLine)
+		if got := msg.StatusCode(); got != 100 {
+			t.Fatalf("StatusCode() = %d, want 100", got)
+		}
 	case <-time.After(20 * time.Millisecond):
+		t.Fatal("waiting for 100 Trying")
 	}
 
 	close(callbackRelease)
@@ -374,13 +384,16 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	callbackReturned := make(chan struct{})
-	writeCh := make(chan sip.Message, 4)
+	writeCh := make(chan sip.Message, 5)
 	svc, err := New(Config{
 		OnIncoming: func(session *Session, msg Message) {
-			if err := session.Reply(context.Background(), "1"); err != nil {
+			replyCtx, cancel := context.WithCancel(context.Background())
+			if err := session.Reply(replyCtx, "1"); err != nil {
 				t.Errorf("Reply() in callback error = %v", err)
+				cancel()
 				return
 			}
+			cancel()
 			close(callbackReturned)
 		},
 	}, sess, reg)
@@ -429,6 +442,15 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 	}
 
 	var inviteOK sip.Message
+	select {
+	case trying := <-writeCh:
+		if got := trying.StatusCode(); got != 100 {
+			t.Fatalf("StatusCode() = %d, want 100", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for 100 Trying")
+	}
+
 	select {
 	case inviteOK = <-writeCh:
 		if got := inviteOK.StatusCode(); got != 200 {
@@ -533,7 +555,7 @@ func registeredService(t *testing.T, transport *stubTransport) (*session.Session
 			if len(transport.writes) == 1 {
 				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
 				))
 				return
 			}
@@ -563,7 +585,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 			if len(transport.writes) == 1 {
 				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
 				))
 				return
 			}

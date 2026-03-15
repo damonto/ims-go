@@ -356,9 +356,13 @@ func encodeSMSTimestamp(ts time.Time) []byte {
 }
 
 func encodeTPAddress(number string) []byte {
-	number = strings.TrimPrefix(number, "+")
+	toa := byte(0x81)
+	if strings.HasPrefix(number, "+") {
+		toa = 0x91
+		number = strings.TrimPrefix(number, "+")
+	}
 	packed := swapDigits(number)
-	return append([]byte{byte(len(number)), 0x91}, packed...)
+	return append([]byte{byte(len(number)), toa}, packed...)
 }
 
 func digitOctetCount(digits int) int {

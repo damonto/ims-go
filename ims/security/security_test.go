@@ -19,13 +19,13 @@ func (stubAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 
 func TestParamUnmarshalText(t *testing.T) {
 	var got Params
-	err := got.UnmarshalText([]byte("ipsec-3gpp;alg=hmac-md5-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20"))
+	err := got.UnmarshalText([]byte("ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20"))
 	if err != nil {
 		t.Fatalf("UnmarshalText() error = %v", err)
 	}
 	want := Param{
 		Mechanism: "ipsec-3gpp",
-		Alg:       "hmac-md5-96",
+		Alg:       "hmac-sha-1-96",
 		EAlg:      "null",
 		Mod:       "trans",
 		PortC:     5062,
@@ -76,7 +76,7 @@ func TestNormalizeParam(t *testing.T) {
 			name: "defaults omitted protocol",
 			in: Param{
 				Mechanism: "ipsec-3gpp",
-				Alg:       "hmac-md5-96",
+				Alg:       "hmac-sha-1-96",
 				EAlg:      "null",
 				PortC:     5062,
 				PortS:     5060,
@@ -86,7 +86,7 @@ func TestNormalizeParam(t *testing.T) {
 			ok: true,
 			want: Param{
 				Mechanism: "ipsec-3gpp",
-				Alg:       "hmac-md5-96",
+				Alg:       "hmac-sha1-96",
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
@@ -97,10 +97,25 @@ func TestNormalizeParam(t *testing.T) {
 			},
 		},
 		{
+			name: "rejects removed md5 integrity algorithm",
+			in: Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-md5-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5060,
+				Prot:      "esp",
+				SPIC:      10,
+				SPIS:      20,
+			},
+			ok: false,
+		},
+		{
 			name: "rejects incompatible mechanism",
 			in: Param{
 				Mechanism: "tls",
-				Alg:       "hmac-md5-96",
+				Alg:       "hmac-sha-1-96",
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,

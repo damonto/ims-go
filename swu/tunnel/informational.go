@@ -11,6 +11,8 @@ import (
 	"github.com/damonto/ims-client/swu/ike"
 )
 
+const informationalResponseCacheWindow = 8
+
 func (s *Session) allocateMessageID() uint32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -61,6 +63,36 @@ func (s *Session) deliverInformationalWaiter(messageID uint32, packet inboundIKE
 func (s *Session) clearInformationalWaiters() {
 	s.mu.Lock()
 	s.informWaiters = nil
+	s.mu.Unlock()
+}
+
+func (s *Session) cachedInformationalResponse(messageID uint32) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.informResponses) == 0 {
+		return nil, false
+	}
+	wire, ok := s.informResponses[messageID]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), wire...), true
+}
+
+func (s *Session) cacheInformationalResponse(messageID uint32, wire []byte) {
+	if len(wire) == 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.informResponses == nil {
+		s.informResponses = make(map[uint32][]byte)
+	}
+	s.informResponses[messageID] = append([]byte(nil), wire...)
+	for cachedID := range s.informResponses {
+		if cachedID+informationalResponseCacheWindow <= messageID {
+			delete(s.informResponses, cachedID)
+		}
+	}
 	s.mu.Unlock()
 }
 
@@ -417,27 +449,43 @@ func (s *Session) handleInformationalResponse(crypto *ikeCrypto, packet ike.IKEP
 	return true, nil
 }
 
-func (s *Session) writeInformationalResponse(state informationalState, messageID uint32, payloads []ike.Payload, addr net.Addr) error {
-	responseHeader := ike.IKEHeader{
+func informationalResponseHeader(state informationalState, messageID uint32) ike.IKEHeader {
+	return ike.IKEHeader{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeInformational,
-		Flags:        flagResponse,
+		Flags:        flagResponse | flagInitiator,
 		MessageID:    messageID,
 	}
-	wire, err := state.ike.SealIKE(responseHeader, payloads, true)
+}
+
+func (s *Session) sealInformationalResponse(state informationalState, messageID uint32, payloads []ike.Payload) ([]byte, error) {
+	wire, err := state.ike.SealIKE(informationalResponseHeader(state, messageID), payloads, true)
 	if err != nil {
-		return fmt.Errorf("sealing informational response: %w", err)
+		return nil, fmt.Errorf("sealing informational response: %w", err)
 	}
+	return append([]byte{0x00, 0x00, 0x00, 0x00}, wire...), nil
+}
+
+func (s *Session) writeInformationalResponse(state informationalState, messageID uint32, payloads []ike.Payload, addr net.Addr) error {
+	wire, err := s.sealInformationalResponse(state, messageID, payloads)
+	if err != nil {
+		return err
+	}
+	s.cacheInformationalResponse(messageID, wire)
+	return s.writeInformationalResponseWire(state, messageID, len(payloads), wire, addr)
+}
+
+func (s *Session) writeInformationalResponseWire(state informationalState, messageID uint32, payloadCount int, wire []byte, addr net.Addr) error {
 	ctx, cancel := s.timeoutContext(2 * time.Second)
 	defer cancel()
 	peer := s.informationalResponsePeer(addr, state.peer)
-	if err := s.writeOuter(ctx, append([]byte{0x00, 0x00, 0x00, 0x00}, wire...), peer); err != nil {
+	if err := s.writeOuter(ctx, wire, peer); err != nil {
 		return fmt.Errorf("writing informational response: %w", err)
 	}
 	s.markProtectedTx(time.Now())
-	s.logger.Debug("replied to informational request", "message_id", messageID, "payload_count", len(payloads))
+	s.logger.Debug("replied to informational request", "message_id", messageID, "payload_count", payloadCount)
 	return nil
 }
 
@@ -447,6 +495,9 @@ func (s *Session) handleInformationalRequest(state informationalState, packet ik
 		return true, fmt.Errorf("opening informational request: %w", err)
 	}
 	s.markProtectedRx(time.Now())
+	if wire, ok := s.cachedInformationalResponse(packet.Header.MessageID); ok {
+		return true, s.writeInformationalResponseWire(state, packet.Header.MessageID, 0, wire, addr)
+	}
 	responsePayloads, action, err := buildInformationalResponsePayloads(state, payloads, state.identity)
 	if err != nil {
 		return true, err
