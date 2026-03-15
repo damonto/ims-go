@@ -200,7 +200,7 @@ func (c *conn) SetReadDeadline(t time.Time) error {
 		c.readTimeout = defaultRequestTimeout
 		return nil
 	}
-	c.readTimeout = maxDuration(time.Until(t), time.Millisecond)
+	c.readTimeout = max(time.Until(t), time.Millisecond)
 	return nil
 }
 
@@ -265,11 +265,4 @@ func (c *conn) recv(buf []byte) (int, *sockAddr, error) {
 		return n, from, nil
 	}
 	return 0, nil, os.ErrDeadlineExceeded
-}
-
-func maxDuration(a, b time.Duration) time.Duration {
-	if a > b {
-		return a
-	}
-	return b
 }

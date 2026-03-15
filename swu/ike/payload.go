@@ -29,57 +29,8 @@ const (
 )
 
 const (
-	proposalProtocolIKE byte = 1
-	proposalProtocolESP byte = 3
-)
-
-const (
-	transformTypeENCR  byte = 1
-	transformTypePRF   byte = 2
-	transformTypeINTEG byte = 3
-	transformTypeDH    byte = 4
-	transformTypeESN   byte = 5
-)
-
-const transformAttrKeyLength uint16 = 14
-
-const (
-	idTypeFQDN             byte = 2
-	idTypeRFC822Addr       byte = 3
-	authMethodSharedKeyMIC byte = 2
-)
-
-const (
-	protocolIDIKE byte = 1
-	protocolIDESP byte = 3
-)
-
-const (
-	notifyTypeInvalidKEPayload      uint16 = 17
-	notifyTypeNATDetectionSourceIP  uint16 = 16388
-	notifyTypeNATDetectionDestIP    uint16 = 16389
-	notifyTypeEAPOnlyAuthentication uint16 = 16417
-	notifyTypeDeviceIdentity        uint16 = 41101
-)
-
-const (
 	deviceIdentityIMEI   byte = 0x01
 	deviceIdentityIMEISV byte = 0x02
-)
-
-const (
-	configTypeRequest byte = 1
-	configTypeReply   byte = 2
-)
-
-const (
-	configAttrInternalIPv4Address           uint16 = 1
-	configAttrInternalIPv4DNS               uint16 = 3
-	configAttrInternalIPv6Address           uint16 = 8
-	configAttrInternalIPv6DNS               uint16 = 10
-	configAttrPCSCFIPv4Address              uint16 = 20
-	configAttrPCSCFIPv6Address              uint16 = 21
-	configAttrTimeoutPeriodForLivenessCheck uint16 = 24
 )
 
 const (
