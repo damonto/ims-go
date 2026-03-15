@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -189,6 +190,7 @@ func (e *USSDEvents) Close() {
 type Client struct {
 	cfg    Config
 	card   Card
+	reader io.Closer
 	logger *slog.Logger
 
 	lifecycleCtx    context.Context
@@ -230,6 +232,8 @@ type Session struct {
 	watchOnce sync.Once
 }
 
+// New loads the SIM state and takes ownership of reader on success.
+// The returned Client closes the underlying reader when Close is called.
 func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -247,7 +251,12 @@ func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, e
 	}
 
 	raw.Logger = logger
-	return newClient(raw, card)
+	client, err := newClient(raw, card)
+	if err != nil {
+		return nil, err
+	}
+	client.reader = reader
+	return client, nil
 }
 
 func newClient(cfg Config, card Card) (*Client, error) {

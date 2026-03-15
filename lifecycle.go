@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/damonto/ims-client/ims/registration"
@@ -38,10 +37,6 @@ type connectSetup struct {
 	reg        *registration.Service
 	sms        *imssms.Service
 	ussd       *imsussd.Service
-}
-
-type cardCloser interface {
-	io.Closer
 }
 
 const defaultCloseTimeout = 5 * time.Second
@@ -596,8 +591,9 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		c.connecting = false
 		c.reconnecting = false
 		active := c.active
-		card := c.card
+		reader := c.reader
 		c.active = nil
+		c.reader = nil
 		c.mu.Unlock()
 
 		if c.lifecycleCancel != nil {
@@ -608,8 +604,8 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		}
 		c.closeWG.Wait()
 		err = errors.Join(err, c.closeActive(ctx, active))
-		if closer, ok := card.(cardCloser); ok {
-			err = errors.Join(err, wrapCloseError("closing card", closer.Close()))
+		if reader != nil {
+			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
 		}
 		c.emitState(StateClosed)
 		c.events.close()

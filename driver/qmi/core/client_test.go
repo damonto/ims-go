@@ -13,9 +13,11 @@ import (
 )
 
 type fakeTransport struct {
-	t     *testing.T
-	calls []transportCall
-	idx   int
+	t          *testing.T
+	calls      []transportCall
+	idx        int
+	closeCalls int
+	closeErr   error
 }
 
 type transportCall struct {
@@ -42,7 +44,8 @@ func (t *fakeTransport) Do(_ context.Context, req Request) (Response, error) {
 }
 
 func (t *fakeTransport) Close() error {
-	return nil
+	t.closeCalls++
+	return t.closeErr
 }
 
 func TestReaderUIMMessages(t *testing.T) {
@@ -241,6 +244,59 @@ func TestEnsureSlotActivated(t *testing.T) {
 				t.Fatalf("ensureSlotActivated() error = %v, want text %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestReaderCloseIsIdempotent(t *testing.T) {
+	transport := &fakeTransport{
+		t: t,
+		calls: []transportCall{
+			{
+				check: func(req Request) {
+					if req.Service != ServiceControl {
+						t.Fatalf("Service = %v, want %v", req.Service, ServiceControl)
+					}
+					if req.ClientID != 0 {
+						t.Fatalf("ClientID = %d, want 0", req.ClientID)
+					}
+					if req.MessageID != MessageReleaseClientID {
+						t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, MessageReleaseClientID)
+					}
+					assertTLV(t, req.TLVs, 0x01, []byte{byte(ServiceUIM), 0x07})
+				},
+				resp: Response{
+					Service:   ServiceControl,
+					MessageID: MessageReleaseClientID,
+					TLVs: TLVs{
+						TLVBytes(TLVResult, []byte{0x00, 0x00, 0x00, 0x00}),
+					},
+				},
+			},
+		},
+	}
+	reader := &Reader{
+		Transport: transport,
+		Slot:      1,
+		ClientID:  7,
+	}
+
+	if err := reader.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if transport.idx != 1 {
+		t.Fatalf("Do() calls = %d, want 1", transport.idx)
+	}
+	if transport.closeCalls != 1 {
+		t.Fatalf("Close() calls = %d, want 1", transport.closeCalls)
+	}
+	if reader.ClientID != 0 {
+		t.Fatalf("ClientID = %d, want 0", reader.ClientID)
+	}
+	if reader.Transport != nil {
+		t.Fatal("Transport was not cleared")
 	}
 }
 

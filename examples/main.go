@@ -95,11 +95,6 @@ func run(opt options) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := reader.Close(); err != nil {
-			slog.Warn("close driver", "err", err)
-		}
-	}()
 
 	cfg := &imsclient.Config{
 		IMEI:   opt.imei,
@@ -113,6 +108,9 @@ func run(opt options) error {
 
 	client, err := imsclient.New(ctx, reader, cfg)
 	if err != nil {
+		if closeErr := reader.Close(); closeErr != nil {
+			return errors.Join(fmt.Errorf("creating client: %w", err), fmt.Errorf("closing driver: %w", closeErr))
+		}
 		return fmt.Errorf("creating client: %w", err)
 	}
 	defer func() {

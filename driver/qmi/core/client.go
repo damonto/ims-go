@@ -8,6 +8,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,8 @@ type Reader struct {
 	Slot      uint8
 	ClientID  uint8
 	txn       atomic.Uint32
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type sessionRequest struct {
@@ -74,19 +77,30 @@ func Open(ctx context.Context, transport Transport, slot uint8, device string) (
 }
 
 func (r *Reader) Close() error {
-	ctx := context.Background()
+	r.closeOnce.Do(func() {
+		transport := r.Transport
+		if transport == nil {
+			r.ClientID = 0
+			return
+		}
 
-	var releaseErr error
-	if r.ClientID != 0 {
-		releaseErr = r.releaseClientID(ctx)
-		r.ClientID = 0
-	}
+		ctx := context.Background()
 
-	closeErr := r.Transport.Close()
-	if releaseErr == nil {
-		return closeErr
-	}
-	return errors.Join(releaseErr, closeErr)
+		var releaseErr error
+		if r.ClientID != 0 {
+			releaseErr = r.releaseClientID(ctx)
+			r.ClientID = 0
+		}
+
+		closeErr := transport.Close()
+		r.Transport = nil
+		if releaseErr == nil {
+			r.closeErr = closeErr
+			return
+		}
+		r.closeErr = errors.Join(releaseErr, closeErr)
+	})
+	return r.closeErr
 }
 
 func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application, error) {

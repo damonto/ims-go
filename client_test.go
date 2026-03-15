@@ -30,6 +30,16 @@ func (stubCard) AKA(_ context.Context, _, _ []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{RES: []byte("12345678")}, nil
 }
 
+type closingReader struct {
+	closeCalls int
+	closeErr   error
+}
+
+func (r *closingReader) Close() error {
+	r.closeCalls++
+	return r.closeErr
+}
+
 type gatedCancelTransport struct {
 	local  net.Addr
 	remote net.Addr
@@ -317,6 +327,22 @@ func TestNewNilDriver(t *testing.T) {
 	_, err := New(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("New() error = nil, want non-nil")
+	}
+}
+
+func TestClientCloseClosesOwnedReaderOnce(t *testing.T) {
+	client := newStandaloneClient(t)
+	reader := &closingReader{}
+	client.reader = reader
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if reader.closeCalls != 1 {
+		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
 	}
 }
 
