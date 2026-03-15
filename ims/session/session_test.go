@@ -595,15 +595,3 @@ func extractStubTransport(t Transport) *stubTransport {
 		return nil
 	}
 }
-
-func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("waiting for condition")
-}

@@ -299,8 +299,8 @@ func headerAddressURI(value string) string {
 	if uri == "" {
 		return ""
 	}
-	if i := strings.IndexByte(uri, ';'); i >= 0 {
-		return strings.TrimSpace(uri[:i])
+	if before, _, ok := strings.Cut(uri, ";"); ok {
+		return strings.TrimSpace(before)
 	}
 	return strings.TrimSpace(uri)
 }

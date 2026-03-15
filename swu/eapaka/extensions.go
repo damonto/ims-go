@@ -23,16 +23,13 @@ const (
 )
 
 const (
-	akaAttrPermanentIDReq  byte = 10
 	akaAttrNotification    byte = 12
 	akaAttrAnyIDReq        byte = 13
 	akaAttrIdentity        byte = 14
-	akaAttrFullAuthIDReq   byte = 17
 	akaAttrCounter         byte = 19
 	akaAttrCounterTooSmall byte = 20
 	akaAttrNonceS          byte = 21
 	akaAttrClientErrorCode byte = 22
-	akaAttrNextPseudonym   byte = 132
 	akaAttrNextReauthID    byte = 133
 	akaAttrCheckcode       byte = 134
 	akaAttrResultInd       byte = 135
@@ -40,7 +37,6 @@ const (
 
 const (
 	akaNotificationSuccess              uint16 = 32768
-	akaClientErrorUnableToProcessPacket uint16 = 0
 )
 
 type AKANotification struct {
