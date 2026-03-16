@@ -106,6 +106,39 @@ func TestMultipartBodyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestContactValueFormatsIPHosts(t *testing.T) {
+	tests := []struct {
+		name  string
+		state registration.State
+		want  string
+	}{
+		{
+			name: "ipv4",
+			state: registration.State{
+				ContactHost: "127.0.0.1",
+				MessagePort: 5062,
+			},
+			want: "<sip:127.0.0.1:5062>;",
+		},
+		{
+			name: "ipv6",
+			state: registration.State{
+				ContactHost: "2001:db8::20",
+				MessagePort: 5062,
+			},
+			want: "<sip:[2001:db8::20]:5062>;",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contactValue(tt.state); !strings.HasPrefix(got, tt.want) {
+				t.Fatalf("contactValue() = %q, want prefix %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStartUSSDSessionFlow(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)

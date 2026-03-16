@@ -102,14 +102,6 @@ func initialAKAIdentity(card Card) (string, string, usim.AKAIdentityState) {
 	return fmt.Sprintf("0%s@%s", card.IMSI(), realm), realm, state
 }
 
-func undecoratedAKAIdentity(identity string) string {
-	user, _, ok := strings.Cut(identity, "@")
-	if ok {
-		return user
-	}
-	return identity
-}
-
 func identityRequestType(attrs []eapaka.AKAAttribute) (byte, error) {
 	requestType := byte(0)
 	requests := 0
@@ -138,24 +130,24 @@ func identityRequestType(attrs []eapaka.AKAAttribute) (byte, error) {
 func selectAKAIdentity(card Card, realm string, state usim.AKAIdentityState, requestType byte) (string, error) {
 	permanentIdentity := fmt.Sprintf("0%s", card.IMSI())
 	if requestType == akaAttrPermanentIDReq {
-		return permanentIdentity, nil
+		return normalizeAKAIdentity(permanentIdentity, realm), nil
 	}
 	if requestType == akaAttrFullAuthIDReq {
 		if state.Pseudonym != "" {
-			return undecoratedAKAIdentity(normalizeAKAIdentity(state.Pseudonym, realm)), nil
+			return normalizeAKAIdentity(state.Pseudonym, realm), nil
 		}
-		return permanentIdentity, nil
+		return normalizeAKAIdentity(permanentIdentity, realm), nil
 	}
 	if requestType != akaAttrAnyIDReq {
 		return "", fmt.Errorf("selecting aka identity: unsupported request type %d", requestType)
 	}
 	if state.ReauthIdentity != "" && len(state.MK) != 0 && len(state.KAut) != 0 && len(state.KEncr) != 0 {
-		return undecoratedAKAIdentity(normalizeAKAIdentity(state.ReauthIdentity, realm)), nil
+		return normalizeAKAIdentity(state.ReauthIdentity, realm), nil
 	}
 	if state.Pseudonym != "" {
-		return undecoratedAKAIdentity(normalizeAKAIdentity(state.Pseudonym, realm)), nil
+		return normalizeAKAIdentity(state.Pseudonym, realm), nil
 	}
-	return permanentIdentity, nil
+	return normalizeAKAIdentity(permanentIdentity, realm), nil
 }
 
 func (f *akaAuthFlow) validateIdentityRequest(requestType byte) error {
@@ -433,7 +425,7 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 		}
 		return akaResponse{data: data, afterSend: fmt.Errorf("connecting swu session: reauth counter %d is stale (current %d)", reauth.Counter, f.currentState.Counter)}, nil
 	}
-	msk, emsk, err := eapaka.DeriveFastReauthKeys([]byte(undecoratedAKAIdentity(f.currentState.ReauthIdentity)), reauth.Counter, reauth.NonceS, f.currentState.MK)
+	msk, emsk, err := eapaka.DeriveFastReauthKeys([]byte(f.eapIdentity), reauth.Counter, reauth.NonceS, f.currentState.MK)
 	if err != nil {
 		return f.clientErrorResponse(message.Identifier, "deriving fast reauth keys", err)
 	}

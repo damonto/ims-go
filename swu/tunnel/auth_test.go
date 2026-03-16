@@ -3,6 +3,8 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -11,6 +13,8 @@ import (
 	"github.com/damonto/ims-client/swu/ike"
 	"github.com/damonto/ims-client/usim"
 )
+
+const akaAttrNonceSTest byte = 21
 
 type akaChallengeTestCard struct {
 	sessionTestCard
@@ -43,6 +47,58 @@ func buildSignedAKAChallenge(t *testing.T, identifier byte, identity string, ran
 	return wire
 }
 
+func encryptAKAAttributesForTest(t *testing.T, attrs []eapaka.AKAAttribute, encrKey, iv []byte) []eapaka.AKAAttribute {
+	t.Helper()
+
+	plain := make([]byte, 0)
+	for _, attr := range attrs {
+		encoded, err := attr.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		plain = append(plain, encoded...)
+	}
+	if rem := len(plain) % aes.BlockSize; rem != 0 {
+		padLen := aes.BlockSize - rem
+		padding, err := (eapaka.AKAAttribute{Type: eapaka.AttrPadding, Value: make([]byte, padLen-2)}).MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		plain = append(plain, padding...)
+	}
+	block, err := aes.NewCipher(encrKey)
+	if err != nil {
+		t.Fatalf("NewCipher() error = %v", err)
+	}
+	ciphertext := make([]byte, len(plain))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, plain)
+	return []eapaka.AKAAttribute{
+		{Type: akaAttrIV, Value: append([]byte{0x00, 0x00}, iv...)},
+		{Type: akaAttrEncryptedData, Value: append([]byte{0x00, 0x00}, ciphertext...)},
+	}
+}
+
+func buildSignedAKAReauthRequest(t *testing.T, identifier byte, counter uint16, nonceS, autKey, encrKey []byte) []byte {
+	t.Helper()
+
+	counterValue := make([]byte, 2)
+	binary.BigEndian.PutUint16(counterValue, counter)
+	encrypted := encryptAKAAttributesForTest(t, []eapaka.AKAAttribute{
+		{Type: akaAttrCounter, Value: counterValue},
+		{Type: akaAttrNonceSTest, Value: append([]byte{0x00, 0x00}, nonceS...)},
+	}, encrKey, bytes.Repeat([]byte{0x55}, aes.BlockSize))
+	wire, err := (eapaka.AKAMessage{
+		Code:       eapaka.CodeRequest,
+		Identifier: identifier,
+		Subtype:    eapaka.SubtypeReauthentication,
+		Attributes: encrypted,
+	}).MarshalSigned(autKey, nil)
+	if err != nil {
+		t.Fatalf("MarshalSigned() error = %v", err)
+	}
+	return wire
+}
+
 func TestAKAAuthFlowBuildIdentityResponse(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -57,7 +113,38 @@ func TestAKAAuthFlowBuildIdentityResponse(t *testing.T) {
 			name:               "first any identity request succeeds",
 			flow:               akaAuthFlow{card: sessionTestCard{}, realm: "nai.epc.mnc001.mcc001.3gppnetwork.org"},
 			attrs:              []eapaka.AKAAttribute{{Type: akaAttrAnyIDReq, Value: []byte{0x00, 0x00}}},
-			wantIdentity:       "0001010123456789",
+			wantIdentity:       "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
+			wantIdentityRounds: 1,
+			wantLastRequest:    akaAttrAnyIDReq,
+		},
+		{
+			name: "fullauth uses pseudonym identity with realm",
+			flow: akaAuthFlow{
+				card:  sessionTestCard{},
+				realm: "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				currentState: usim.AKAIdentityState{
+					Pseudonym: "pseudonym123",
+				},
+			},
+			attrs:              []eapaka.AKAAttribute{{Type: akaAttrFullAuthIDReq, Value: []byte{0x00, 0x00}}},
+			wantIdentity:       "pseudonym123@nai.epc.mnc001.mcc001.3gppnetwork.org",
+			wantIdentityRounds: 1,
+			wantLastRequest:    akaAttrFullAuthIDReq,
+		},
+		{
+			name: "any identity prefers fast reauth nai",
+			flow: akaAuthFlow{
+				card:  sessionTestCard{},
+				realm: "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				currentState: usim.AKAIdentityState{
+					ReauthIdentity: "reauth123@aaa.example.net",
+					MK:             []byte{0x01},
+					KAut:           []byte{0x02},
+					KEncr:          []byte{0x03},
+				},
+			},
+			attrs:              []eapaka.AKAAttribute{{Type: akaAttrAnyIDReq, Value: []byte{0x00, 0x00}}},
+			wantIdentity:       "reauth123@aaa.example.net",
 			wantIdentityRounds: 1,
 			wantLastRequest:    akaAttrAnyIDReq,
 		},
@@ -356,7 +443,7 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 			name:            "challenge after identity round uses last at_identity value",
 			identity:        "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
 			identityRequest: []eapaka.AKAAttribute{{Type: akaAttrPermanentIDReq, Value: []byte{0x00, 0x00}}},
-			challengeID:     "0001010123456789",
+			challengeID:     "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
 		},
 	}
 
@@ -404,6 +491,52 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 				t.Fatalf("response subtype = %d, want %d", got.Subtype, eapaka.SubtypeChallenge)
 			}
 		})
+	}
+}
+
+func TestAKAAuthFlowBuildReauthenticationResponseUsesCurrentEAPIdentity(t *testing.T) {
+	identity := "reauth123@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	mk := bytes.Repeat([]byte{0x77}, 20)
+	kAut := bytes.Repeat([]byte{0x11}, 16)
+	kEncr := bytes.Repeat([]byte{0x22}, 16)
+	nonceS := bytes.Repeat([]byte{0x33}, 16)
+	counter := uint16(5)
+
+	wantMSK, wantEMSK, err := eapaka.DeriveFastReauthKeys([]byte(identity), counter, nonceS, mk)
+	if err != nil {
+		t.Fatalf("DeriveFastReauthKeys() error = %v", err)
+	}
+
+	flow := akaAuthFlow{
+		eapIdentity: identity,
+		currentState: usim.AKAIdentityState{
+			ReauthIdentity: identity,
+			Counter:        1,
+			MK:             mk,
+			KAut:           kAut,
+			KEncr:          kEncr,
+		},
+		crypto: &ikeCrypto{},
+	}
+
+	wire := buildSignedAKAReauthRequest(t, 9, counter, nonceS, kAut, kEncr)
+	var message eapaka.AKAMessage
+	if err := message.UnmarshalBinary(wire); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+
+	response, err := flow.buildReauthenticationResponse(message, wire)
+	if err != nil {
+		t.Fatalf("buildReauthenticationResponse() error = %v", err)
+	}
+	if response.afterSend != nil {
+		t.Fatalf("buildReauthenticationResponse() afterSend = %v, want nil", response.afterSend)
+	}
+	if !bytes.Equal(flow.crypto.eap.MSK, wantMSK) {
+		t.Fatalf("MSK = %X, want %X", flow.crypto.eap.MSK, wantMSK)
+	}
+	if !bytes.Equal(flow.crypto.eap.EMSK, wantEMSK) {
+		t.Fatalf("EMSK = %X, want %X", flow.crypto.eap.EMSK, wantEMSK)
 	}
 }
 

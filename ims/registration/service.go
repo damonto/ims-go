@@ -382,7 +382,7 @@ func (s *Service) currentRegisterContactURI() string {
 	if state.SecurityVerify != nil {
 		port = state.SecurityClient.PortS
 	}
-	return fmt.Sprintf("sip:%s:%d", state.ContactHost, port)
+	return contactURI(state.ContactHost, port)
 }
 
 func (s *Service) CloseContext(ctx context.Context) error {
@@ -1006,8 +1006,7 @@ func (s *Service) subscribeContactValue(port int) string {
 	if s.cfg.IMEI != "" {
 		params = append([]string{fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, s.cfg.IMEI)}, params...)
 	}
-	contactURI := fmt.Sprintf("sip:%s:%d", s.State().ContactHost, port)
-	return fmt.Sprintf("<%s>;%s", contactURI, strings.Join(params, ";"))
+	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
 }
 
 func (s *Service) registerPIDFBody() string {
@@ -1041,8 +1040,11 @@ func (s *Service) registerContactValue(port int) string {
 		params = append(params, fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, s.cfg.IMEI))
 	}
 	params = append(params, "text")
-	contactURI := fmt.Sprintf("sip:%s:%d", s.State().ContactHost, port)
-	return fmt.Sprintf("<%s>;%s", contactURI, strings.Join(params, ";"))
+	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
+}
+
+func contactURI(host string, port int) string {
+	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func resolveIdentity(cfg Config, card Card) clientIdentity {

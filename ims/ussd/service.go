@@ -1281,7 +1281,11 @@ func contactValue(state registration.State) string {
 		params = append(params, fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, state.IMEI))
 	}
 	params = append(params, "text")
-	return fmt.Sprintf("<sip:%s:%d>;%s", state.ContactHost, state.MessagePort, strings.Join(params, ";"))
+	return fmt.Sprintf("<%s>;%s", sipContactURI(state.ContactHost, state.MessagePort), strings.Join(params, ";"))
+}
+
+func sipContactURI(host string, port int) string {
+	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func ussdPreferredIdentity(state registration.State) string {

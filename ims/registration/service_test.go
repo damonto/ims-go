@@ -182,6 +182,54 @@ func TestBuildRegisterUsesSpecDefaultExpires(t *testing.T) {
 	}
 }
 
+func TestContactURIFormatting(t *testing.T) {
+	tests := []struct {
+		name               string
+		localAddr          net.Addr
+		wantRegisterURI    string
+		wantRegisterPrefix string
+		wantSubscribe      string
+	}{
+		{
+			name:               "ipv4",
+			localAddr:          &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+			wantRegisterURI:    "sip:127.0.0.1:5062",
+			wantRegisterPrefix: "<sip:127.0.0.1:5062>;",
+			wantSubscribe:      "<sip:127.0.0.1:5062>;text",
+		},
+		{
+			name:               "ipv6",
+			localAddr:          &net.TCPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5062},
+			wantRegisterURI:    "sip:[2001:db8::10]:5062",
+			wantRegisterPrefix: "<sip:[2001:db8::10]:5062>;",
+			wantSubscribe:      "<sip:[2001:db8::10]:5062>;text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &stubTransport{
+				local:  tt.localAddr,
+				remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+				readCh: make(chan []byte, 16),
+			}
+			svc := newTestService(t, Config{}, transport, stubCard{})
+
+			if got := svc.currentRegisterContactURI(); got != tt.wantRegisterURI {
+				t.Fatalf("currentRegisterContactURI() = %q, want %q", got, tt.wantRegisterURI)
+			}
+
+			if got := svc.buildRegister(nil, nil).Header("Contact"); !strings.HasPrefix(got, tt.wantRegisterPrefix) {
+				t.Fatalf("REGISTER Contact = %q, want prefix %q", got, tt.wantRegisterPrefix)
+			}
+
+			if got := svc.buildSubscribe().Header("Contact"); got != tt.wantSubscribe {
+				t.Fatalf("SUBSCRIBE Contact = %q, want %q", got, tt.wantSubscribe)
+			}
+		})
+	}
+}
+
 func TestNormalizeConfigRegion(t *testing.T) {
 	tests := []struct {
 		name       string
