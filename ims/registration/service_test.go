@@ -182,6 +182,45 @@ func TestBuildRegisterUsesSpecDefaultExpires(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigRegion(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        Config
+		wantRegion string
+	}{
+		{
+			name:       "defaults to IE",
+			cfg:        Config{},
+			wantRegion: "IE",
+		},
+		{
+			name: "trims explicit region",
+			cfg: Config{
+				Region: " NZ ",
+			},
+			wantRegion: "NZ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeConfig(tt.cfg)
+			if got.Region != tt.wantRegion {
+				t.Fatalf("Region = %q, want %q", got.Region, tt.wantRegion)
+			}
+		})
+	}
+}
+
+func TestRegisterPIDFBodyUsesRegionValue(t *testing.T) {
+	svc := newTestService(t, Config{Region: "NZ"}, newUDPTransport(5062, 5060), stubCard{})
+
+	body := svc.registerPIDFBody()
+	if !strings.Contains(body, "<cl:country>NZ</cl:country>") {
+		t.Fatalf("registerPIDFBody() = %q, want region in cl:country element", body)
+	}
+}
+
 func TestApplyServiceRoutesReplacesStoredRoutesWithEmptyList(t *testing.T) {
 	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
 	svc.mu.Lock()

@@ -59,8 +59,8 @@ func TestReaderUIMMessages(t *testing.T) {
 						if req.MessageID != MessageGetFileAttrs {
 							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageGetFileAttrs)
 						}
-						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionCardSlot1), 0x00})
-						assertTLV(t, req.TLVs, 0x02, []byte{0xE2, 0x2F, 0x00})
+						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x00})
+						assertTLV(t, req.TLVs, 0x02, []byte{0xE2, 0x2F, 0x02, 0x00, 0x3F})
 					},
 					resp: successResponse(MessageGetFileAttrs,
 						TLVBytes(0x10, []byte{0x90, 0x00}),
@@ -73,7 +73,7 @@ func TestReaderUIMMessages(t *testing.T) {
 							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageReadTransparent)
 						}
 						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x00})
-						assertTLV(t, req.TLVs, 0x02, []byte{0x07, 0x6F, 0x00})
+						assertTLV(t, req.TLVs, 0x02, []byte{0x07, 0x6F, 0x04, 0x00, 0x3F, 0xFF, 0x7F})
 						assertTLV(t, req.TLVs, 0x03, []byte{0x00, 0x00, 0x09, 0x00})
 					},
 					resp: successResponse(MessageReadTransparent,
@@ -165,6 +165,72 @@ func TestReaderUIMMessages(t *testing.T) {
 	}
 	if !bytes.Equal(auth, []byte{0xDC, 0x00}) {
 		t.Fatalf("Authenticate3G() = %X, want DC00", auth)
+	}
+}
+
+func TestFileRequestStrategy(t *testing.T) {
+	isimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
+	usimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+
+	tests := []struct {
+		name         string
+		file         usimreader.FileRef
+		wantPath     []byte
+		wantSessions []sessionRequest
+	}{
+		{
+			name:         "mf file uses primary provisioning session",
+			file:         usimreader.FileRef{Path: []byte{0x2F, 0xE2}},
+			wantPath:     []byte{0x3F, 0x00, 0x2F, 0xE2},
+			wantSessions: []sessionRequest{{session: SessionPrimaryGWProvisioning}},
+		},
+		{
+			name:         "explicit master file path is preserved",
+			file:         usimreader.FileRef{Path: []byte{0x3F, 0x00, 0x2F, 0x00}},
+			wantPath:     []byte{0x3F, 0x00, 0x2F, 0x00},
+			wantSessions: []sessionRequest{{session: SessionPrimaryGWProvisioning}},
+		},
+		{
+			name:         "usim app expands path through current ADF",
+			file:         usimreader.FileRef{AID: usimAID, Path: []byte{0x6F, 0x07}},
+			wantPath:     []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0x07},
+			wantSessions: []sessionRequest{{session: SessionPrimaryGWProvisioning}},
+		},
+		{
+			name:     "isim app keeps retry session fallback",
+			file:     usimreader.FileRef{AID: isimAID, Path: []byte{0x6F, 0x04}},
+			wantPath: []byte{0x6F, 0x04},
+			wantSessions: []sessionRequest{
+				{session: SessionCardSlot1, aid: isimAID},
+				{session: SessionNonProvisioningSlot1, aid: isimAID},
+			},
+		},
+	}
+
+	reader := &Reader{Slot: 1}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath := reader.requestFilePath(tt.file)
+			if !bytes.Equal(gotPath, tt.wantPath) {
+				t.Fatalf("requestFilePath() = % X, want % X", gotPath, tt.wantPath)
+			}
+
+			gotSessions, err := reader.sessionsForFile(tt.file)
+			if err != nil {
+				t.Fatalf("sessionsForFile() error = %v", err)
+			}
+			if len(gotSessions) != len(tt.wantSessions) {
+				t.Fatalf("sessionsForFile() len = %d, want %d", len(gotSessions), len(tt.wantSessions))
+			}
+			for i := range gotSessions {
+				if gotSessions[i].session != tt.wantSessions[i].session {
+					t.Fatalf("sessionsForFile()[%d].session = %d, want %d", i, gotSessions[i].session, tt.wantSessions[i].session)
+				}
+				if !bytes.Equal(gotSessions[i].aid, tt.wantSessions[i].aid) {
+					t.Fatalf("sessionsForFile()[%d].aid = % X, want % X", i, gotSessions[i].aid, tt.wantSessions[i].aid)
+				}
+			}
+		})
 	}
 }
 

@@ -30,7 +30,7 @@ type IMSConfig struct {
 	Transport         string
 	PublicIdentity    string
 	HomeDomain        string
-	Country           string
+	Region            string
 	USSDLanguage      string
 	UserAgent         string
 	AccessNetworkInfo string

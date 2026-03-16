@@ -23,7 +23,7 @@ import (
 type Config struct {
 	PublicIdentity    string
 	HomeDomain        string
-	Country           string
+	Region            string
 	UserAgent         string
 	AccessNetworkInfo string
 	WLANNodeID        string
@@ -1025,7 +1025,7 @@ func (s *Service) registerPIDFBody() string {
 </gp:geopriv>
 <dm:timestamp>%s</dm:timestamp>
 </dm:device>
-</presence>`, state.PublicIdentity, s.cfg.Country, time.Now().UTC().Format(time.RFC3339))
+</presence>`, state.PublicIdentity, s.cfg.Region, time.Now().UTC().Format(time.RFC3339))
 }
 
 func (s *Service) registerContactValue(port int) string {
@@ -1089,13 +1089,13 @@ func resolveLocalAddr(addr net.Addr) (string, int, error) {
 func normalizeConfig(cfg Config) Config {
 	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
-	cfg.Country = strings.TrimSpace(cfg.Country)
+	cfg.Region = strings.TrimSpace(cfg.Region)
 	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
-	if cfg.Country == "" {
-		cfg.Country = "IE"
+	if cfg.Region == "" {
+		cfg.Region = "IE"
 	}
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = "IMSClient/1.0 Linux"

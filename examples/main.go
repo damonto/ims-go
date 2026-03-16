@@ -30,7 +30,7 @@ type options struct {
 	slot        int
 	imei        string
 	epdgAddr    string
-	country     string
+	region      string
 	sendTo      string
 	sendText    string
 	ussdCode    string
@@ -62,7 +62,7 @@ func parseFlags() options {
 	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi")
 	flag.StringVar(&opt.imei, "imei", "", "UE IMEI used for SWu authentication")
 	flag.StringVar(&opt.epdgAddr, "epdg", "", "optional ePDG host:port or host; default uses MCC/MNC from the card")
-	flag.StringVar(&opt.country, "country", "IE", "PIDF civic country code, for example NZ")
+	flag.StringVar(&opt.region, "region", "IE", "PIDF civic region code, for example NZ")
 	flag.StringVar(&opt.sendTo, "send-to", "", "destination MSISDN for one test SMS")
 	flag.StringVar(&opt.sendText, "send-text", "", "text body for one test SMS")
 	flag.StringVar(&opt.ussdCode, "ussd", "", "USSD code to dial, for example *100#")
@@ -102,7 +102,7 @@ func run(opt options) error {
 		Logger: slog.Default(),
 		Tunnel: swutunnel.Config{},
 		IMS: imsclient.IMSConfig{
-			Country: opt.country,
+			Region: opt.region,
 		},
 	}
 

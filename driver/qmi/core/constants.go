@@ -69,6 +69,7 @@ const (
 	ErrorNoMemory           Error = 2
 	ErrorDeviceInUse        Error = 23
 	ErrorDeviceUnsupported  Error = 25
+	ErrorInvalidArgument    Error = 48
 	ErrorSessionInactive    Error = 65
 	ErrorSessionInvalid     Error = 66
 	ErrorSIMFileNotFound    Error = 80
@@ -85,6 +86,8 @@ func (e Error) Error() string {
 		return "QMI device in use"
 	case ErrorDeviceUnsupported:
 		return "QMI device unsupported"
+	case ErrorInvalidArgument:
+		return "QMI invalid argument"
 	case ErrorSessionInactive:
 		return "QMI session inactive"
 	case ErrorSessionInvalid:

@@ -209,21 +209,21 @@ func TestAKAWithFakeQMITransport(t *testing.T) {
 
 func newUSIMOnlyTransport() *simTransport {
 	files := map[string]simFile{
-		simFileKey(SessionCardSlot1, nil, []byte{0x2F, 0x00}): {
+		simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x2F, 0x00}): {
 			attrs: makeAttrs(20, 0x2F00, 2, 20, 1, "620B8205422100140180020014"),
 			rows: map[uint16][]byte{
 				1: mustHex("610F4F07A000000087100250045553494D"),
 			},
 		},
-		simFileKey(SessionCardSlot1, nil, []byte{0x2F, 0xE2}): {
+		simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x2F, 0xE2}): {
 			attrs: makeAttrs(10, 0x2FE2, 0, 0, 0, "6208820241218002000A"),
 			data:  mustHex("986800000000000000F0"),
 		},
-		simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x6F, 0x07}): {
+		simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0x07}): {
 			attrs: makeAttrs(9, 0x6F07, 0, 0, 0, "62088202412180020009"),
 			data:  mustHex("080910101032547698"),
 		},
-		simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x6F, 0xAD}): {
+		simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0xAD}): {
 			attrs: makeAttrs(4, 0x6FAD, 0, 0, 0, "62088202412180020004"),
 			data:  []byte{0x00, 0x00, 0x00, 0x02},
 		},
@@ -234,20 +234,20 @@ func newUSIMOnlyTransport() *simTransport {
 func newUSIMISIMTransport() *simTransport {
 	isimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
 	files := newUSIMOnlyTransport().files
-	files[simFileKey(SessionCardSlot1, nil, []byte{0x2F, 0x00})] = simFile{
+	files[simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x2F, 0x00})] = simFile{
 		attrs: makeAttrs(40, 0x2F00, 2, 20, 2, "620B8205422100140280020028"),
 		rows: map[uint16][]byte{
 			1: mustHex("610F4F07A000000087100250045553494D"),
 			2: mustHex("610F4F07A000000087100450044953494D"),
 		},
 	}
-	files[simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x6F, 0x42})] = simFile{
+	files[simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x6F, 0x42})] = simFile{
 		attrs: makeAttrs(28, 0x6F42, 2, 28, 1, "620B82054221001C018002001C"),
 		rows: map[uint16][]byte{
 			1: smscRecord(28, 0x91, 0x55, 0x15, 0x00, 0x00, 0x00, 0xF0),
 		},
 	}
-	files[simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x7F, 0x10, 0x6F, 0xE5})] = simFile{
+	files[simFileKey(SessionPrimaryGWProvisioning, nil, []byte{0x3F, 0x00, 0x7F, 0xFF, 0x7F, 0x10, 0x6F, 0xE5})] = simFile{
 		attrs: makeAttrs(32, 0x6FE5, 2, 32, 1, "620B8205422100200180020020"),
 		rows: map[uint16][]byte{
 			1: tlvTextRecord("sip:usim-smsc@example.com", 32),

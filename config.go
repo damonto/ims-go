@@ -103,7 +103,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.Transport = strings.ToLower(strings.TrimSpace(cfg.Transport))
 	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
-	cfg.Country = strings.TrimSpace(cfg.Country)
+	cfg.Region = strings.TrimSpace(cfg.Region)
 	cfg.USSDLanguage = strings.TrimSpace(cfg.USSDLanguage)
 	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
@@ -119,8 +119,8 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	default:
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported transport %q", cfg.Transport)
 	}
-	if cfg.Country == "" {
-		cfg.Country = "IE"
+	if cfg.Region == "" {
+		cfg.Region = "US"
 	}
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = "IMSClient/1.0 Linux"

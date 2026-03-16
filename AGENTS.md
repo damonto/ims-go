@@ -180,11 +180,7 @@ func TestAdd(t *testing.T) {
 
 **严禁**凭空捏造任何第三方库的 API、参数或用法。
 
-### 5.1 代码检索 (Augment Context Engine)
-
-请使用 Augment Context Engine 即 **codebase-retrieval** 进行代码检索或语义分析。
-
-### 5.2 代码生成与 API 核验 (Context7)
+### 5.1 代码生成与 API 核验 (Context7)
 
 凡涉及代码编写、第三方库引用（需符合 Star/活跃度标准）或 API 细节查询时，必须依托 **Context7** 能力进行统一验证。
 

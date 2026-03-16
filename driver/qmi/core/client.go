@@ -24,7 +24,12 @@ const (
 	slotPollInterval      = 500 * time.Millisecond
 )
 
-var isimAIDPrefix = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
+var (
+	usimAIDPrefix  = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+	isimAIDPrefix  = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
+	masterFilePath = []byte{0x3F, 0x00}
+	currentADFPath = []byte{0x7F, 0xFF}
+)
 
 type Reader struct {
 	Transport Transport
@@ -140,8 +145,9 @@ func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application
 }
 
 func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+	path := r.requestFilePath(file)
 	response, err := r.withFileSession(ctx, file, func(ctx context.Context, session sessionRequest) (Response, error) {
-		return r.getFileAttributesResponse(ctx, session, file.Path)
+		return r.getFileAttributesResponse(ctx, session, path)
 	})
 	if err != nil {
 		return usimreader.FileAttributes{}, err
@@ -150,6 +156,7 @@ func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef)
 }
 
 func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.TransparentRead) ([]byte, error) {
+	path := r.requestFilePath(req.File)
 	length := req.Length
 	if length == 0 {
 		attrs, err := r.GetFileAttributes(ctx, req.File)
@@ -166,7 +173,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 	}
 
 	response, err := r.withFileSession(ctx, req.File, func(ctx context.Context, session sessionRequest) (Response, error) {
-		return r.readTransparentResponse(ctx, session, req.File.Path, req.Offset, length)
+		return r.readTransparentResponse(ctx, session, path, req.Offset, length)
 	})
 	if err != nil {
 		return nil, err
@@ -180,6 +187,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 }
 
 func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]byte, error) {
+	path := r.requestFilePath(req.File)
 	if req.Record == 0 {
 		return nil, errors.New("reading record file: record number is zero")
 	}
@@ -197,7 +205,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 	}
 
 	response, err := r.withFileSession(ctx, req.File, func(ctx context.Context, session sessionRequest) (Response, error) {
-		return r.readRecordResponse(ctx, session, req.File.Path, req.Record, length)
+		return r.readRecordResponse(ctx, session, path, req.Record, length)
 	})
 	if err != nil {
 		return nil, err
@@ -251,11 +259,7 @@ func (r *Reader) withFileSession(
 
 func (r *Reader) sessionsForFile(file usimreader.FileRef) ([]sessionRequest, error) {
 	if len(file.AID) == 0 {
-		session, err := CardSessionForSlot(r.Slot)
-		if err != nil {
-			return nil, err
-		}
-		return []sessionRequest{{session: session}}, nil
+		return []sessionRequest{{session: SessionPrimaryGWProvisioning}}, nil
 	}
 
 	if hasPrefix(file.AID, isimAIDPrefix) {
@@ -274,6 +278,19 @@ func (r *Reader) sessionsForFile(file usimreader.FileRef) ([]sessionRequest, err
 	}
 
 	return []sessionRequest{{session: SessionPrimaryGWProvisioning}}, nil
+}
+
+func (r *Reader) requestFilePath(file usimreader.FileRef) []byte {
+	if len(file.AID) != 0 {
+		if hasPrefix(file.AID, usimAIDPrefix) {
+			return Buffer(masterFilePath, currentADFPath, file.Path)
+		}
+		return slices.Clone(file.Path)
+	}
+	if hasPrefix(file.Path, masterFilePath) {
+		return slices.Clone(file.Path)
+	}
+	return Buffer(masterFilePath, file.Path)
 }
 
 func (r *Reader) ensureSlotActivated(ctx context.Context) error {

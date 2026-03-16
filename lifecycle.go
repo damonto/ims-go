@@ -308,7 +308,7 @@ func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 	return registration.Config{
 		PublicIdentity:    cfg.PublicIdentity,
 		HomeDomain:        cfg.HomeDomain,
-		Country:           cfg.Country,
+		Region:            cfg.Region,
 		UserAgent:         cfg.UserAgent,
 		AccessNetworkInfo: cfg.AccessNetworkInfo,
 		WLANNodeID:        cfg.WLANNodeID,
