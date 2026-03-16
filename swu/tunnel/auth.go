@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/damonto/ims-client/swu/eapaka"
@@ -211,6 +212,7 @@ func (f *akaAuthFlow) run(serverPayloads []ike.Payload) ([]ike.Payload, uint32, 
 		if err := eapPacket.UnmarshalBinary(eapPayload.Data); err != nil {
 			return nil, 0, fmt.Errorf("connecting swu session: parsing eap packet: %w", err)
 		}
+		logEAPPacket(f.logger(), "received EAP packet", "inbound", f.nextRequestID-1, eapPayload.Data)
 		switch eapPacket.Code {
 		case eapCodeSuccess:
 			return f.finishSuccess(serverPayloads)
@@ -255,9 +257,9 @@ func (f *akaAuthFlow) finishSuccess(serverPayloads []ike.Payload) ([]ike.Payload
 	if err := responsePacket.UnmarshalBinary(responseRaw); err != nil {
 		return nil, 0, fmt.Errorf("connecting swu session: parsing final ike_auth response: %w", err)
 	}
-	payloads, err := f.crypto.OpenIKE(responsePacket, false)
+	payloads, err := openIKEAuthResponse(responsePacket, f.crypto, "connecting swu session: opening final ike_auth response")
 	if err != nil {
-		return nil, 0, fmt.Errorf("connecting swu session: opening final ike_auth response: %w", err)
+		return nil, 0, err
 	}
 	return payloads, f.nextRequestID + 1, nil
 }
@@ -353,6 +355,16 @@ func (f *akaAuthFlow) buildChallengeResponse(message eapaka.AKAMessage, eapData 
 	}
 	if !aka.IsSuccess() {
 		return f.clientErrorResponse(message.Identifier, "processing aka result", errors.New("aka result is incomplete"))
+	}
+	if logger := f.logger(); logger != nil {
+		logger.Debug(
+			"calculated AKA response",
+			"res_len", len(aka.RES),
+			"ck_len", len(aka.CK),
+			"ik_len", len(aka.IK),
+			"challenge_has_result_ind", eapaka.HasAttribute(message.Attributes, akaAttrResultInd),
+			"challenge_has_checkcode", eapaka.HasAttribute(message.Attributes, akaAttrCheckcode),
+		)
 	}
 	if err := f.crypto.DeriveEAPKeys([]byte(f.eapIdentity), aka.RES, aka.IK, aka.CK); err != nil {
 		return f.clientErrorResponse(message.Identifier, "deriving eap keys", err)
@@ -505,6 +517,7 @@ func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, in
 	if ok {
 		requestPayloads = append(requestPayloads, deviceIdentityPayload)
 	}
+	logEAPPacket(s.logger, "sending EAP packet", "outbound", messageID, responseData)
 	header := ike.IKEHeader{InitiatorSPI: initiatorSPI, ResponderSPI: responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: messageID}
 	request, err := crypto.SealIKE(header, requestPayloads, true)
 	if err != nil {
@@ -518,9 +531,210 @@ func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, in
 	if err := responsePacket.UnmarshalBinary(responseRaw); err != nil {
 		return nil, fmt.Errorf("connecting swu session: parsing aka response message: %w", err)
 	}
-	payloads, err := crypto.OpenIKE(responsePacket, false)
+	payloads, err := openIKEAuthResponse(responsePacket, crypto, "connecting swu session: opening aka response message")
 	if err != nil {
-		return nil, fmt.Errorf("connecting swu session: opening aka response message: %w", err)
+		return nil, err
 	}
 	return payloads, nil
+}
+
+func openIKEAuthResponse(packet ike.IKEPacket, crypto *ikeCrypto, action string) ([]ike.Payload, error) {
+	payloads, err := crypto.OpenIKE(packet, false)
+	if err == nil {
+		return payloads, nil
+	}
+	if errors.Is(err, errMissingEncryptedPayload) {
+		if notifyErr := plaintextIKENotifyError(packet.Payloads); notifyErr != nil {
+			return nil, fmt.Errorf("%s: %w", action, notifyErr)
+		}
+	}
+	return nil, fmt.Errorf("%s: %w", action, err)
+}
+
+func (f *akaAuthFlow) logger() *slog.Logger {
+	if f == nil || f.session == nil {
+		return nil
+	}
+	return f.session.logger
+}
+
+func plaintextIKENotifyError(payloads []ike.Payload) error {
+	if len(payloads) == 0 {
+		return errors.New("received unencrypted ike_auth response without payloads")
+	}
+	notifies := make([]string, 0, len(payloads))
+	for _, payload := range payloads {
+		notify, ok := payload.(*ike.NotifyPayload)
+		if !ok {
+			return fmt.Errorf("received unencrypted ike_auth payload %T", payload)
+		}
+		notifies = append(notifies, fmt.Sprintf("%s (%d)", ikeNotifyName(notify.NotifyType), notify.NotifyType))
+	}
+	return fmt.Errorf("received unencrypted ike_auth notify %s", strings.Join(notifies, ", "))
+}
+
+func logEAPPacket(logger *slog.Logger, msg, direction string, messageID uint32, data []byte) {
+	if logger == nil {
+		return
+	}
+	var packet eapaka.EAPPacket
+	if err := packet.UnmarshalBinary(data); err != nil {
+		logger.Debug(msg, "direction", direction, "message_id", messageID, "parse_err", err)
+		return
+	}
+	attrs := []string(nil)
+	akaSubtype := ""
+	if packet.HasType && packet.Type == eapaka.TypeAKA {
+		var message eapaka.AKAMessage
+		if err := message.UnmarshalBinary(data); err == nil {
+			akaSubtype = akaSubtypeName(message.Subtype)
+			attrs = summarizeAKAAttributes(message.Attributes)
+		}
+	}
+	logger.Debug(
+		msg,
+		"direction", direction,
+		"message_id", messageID,
+		"eap_code", eapCodeName(packet.Code),
+		"eap_identifier", packet.Identifier,
+		"eap_type", eapTypeName(packet),
+		"aka_subtype", akaSubtype,
+		"aka_attrs", attrs,
+	)
+}
+
+func eapCodeName(code byte) string {
+	switch code {
+	case eapCodeRequest:
+		return "request"
+	case 2:
+		return "response"
+	case eapCodeSuccess:
+		return "success"
+	case eapCodeFailure:
+		return "failure"
+	default:
+		return fmt.Sprintf("unknown(%d)", code)
+	}
+}
+
+func eapTypeName(packet eapaka.EAPPacket) string {
+	if !packet.HasType {
+		return ""
+	}
+	if packet.Type == eapaka.TypeAKA {
+		return "aka"
+	}
+	return fmt.Sprintf("unknown(%d)", packet.Type)
+}
+
+func akaSubtypeName(subtype byte) string {
+	switch subtype {
+	case akaSubtypeChallenge:
+		return "challenge"
+	case 2:
+		return "authentication_reject"
+	case 4:
+		return "synchronization_failure"
+	case akaSubtypeIdentity:
+		return "identity"
+	case akaSubtypeNotification:
+		return "notification"
+	case akaSubtypeReauthentication:
+		return "reauthentication"
+	case 14:
+		return "client_error"
+	default:
+		return fmt.Sprintf("unknown(%d)", subtype)
+	}
+}
+
+func summarizeAKAAttributes(attrs []eapaka.AKAAttribute) []string {
+	summary := make([]string, 0, len(attrs))
+	for _, attr := range attrs {
+		summary = append(summary, fmt.Sprintf("%s(%d)", akaAttributeName(attr.Type), len(attr.Value)))
+	}
+	return summary
+}
+
+func akaAttributeName(attrType byte) string {
+	switch attrType {
+	case akaAttrRAND:
+		return "AT_RAND"
+	case akaAttrAUTN:
+		return "AT_AUTN"
+	case 3:
+		return "AT_RES"
+	case 4:
+		return "AT_AUTS"
+	case 6:
+		return "AT_PADDING"
+	case akaAttrPermanentIDReq:
+		return "AT_PERMANENT_ID_REQ"
+	case akaAttrMAC:
+		return "AT_MAC"
+	case 12:
+		return "AT_NOTIFICATION"
+	case akaAttrAnyIDReq:
+		return "AT_ANY_ID_REQ"
+	case akaAttrIdentity:
+		return "AT_IDENTITY"
+	case akaAttrFullAuthIDReq:
+		return "AT_FULLAUTH_ID_REQ"
+	case akaAttrCounter:
+		return "AT_COUNTER"
+	case 20:
+		return "AT_COUNTER_TOO_SMALL"
+	case 21:
+		return "AT_NONCE_S"
+	case 22:
+		return "AT_CLIENT_ERROR_CODE"
+	case akaAttrIV:
+		return "AT_IV"
+	case akaAttrEncryptedData:
+		return "AT_ENCR_DATA"
+	case akaAttrNextPseudonym:
+		return "AT_NEXT_PSEUDONYM"
+	case akaAttrNextReauthID:
+		return "AT_NEXT_REAUTH_ID"
+	case akaAttrCheckcode:
+		return "AT_CHECKCODE"
+	case akaAttrResultInd:
+		return "AT_RESULT_IND"
+	case 136:
+		return "AT_BIDDING"
+	default:
+		return fmt.Sprintf("ATTR_%d", attrType)
+	}
+}
+
+func ikeNotifyName(notifyType uint16) string {
+	switch notifyType {
+	case 1:
+		return "UNSUPPORTED_CRITICAL_PAYLOAD"
+	case 7:
+		return "INVALID_SYNTAX"
+	case 9:
+		return "INVALID_MESSAGE_ID"
+	case 14:
+		return "NO_PROPOSAL_CHOSEN"
+	case notifyTypeInvalidKEPayload:
+		return "INVALID_KE_PAYLOAD"
+	case 24:
+		return "AUTHENTICATION_FAILED"
+	case 34:
+		return "SINGLE_PAIR_REQUIRED"
+	case 35:
+		return "NO_ADDITIONAL_SAS"
+	case 36:
+		return "INTERNAL_ADDRESS_FAILURE"
+	case 37:
+		return "FAILED_CP_REQUIRED"
+	case 38:
+		return "TS_UNACCEPTABLE"
+	case 43:
+		return "TEMPORARY_FAILURE"
+	default:
+		return "UNKNOWN_NOTIFY"
+	}
 }

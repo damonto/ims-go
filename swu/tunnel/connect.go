@@ -31,6 +31,7 @@ type connectState struct {
 	responderSPI    uint64
 	espInitiatorSPI uint32
 	nonceI          []byte
+	ikeInitCookie   []byte
 	ikeInitRequest  []byte
 	responderNonce  []byte
 	nextMessageID   uint32
@@ -170,6 +171,14 @@ func (state *connectState) resetDHGroup(dhGroup uint16) error {
 
 func (state *connectState) buildIKESAInitRequest(outerLocal, outerRemote *net.UDPAddr) ([]byte, error) {
 	payloads := defaultIKESAInitPayloads(state.crypto, outerLocal, outerRemote)
+	if len(state.ikeInitCookie) != 0 {
+		payloads = append([]ike.Payload{
+			&ike.NotifyPayload{
+				NotifyType: notifyTypeCookie,
+				Data:       append([]byte(nil), state.ikeInitCookie...),
+			},
+		}, payloads...)
+	}
 	header := ike.IKEHeader{
 		InitiatorSPI: state.initiatorSPI,
 		Version:      ikeVersion20,
@@ -220,6 +229,7 @@ func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, reques
 
 func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) error {
 	triedGroups := map[uint16]struct{}{state.crypto.dhGroup: {}}
+	cookieRetries := 0
 	for {
 		outerLocal, err := resolveOuterLocalAddr(s.conn, s.outerRemote)
 		if err != nil {
@@ -238,8 +248,23 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 		if err != nil {
 			return err
 		}
+		cookie, retryCookie, err := cookiePayloadData(response.Payloads)
+		if err != nil {
+			return err
+		}
+		if retryCookie {
+			cookieRetries++
+			if cookieRetries > 4 {
+				return errors.New("parsing ike_sa_init response: too many COOKIE retries")
+			}
+			state.ikeInitCookie = cookie
+			continue
+		}
 		group, retry, err := invalidKEPayloadGroup(response.Payloads)
 		if err != nil {
+			return err
+		}
+		if err := ikeSAInitNotifyError(response.Payloads); err != nil {
 			return err
 		}
 		if !retry {
@@ -294,9 +319,9 @@ func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState,
 	if err := challengePacket.UnmarshalBinary(challengeRaw); err != nil {
 		return nil, fmt.Errorf("parsing ike_auth challenge: %w", err)
 	}
-	challengePayloads, err := state.crypto.OpenIKE(challengePacket, false)
+	challengePayloads, err := openIKEAuthResponse(challengePacket, state.crypto, "opening ike_auth challenge")
 	if err != nil {
-		return nil, fmt.Errorf("opening ike_auth challenge: %w", err)
+		return nil, err
 	}
 	state.auth.ChallengeData = marshalPayloadCopies(challengePayloads)
 	return challengePayloads, nil
@@ -430,6 +455,31 @@ func invalidKEPayloadGroup(payloads []ike.Payload) (uint16, bool, error) {
 		return 0, false, fmt.Errorf("parsing ike_sa_init response: invalid INVALID_KE_PAYLOAD length %d", len(notify.Data))
 	}
 	return binary.BigEndian.Uint16(notify.Data), true, nil
+}
+
+func cookiePayloadData(payloads []ike.Payload) ([]byte, bool, error) {
+	notify := ike.FindNotifyPayload(payloads, notifyTypeCookie)
+	if notify == nil {
+		return nil, false, nil
+	}
+	if len(notify.SPI) != 0 {
+		return nil, false, fmt.Errorf("parsing ike_sa_init response: invalid COOKIE spi length %d", len(notify.SPI))
+	}
+	if len(notify.Data) == 0 || len(notify.Data) > 64 {
+		return nil, false, fmt.Errorf("parsing ike_sa_init response: invalid COOKIE length %d", len(notify.Data))
+	}
+	return append([]byte(nil), notify.Data...), true, nil
+}
+
+func ikeSAInitNotifyError(payloads []ike.Payload) error {
+	for _, payload := range payloads {
+		notify, ok := payload.(*ike.NotifyPayload)
+		if !ok || notify.NotifyType >= 16384 || notify.NotifyType == notifyTypeInvalidKEPayload {
+			continue
+		}
+		return fmt.Errorf("parsing ike_sa_init response: received %s (%d)", ikeNotifyName(notify.NotifyType), notify.NotifyType)
+	}
+	return nil
 }
 
 func negotiatedIKESAFromProposal(proposal ike.Proposal) (negotiatedIKESA, error) {

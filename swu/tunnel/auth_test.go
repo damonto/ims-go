@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/damonto/ims-client/swu/eapaka"
@@ -537,6 +538,67 @@ func TestAKAAuthFlowBuildReauthenticationResponseUsesCurrentEAPIdentity(t *testi
 	}
 	if !bytes.Equal(flow.crypto.eap.EMSK, wantEMSK) {
 		t.Fatalf("EMSK = %X, want %X", flow.crypto.eap.EMSK, wantEMSK)
+	}
+}
+
+func TestOpenIKEAuthResponsePlaintextNotify(t *testing.T) {
+	tests := []struct {
+		name       string
+		notifyType uint16
+		want       string
+	}{
+		{
+			name:       "invalid syntax",
+			notifyType: 7,
+			want:       "INVALID_SYNTAX (7)",
+		},
+		{
+			name:       "authentication failed",
+			notifyType: 24,
+			want:       "AUTHENTICATION_FAILED (24)",
+		},
+		{
+			name:       "unknown notify",
+			notifyType: 65000,
+			want:       "UNKNOWN_NOTIFY (65000)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := (ike.IKEPacket{
+				Header: ike.IKEHeader{
+					InitiatorSPI: 1,
+					ResponderSPI: 2,
+					Version:      ike.Version20,
+					ExchangeType: ike.ExchangeTypeIKEAuth,
+					Flags:        ike.FlagResponse,
+					MessageID:    3,
+				},
+				Payloads: []ike.Payload{
+					&ike.NotifyPayload{NotifyType: tt.notifyType},
+				},
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+
+			var packet ike.IKEPacket
+			if err := packet.UnmarshalBinary(raw); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+			if err == nil {
+				t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
+			}
+			if !strings.Contains(err.Error(), "unencrypted ike_auth notify") {
+				t.Fatalf("openIKEAuthResponse() error = %v, want unencrypted notify context", err)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("openIKEAuthResponse() error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

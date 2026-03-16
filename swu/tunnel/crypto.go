@@ -21,6 +21,8 @@ import (
 var (
 	sha1DSSIncrement = big.NewInt(1)
 	sha1DSSModulus   = new(big.Int).Lsh(big.NewInt(1), 160)
+
+	errMissingEncryptedPayload = errors.New("opening ike packet: missing encrypted payload")
 )
 
 type ikeKeys struct {
@@ -246,7 +248,7 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 	}
 	container, ok := packet.Payloads[0].(*ike.EncryptedPayload)
 	if !ok {
-		return nil, errors.New("opening ike packet: missing encrypted payload")
+		return nil, errMissingEncryptedPayload
 	}
 	ivLen := aes.BlockSize
 	icvLen, err := integLength(c.integ)

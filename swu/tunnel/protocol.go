@@ -60,6 +60,7 @@ const (
 
 const (
 	notifyTypeInvalidKEPayload      uint16 = 17
+	notifyTypeCookie                uint16 = 16390
 	notifyTypeNATDetectionSourceIP  uint16 = 16388
 	notifyTypeNATDetectionDestIP    uint16 = 16389
 	notifyTypeEAPOnlyAuthentication uint16 = 16417
