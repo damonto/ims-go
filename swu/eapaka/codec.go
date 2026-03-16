@@ -328,7 +328,17 @@ func ParseAKAChallenge(data []byte) (AKAChallenge, error) {
 				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid result indication length %d", len(attr.Value))
 			}
 			seenResultInd = true
+		case akaAttrBidding:
+			if len(attr.Value) != 2 {
+				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid bidding length %d", len(attr.Value))
+			}
 		default:
+			// RFC 4187 section 8.1 requires peers to ignore unknown skippable
+			// attributes (128..255) while still rejecting unknown
+			// non-skippable ones.
+			if attr.Type >= 128 {
+				continue
+			}
 			return AKAChallenge{}, fmt.Errorf("parsing aka challenge: unexpected attribute %d", attr.Type)
 		}
 	}

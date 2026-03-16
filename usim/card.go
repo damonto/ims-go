@@ -80,7 +80,11 @@ func (u *Card) AKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
 		return AKAResult{}, errors.New("authenticating USIM: rand and autn must be 16 bytes")
 	}
 
-	payload, err := u.tx.Authenticate3G(ctx, usimreader.AuthenticateRequest{Rand: rand, AUTN: autn})
+	payload, err := u.tx.Authenticate3G(ctx, usimreader.AuthenticateRequest{
+		AID:  u.aid,
+		Rand: rand,
+		AUTN: autn,
+	})
 	if err != nil {
 		return AKAResult{}, fmt.Errorf("authenticating USIM: %w", err)
 	}

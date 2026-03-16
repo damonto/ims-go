@@ -119,6 +119,12 @@ func (r *reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 }
 
 func (r *reader) Authenticate3G(ctx context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
+	if len(req.AID) != 0 {
+		if _, err := r.selectName(ctx, req.AID); err != nil {
+			return nil, fmt.Errorf("selecting authentication application: %w", err)
+		}
+		r.selected = selection{}
+	}
 	raw, err := r.transmit(ctx, command.Authenticate3G{
 		Rand: slices.Clone(req.Rand),
 		AUTN: slices.Clone(req.AUTN),

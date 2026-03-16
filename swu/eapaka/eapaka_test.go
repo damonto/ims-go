@@ -100,6 +100,7 @@ func TestParseAKAChallenge(t *testing.T) {
 	checkcodeValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x66}, 20)...)
 	invalidCheckcodeValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x66}, 4)...)
 	resultIndValue := []byte{0x00, 0x00}
+	biddingValue := []byte{0x80, 0x00}
 	shortRandValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 12)...)
 	invalidEncryptedValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x44}, 12)...)
 
@@ -123,6 +124,24 @@ func TestParseAKAChallenge(t *testing.T) {
 				{Type: akaAttrAUTN, Value: autnValue},
 				{Type: akaAttrMAC, Value: macValue},
 				{Type: akaAttrResultInd, Value: resultIndValue},
+			},
+		},
+		{
+			name: "valid with bidding attribute",
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrMAC, Value: macValue},
+				{Type: akaAttrBidding, Value: biddingValue},
+			},
+		},
+		{
+			name: "valid with unknown skippable attribute",
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrMAC, Value: macValue},
+				{Type: 200, Value: []byte{0x00, 0x00}},
 			},
 		},
 		{

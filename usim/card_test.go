@@ -34,6 +34,7 @@ func (s *scriptTransmitter) Transmit(_ context.Context, req []byte) ([]byte, err
 }
 
 func TestCardAKA(t *testing.T) {
+	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 	rand := bytes.Repeat([]byte{0x01}, 16)
 	autn := bytes.Repeat([]byte{0x02}, 16)
 	res := []byte{0x11, 0x22, 0x33, 0x44}
@@ -86,10 +87,12 @@ func TestCardAKA(t *testing.T) {
 			req := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
 			card := &Card{
 				tx: New(&scriptTransmitter{steps: []scriptStep{
+					{wantAPDU: "00A4040407A0000000871002", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00}},
 					{wantAPDU: stringsUpperHex(req), resp: []byte{0x61, byte(len(tt.body))}},
 					{wantAPDU: "00C00000" + stringsUpperHex([]byte{byte(len(tt.body))}), resp: append(append([]byte{}, tt.body...), 0x90, 0x00)},
 				}}),
 				logger: slog.Default(),
+				aid:    aid,
 			}
 
 			got, err := card.AKA(context.Background(), rand, autn)

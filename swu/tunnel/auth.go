@@ -26,6 +26,7 @@ type akaAuthFlow struct {
 	imei           string
 	identity       string
 	realm          string
+	eapIdentity    string
 	crypto         *ikeCrypto
 	initiatorSPI   uint64
 	responderSPI   uint64
@@ -194,6 +195,7 @@ func (s *Session) authenticateEAPAKA(ctx context.Context, card Card, imei, ident
 		imei:           imei,
 		identity:       identity,
 		realm:          realm,
+		eapIdentity:    identity,
 		crypto:         crypto,
 		initiatorSPI:   initiatorSPI,
 		responderSPI:   responderSPI,
@@ -329,6 +331,7 @@ func (f *akaAuthFlow) buildIdentityResponse(message eapaka.AKAMessage) (akaRespo
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("connecting swu session: building aka identity response: %w", err)
 	}
+	f.eapIdentity = identityResponse
 	f.recordIdentityRequest(requestType)
 	return akaResponse{data: data}, nil
 }
@@ -359,7 +362,7 @@ func (f *akaAuthFlow) buildChallengeResponse(message eapaka.AKAMessage, eapData 
 	if !aka.IsSuccess() {
 		return f.clientErrorResponse(message.Identifier, "processing aka result", errors.New("aka result is incomplete"))
 	}
-	if err := f.crypto.DeriveEAPKeys([]byte(f.identity), aka.RES, aka.IK, aka.CK); err != nil {
+	if err := f.crypto.DeriveEAPKeys([]byte(f.eapIdentity), aka.RES, aka.IK, aka.CK); err != nil {
 		return f.clientErrorResponse(message.Identifier, "deriving eap keys", err)
 	}
 	if err := eapaka.VerifyMessageMAC(eapData, f.crypto.eap.AUT, nil); err != nil {

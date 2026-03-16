@@ -33,10 +33,11 @@ const (
 	akaAttrNextReauthID    byte = 133
 	akaAttrCheckcode       byte = 134
 	akaAttrResultInd       byte = 135
+	akaAttrBidding         byte = 136
 )
 
 const (
-	akaNotificationSuccess              uint16 = 32768
+	akaNotificationSuccess uint16 = 32768
 )
 
 type AKANotification struct {

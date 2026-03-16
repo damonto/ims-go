@@ -110,6 +110,78 @@ func TestReaderAuthenticate3GUsesExpectedAPDU(t *testing.T) {
 	}
 }
 
+func TestReaderAuthenticate3GSelectsApplicationWhenAIDProvided(t *testing.T) {
+	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+	rand := []byte{0x01, 0x02, 0x03, 0x04}
+	autn := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	want := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+
+	reader := New(&apduScriptTransmitter{
+		t: t,
+		steps: []apduScriptStep{
+			{
+				wantAPDU: "00A4040407A0000000871002",
+				resp:     []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00},
+			},
+			{
+				wantAPDU: strings.ToUpper(hex.EncodeToString(want)),
+				resp:     []byte{0xDB, 0x02, 0x11, 0x22, 0x90, 0x00},
+			},
+		},
+	})
+
+	got, err := reader.Authenticate3G(context.Background(), usimreader.AuthenticateRequest{
+		AID:  aid,
+		Rand: rand,
+		AUTN: autn,
+	})
+	if err != nil {
+		t.Fatalf("Authenticate3G() error = %v", err)
+	}
+	if gotText := strings.ToUpper(hex.EncodeToString(got)); gotText != "DB021122" {
+		t.Fatalf("Authenticate3G() = %s", gotText)
+	}
+}
+
+func TestReaderAuthenticate3GClearsSelectedFileCache(t *testing.T) {
+	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+	rand := []byte{0x01, 0x02, 0x03, 0x04}
+	autn := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	auth := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+
+	reader := New(&apduScriptTransmitter{
+		t: t,
+		steps: []apduScriptStep{
+			{wantAPDU: "00A4040407A0000000871002", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00}},
+			{wantAPDU: "00A40004026F07", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x21, 0x80, 0x02, 0x00, 0x09, 0x90, 0x00}},
+			{wantAPDU: "00B0000009", resp: []byte{0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98, 0x90, 0x00}},
+			{wantAPDU: "00A4040407A0000000871002", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00}},
+			{wantAPDU: strings.ToUpper(hex.EncodeToString(auth)), resp: []byte{0xDB, 0x02, 0x11, 0x22, 0x90, 0x00}},
+			{wantAPDU: "00A4040407A0000000871002", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00}},
+			{wantAPDU: "00A40004026F07", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x21, 0x80, 0x02, 0x00, 0x09, 0x90, 0x00}},
+			{wantAPDU: "00B0000009", resp: []byte{0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98, 0x90, 0x00}},
+		},
+	})
+
+	req := usimreader.TransparentRead{
+		File:   usimreader.FileRef{AID: aid, Path: []byte{0x6F, 0x07}},
+		Length: 9,
+	}
+	if _, err := reader.ReadTransparent(context.Background(), req); err != nil {
+		t.Fatalf("ReadTransparent() before Authenticate3G error = %v", err)
+	}
+	if _, err := reader.Authenticate3G(context.Background(), usimreader.AuthenticateRequest{
+		AID:  aid,
+		Rand: rand,
+		AUTN: autn,
+	}); err != nil {
+		t.Fatalf("Authenticate3G() error = %v", err)
+	}
+	if _, err := reader.ReadTransparent(context.Background(), req); err != nil {
+		t.Fatalf("ReadTransparent() after Authenticate3G error = %v", err)
+	}
+}
+
 func TestReaderCloseDelegatesToTransmitter(t *testing.T) {
 	tx := &closingTransmitter{}
 	reader := New(tx)
