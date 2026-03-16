@@ -108,10 +108,7 @@ func run(opt options) error {
 
 	client, err := imsclient.New(ctx, reader, cfg)
 	if err != nil {
-		if closeErr := reader.Close(); closeErr != nil {
-			return errors.Join(fmt.Errorf("creating client: %w", err), fmt.Errorf("closing driver: %w", closeErr))
-		}
-		return fmt.Errorf("creating client: %w", err)
+		return err
 	}
 	defer func() {
 		if err := client.Close(); err != nil {

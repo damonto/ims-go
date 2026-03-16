@@ -232,13 +232,25 @@ type Session struct {
 	watchOnce sync.Once
 }
 
-// New loads the SIM state and takes ownership of reader on success.
+// New loads the SIM state and takes ownership of reader.
+// On failure it closes reader before returning the error.
 // The returned Client closes the underlying reader when Close is called.
 func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
+	client, err := buildClient(ctx, reader, cfg)
+	if err != nil {
+		if reader != nil {
+			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
+		}
+		return nil, err
+	}
+	return client, nil
+}
+
+func buildClient(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, error) {
 	raw := cloneConfig(cfg)
 	logger := raw.Logger
 	if logger == nil {

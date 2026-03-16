@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	imssms "github.com/damonto/ims-client/ims/sms"
 	imsussd "github.com/damonto/ims-client/ims/ussd"
 	"github.com/damonto/ims-client/usim"
+	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
 type stubCard struct{}
@@ -30,12 +32,52 @@ func (stubCard) AKA(_ context.Context, _, _ []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{RES: []byte("12345678")}, nil
 }
 
-type closingReader struct {
-	closeCalls int
-	closeErr   error
+type readerStub struct {
+	closeCalls        int
+	closeErr          error
+	listApplications  func(context.Context) ([]usimreader.Application, error)
+	getFileAttributes func(context.Context, usimreader.FileRef) (usimreader.FileAttributes, error)
+	readTransparent   func(context.Context, usimreader.TransparentRead) ([]byte, error)
+	readRecord        func(context.Context, usimreader.RecordRead) ([]byte, error)
+	authenticate3G    func(context.Context, usimreader.AuthenticateRequest) ([]byte, error)
 }
 
-func (r *closingReader) Close() error {
+func (r *readerStub) ListApplications(ctx context.Context) ([]usimreader.Application, error) {
+	if r.listApplications == nil {
+		return nil, errors.New("ListApplications was not expected")
+	}
+	return r.listApplications(ctx)
+}
+
+func (r *readerStub) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+	if r.getFileAttributes == nil {
+		return usimreader.FileAttributes{}, errors.New("GetFileAttributes was not expected")
+	}
+	return r.getFileAttributes(ctx, file)
+}
+
+func (r *readerStub) ReadTransparent(ctx context.Context, req usimreader.TransparentRead) ([]byte, error) {
+	if r.readTransparent == nil {
+		return nil, errors.New("ReadTransparent was not expected")
+	}
+	return r.readTransparent(ctx, req)
+}
+
+func (r *readerStub) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]byte, error) {
+	if r.readRecord == nil {
+		return nil, errors.New("ReadRecord was not expected")
+	}
+	return r.readRecord(ctx, req)
+}
+
+func (r *readerStub) Authenticate3G(ctx context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
+	if r.authenticate3G == nil {
+		return nil, errors.New("Authenticate3G was not expected")
+	}
+	return r.authenticate3G(ctx, req)
+}
+
+func (r *readerStub) Close() error {
 	r.closeCalls++
 	return r.closeErr
 }
@@ -330,9 +372,60 @@ func TestNewNilDriver(t *testing.T) {
 	}
 }
 
+func TestNewClosesReaderOnUSIMLoadError(t *testing.T) {
+	reader := &readerStub{
+		listApplications: func(context.Context) ([]usimreader.Application, error) {
+			return nil, errors.New("boom")
+		},
+	}
+
+	_, err := New(context.Background(), reader, nil)
+	if err == nil {
+		t.Fatal("New() error = nil, want non-nil")
+	}
+	if reader.closeCalls != 1 {
+		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
+	}
+}
+
+func TestNewJoinsReaderCloseErrorOnFailure(t *testing.T) {
+	reader := &readerStub{
+		closeErr: errors.New("close boom"),
+		listApplications: func(context.Context) ([]usimreader.Application, error) {
+			return nil, errors.New("load boom")
+		},
+	}
+
+	_, err := New(context.Background(), reader, nil)
+	if err == nil {
+		t.Fatal("New() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "load boom") {
+		t.Fatalf("New() error = %v, want load error text", err)
+	}
+	if !strings.Contains(err.Error(), "closing reader: close boom") {
+		t.Fatalf("New() error = %v, want close error text", err)
+	}
+	if reader.closeCalls != 1 {
+		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
+	}
+}
+
+func TestNewClosesReaderOnConfigError(t *testing.T) {
+	reader := newReaderStubForUSIMLoad()
+
+	_, err := New(context.Background(), reader, &Config{})
+	if err == nil {
+		t.Fatal("New() error = nil, want non-nil")
+	}
+	if reader.closeCalls != 1 {
+		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
+	}
+}
+
 func TestClientCloseClosesOwnedReaderOnce(t *testing.T) {
 	client := newStandaloneClient(t)
-	reader := &closingReader{}
+	reader := &readerStub{}
 	client.reader = reader
 
 	if err := client.Close(); err != nil {
@@ -437,5 +530,49 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	}
 	if reg.State().Registered {
 		t.Fatal("Registered = true, want false")
+	}
+}
+
+func newReaderStubForUSIMLoad() *readerStub {
+	const (
+		fileStructureTransparent byte = 0x01
+		fileStructureLinearFixed byte = 0x02
+	)
+
+	usimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+
+	return &readerStub{
+		listApplications: func(context.Context) ([]usimreader.Application, error) {
+			return []usimreader.Application{{
+				AID:   append([]byte(nil), usimAID...),
+				Label: "USIM",
+			}}, nil
+		},
+		getFileAttributes: func(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+			switch {
+			case len(file.AID) == 0 && slices.Equal(file.Path, []byte{0x2F, 0xE2}):
+				return usimreader.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 10}, nil
+			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0x07}):
+				return usimreader.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 9}, nil
+			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0xAD}):
+				return usimreader.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 4}, nil
+			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0x42}):
+				return usimreader.FileAttributes{FileStructure: fileStructureLinearFixed, RecordSize: 32, RecordCount: 0}, nil
+			default:
+				return usimreader.FileAttributes{}, errors.New("file not found")
+			}
+		},
+		readTransparent: func(_ context.Context, req usimreader.TransparentRead) ([]byte, error) {
+			switch {
+			case len(req.File.AID) == 0 && slices.Equal(req.File.Path, []byte{0x2F, 0xE2}):
+				return []byte{0x98, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0}, nil
+			case slices.Equal(req.File.AID, usimAID) && slices.Equal(req.File.Path, []byte{0x6F, 0x07}):
+				return []byte{0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98}, nil
+			case slices.Equal(req.File.AID, usimAID) && slices.Equal(req.File.Path, []byte{0x6F, 0xAD}):
+				return []byte{0x00, 0x00, 0x00, 0x02}, nil
+			default:
+				return nil, errors.New("transparent file not found")
+			}
+		},
 	}
 }
