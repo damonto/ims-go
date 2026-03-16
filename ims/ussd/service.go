@@ -300,6 +300,7 @@ func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, er
 
 func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte) sip.Message {
 	state := s.reg.State()
+	securityVerify := s.reg.SecurityVerifyValue()
 	senderIdentity := ussdPreferredIdentity(state)
 	msg := sip.NewRequest("INVITE", start.target)
 	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), start.branch))
@@ -323,8 +324,8 @@ func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte)
 	if state.AccessNetworkInfo != "" {
 		msg.Headers.Add("P-Access-Network-Info", state.AccessNetworkInfo)
 	}
-	if state.SecurityVerify != nil {
-		msg.Headers.Add("Security-Verify", state.SecurityVerify.String())
+	if securityVerify != "" {
+		msg.Headers.Add("Security-Verify", securityVerify)
 		msg.Headers.Add("Require", "sec-agree")
 		msg.Headers.Add("Proxy-Require", "sec-agree")
 	}
@@ -728,6 +729,7 @@ func (s *Session) buildACK() sip.Message {
 
 func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 	state := s.service.reg.State()
+	securityVerify := s.service.reg.SecurityVerifyValue()
 	senderIdentity := s.localDialogURI()
 	msg := sip.NewRequest(method, s.targetURI)
 	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.service.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), randomAlphaNum(15)))
@@ -747,8 +749,8 @@ func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 	if state.AccessNetworkInfo != "" {
 		msg.Headers.Add("P-Access-Network-Info", state.AccessNetworkInfo)
 	}
-	if state.SecurityVerify != nil {
-		msg.Headers.Add("Security-Verify", state.SecurityVerify.String())
+	if securityVerify != "" {
+		msg.Headers.Add("Security-Verify", securityVerify)
 	}
 	msg.Body = body
 	return msg

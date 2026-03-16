@@ -257,6 +257,10 @@ func (s *Service) State() State {
 	return state
 }
 
+func (s *Service) SecurityVerifyValue() string {
+	return s.securityVerifyValue(s.currentSecurityVerify())
+}
+
 func splitHeaderList(value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {

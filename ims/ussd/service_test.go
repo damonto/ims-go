@@ -140,6 +140,8 @@ func TestContactValueFormatsIPHosts(t *testing.T) {
 }
 
 func TestStartUSSDSessionFlow(t *testing.T) {
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222"
+
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	svc, err := New(Config{}, sess, reg)
@@ -151,6 +153,9 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 		req := mustParseUSSDMessage(t, data)
 		switch req.Method() {
 		case "INVITE":
+			if got := req.Header("Security-Verify"); got != wantSecurityVerify {
+				t.Fatalf("INVITE Security-Verify = %q, want %q", got, wantSecurityVerify)
+			}
 			transport.queue(newUSSDResponse(req, 200, "OK",
 				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
 				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
@@ -161,6 +166,9 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 				sip.Header{Name: "Content-Type", Value: "application/sdp"},
 			))
 		case "INFO", "BYE":
+			if got := req.Header("Security-Verify"); got != wantSecurityVerify {
+				t.Fatalf("%s Security-Verify = %q, want %q", req.Method(), got, wantSecurityVerify)
+			}
 			transport.queue(newUSSDResponse(req, 200, "OK", nil))
 		}
 	}

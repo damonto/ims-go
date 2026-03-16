@@ -55,6 +55,8 @@ func (serviceStubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 }
 
 func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222"
+
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	svc, err := New(Config{}, sess, reg, serviceStubCard{})
@@ -79,8 +81,8 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 		if got := req.Header("P-Access-Network-Info"); got == "" {
 			t.Fatal("P-Access-Network-Info = empty")
 		}
-		if got := req.Header("Security-Verify"); got == "" {
-			t.Fatal("Security-Verify = empty")
+		if got := req.Header("Security-Verify"); got != wantSecurityVerify {
+			t.Fatalf("Security-Verify = %q, want %q", got, wantSecurityVerify)
 		}
 		transport.queue(newSMSResponse(req, 202, "Accepted"))
 	}

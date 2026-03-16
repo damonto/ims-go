@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/security"
 	"github.com/damonto/ims-client/ims/session"
 	"github.com/damonto/ims-client/ims/sip"
 )
@@ -924,7 +923,7 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip
 	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
 	addClientRequestHeaders(&msg, state)
 	addServiceRoutes(&msg, state.ServiceRoutes)
-	addSecurityVerifyHeader(&msg, state.SecurityVerify)
+	addSecurityVerifyHeader(&msg, s.reg.SecurityVerifyValue())
 	addSecurityRequirements(&msg)
 	msg.Headers.Add("Content-Type", "application/vnd.3gpp.sms")
 	msg.Headers.Add("Content-Transfer-Encoding", "binary")
@@ -1113,11 +1112,11 @@ func addServiceRoutes(msg *sip.Message, routes []string) {
 	}
 }
 
-func addSecurityVerifyHeader(msg *sip.Message, verify *security.Param) bool {
-	if verify == nil {
+func addSecurityVerifyHeader(msg *sip.Message, verify string) bool {
+	if strings.TrimSpace(verify) == "" {
 		return false
 	}
-	msg.Headers.Add("Security-Verify", verify.String())
+	msg.Headers.Add("Security-Verify", verify)
 	return true
 }
 
