@@ -84,6 +84,12 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 		if got := req.Header("Security-Verify"); got != wantSecurityVerify {
 			t.Fatalf("Security-Verify = %q, want %q", got, wantSecurityVerify)
 		}
+		if got := req.Header("Require"); got != "sec-agree" {
+			t.Fatalf("Require = %q, want sec-agree", got)
+		}
+		if got := req.Header("Proxy-Require"); got != "sec-agree" {
+			t.Fatalf("Proxy-Require = %q, want sec-agree", got)
+		}
 		transport.queue(newSMSResponse(req, 202, "Accepted"))
 	}
 

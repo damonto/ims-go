@@ -168,8 +168,47 @@ func TestRegisterAppliesChallengeAndSuccessState(t *testing.T) {
 	if len(state.ServiceRoutes) != 1 || state.ServiceRoutes[0] != "<sip:pcscf.example.com;lr>" {
 		t.Fatalf("ServiceRoutes = %v", state.ServiceRoutes)
 	}
+	if len(state.Flow.ServiceRoutes) != 1 || state.Flow.ServiceRoutes[0] != "<sip:pcscf.example.com;lr>" {
+		t.Fatalf("Flow.ServiceRoutes = %v", state.Flow.ServiceRoutes)
+	}
 	if state.RegisterExpires != 10*time.Minute {
 		t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 10*time.Minute)
+	}
+}
+
+func TestApplyRegisterChallengeSelectsHighestQSecurityServer(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+
+	req := svc.buildRegister(nil, nil)
+	resp := newResponse(req, 401, "Unauthorized",
+		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
+		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222;q=0.1`},
+		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`},
+	)
+
+	if _, err := svc.applyRegisterChallenge(resp); err != nil {
+		t.Fatalf("applyRegisterChallenge() error = %v", err)
+	}
+
+	state := svc.State()
+	if state.SecurityVerify == nil {
+		t.Fatal("SecurityVerify = nil, want non-nil")
+	}
+	if got := state.SecurityVerify.PortC; got != 5062 {
+		t.Fatalf("SecurityVerify.PortC = %d, want 5062", got)
+	}
+	if got := state.SecurityVerify.PortS; got != 5060 {
+		t.Fatalf("SecurityVerify.PortS = %d, want 5060", got)
+	}
+	if got := state.MessagePort; got != state.SecurityClient.PortS {
+		t.Fatalf("MessagePort = %d, want %d", got, state.SecurityClient.PortS)
+	}
+	wantVerify := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222;q=0.1,ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`
+	if got := svc.SecurityVerifyValue(); got != wantVerify {
+		t.Fatalf("SecurityVerifyValue() = %q, want %q", got, wantVerify)
+	}
+	if got := len(state.Flow.SecurityServerRaw); got != 2 {
+		t.Fatalf("len(Flow.SecurityServerRaw) = %d, want 2", got)
 	}
 }
 

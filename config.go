@@ -123,7 +123,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 		cfg.Region = "US"
 	}
 	if cfg.UserAgent == "" {
-		cfg.UserAgent = "IMSClient/1.0 Linux"
+		cfg.UserAgent = defaultUserAgent()
 	}
 	if cfg.RegisterExpires < 0 {
 		return IMSConfig{}, errors.New("normalizing ims config: register expires must be >= 0")

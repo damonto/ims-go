@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/damonto/ims-client/ims/sip"
 )
 
 const (
@@ -185,7 +187,7 @@ func buildGSM7UserDataParts(gsm7 GSM7) ([]smsUserDataPart, error) {
 	if len(chunks) > 255 {
 		return nil, fmt.Errorf("encoding SMS-SUBMIT: %d GSM7 segments exceed 255-part limit", len(chunks))
 	}
-	ref := byte(randomUint32())
+	ref := byte(sip.RandomUint32())
 	parts := make([]smsUserDataPart, 0, len(chunks))
 	for i, chunk := range chunks {
 		header := buildConcatUDH8(ref, byte(len(chunks)), byte(i+1))
@@ -205,7 +207,7 @@ func buildUCS2UserDataParts(text UCS2) []smsUserDataPart {
 	if len(chunks) > 255 {
 		return nil
 	}
-	ref := byte(randomUint32())
+	ref := byte(sip.RandomUint32())
 	parts := make([]smsUserDataPart, 0, len(chunks))
 	for i, chunk := range chunks {
 		header := buildConcatUDH8(ref, byte(len(chunks)), byte(i+1))

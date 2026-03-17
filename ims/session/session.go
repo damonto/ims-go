@@ -56,19 +56,20 @@ type Session struct {
 	cfg    Config
 	logger *slog.Logger
 
-	mu        sync.Mutex
-	sendMu    sync.Mutex
-	readWG    sync.WaitGroup
-	primary   Transport
-	aux       []Transport
-	pending   map[string]chan sip.Message
-	handlers  []*handlerEntry
-	startedCh chan struct{}
-	closedCh  chan struct{}
-	closed    bool
-	started   bool
-	ready     bool
-	running   bool
+	mu           sync.Mutex
+	sendMu       sync.Mutex
+	readWG       sync.WaitGroup
+	primary      Transport
+	aux          []Transport
+	dialogs      map[string][]*dialogEntry
+	transactions map[string]*clientTransaction
+	handlers     []*handlerEntry
+	startedCh    chan struct{}
+	closedCh     chan struct{}
+	closed       bool
+	started      bool
+	ready        bool
+	running      bool
 
 	notifyOnce sync.Once
 }
@@ -104,12 +105,13 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		return nil, fmt.Errorf("opening session: %w", err)
 	}
 	return &Session{
-		cfg:       cfg,
-		logger:    cfg.Logger.With("component", "ims-session"),
-		primary:   primary,
-		pending:   make(map[string]chan sip.Message),
-		startedCh: make(chan struct{}),
-		closedCh:  make(chan struct{}),
+		cfg:          cfg,
+		logger:       cfg.Logger.With("component", "ims-session"),
+		primary:      primary,
+		dialogs:      make(map[string][]*dialogEntry),
+		transactions: make(map[string]*clientTransaction),
+		startedCh:    make(chan struct{}),
+		closedCh:     make(chan struct{}),
 	}, nil
 }
 
@@ -207,12 +209,11 @@ func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, e
 		}
 		return resp, nil
 	}
-	respCh := s.registerPending(req)
-	defer s.removePending(req)
-	if err := s.writeRequest(ctx, s.primaryTransport(), req); err != nil {
+	tx := newClientTransaction(s, s.primaryTransport(), req)
+	if err := tx.start(ctx); err != nil {
 		return sip.Message{}, err
 	}
-	return awaitPendingFinalResponse(ctx, respCh)
+	return tx.await(ctx)
 }
 
 func (s *Session) Send(ctx context.Context, req sip.Message) error {
@@ -345,6 +346,7 @@ func (s *Session) CloseContext(ctx context.Context) error {
 	if notifyErr == nil {
 		notifyErr = errors.New("session is closed")
 	}
+	s.abortTransactions(notifyErr)
 	s.notifyHandlersOnce(handlers, notifyErr)
 
 	done := make(chan struct{})
@@ -391,20 +393,6 @@ func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip
 		return fmt.Errorf("sending %s: %w", req.Method(), err)
 	}
 	return nil
-}
-
-func awaitPendingFinalResponse(ctx context.Context, respCh <-chan sip.Message) (sip.Message, error) {
-	for {
-		select {
-		case <-ctx.Done():
-			return sip.Message{}, ctx.Err()
-		case resp := <-respCh:
-			if isProvisionalResponse(resp) {
-				continue
-			}
-			return resp, nil
-		}
-	}
 }
 
 func (s *Session) readFinalTransportResponse(ctx context.Context, transport Transport) (sip.Message, error) {
@@ -513,35 +501,15 @@ func responseDestination(remote net.Addr, via string) net.Addr {
 	return target
 }
 
-func (s *Session) registerPending(msg sip.Message) <-chan sip.Message {
-	key := sip.PendingKey(msg)
-	ch := make(chan sip.Message, 4)
-	s.mu.Lock()
-	s.pending[key] = ch
-	s.mu.Unlock()
-	return ch
-}
-
-func (s *Session) removePending(msg sip.Message) {
-	key := sip.PendingKey(msg)
-	s.mu.Lock()
-	delete(s.pending, key)
-	s.mu.Unlock()
-}
-
 func (s *Session) dispatchResponse(msg sip.Message) bool {
 	key := sip.PendingKey(msg)
 	s.mu.Lock()
-	ch, ok := s.pending[key]
+	tx, ok := s.transactions[key]
 	s.mu.Unlock()
 	if !ok {
 		return false
 	}
-	select {
-	case ch <- msg:
-	default:
-		s.logger.Warn("dropping buffered response", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "status", msg.StatusCode())
-	}
+	tx.handleResponse(msg)
 	return true
 }
 

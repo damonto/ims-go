@@ -2,14 +2,10 @@ package sms
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
-	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -910,7 +906,7 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip
 	if target == "" {
 		target = "tel:" + s.mustResolveSMSC()
 	}
-	callID, _, tag, branch := newTransaction()
+	callID, _, tag, branch := sip.NewTransaction()
 	senderIdentity := smsPreferredIdentity(state)
 	msg := sip.NewRequest("MESSAGE", target)
 	msg.Headers.Add("Call-ID", callID)
@@ -919,12 +915,9 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip
 	msg.Headers.Add("Request-Disposition", "no-fork")
 	msg.Headers.Add("Accept-Contact", "*;+g.3gpp.smsip")
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d MESSAGE", atomic.AddInt64(&s.cseq, 1)))
-	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), branch))
+	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, state.MessagePort, branch))
 	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
-	addClientRequestHeaders(&msg, state)
-	addServiceRoutes(&msg, state.ServiceRoutes)
-	addSecurityVerifyHeader(&msg, s.reg.SecurityVerifyValue())
-	addSecurityRequirements(&msg)
+	s.reg.RequestPolicy().Apply(&msg)
 	msg.Headers.Add("Content-Type", "application/vnd.3gpp.sms")
 	msg.Headers.Add("Content-Transfer-Encoding", "binary")
 	if inReplyTo != "" {
@@ -1094,72 +1087,6 @@ func smsSeenKey(msg sip.Message) (string, bool) {
 		return "", false
 	}
 	return callID + "|" + cseq, true
-}
-
-func addClientRequestHeaders(msg *sip.Message, state registration.State) {
-	msg.Headers.Add("Allow", "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,REFER,UPDATE")
-	msg.Headers.Add("Max-Forwards", "70")
-	msg.Headers.Add("Supported", "100rel,path,replaces")
-	msg.Headers.Add("User-Agent", state.UserAgent)
-	if state.AccessNetworkInfo != "" {
-		msg.Headers.Add("P-Access-Network-Info", state.AccessNetworkInfo)
-	}
-}
-
-func addServiceRoutes(msg *sip.Message, routes []string) {
-	for _, route := range routes {
-		msg.Headers.Add("Route", route)
-	}
-}
-
-func addSecurityVerifyHeader(msg *sip.Message, verify string) bool {
-	if strings.TrimSpace(verify) == "" {
-		return false
-	}
-	msg.Headers.Add("Security-Verify", verify)
-	return true
-}
-
-func addSecurityRequirements(msg *sip.Message) {
-	msg.Headers.Add("Require", "sec-agree")
-	msg.Headers.Add("Proxy-Require", "sec-agree")
-}
-
-func transportToken(addr net.Addr) string {
-	switch addr.(type) {
-	case *net.TCPAddr:
-		return "TCP"
-	default:
-		return "UDP"
-	}
-}
-
-func newTransaction() (callID, sessionID, tag, branch string) {
-	return randomAlphaNum(24), randomHex(32), randomAlphaNum(10), randomAlphaNum(15)
-}
-
-func randomAlphaNum(length int) string {
-	return randomString(length, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-}
-
-func randomHex(length int) string {
-	return randomString(length, "0123456789abcdef")
-}
-
-func randomString(length int, alphabet string) string {
-	buf := make([]byte, length)
-	rnd := make([]byte, length)
-	_, _ = rand.Read(rnd)
-	for i, b := range rnd {
-		buf[i] = alphabet[int(b)%len(alphabet)]
-	}
-	return string(buf)
-}
-
-func randomUint32() uint32 {
-	var buf [4]byte
-	_, _ = rand.Read(buf[:])
-	return binary.BigEndian.Uint32(buf[:])
 }
 
 func normalizeContext(ctx context.Context) context.Context {

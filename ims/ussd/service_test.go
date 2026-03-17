@@ -156,6 +156,12 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 			if got := req.Header("Security-Verify"); got != wantSecurityVerify {
 				t.Fatalf("INVITE Security-Verify = %q, want %q", got, wantSecurityVerify)
 			}
+			if got := req.Header("Require"); got != "sec-agree" {
+				t.Fatalf("INVITE Require = %q, want sec-agree", got)
+			}
+			if got := req.Header("Proxy-Require"); got != "sec-agree" {
+				t.Fatalf("INVITE Proxy-Require = %q, want sec-agree", got)
+			}
 			transport.queue(newUSSDResponse(req, 200, "OK",
 				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
 				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
@@ -168,6 +174,12 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 		case "INFO", "BYE":
 			if got := req.Header("Security-Verify"); got != wantSecurityVerify {
 				t.Fatalf("%s Security-Verify = %q, want %q", req.Method(), got, wantSecurityVerify)
+			}
+			if got := req.Header("Require"); got != "sec-agree" {
+				t.Fatalf("%s Require = %q, want sec-agree", req.Method(), got)
+			}
+			if got := req.Header("Proxy-Require"); got != "sec-agree" {
+				t.Fatalf("%s Proxy-Require = %q, want sec-agree", req.Method(), got)
 			}
 			transport.queue(newUSSDResponse(req, 200, "OK", nil))
 		}
@@ -190,6 +202,185 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	}
 	if payload.Request {
 		t.Fatalf("payload.Request = %t, want false", payload.Request)
+	}
+}
+
+func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "INVITE":
+			transport.queue(newUSSDResponse(req, 200, "OK",
+				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
+				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
+				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
+				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
+				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
+				sip.Header{Name: "Content-Type", Value: "application/sdp"},
+			))
+		case "INFO", "BYE":
+			transport.queue(newUSSDResponse(req, 200, "OK", nil))
+		}
+	}
+
+	us, err := svc.Start(context.Background(), "*100#")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	msg := newDialogRequest("INFO", us.targetURI, us.remoteTo, "<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>;tag="+us.localTag, us.callID, "2 INFO")
+	msg.Headers.Add("Info-Package", ussdInfoPackage)
+	msg.Headers.Add("Content-Disposition", "info-package")
+	msg.Headers.Add("Content-Type", ussdContentType)
+	msg.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
+
+	key, ok := sess.LookupDialogKey(msg)
+	if !ok {
+		t.Fatal("LookupDialogKey() ok = false, want true")
+	}
+	if key != us.sessionKey() {
+		t.Fatalf("LookupDialogKey() = %q, want %q", key, us.sessionKey())
+	}
+}
+
+func TestLookupIncomingInviteSessionMatchesServerTransaction(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	orig := buildNetworkUSSDInvite(t)
+	orig.Headers = sip.UpsertHeader(orig.Headers, "Call-ID", "shared-call")
+	orig.Headers = sip.UpsertHeader(orig.Headers, "From", "<sip:network@example.com>;tag=remote-1")
+	orig.Headers = sip.UpsertHeader(orig.Headers, "CSeq", "1 INVITE")
+	orig.Headers = sip.UpsertHeader(orig.Headers, "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1")
+
+	us := svc.newIncomingUSSDSession(orig, Message{Text: "Enter PIN", Language: "en", Request: true})
+	us.inviteOK = svc.buildIncomingUSSDInviteOK(orig, us.localURI, us.localTag)
+	if err := svc.storeSession(us); err != nil {
+		t.Fatalf("storeSession() error = %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		via        string
+		requestURI string
+		wantMatch  bool
+	}{
+		{
+			name:       "same branch and sent-by",
+			via:        "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1",
+			requestURI: sip.RequestURI(orig),
+			wantMatch:  true,
+		},
+		{
+			name:       "different branch",
+			via:        "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2",
+			requestURI: sip.RequestURI(orig),
+			wantMatch:  false,
+		},
+		{
+			name:       "different sent-by",
+			via:        "SIP/2.0/UDP 127.0.0.2:5060;branch=z9hG4bK-1",
+			requestURI: sip.RequestURI(orig),
+			wantMatch:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invite := buildNetworkUSSDInvite(t)
+			invite.StartLine = "INVITE " + tt.requestURI + " SIP/2.0"
+			invite.Headers = sip.UpsertHeader(invite.Headers, "Call-ID", orig.Header("Call-ID"))
+			invite.Headers = sip.UpsertHeader(invite.Headers, "From", orig.Header("From"))
+			invite.Headers = sip.UpsertHeader(invite.Headers, "CSeq", orig.Header("CSeq"))
+			invite.Headers = sip.UpsertHeader(invite.Headers, "Via", tt.via)
+
+			got := svc.lookupIncomingInviteSession(invite)
+			if tt.wantMatch && got != us {
+				t.Fatalf("lookupIncomingInviteSession() = %p, want stored session %p", got, us)
+			}
+			if !tt.wantMatch && got != nil {
+				t.Fatalf("lookupIncomingInviteSession() = %p, want nil", got)
+			}
+		})
+	}
+}
+
+func TestLookupIncomingInviteSessionMatchesLegacyServerTransaction(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	orig := buildNetworkUSSDInvite(t)
+	orig.StartLine = "INVITE sip:*100%23;phone-context=ims.example@ims.example;user=dialstring SIP/2.0"
+	orig.Headers = sip.UpsertHeader(orig.Headers, "Call-ID", "legacy-call")
+	orig.Headers = sip.UpsertHeader(orig.Headers, "From", "<sip:network@example.com>;tag=legacy-remote")
+	orig.Headers = sip.UpsertHeader(orig.Headers, "CSeq", "7 INVITE")
+	orig.Headers = sip.UpsertHeader(orig.Headers, "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=legacy-1")
+
+	us := svc.newIncomingUSSDSession(orig, Message{Text: "Enter PIN", Language: "en", Request: true})
+	us.inviteOK = svc.buildIncomingUSSDInviteOK(orig, us.localURI, us.localTag)
+	if err := svc.storeSession(us); err != nil {
+		t.Fatalf("storeSession() error = %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		via        string
+		requestURI string
+		wantMatch  bool
+	}{
+		{
+			name:       "same legacy request",
+			via:        "SIP/2.0/UDP 127.0.0.1:5060;branch=legacy-1",
+			requestURI: sip.RequestURI(orig),
+			wantMatch:  true,
+		},
+		{
+			name:       "different request uri",
+			via:        "SIP/2.0/UDP 127.0.0.1:5060;branch=legacy-1",
+			requestURI: "sip:*101%23;phone-context=ims.example@ims.example;user=dialstring",
+			wantMatch:  false,
+		},
+		{
+			name:       "different top via",
+			via:        "SIP/2.0/UDP 127.0.0.2:5060;branch=legacy-1",
+			requestURI: sip.RequestURI(orig),
+			wantMatch:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invite := buildNetworkUSSDInvite(t)
+			invite.StartLine = "INVITE " + tt.requestURI + " SIP/2.0"
+			invite.Headers = sip.UpsertHeader(invite.Headers, "Call-ID", orig.Header("Call-ID"))
+			invite.Headers = sip.UpsertHeader(invite.Headers, "From", orig.Header("From"))
+			invite.Headers = sip.UpsertHeader(invite.Headers, "CSeq", orig.Header("CSeq"))
+			invite.Headers = sip.UpsertHeader(invite.Headers, "Via", tt.via)
+
+			got := svc.lookupIncomingInviteSession(invite)
+			if tt.wantMatch && got != us {
+				t.Fatalf("lookupIncomingInviteSession() = %p, want stored session %p", got, us)
+			}
+			if !tt.wantMatch && got != nil {
+				t.Fatalf("lookupIncomingInviteSession() = %p, want nil", got)
+			}
+		})
 	}
 }
 

@@ -3,8 +3,6 @@ package ussd
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -57,15 +55,18 @@ type Service struct {
 	cleanupCtx    context.Context
 	cleanupCancel context.CancelFunc
 
-	mu       sync.Mutex
-	sessions map[string]*Session
-	closed   bool
-	cseq     int64
-	bgWG     sync.WaitGroup
+	mu            sync.Mutex
+	sessions      map[string]*Session
+	incomingIndex map[string]string
+	closed        bool
+	cseq          int64
+	bgWG          sync.WaitGroup
 }
 
 type Session struct {
 	service          *Service
+	dialogAttachment session.Attachment
+	incomingInviteID string
 	callID           string
 	sessionID        string
 	localURI         string
@@ -152,6 +153,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		reg:           reg,
 		logger:        slog.Default().With("component", "ims-ussd"),
 		sessions:      make(map[string]*Session),
+		incomingIndex: make(map[string]string),
 		cleanupCtx:    cleanupCtx,
 		cleanupCancel: cleanupCancel,
 	}
@@ -197,6 +199,7 @@ func (s *Service) CloseContext(ctx context.Context) error {
 		sessions = append(sessions, sess)
 	}
 	s.sessions = make(map[string]*Session)
+	s.incomingIndex = make(map[string]string)
 	s.mu.Unlock()
 
 	if s.cleanupCancel != nil {
@@ -258,10 +261,10 @@ func (s *Service) newUSSDStart(code string) (ussdStart, sip.Message, error) {
 	}
 	start := ussdStart{
 		code:      code,
-		callID:    randomAlphaNum(24),
-		sessionID: randomHex(32),
-		localTag:  randomAlphaNum(10),
-		branch:    randomAlphaNum(15),
+		callID:    sip.RandomAlphaNum(24),
+		sessionID: sip.RandomHex(32),
+		localTag:  sip.RandomAlphaNum(10),
+		branch:    sip.RandomAlphaNum(15),
 		inviteSeq: atomic.AddInt64(&s.cseq, 1),
 		language:  defaultValue(s.cfg.Language, defaultUSSDLang),
 	}
@@ -278,7 +281,7 @@ func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, er
 	if err != nil {
 		return "", nil, fmt.Errorf("starting USSD: encoding XML payload: %w", err)
 	}
-	boundary := "ussd-" + randomAlphaNum(12)
+	boundary := "ussd-" + sip.RandomAlphaNum(12)
 	body, err := (multipartBody{Boundary: boundary, Parts: []multipartBodyPart{
 		{
 			Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}},
@@ -300,14 +303,9 @@ func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, er
 
 func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte) sip.Message {
 	state := s.reg.State()
-	securityVerify := s.reg.SecurityVerifyValue()
 	senderIdentity := ussdPreferredIdentity(state)
 	msg := sip.NewRequest("INVITE", start.target)
-	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), start.branch))
-	msg.Headers.Add("Max-Forwards", "70")
-	for _, route := range state.ServiceRoutes {
-		msg.Headers.Add("Route", route)
-	}
+	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, state.MessagePort, start.branch))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, start.localTag))
 	msg.Headers.Add("To", fmt.Sprintf("<%s>", start.target))
 	msg.Headers.Add("Call-ID", start.callID)
@@ -316,19 +314,9 @@ func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte)
 	msg.Headers.Add("Accept-Contact", `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`)
 	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
 	msg.Headers.Add("Contact", contactValue(state))
-	msg.Headers.Add("Allow", "INVITE,ACK,CANCEL,BYE,PRACK,UPDATE,REFER,MESSAGE,INFO")
 	msg.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
 	msg.Headers.Add("Recv-Info", ussdInfoPackage)
-	msg.Headers.Add("Supported", "100rel,path,replaces")
-	msg.Headers.Add("User-Agent", state.UserAgent)
-	if state.AccessNetworkInfo != "" {
-		msg.Headers.Add("P-Access-Network-Info", state.AccessNetworkInfo)
-	}
-	if securityVerify != "" {
-		msg.Headers.Add("Security-Verify", securityVerify)
-		msg.Headers.Add("Require", "sec-agree")
-		msg.Headers.Add("Proxy-Require", "sec-agree")
-	}
+	s.reg.RequestPolicy().Apply(&msg)
 	msg.Headers.Add("Content-Type", fmt.Sprintf("%s; boundary=%s", ussdMultipartType, boundary))
 	msg.Body = body
 	return msg
@@ -354,9 +342,11 @@ func (s *Service) startUSSDSession(ctx context.Context, start ussdStart, invite,
 		remoteCSeqs:  make(map[string]struct{}),
 		responseKind: ussdDialogKindRequest,
 	}
-	s.storeSession(ussdSession)
+	if err := s.storeSession(ussdSession); err != nil {
+		return nil, err
+	}
 	if err := s.sess.Send(ctx, ussdSession.buildACK()); err != nil {
-		s.removeSession(start.callID)
+		s.removeSession(ussdSession.sessionKey())
 		ussdSession.closeEvents()
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
@@ -386,7 +376,9 @@ func (s *Service) handleIncomingUSSDInvite(ctx context.Context, req session.Requ
 		return fmt.Errorf("handling USSD INVITE: sending 100 Trying: %w", err)
 	}
 	ussdSession.inviteOK = s.buildIncomingUSSDInviteOK(req.Message, ussdSession.localURI, ussdSession.localTag)
-	s.storeSession(ussdSession)
+	if err := s.storeSession(ussdSession); err != nil {
+		return err
+	}
 	ussdSession.emit(payload)
 	ussdSession.setDeliveringInvite(true)
 	if s.cfg.OnIncoming != nil {
@@ -402,7 +394,7 @@ func (s *Service) handleIncomingUSSDInvite(ctx context.Context, req session.Requ
 }
 
 func (s *Service) handleExistingUSSDInvite(ctx context.Context, req session.Request) (bool, error) {
-	ussdSession := s.lookupSessionByCallID(req.Message.Header("Call-ID"))
+	ussdSession := s.lookupIncomingInviteSession(req.Message)
 	if ussdSession == nil {
 		return false, nil
 	}
@@ -414,7 +406,7 @@ func (s *Service) handleExistingUSSDInvite(ctx context.Context, req session.Requ
 
 func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Session {
 	state := s.reg.State()
-	localTag := randomAlphaNum(10)
+	localTag := sip.RandomAlphaNum(10)
 	remoteTo := msg.Header("From")
 	targetURI := nonEmpty(sip.AddressURI(msg.Header("Contact")), sip.AddressURI(remoteTo))
 	if targetURI == "" {
@@ -422,8 +414,9 @@ func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Sess
 	}
 	return &Session{
 		service:          s,
+		incomingInviteID: incomingInviteKey(msg),
 		callID:           msg.Header("Call-ID"),
-		sessionID:        nonEmpty(msg.Header("Session-ID"), randomHex(32)),
+		sessionID:        nonEmpty(msg.Header("Session-ID"), sip.RandomHex(32)),
 		localURI:         nonEmpty(sip.AddressURI(msg.Header("To")), ussdPreferredIdentity(state)),
 		localTag:         localTag,
 		remoteTag:        sip.HeaderTag(remoteTo),
@@ -452,33 +445,75 @@ func (s *Service) buildIncomingUSSDInviteOK(msg sip.Message, localURI, localTag 
 	return ok
 }
 
-func (s *Service) storeSession(ussdSession *Session) {
+func (s *Service) storeSession(ussdSession *Session) error {
+	key := ussdSession.sessionKey()
+	attachment, err := s.sess.RegisterDialog(sip.DialogID{
+		CallID:    ussdSession.callID,
+		LocalTag:  ussdSession.localTag,
+		RemoteTag: ussdSession.remoteTag,
+	}, key)
+	if err != nil {
+		return fmt.Errorf("storing USSD session: %w", err)
+	}
+	ussdSession.dialogAttachment = attachment
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[ussdSession.callID] = ussdSession
+	s.sessions[key] = ussdSession
+	if inviteKey := ussdSession.inviteRequestKey(); inviteKey != "" {
+		s.incomingIndex[inviteKey] = key
+	}
+	return nil
 }
 
 func (s *Service) lookupSessionByCallID(callID string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sessions[callID]
+	for _, ussdSession := range s.sessions {
+		if ussdSession.callID == callID {
+			return ussdSession
+		}
+	}
+	return nil
+}
+
+func (s *Service) lookupIncomingInviteSession(msg sip.Message) *Session {
+	inviteKey := incomingInviteKey(msg)
+	if inviteKey == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.incomingIndex[inviteKey]
+	if !ok {
+		return nil
+	}
+	return s.sessions[key]
 }
 
 func (s *Service) lookupSessionForMessage(msg sip.Message) *Session {
-	ussdSession := s.lookupSessionByCallID(msg.Header("Call-ID"))
-	if ussdSession == nil {
+	key, ok := s.sess.LookupDialogKey(msg)
+	if !ok {
 		return nil
 	}
-	if !ussdSession.matchesDialog(msg) {
-		return nil
-	}
-	return ussdSession
-}
-
-func (s *Service) removeSession(callID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, callID)
+	return s.sessions[key]
+}
+
+func (s *Service) removeSession(key string) {
+	s.mu.Lock()
+	ussdSession := s.sessions[key]
+	if ussdSession != nil {
+		delete(s.sessions, key)
+		if inviteKey := ussdSession.inviteRequestKey(); inviteKey != "" {
+			delete(s.incomingIndex, inviteKey)
+		}
+	}
+	s.mu.Unlock()
+	if ussdSession != nil && ussdSession.dialogAttachment != nil {
+		_ = ussdSession.dialogAttachment.Close()
+		ussdSession.dialogAttachment = nil
+	}
 }
 
 func (s *Service) ussdTargetURI(code string) string {
@@ -493,7 +528,7 @@ func (s *Service) ussdSDP() string {
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		network = "IP6"
 	}
-	sessionID := randomUint32()
+	sessionID := sip.RandomUint32()
 	return fmt.Sprintf("v=0\r\no=- %d %d IN %s %s\r\ns=-\r\nc=IN %s %s\r\nt=0 0\r\nm=audio 0 RTP/AVP 97 96\r\na=rtpmap:97 AMR\r\na=fmtp:97 mode-set=0,2,5,7; maxframes=2\r\na=rtpmap:96 telephone-event\r\n", sessionID, sessionID, network, host, network, host)
 }
 
@@ -715,11 +750,9 @@ func (s *Session) buildACK() sip.Message {
 	state := s.service.reg.State()
 	senderIdentity := s.localDialogURI()
 	msg := sip.NewRequest("ACK", s.targetURI)
-	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.service.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), randomAlphaNum(15)))
+	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
 	msg.Headers.Add("Max-Forwards", "70")
-	for _, route := range s.routeSet {
-		msg.Headers.Add("Route", route)
-	}
+	sip.AddRouteHeaders(&msg, s.routeSet)
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, s.localTag))
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)
@@ -729,29 +762,16 @@ func (s *Session) buildACK() sip.Message {
 
 func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 	state := s.service.reg.State()
-	securityVerify := s.service.reg.SecurityVerifyValue()
 	senderIdentity := s.localDialogURI()
 	msg := sip.NewRequest(method, s.targetURI)
-	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportToken(s.service.sess.LocalAddr()), net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort)), randomAlphaNum(15)))
-	msg.Headers.Add("Max-Forwards", "70")
-	for _, route := range s.routeSet {
-		msg.Headers.Add("Route", route)
-	}
+	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, s.localTag))
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("Session-ID", s.sessionID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", atomic.AddInt64(&s.service.cseq, 1), method))
 	msg.Headers.Add("Contact", contactValue(state))
-	msg.Headers.Add("Allow", "INVITE,ACK,CANCEL,BYE,PRACK,UPDATE,REFER,MESSAGE,INFO")
-	msg.Headers.Add("Supported", "100rel,path,replaces")
-	msg.Headers.Add("User-Agent", state.UserAgent)
-	if state.AccessNetworkInfo != "" {
-		msg.Headers.Add("P-Access-Network-Info", state.AccessNetworkInfo)
-	}
-	if securityVerify != "" {
-		msg.Headers.Add("Security-Verify", securityVerify)
-	}
+	s.service.reg.DialogRequestPolicy(s.routeSet).Apply(&msg)
 	msg.Body = body
 	return msg
 }
@@ -906,7 +926,11 @@ func (s *Session) finish(fromNetwork bool) {
 		s.acked = true
 	}
 	s.mu.Unlock()
-	s.service.removeSession(s.callID)
+	if s.dialogAttachment != nil {
+		_ = s.dialogAttachment.Close()
+		s.dialogAttachment = nil
+	}
+	s.service.removeSession(s.sessionKey())
 	s.closeEvents()
 	s.service.logger.Debug("ended USSD session", "call_id", s.callID, "from_network", fromNetwork)
 }
@@ -955,17 +979,53 @@ func (s *Session) localDialogURI() string {
 	return ussdPreferredIdentity(s.service.reg.State())
 }
 
-func (s *Session) matchesDialog(msg sip.Message) bool {
-	if msg.Header("Call-ID") != s.callID {
-		return false
+func (s *Session) sessionKey() string {
+	return dialogSessionKey(sip.DialogID{
+		CallID:    s.callID,
+		LocalTag:  s.localTag,
+		RemoteTag: s.remoteTag,
+	})
+}
+
+func (s *Session) inviteRequestKey() string {
+	if !s.networkInitiated {
+		return ""
 	}
-	if tag := sip.HeaderTag(msg.Header("To")); tag != "" && s.localTag != "" && tag != s.localTag {
-		return false
+	return strings.TrimSpace(s.incomingInviteID)
+}
+
+func dialogSessionKey(id sip.DialogID) string {
+	return id.CallID + "|" + id.LocalTag + "|" + id.RemoteTag
+}
+
+func incomingInviteKey(msg sip.Message) string {
+	method := strings.ToUpper(strings.TrimSpace(msg.Method()))
+	if method == "" {
+		return ""
 	}
-	if tag := sip.HeaderTag(msg.Header("From")); tag != "" && s.remoteTag != "" && tag != s.remoteTag {
-		return false
+	if method == "ACK" {
+		method = "INVITE"
 	}
-	return true
+
+	via := strings.TrimSpace(msg.Header("Via"))
+	branch := strings.TrimSpace(sip.TopViaBranch(via))
+	if strings.HasPrefix(branch, "z9hG4bK") {
+		sentBy := strings.TrimSpace(sip.TopViaSentBy(via))
+		if sentBy == "" {
+			return ""
+		}
+		return branch + "|" + sentBy + "|" + method
+	}
+
+	requestURI := strings.TrimSpace(sip.RequestURI(msg))
+	callID := strings.TrimSpace(msg.Header("Call-ID"))
+	cseq := strings.TrimSpace(msg.Header("CSeq"))
+	fromTag := strings.TrimSpace(sip.HeaderTag(msg.Header("From")))
+	toTag := strings.TrimSpace(sip.HeaderTag(msg.Header("To")))
+	if requestURI == "" || via == "" || callID == "" || cseq == "" || fromTag == "" {
+		return ""
+	}
+	return requestURI + "|" + toTag + "|" + fromTag + "|" + callID + "|" + cseq + "|" + via
 }
 
 func validateUSSDInviteOK(msg sip.Message) error {
@@ -1295,39 +1355,6 @@ func ussdPreferredIdentity(state registration.State) string {
 		return identity
 	}
 	return state.PublicIdentity
-}
-
-func transportToken(addr net.Addr) string {
-	switch addr.(type) {
-	case *net.TCPAddr:
-		return "TCP"
-	default:
-		return "UDP"
-	}
-}
-
-func randomAlphaNum(length int) string {
-	return randomString(length, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-}
-
-func randomHex(length int) string {
-	return randomString(length, "0123456789abcdef")
-}
-
-func randomString(length int, alphabet string) string {
-	buf := make([]byte, length)
-	rnd := make([]byte, length)
-	_, _ = rand.Read(rnd)
-	for i, b := range rnd {
-		buf[i] = alphabet[int(b)%len(alphabet)]
-	}
-	return string(buf)
-}
-
-func randomUint32() uint32 {
-	var buf [4]byte
-	_, _ = rand.Read(buf[:])
-	return binary.BigEndian.Uint32(buf[:])
 }
 
 func normalizeContext(ctx context.Context) context.Context {

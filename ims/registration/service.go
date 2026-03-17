@@ -2,11 +2,10 @@ package registration
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -56,6 +55,7 @@ type State struct {
 	HomeDomain        string
 	RegisterURI       string
 	TelPublicID       string
+	Flow              Flow
 	ServiceRoutes     []string
 	SecurityClient    security.Param
 	SecurityVerify    *security.Param
@@ -75,18 +75,18 @@ type Service struct {
 	logger     *slog.Logger
 	attachment session.Attachment
 
-	mu                sync.Mutex
-	state             State
-	securityVerifyRaw string
-	authIK            []byte
-	authNonce         string
-	authRealm         string
-	authQOP           string
-	authNonceCount    uint32
-	callID            string
-	sessionID         string
-	tag               string
-	cseq              int64
+	mu             sync.Mutex
+	state          State
+	flow           Flow
+	authIK         []byte
+	authNonce      string
+	authRealm      string
+	authQOP        string
+	authNonceCount uint32
+	callID         string
+	sessionID      string
+	tag            string
+	cseq           int64
 }
 
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
@@ -103,7 +103,7 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating registration service: %w", err)
 	}
-	callID, sessionID, tag, _ := newTransaction()
+	callID, sessionID, tag, _ := sip.NewTransaction()
 	svc := &Service{
 		cfg:    cfg,
 		sess:   sess,
@@ -116,13 +116,15 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 			HomeDomain:        identity.realm,
 			RegisterURI:       "sip:" + identity.realm,
 			RegisterExpires:   cfg.RegisterExpires,
-			ContactHost:       host,
-			RegisterPort:      port,
-			MessagePort:       port,
-			SecurityClient:    newSecurityClient(port),
 			UserAgent:         cfg.UserAgent,
 			AccessNetworkInfo: accessNetworkInfo(cfg),
 			IMEI:              cfg.IMEI,
+		},
+		flow: Flow{
+			ContactHost:    host,
+			RegisterPort:   port,
+			MessagePort:    port,
+			SecurityClient: newSecurityClient(port),
 		},
 		callID:    callID,
 		sessionID: sessionID,
@@ -249,16 +251,38 @@ func (s *Service) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.state
-	state.ServiceRoutes = append([]string(nil), state.ServiceRoutes...)
-	if state.SecurityVerify != nil {
-		verify := *state.SecurityVerify
+	state.Flow = s.flow.clone()
+	state.ServiceRoutes = append([]string(nil), state.Flow.ServiceRoutes...)
+	state.SecurityClient = state.Flow.SecurityClient
+	state.SecurityVerify = nil
+	if state.Flow.SecurityVerify != nil {
+		verify := *state.Flow.SecurityVerify
 		state.SecurityVerify = &verify
 	}
+	state.ContactHost = state.Flow.ContactHost
+	state.RegisterPort = state.Flow.RegisterPort
+	state.MessagePort = state.Flow.MessagePort
 	return state
 }
 
+func (s *Service) CurrentFlow() Flow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flow.clone()
+}
+
 func (s *Service) SecurityVerifyValue() string {
-	return s.securityVerifyValue(s.currentSecurityVerify())
+	return s.CurrentFlow().SecurityVerifyValue()
+}
+
+func (s *Service) RequestPolicy() sip.ClientRequestPolicy {
+	state := s.State()
+	return state.Flow.RequestPolicy(state.UserAgent, state.AccessNetworkInfo)
+}
+
+func (s *Service) DialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
+	state := s.State()
+	return state.Flow.DialogRequestPolicy(routes, state.UserAgent, state.AccessNetworkInfo)
 }
 
 func splitHeaderList(value string) []string {
@@ -381,12 +405,12 @@ func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration,
 }
 
 func (s *Service) currentRegisterContactURI() string {
-	state := s.State()
-	port := state.RegisterPort
-	if state.SecurityVerify != nil {
-		port = state.SecurityClient.PortS
+	flow := s.CurrentFlow()
+	port := flow.RegisterPort
+	if flow.MessagePort != 0 {
+		port = flow.MessagePort
 	}
-	return contactURI(state.ContactHost, port)
+	return contactURI(flow.ContactHost, port)
 }
 
 func (s *Service) CloseContext(ctx context.Context) error {
@@ -504,7 +528,7 @@ func (s *Service) applyAssociatedURI(msg sip.Message) {
 func (s *Service) applyServiceRoutes(msg sip.Message) {
 	routes := msg.HeadersByName("Service-Route")
 	s.mu.Lock()
-	s.state.ServiceRoutes = append([]string(nil), routes...)
+	s.flow.ServiceRoutes = append([]string(nil), routes...)
 	s.mu.Unlock()
 }
 
@@ -545,10 +569,10 @@ func (s *Service) refreshInterval() time.Duration {
 func (s *Service) currentSecurityVerify() *security.Param {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state.SecurityVerify == nil {
+	if s.flow.SecurityVerify == nil {
 		return nil
 	}
-	verify := *s.state.SecurityVerify
+	verify := *s.flow.SecurityVerify
 	return &verify
 }
 
@@ -556,46 +580,27 @@ func (s *Service) securityVerifyValue(verify *security.Param) string {
 	if verify == nil {
 		return ""
 	}
-	s.mu.Lock()
-	raw := s.securityVerifyRaw
-	s.mu.Unlock()
-	if raw != "" {
-		return raw
+	flow := s.CurrentFlow()
+	if value := flow.SecurityVerifyValue(); value != "" {
+		return value
 	}
 	return verify.String()
 }
 
-func (s *Service) addSecurityVerifyHeader(msg *sip.Message, verify *security.Param) bool {
-	if verify == nil {
-		return false
-	}
-	msg.Headers.Add("Security-Verify", s.securityVerifyValue(verify))
-	return true
-}
-
-func (s *Service) applySecurityServer(headerValue string) error {
-	headerValue = strings.TrimSpace(headerValue)
-	if headerValue == "" {
-		return errors.New("applying Security-Server: header is empty")
-	}
-	var params security.Params
-	if err := params.UnmarshalText([]byte(headerValue)); err != nil {
+func (s *Service) applySecurityServer(headerValues []string) error {
+	verify, raw, err := selectSecurityServer(headerValues)
+	if err != nil {
 		return err
+	}
+	if verify == nil {
+		return errors.New("applying Security-Server: header is empty")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.securityVerifyRaw = ""
-	s.state.SecurityVerify = nil
-	for _, param := range params {
-		if normalized, ok := security.NormalizeParam(param); ok {
-			verify := normalized
-			s.securityVerifyRaw = headerValue
-			s.state.SecurityVerify = &verify
-			s.state.MessagePort = s.state.SecurityClient.PortS
-			return nil
-		}
-	}
-	return errors.New("applying Security-Server: no compatible ipsec-3gpp security mechanism")
+	s.flow.SecurityServerRaw = append([]string(nil), raw...)
+	s.flow.SecurityVerify = verify
+	s.flow.MessagePort = s.flow.SecurityClient.PortS
+	return nil
 }
 
 func (s *Service) applyAuthenticationInfo(msg sip.Message) {
@@ -698,7 +703,7 @@ func (s *Service) applyRegisterChallenge(resp sip.Message) (security.Challenge, 
 	if _, err := challenge.SelectedQOP(); err != nil {
 		return security.Challenge{}, err
 	}
-	if err := s.applySecurityServer(resp.Header("Security-Server")); err != nil {
+	if err := s.applySecurityServer(resp.HeadersByName("Security-Server")); err != nil {
 		return security.Challenge{}, err
 	}
 	s.storeAuthChallenge(challenge)
@@ -808,7 +813,8 @@ func (s *Service) upgradeSecureTransport(ctx context.Context) error {
 	if !s.shouldUpgradeSecureTransport(verify) {
 		return nil
 	}
-	secureTransport, err := s.cfg.DialSecureTCP(ctx, s.secureTransportConfig(verify, s.State().SecurityClient.PortC, verify.PortS, verify.SPIS, s.State().SecurityClient.SPIC))
+	flow := s.CurrentFlow()
+	secureTransport, err := s.cfg.DialSecureTCP(ctx, s.secureTransportConfig(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC))
 	if err != nil {
 		return fmt.Errorf("dialing secure IMS transport: %w", err)
 	}
@@ -822,7 +828,7 @@ func (s *Service) upgradeSecureTransport(ctx context.Context) error {
 }
 
 func (s *Service) shouldUpgradeSecureTransport(verify *security.Param) bool {
-	return strings.EqualFold(s.transportToken(), "TCP") && verify != nil && s.cfg.DialSecureTCP != nil
+	return strings.EqualFold(sip.TransportToken(s.sess.LocalAddr()), "TCP") && verify != nil && s.cfg.DialSecureTCP != nil
 }
 
 func (s *Service) secureTransportConfig(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32) session.SecureTCPConfig {
@@ -848,9 +854,9 @@ func (s *Service) secureDatagramTransportConfig(verify *security.Param, localPor
 }
 
 func (s *Service) startSecureServerTransports(ctx context.Context, verify *security.Param) error {
-	state := s.State()
+	flow := s.CurrentFlow()
 	if s.cfg.ListenSecureTCP != nil {
-		serverTransport, err := s.cfg.ListenSecureTCP(ctx, s.secureTransportConfig(verify, state.SecurityClient.PortS, verify.PortC, verify.SPIC, state.SecurityClient.SPIS))
+		serverTransport, err := s.cfg.ListenSecureTCP(ctx, s.secureTransportConfig(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS))
 		if err != nil {
 			return fmt.Errorf("listening secure IMS transport: %w", err)
 		}
@@ -859,7 +865,7 @@ func (s *Service) startSecureServerTransports(ctx context.Context, verify *secur
 		}
 	}
 	if s.cfg.ListenSecureUDP != nil {
-		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, s.secureDatagramTransportConfig(verify, state.SecurityClient.PortS, verify.PortC, verify.SPIC, state.SecurityClient.SPIS))
+		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, s.secureDatagramTransportConfig(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS))
 		if err != nil {
 			return fmt.Errorf("listening secure IMS datagram transport: %w", err)
 		}
@@ -898,27 +904,6 @@ func (s *Service) registerRealm(auth *security.Authorization) string {
 	return auth.Realm
 }
 
-func (s *Service) addClientRequestHeaders(msg *sip.Message) {
-	msg.Headers.Add("Allow", "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,REFER,UPDATE")
-	msg.Headers.Add("Max-Forwards", "70")
-	msg.Headers.Add("Supported", "100rel,path,replaces")
-	msg.Headers.Add("User-Agent", s.State().UserAgent)
-	if value := s.State().AccessNetworkInfo; value != "" {
-		msg.Headers.Add("P-Access-Network-Info", value)
-	}
-}
-
-func (s *Service) addSecurityRequirements(msg *sip.Message) {
-	msg.Headers.Add("Require", "sec-agree")
-	msg.Headers.Add("Proxy-Require", "sec-agree")
-}
-
-func (s *Service) addServiceRoutes(msg *sip.Message) {
-	for _, route := range s.State().ServiceRoutes {
-		msg.Headers.Add("Route", route)
-	}
-}
-
 func (s *Service) legacyEmptyAuthorizationValue() string {
 	text, _ := (security.Authorization{
 		Nonce:    "",
@@ -932,13 +917,13 @@ func (s *Service) legacyEmptyAuthorizationValue() string {
 
 func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int) sip.Message {
 	realm := s.registerRealm(auth)
-	_, _, _, branch := newTransaction()
+	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
 	msg := sip.NewRequest("REGISTER", state.RegisterURI)
 	msg.Headers.Add("To", fmt.Sprintf("<%s>", state.PublicIdentity))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, s.tag))
 	msg.Headers.Add("Expires", strconv.Itoa(expiresSeconds))
-	s.addSecurityRequirements(&msg)
+	sip.SecurityAgreement{Verify: s.securityVerifyValue(verify), Required: true}.Apply(&msg)
 	msg.Headers.Add("Security-Client", state.SecurityClient.String())
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("Session-ID", s.sessionID)
@@ -951,9 +936,11 @@ func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAutho
 		msg.Headers.Add("Authorization", legacyAuthorization)
 	}
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d REGISTER", atomic.AddInt64(&s.cseq, 1)))
-	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", s.transportToken(), net.JoinHostPort(state.ContactHost, strconv.Itoa(port)), branch))
-	s.addClientRequestHeaders(&msg)
-	s.addSecurityVerifyHeader(&msg, verify)
+	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, port, branch))
+	sip.ClientRequestPolicy{
+		UserAgent:         state.UserAgent,
+		AccessNetworkInfo: state.AccessNetworkInfo,
+	}.Apply(&msg)
 	msg.Headers.Add("Content-Type", "application/pidf+xml")
 	msg.Body = []byte(s.registerPIDFBody())
 	return msg
@@ -962,7 +949,7 @@ func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAutho
 func (s *Service) buildSubscribe() sip.Message {
 	state := s.State()
 	publicID := subscribePublicIdentity(state)
-	callID, sessionID, tag, branch := newTransaction()
+	callID, sessionID, tag, branch := sip.NewTransaction()
 	msg := sip.NewRequest("SUBSCRIBE", publicID)
 	msg.Headers.Add("Expires", strconv.Itoa(s.registerExpiresSeconds()))
 	msg.Headers.Add("Event", "reg")
@@ -972,11 +959,8 @@ func (s *Service) buildSubscribe() sip.Message {
 	msg.Headers.Add("Session-ID", sessionID)
 	msg.Headers.Add("Contact", s.subscribeContactValue(s.messagePort()))
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d SUBSCRIBE", atomic.AddInt64(&s.cseq, 1)))
-	msg.Headers.Add("Via", fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", s.transportToken(), net.JoinHostPort(state.ContactHost, strconv.Itoa(s.messagePort())), branch))
-	s.addClientRequestHeaders(&msg)
-	s.addServiceRoutes(&msg)
-	s.addSecurityVerifyHeader(&msg, s.currentSecurityVerify())
-	s.addSecurityRequirements(&msg)
+	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, s.messagePort(), branch))
+	s.RequestPolicy().Apply(&msg)
 	return msg
 }
 
@@ -988,21 +972,11 @@ func subscribePublicIdentity(state State) string {
 }
 
 func (s *Service) messagePort() int {
-	verify := s.currentSecurityVerify()
-	state := s.State()
-	if verify != nil && state.SecurityClient.PortS != 0 {
-		return state.SecurityClient.PortS
+	flow := s.CurrentFlow()
+	if flow.MessagePort != 0 {
+		return flow.MessagePort
 	}
-	return state.RegisterPort
-}
-
-func (s *Service) transportToken() string {
-	switch s.sess.LocalAddr().(type) {
-	case *net.TCPAddr:
-		return "TCP"
-	default:
-		return "UDP"
-	}
+	return flow.RegisterPort
 }
 
 func (s *Service) subscribeContactValue(port int) string {
@@ -1104,7 +1078,7 @@ func normalizeConfig(cfg Config) Config {
 		cfg.Region = "IE"
 	}
 	if cfg.UserAgent == "" {
-		cfg.UserAgent = "IMSClient/1.0 Linux"
+		cfg.UserAgent = defaultUserAgent()
 	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
@@ -1120,6 +1094,61 @@ func accessNetworkInfo(cfg Config) string {
 		return "IEEE-802.11;i-wlan-node-id=" + strings.ToLower(nodeID)
 	}
 	return ""
+}
+
+func selectSecurityServer(values []string) (*security.Param, []string, error) {
+	raw := make([]string, 0, len(values))
+	bestQ := -1
+	var best *security.Param
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		raw = append(raw, value)
+		var params security.Params
+		if err := params.UnmarshalText([]byte(value)); err != nil {
+			return nil, nil, err
+		}
+		for _, param := range params {
+			normalized, ok := security.NormalizeParam(param)
+			if !ok {
+				continue
+			}
+			q, err := securityQValue(param.Q)
+			if err != nil {
+				return nil, nil, fmt.Errorf("parsing Security-Server q-value %q: %w", param.Q, err)
+			}
+			if best != nil && q <= bestQ {
+				continue
+			}
+			verify := normalized
+			best = &verify
+			bestQ = q
+		}
+	}
+	if len(raw) == 0 {
+		return nil, nil, errors.New("applying Security-Server: header is empty")
+	}
+	if best == nil {
+		return nil, nil, errors.New("applying Security-Server: no compatible ipsec-3gpp security mechanism")
+	}
+	return best, raw, nil
+}
+
+func securityQValue(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 1000, nil
+	}
+	q, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, err
+	}
+	if q < 0 || q > 1 {
+		return 0, fmt.Errorf("out of range q=%q", value)
+	}
+	return int(math.Round(q * 1000)), nil
 }
 
 func defaultRealm(realm, registerURI string) string {
@@ -1163,8 +1192,8 @@ func newSecurityClient(registerPort int) security.Param {
 		PortC:     clientPort,
 		PortS:     serverPort,
 		Prot:      "esp",
-		SPIC:      randomUint32(),
-		SPIS:      randomUint32(),
+		SPIC:      sip.RandomUint32(),
+		SPIS:      sip.RandomUint32(),
 	}
 }
 
@@ -1174,38 +1203,10 @@ func (p akaProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult
 	return p.card.AKA(ctx, rand, autn)
 }
 
-func newTransaction() (callID, sessionID, tag, branch string) {
-	return randomAlphaNum(24), randomHex(32), randomAlphaNum(10), randomAlphaNum(15)
-}
-
-func randomAlphaNum(length int) string {
-	return randomString(length, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-}
-
-func randomHex(length int) string {
-	return randomString(length, "0123456789abcdef")
-}
-
-func randomString(length int, alphabet string) string {
-	buf := make([]byte, length)
-	rnd := make([]byte, length)
-	_, _ = rand.Read(rnd)
-	for i, b := range rnd {
-		buf[i] = alphabet[int(b)%len(alphabet)]
-	}
-	return string(buf)
-}
-
 func randomIMSPort() int {
 	const base = 10000
 	const span = 55535
-	return base + int(randomUint32()%span)
-}
-
-func randomUint32() uint32 {
-	var buf [4]byte
-	_, _ = rand.Read(buf[:])
-	return binary.BigEndian.Uint32(buf[:])
+	return base + int(sip.RandomUint32()%span)
 }
 
 func normalizeContext(ctx context.Context) context.Context {

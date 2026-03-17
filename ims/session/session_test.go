@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -632,5 +633,251 @@ func extractStubTransport(t Transport) *stubTransport {
 		return v.stub
 	default:
 		return nil
+	}
+}
+
+func useTransactionTimers(t *testing.T, timers transactionTimers) {
+	t.Helper()
+	previous := defaultTransactionTimers
+	defaultTransactionTimers = timers
+	t.Cleanup(func() {
+		defaultTransactionTimers = previous
+	})
+}
+
+func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
+	useTransactionTimers(t, transactionTimers{
+		T1: 10 * time.Millisecond,
+		T2: 20 * time.Millisecond,
+		T4: 10 * time.Millisecond,
+	})
+
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	req := newRequest("MESSAGE", "call-retry", "1 MESSAGE")
+	transport.onWrite = func(_ []byte) {
+		if len(transport.writes) < 2 {
+			return
+		}
+		transport.queueRead(newResponse(req, 200, "OK"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := sess.Exchange(ctx, req)
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	if resp.StatusCode() != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+	if got := len(transport.writes); got < 2 {
+		t.Fatalf("len(writes) = %d, want at least 2", got)
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
+	useTransactionTimers(t, transactionTimers{
+		T1: 10 * time.Millisecond,
+		T2: 20 * time.Millisecond,
+		T4: 10 * time.Millisecond,
+	})
+
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = sess.Exchange(ctx, newRequest("MESSAGE", "call-timeout", "1 MESSAGE"))
+	if err == nil {
+		t.Fatal("Exchange() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "transaction timeout") {
+		t.Fatalf("Exchange() error = %v, want transaction timeout", err)
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
+	useTransactionTimers(t, transactionTimers{
+		T1: 10 * time.Millisecond,
+		T2: 20 * time.Millisecond,
+		T4: 10 * time.Millisecond,
+		TD: 30 * time.Millisecond,
+	})
+
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	req := newRequest("INVITE", "call-invite", "1 INVITE")
+	transport.onWrite = func(data []byte) {
+		msg, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage() error = %v", err)
+		}
+		if msg.Method() == "INVITE" {
+			transport.queueRead(newResponse(req, 404, "Not Found"))
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := sess.Exchange(ctx, req)
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	if resp.StatusCode() != 404 {
+		t.Fatalf("StatusCode() = %d, want 404", resp.StatusCode())
+	}
+	if len(transport.writes) < 2 {
+		t.Fatalf("len(writes) = %d, want at least 2", len(transport.writes))
+	}
+	ack, err := sip.ParseMessage(transport.writes[len(transport.writes)-1])
+	if err != nil {
+		t.Fatalf("ParseMessage(ACK) error = %v", err)
+	}
+	if ack.Method() != "ACK" {
+		t.Fatalf("ack.Method() = %q, want ACK", ack.Method())
+	}
+	if got := ack.Header("CSeq"); got != "1 ACK" {
+		t.Fatalf("ACK CSeq = %q, want 1 ACK", got)
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
+	useTransactionTimers(t, transactionTimers{
+		T1: 10 * time.Millisecond,
+		T2: 20 * time.Millisecond,
+		T4: 10 * time.Millisecond,
+		TD: 40 * time.Millisecond,
+	})
+
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	req := newRequest("INVITE", "call-repeat-ack", "1 INVITE")
+	transport.onWrite = func(data []byte) {
+		msg, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage() error = %v", err)
+		}
+		switch msg.Method() {
+		case "INVITE":
+			transport.queueRead(newResponse(req, 486, "Busy Here"))
+		case "ACK":
+			if len(transport.writes) == 2 {
+				transport.queueRead(newResponse(req, 486, "Busy Here"))
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := sess.Exchange(ctx, req)
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	if resp.StatusCode() != 486 {
+		t.Fatalf("StatusCode() = %d, want 486", resp.StatusCode())
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	ackCount := 0
+	for _, data := range transport.writes {
+		msg, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage() error = %v", err)
+		}
+		if msg.Method() == "ACK" {
+			ackCount++
+		}
+	}
+	if ackCount < 2 {
+		t.Fatalf("ACK count = %d, want at least 2", ackCount)
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInviteTransactionDefaultTimerDMeetsRFCMinimum(t *testing.T) {
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	tx := newClientTransaction(sess, transport, newRequest("INVITE", "call-d", "1 INVITE"))
+	if got := tx.timerD(); got < 32*time.Second {
+		t.Fatalf("timerD() = %v, want at least 32s", got)
 	}
 }
