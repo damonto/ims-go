@@ -63,6 +63,7 @@ type Session struct {
 	aux          []Transport
 	dialogs      map[string][]*dialogEntry
 	transactions map[string]*clientTransaction
+	serverTxs    map[string]*serverTransaction
 	handlers     []*handlerEntry
 	startedCh    chan struct{}
 	closedCh     chan struct{}
@@ -110,6 +111,7 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		primary:      primary,
 		dialogs:      make(map[string][]*dialogEntry),
 		transactions: make(map[string]*clientTransaction),
+		serverTxs:    make(map[string]*serverTransaction),
 		startedCh:    make(chan struct{}),
 		closedCh:     make(chan struct{}),
 	}, nil
@@ -229,7 +231,11 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 	if err := s.ensureOpen("writing response"); err != nil {
 		return err
 	}
-	return s.writeResponsePacket(ctx, req.Transport, req.Message, resp.Bytes())
+	if err := s.writeResponsePacket(ctx, req.Transport, req.Message, resp.Bytes()); err != nil {
+		return err
+	}
+	s.recordServerTransactionResponse(req, resp)
+	return nil
 }
 
 func (s *Session) WriteStatus(ctx context.Context, req Request, code int, reason string) error {
@@ -275,7 +281,7 @@ func (s *Session) Run(ctx context.Context) error {
 				return inbound.err
 			}
 			if inbound.msg.IsRequest() {
-				if err := s.handleRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport}); err != nil {
+				if err := s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport}); err != nil {
 					return err
 				}
 				continue
@@ -284,6 +290,14 @@ func (s *Session) Run(ctx context.Context) error {
 			s.dispatchResponse(inbound.msg)
 		}
 	}
+}
+
+func (s *Session) handleInboundRequest(ctx context.Context, req Request) error {
+	handled, err := s.processServerTransaction(ctx, req)
+	if handled || err != nil {
+		return err
+	}
+	return s.handleRequest(ctx, req)
 }
 
 func (s *Session) WaitStarted(ctx context.Context) error {
@@ -347,6 +361,7 @@ func (s *Session) CloseContext(ctx context.Context) error {
 		notifyErr = errors.New("session is closed")
 	}
 	s.abortTransactions(notifyErr)
+	s.clearServerTransactions()
 	s.notifyHandlersOnce(handlers, notifyErr)
 
 	done := make(chan struct{})

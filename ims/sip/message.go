@@ -226,13 +226,18 @@ func ResponseHeaders(req Message, code int) Headers {
 	if code != 100 && to != "" {
 		to = WithTag(to, "", ResponseTag(req))
 	}
-	return Headers{
-		{Name: "Via", Value: req.Header("Via")},
-		{Name: "From", Value: req.Header("From")},
-		{Name: "To", Value: to},
-		{Name: "Call-ID", Value: req.Header("Call-ID")},
-		{Name: "CSeq", Value: req.Header("CSeq")},
+	vias := req.HeadersByName("Via")
+	headers := make(Headers, 0, len(vias)+4)
+	for _, via := range vias {
+		headers = append(headers, Header{Name: "Via", Value: via})
 	}
+	headers = append(headers,
+		Header{Name: "From", Value: req.Header("From")},
+		Header{Name: "To", Value: to},
+		Header{Name: "Call-ID", Value: req.Header("Call-ID")},
+		Header{Name: "CSeq", Value: req.Header("CSeq")},
+	)
+	return headers
 }
 
 func ResponseTag(req Message) string {
@@ -253,6 +258,15 @@ func RequestURI(msg Message) string {
 		return ""
 	}
 	return parts[1]
+}
+
+func SetRequestURI(msg *Message, uri string) {
+	parts := strings.SplitN(msg.StartLine, " ", 3)
+	if len(parts) != 3 {
+		return
+	}
+	parts[1] = uri
+	msg.StartLine = strings.Join(parts, " ")
 }
 
 func AddressURI(value string) string {

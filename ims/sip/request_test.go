@@ -133,4 +133,52 @@ func TestTransportTokenAndVia(t *testing.T) {
 	if got, want := BuildVia("TCP", "127.0.0.1", 5060, "abc123"), "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKabc123;rport"; got != want {
 		t.Fatalf("BuildVia() = %q, want %q", got, want)
 	}
+	if got, want := BuildViaWithOptions("UDP", "127.0.0.1", 5060, "abc123", ViaOptions{Keep: true}), "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKabc123;rport;keep"; got != want {
+		t.Fatalf("BuildViaWithOptions() = %q, want %q", got, want)
+	}
+}
+
+func TestApplyRouteSet(t *testing.T) {
+	tests := []struct {
+		name           string
+		routes         []string
+		wantRequestURI string
+		wantRoutes     []string
+	}{
+		{
+			name:           "loose route keeps remote target",
+			routes:         []string{"<sip:pcscf.example.com;lr>"},
+			wantRequestURI: "sip:user@example.com",
+			wantRoutes:     []string{"<sip:pcscf.example.com;lr>"},
+		},
+		{
+			name:           "strict route rewrites request uri",
+			routes:         []string{"<sip:edge.example.com>", "<sip:pcscf.example.com;lr>"},
+			wantRequestURI: "sip:edge.example.com",
+			wantRoutes:     []string{"<sip:pcscf.example.com;lr>", "<sip:user@example.com>"},
+		},
+		{
+			name:           "empty routes leaves request untouched",
+			wantRequestURI: "sip:user@example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := NewRequest("MESSAGE", "sip:user@example.com")
+			ApplyRouteSet(&msg, tt.routes)
+			if got := RequestURI(msg); got != tt.wantRequestURI {
+				t.Fatalf("RequestURI() = %q, want %q", got, tt.wantRequestURI)
+			}
+			if got := msg.HeadersByName("Route"); len(got) != len(tt.wantRoutes) {
+				t.Fatalf("HeadersByName(Route) = %v, want %v", got, tt.wantRoutes)
+			} else {
+				for i := range got {
+					if got[i] != tt.wantRoutes[i] {
+						t.Fatalf("HeadersByName(Route) = %v, want %v", got, tt.wantRoutes)
+					}
+				}
+			}
+		})
+	}
 }

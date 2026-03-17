@@ -92,6 +92,22 @@ func (t *stubTransport) WritePacketTo(ctx context.Context, data []byte, addr net
 	return nil
 }
 
+func (t *stubTransport) writeCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.writes)
+}
+
+func (t *stubTransport) snapshotWrites() [][]byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	writes := make([][]byte, len(t.writes))
+	for i, data := range t.writes {
+		writes[i] = append([]byte(nil), data...)
+	}
+	return writes
+}
+
 func (t *stubTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -188,8 +204,8 @@ func TestExchangeBeforeRunSkipsRequestsAndProvisionalResponses(t *testing.T) {
 	if resp.StatusCode() != 200 {
 		t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
 	}
-	if len(transport.writes) != 1 {
-		t.Fatalf("len(writes) = %d, want 1", len(transport.writes))
+	if got := transport.writeCount(); got != 1 {
+		t.Fatalf("len(writes) = %d, want 1", got)
 	}
 }
 
@@ -591,6 +607,131 @@ func TestCloseContextClosesTransportsAndFansOutErrorOnce(t *testing.T) {
 	}
 }
 
+func TestRunRetransmitsFinalResponseForRepeatedInboundRequest(t *testing.T) {
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	handled := make(chan struct{}, 2)
+	handler := &requestHandler{
+		handle: func(ctx context.Context, req Request) (bool, error) {
+			if req.Message.Method() != "MESSAGE" {
+				return false, nil
+			}
+			handled <- struct{}{}
+			return true, sess.WriteStatus(ctx, req, 200, "OK")
+		},
+	}
+	if _, err := sess.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	req := newInboundRequest("MESSAGE", "call-server-retry", "1 MESSAGE")
+	transport.queueRead(req)
+	transport.queueRead(req)
+	waitForWriteCount(t, transport, 2)
+
+	if got := len(handled); got != 1 {
+		t.Fatalf("handler count = %d, want 1", got)
+	}
+	for _, data := range transport.snapshotWrites() {
+		resp, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage() error = %v", err)
+		}
+		if resp.StatusCode() != 200 {
+			t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+		}
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	handled := make(chan string, 2)
+	handler := &requestHandler{
+		handle: func(ctx context.Context, req Request) (bool, error) {
+			if req.Message.Method() != "INVITE" {
+				return false, nil
+			}
+			handled <- req.Message.Method()
+			return true, sess.WriteStatus(ctx, req, 100, "Trying")
+		},
+	}
+	if _, err := sess.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	invite := newInboundRequest("INVITE", "call-cancel", "1 INVITE")
+	cancel := newInboundRequest("CANCEL", "call-cancel", "1 CANCEL")
+	transport.queueRead(invite)
+	waitForWriteCount(t, transport, 1)
+	transport.queueRead(cancel)
+	waitForWriteCount(t, transport, 3)
+
+	if got := len(handled); got != 1 {
+		t.Fatalf("handler count = %d, want 1", got)
+	}
+	writes := transport.snapshotWrites()
+	if len(writes) != 3 {
+		t.Fatalf("len(writes) = %d, want 3", len(writes))
+	}
+	got := make([]string, 0, len(writes))
+	for _, data := range writes {
+		resp, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage() error = %v", err)
+		}
+		got = append(got, resp.StartLine+" "+resp.Header("CSeq"))
+	}
+	want := []string{
+		"SIP/2.0 100 Trying 1 INVITE",
+		"SIP/2.0 200 OK 1 CANCEL",
+		"SIP/2.0 487 Request Terminated 1 INVITE",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("responses[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
 func newRequest(method, callID, cseq string) sip.Message {
 	msg := sip.NewRequest(method, "sip:test@example.com")
 	msg.Headers = sip.Headers{
@@ -612,6 +753,20 @@ func newResponse(req sip.Message, code int, reason string) sip.Message {
 	resp := sip.NewResponse(code, reason)
 	resp.Headers = sip.ResponseHeaders(req, code)
 	return resp
+}
+
+func waitForWriteCount(t *testing.T, transport *stubTransport, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if transport.writeCount() >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waiting for writes: got %d, want at least %d", transport.writeCount(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func cloneAddr(addr net.Addr) net.Addr {
@@ -670,7 +825,7 @@ func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
 
 	req := newRequest("MESSAGE", "call-retry", "1 MESSAGE")
 	transport.onWrite = func(_ []byte) {
-		if len(transport.writes) < 2 {
+		if transport.writeCount() < 2 {
 			return
 		}
 		transport.queueRead(newResponse(req, 200, "OK"))
@@ -685,7 +840,7 @@ func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
 	if resp.StatusCode() != 200 {
 		t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
 	}
-	if got := len(transport.writes); got < 2 {
+	if got := transport.writeCount(); got < 2 {
 		t.Fatalf("len(writes) = %d, want at least 2", got)
 	}
 
@@ -778,10 +933,11 @@ func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
 	if resp.StatusCode() != 404 {
 		t.Fatalf("StatusCode() = %d, want 404", resp.StatusCode())
 	}
-	if len(transport.writes) < 2 {
-		t.Fatalf("len(writes) = %d, want at least 2", len(transport.writes))
+	writes := transport.snapshotWrites()
+	if len(writes) < 2 {
+		t.Fatalf("len(writes) = %d, want at least 2", len(writes))
 	}
-	ack, err := sip.ParseMessage(transport.writes[len(transport.writes)-1])
+	ack, err := sip.ParseMessage(writes[len(writes)-1])
 	if err != nil {
 		t.Fatalf("ParseMessage(ACK) error = %v", err)
 	}
@@ -832,7 +988,7 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 		case "INVITE":
 			transport.queueRead(newResponse(req, 486, "Busy Here"))
 		case "ACK":
-			if len(transport.writes) == 2 {
+			if transport.writeCount() == 2 {
 				transport.queueRead(newResponse(req, 486, "Busy Here"))
 			}
 		}
@@ -851,7 +1007,7 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	ackCount := 0
-	for _, data := range transport.writes {
+	for _, data := range transport.snapshotWrites() {
 		msg, err := sip.ParseMessage(data)
 		if err != nil {
 			t.Fatalf("ParseMessage() error = %v", err)

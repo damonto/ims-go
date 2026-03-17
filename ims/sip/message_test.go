@@ -244,6 +244,7 @@ func TestResponseHelpers(t *testing.T) {
 	req := NewRequest("MESSAGE", "sip:+123@example.com")
 	req.Headers = Headers{
 		{Name: "Via", Value: "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1"},
+		{Name: "Via", Value: "SIP/2.0/UDP proxy.example.com:5060;branch=z9hG4bK-2"},
 		{Name: "From", Value: "<sip:alice@example.com>;tag=local"},
 		{Name: "To", Value: "<sip:bob@example.com>"},
 		{Name: "Call-ID", Value: "call-1"},
@@ -253,6 +254,9 @@ func TestResponseHelpers(t *testing.T) {
 	respHeaders := ResponseHeaders(req, 200)
 	if got := respHeaders.Get("To"); !strings.Contains(got, ";tag=") {
 		t.Fatalf("ResponseHeaders().To = %q, want tag", got)
+	}
+	if got := respHeaders.Values("Via"); len(got) != 2 || got[0] != req.Headers[0].Value || got[1] != req.Headers[1].Value {
+		t.Fatalf("ResponseHeaders().Via = %v, want both request Via headers", got)
 	}
 	if got := ResponseTag(req); got == "" {
 		t.Fatal("ResponseTag() = empty, want non-empty")

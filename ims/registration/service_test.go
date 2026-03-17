@@ -221,6 +221,28 @@ func TestBuildRegisterUsesSpecDefaultExpires(t *testing.T) {
 	}
 }
 
+func TestBuildRegisterViaKeepsIMSUDPProfile(t *testing.T) {
+	tests := []struct {
+		name      string
+		transport *stubTransport
+		wantKeep  bool
+	}{
+		{name: "udp adds keep", transport: newUDPTransport(5062, 5060), wantKeep: true},
+		{name: "tcp omits keep", transport: newTCPTransport(5062, 5060), wantKeep: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{}, tt.transport, stubCard{})
+			msg := svc.buildRegister(nil, nil)
+			via := msg.Header("Via")
+			if strings.Contains(via, ";keep") != tt.wantKeep {
+				t.Fatalf("Via = %q, want keep=%t", via, tt.wantKeep)
+			}
+		})
+	}
+}
+
 func TestContactURIFormatting(t *testing.T) {
 	tests := []struct {
 		name               string

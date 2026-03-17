@@ -936,7 +936,10 @@ func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAutho
 		msg.Headers.Add("Authorization", legacyAuthorization)
 	}
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d REGISTER", atomic.AddInt64(&s.cseq, 1)))
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, port, branch))
+	transport := sip.TransportToken(s.sess.LocalAddr())
+	msg.Headers.Add("Via", sip.BuildViaWithOptions(transport, state.ContactHost, port, branch, sip.ViaOptions{
+		Keep: strings.EqualFold(transport, "UDP"),
+	}))
 	sip.ClientRequestPolicy{
 		UserAgent:         state.UserAgent,
 		AccessNetworkInfo: state.AccessNetworkInfo,

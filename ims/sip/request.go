@@ -19,6 +19,10 @@ type SecurityAgreement struct {
 	Required bool
 }
 
+type ViaOptions struct {
+	Keep bool
+}
+
 type ClientRequestPolicy struct {
 	Routes            []string
 	UserAgent         string
@@ -42,7 +46,7 @@ func (p ClientRequestPolicy) Apply(msg *Message) {
 	if value := strings.TrimSpace(p.AccessNetworkInfo); value != "" {
 		msg.Headers.Add("P-Access-Network-Info", value)
 	}
-	AddRouteHeaders(msg, p.Routes)
+	ApplyRouteSet(msg, p.Routes)
 	p.Security.Apply(msg)
 }
 
@@ -79,8 +83,48 @@ func AddRouteHeaders(msg *Message, routes []string) {
 	}
 }
 
+func ApplyRouteSet(msg *Message, routes []string) {
+	remoteTarget := strings.TrimSpace(RequestURI(*msg))
+	requestURI, routeHeaders := BuildRouteSet(remoteTarget, routes)
+	if requestURI != "" {
+		SetRequestURI(msg, requestURI)
+	}
+	msg.Headers.Del("Route")
+	AddRouteHeaders(msg, routeHeaders)
+}
+
+func BuildRouteSet(remoteTarget string, routes []string) (string, []string) {
+	remoteTarget = strings.TrimSpace(remoteTarget)
+	filtered := make([]string, 0, len(routes))
+	for _, route := range routes {
+		if route = strings.TrimSpace(route); route != "" {
+			filtered = append(filtered, route)
+		}
+	}
+	if len(filtered) == 0 || remoteTarget == "" {
+		return remoteTarget, filtered
+	}
+	firstURI := strings.TrimSpace(AddressURI(filtered[0]))
+	if firstURI == "" || routeHasParam(firstURI, "lr") {
+		return remoteTarget, filtered
+	}
+	rewritten := make([]string, 0, len(filtered))
+	rewritten = append(rewritten, filtered[1:]...)
+	rewritten = append(rewritten, routeHeaderValue(remoteTarget))
+	return firstURI, rewritten
+}
+
 func BuildVia(transport, host string, port int, branch string) string {
-	return fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transport, net.JoinHostPort(host, strconv.Itoa(port)), branch)
+	return BuildViaWithOptions(transport, host, port, branch, ViaOptions{})
+}
+
+func BuildViaWithOptions(transport, host string, port int, branch string, options ViaOptions) string {
+	var params []string
+	params = append(params, "branch=z9hG4bK"+branch, "rport")
+	if options.Keep {
+		params = append(params, "keep")
+	}
+	return fmt.Sprintf("SIP/2.0/%s %s;%s", transport, net.JoinHostPort(host, strconv.Itoa(port)), strings.Join(params, ";"))
 }
 
 func TransportToken(addr net.Addr) string {
@@ -118,4 +162,25 @@ func randomString(length int, alphabet string) string {
 		buf[i] = alphabet[int(b)%len(alphabet)]
 	}
 	return string(buf)
+}
+
+func routeHasParam(uri, want string) bool {
+	for _, field := range strings.Split(uri, ";")[1:] {
+		name, _, _ := strings.Cut(strings.TrimSpace(field), "=")
+		if strings.EqualFold(name, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeHeaderValue(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return ""
+	}
+	if strings.HasPrefix(uri, "<") && strings.Contains(uri, ">") {
+		return uri
+	}
+	return "<" + uri + ">"
 }

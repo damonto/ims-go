@@ -752,7 +752,7 @@ func (s *Session) buildACK() sip.Message {
 	msg := sip.NewRequest("ACK", s.targetURI)
 	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
 	msg.Headers.Add("Max-Forwards", "70")
-	sip.AddRouteHeaders(&msg, s.routeSet)
+	sip.ApplyRouteSet(&msg, s.routeSet)
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, s.localTag))
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)

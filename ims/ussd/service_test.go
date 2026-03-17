@@ -251,6 +251,37 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 	}
 }
 
+func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ussdSession := &Session{
+		service:   svc,
+		targetURI: "sip:ussias@example.com",
+		routeSet: []string{
+			"<sip:edge.example.com>",
+			"<sip:pcscf.example.com;lr>",
+		},
+		localURI:  "sip:user@example.com",
+		localTag:  "local-1",
+		remoteTo:  "<sip:network@example.com>;tag=remote-1",
+		callID:    "call-1",
+		inviteSeq: 1,
+	}
+
+	ack := ussdSession.buildACK()
+	if got := sip.RequestURI(ack); got != "sip:edge.example.com" {
+		t.Fatalf("RequestURI() = %q, want sip:edge.example.com", got)
+	}
+	if got := ack.HeadersByName("Route"); len(got) != 2 || got[0] != "<sip:pcscf.example.com;lr>" || got[1] != "<sip:ussias@example.com>" {
+		t.Fatalf("Route = %v", got)
+	}
+}
+
 func TestLookupIncomingInviteSessionMatchesServerTransaction(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
