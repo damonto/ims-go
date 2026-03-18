@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	swutunnel "github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/ims-client/swu/tunnel"
 )
 
 func cloneConfig(cfg *Config) Config {
@@ -70,14 +70,14 @@ func (cfg Config) validate() error {
 	return nil
 }
 
-func (cfg Config) normalizedTunnel() (swutunnel.Config, error) {
+func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
 	tunnelCfg := cfg.Tunnel
 	if tunnelCfg.Logger == nil {
 		tunnelCfg.Logger = cfg.Logger
 	}
 	normalized, err := tunnelCfg.Normalized()
 	if err != nil {
-		return swutunnel.Config{}, fmt.Errorf("normalizing tunnel config: %w", err)
+		return tunnel.Config{}, fmt.Errorf("normalizing tunnel config: %w", err)
 	}
 	return normalized, nil
 }

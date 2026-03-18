@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"slices"
 
-	usimapdu "github.com/damonto/ims-client/usim/apdu"
+	"github.com/damonto/ims-client/usim/apdu"
 	"github.com/damonto/ims-client/usim/command"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 	"github.com/damonto/ims-client/usim/simfile"
@@ -249,7 +249,7 @@ func (r *reader) readRecordRaw(ctx context.Context, record, length uint16) ([]by
 	return slices.Clone(raw.Data()), nil
 }
 
-func (r *reader) transmit(ctx context.Context, req []byte) (usimapdu.Response, error) {
+func (r *reader) transmit(ctx context.Context, req []byte) (apdu.Response, error) {
 	if r.tx == nil {
 		return nil, errors.New("transmitting APDU: transmitter is nil")
 	}
@@ -258,15 +258,15 @@ func (r *reader) transmit(ctx context.Context, req []byte) (usimapdu.Response, e
 	if err != nil {
 		return nil, err
 	}
-	resp := usimapdu.Response(raw)
+	resp := apdu.Response(raw)
 	if len(resp) < 2 {
-		return nil, usimapdu.ErrMalformedResponse
+		return nil, apdu.ErrMalformedResponse
 	}
 
 	data := append([]byte(nil), resp.Data()...)
 	for resp.HasMore() {
 		length := resp.SW2()
-		follow, err := r.tx.Transmit(ctx, usimapdu.Request{
+		follow, err := r.tx.Transmit(ctx, apdu.Request{
 			CLA: 0x00,
 			INS: 0xC0,
 			P1:  0x00,
@@ -276,15 +276,15 @@ func (r *reader) transmit(ctx context.Context, req []byte) (usimapdu.Response, e
 		if err != nil {
 			return nil, fmt.Errorf("reading response body: %w", err)
 		}
-		resp = usimapdu.Response(follow)
+		resp = apdu.Response(follow)
 		if len(resp) < 2 {
-			return nil, usimapdu.ErrMalformedResponse
+			return nil, apdu.ErrMalformedResponse
 		}
 		data = append(data, resp.Data()...)
 	}
 
 	if !resp.OK() {
-		return nil, usimapdu.StatusError{SW: resp.SW()}
+		return nil, apdu.StatusError{SW: resp.SW()}
 	}
 	return append(data, byte(resp.SW()>>8), byte(resp.SW())), nil
 }

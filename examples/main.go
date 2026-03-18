@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	imsclient "github.com/damonto/ims-client"
-	atdriver "github.com/damonto/ims-client/driver/at"
-	cciddriver "github.com/damonto/ims-client/driver/ccid"
-	qmidriver "github.com/damonto/ims-client/driver/qmi"
-	swutunnel "github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/ims-client"
+	"github.com/damonto/ims-client/driver/at"
+	"github.com/damonto/ims-client/driver/ccid"
+	"github.com/damonto/ims-client/driver/qmi"
+	"github.com/damonto/ims-client/swu/tunnel"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
@@ -100,7 +100,7 @@ func run(opt options) error {
 		IMEI:   opt.imei,
 		EPDG:   opt.epdgAddr,
 		Logger: slog.Default(),
-		Tunnel: swutunnel.Config{},
+		Tunnel: tunnel.Config{},
 		IMS: imsclient.IMSConfig{
 			Region: opt.region,
 		},
@@ -222,7 +222,7 @@ func listCCIDReaders() error {
 }
 
 func availableCCIDReaders() ([]string, error) {
-	readers, err := cciddriver.ListReaders()
+	readers, err := ccid.ListReaders()
 	if err != nil {
 		return nil, fmt.Errorf("listing pcsc readers: %w", err)
 	}
@@ -233,7 +233,7 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 	switch strings.ToLower(strings.TrimSpace(opt.driverKind)) {
 	case "pcsc":
 		if opt.readerName == "" {
-			readers, err := cciddriver.ListReaders()
+			readers, err := ccid.ListReaders()
 			if err != nil {
 				return nil, fmt.Errorf("listing pcsc readers: %w", err)
 			}
@@ -242,7 +242,7 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 			}
 			return nil, fmt.Errorf("opening pcsc driver: -reader is required; available readers: %s", strings.Join(readers, ", "))
 		}
-		drv, err := cciddriver.Open(opt.readerName)
+		drv, err := ccid.Open(opt.readerName)
 		if err != nil {
 			return nil, fmt.Errorf("opening pcsc driver: %w", err)
 		}
@@ -251,7 +251,7 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening AT driver: -device is required")
 		}
-		drv, err := atdriver.New(opt.device, 0)
+		drv, err := at.New(opt.device, 0)
 		if err != nil {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
 		}
@@ -260,13 +260,13 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening QMI driver: -device is required")
 		}
-		drv, err := qmidriver.Open(ctx, opt.device, opt.slot)
+		drv, err := qmi.Open(ctx, opt.device, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QMI driver: %w", err)
 		}
 		return drv, nil
 	case "qrtr":
-		drv, err := qmidriver.OpenQRTR(ctx, opt.slot)
+		drv, err := qmi.OpenQRTR(ctx, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QRTR driver: %w", err)
 		}
