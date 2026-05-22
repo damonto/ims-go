@@ -635,19 +635,29 @@ func nextSIPMessage(stream []byte) ([]byte, []byte, bool, error) {
 	}
 	headersBlob := string(stream[:headersEnd])
 	contentLength := 0
+	foundContentLength := false
 	for line := range strings.SplitSeq(headersBlob, "\r\n") {
 		name, value, ok := strings.Cut(line, ":")
-		if !ok || !strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
+		if !ok {
 			continue
 		}
-		parsed, err := strconv.Atoi(strings.TrimSpace(value))
-		if err == nil {
-			if parsed < 0 {
-				return nil, stream, false, errors.New("reading tcp packet: invalid negative Content-Length")
-			}
-			contentLength = parsed
+		name = strings.TrimSpace(name)
+		if !strings.EqualFold(name, "Content-Length") && !strings.EqualFold(name, "l") {
+			continue
 		}
+		foundContentLength = true
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return nil, stream, false, fmt.Errorf("reading tcp packet: parsing Content-Length: %w", err)
+		}
+		if parsed < 0 {
+			return nil, stream, false, errors.New("reading tcp packet: invalid negative Content-Length")
+		}
+		contentLength = parsed
 		break
+	}
+	if !foundContentLength {
+		return nil, stream, false, errors.New("reading tcp packet: missing Content-Length")
 	}
 	total := headersEnd + 4 + contentLength
 	if len(stream) < total {

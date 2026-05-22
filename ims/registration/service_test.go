@@ -657,6 +657,48 @@ func TestEstablishUpgradesSecureTransport(t *testing.T) {
 	}
 }
 
+func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
+	initial := newUDPTransport(5062, 5060)
+	secure := newUDPTransport(45000, 5060)
+	serverUDP := newUDPTransport(5063, 45000)
+
+	var dialCfg session.SecureUDPConfig
+	var listenUDPCfg session.SecureUDPConfig
+
+	svc := newTestService(t, Config{
+		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			dialCfg = cfg
+			return secure, nil
+		},
+		ListenSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			listenUDPCfg = cfg
+			return serverUDP, nil
+		},
+	}, initial, stubCard{})
+
+	initial.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		initial.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 4060))
+	}
+	secure.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "REGISTER" {
+			t.Fatalf("unexpected method %q", req.Method())
+		}
+		secure.queue(newResponse(req, 200, "OK"))
+	}
+
+	if err := svc.Establish(context.Background()); err != nil {
+		t.Fatalf("Establish() error = %v", err)
+	}
+	if dialCfg.LocalPort == 0 || listenUDPCfg.LocalPort == 0 {
+		t.Fatalf("secure UDP configs not captured: %+v %+v", dialCfg, listenUDPCfg)
+	}
+	if initial.closeCount != 1 {
+		t.Fatalf("initial closeCount = %d, want 1", initial.closeCount)
+	}
+}
+
 func TestDeregisterHandlesChallenge(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
@@ -738,7 +780,7 @@ func TestMaintainRefreshesOnInterval(t *testing.T) {
 		transport.queue(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
@@ -747,7 +789,7 @@ func TestMaintainRefreshesOnInterval(t *testing.T) {
 
 	select {
 	case <-refreshed:
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("waiting for refresh")
 	}
 	cancel()

@@ -1,0 +1,68 @@
+package mbim
+
+type MessageType uint32
+
+const (
+	MessageTypeOpen      MessageType = 0x00000001
+	MessageTypeClose     MessageType = 0x00000002
+	MessageTypeCommand   MessageType = 0x00000003
+	MessageTypeHostError MessageType = 0x00000004
+
+	MessageTypeOpenDone       MessageType = 0x80000001
+	MessageTypeCloseDone      MessageType = 0x80000002
+	MessageTypeCommandDone    MessageType = 0x80000003
+	MessageTypeFunctionError  MessageType = 0x80000004
+	MessageTypeIndicateStatus MessageType = 0x80000007
+)
+
+var (
+	ServiceBasicConnect = [16]byte{0xA2, 0x89, 0xCC, 0x33, 0xBC, 0xBB, 0x8B, 0x4F, 0xB6, 0xB0, 0x13, 0x3E, 0xC2, 0xAA, 0xE6, 0xDF}
+	ServiceAuth         = [16]byte{0x1D, 0x2B, 0x5F, 0xF7, 0x0A, 0xA1, 0x48, 0xB2, 0xAA, 0x52, 0x50, 0xF1, 0x57, 0x67, 0x17, 0x4E}
+
+	ServiceMsUiccLowLevelAccess     = [16]byte{0xC2, 0xF6, 0x58, 0x8E, 0xF0, 0x37, 0x4B, 0xC9, 0x86, 0x65, 0xF4, 0xD4, 0x4B, 0xD0, 0x93, 0x67}
+	ServiceMsBasicConnectExtensions = [16]byte{0x3D, 0x01, 0xDC, 0xC5, 0xFE, 0xF5, 0x4D, 0x05, 0x0D, 0x3A, 0xBE, 0xF7, 0x05, 0x8E, 0x9A, 0xAF}
+	ServiceMbimProxyControl         = [16]byte{0x83, 0x8C, 0xF7, 0xFB, 0x8D, 0x0D, 0x4D, 0x7F, 0x87, 0x1E, 0xD7, 0x1D, 0xBE, 0xFB, 0xB3, 0x9B}
+)
+
+const (
+	CIDSubscriberReadyStatus = 0x00000002
+
+	CIDAuthAKA = 0x00000001
+
+	CIDUiccApplicationList = 0x00000007
+	CIDUiccFileStatus      = 0x00000008
+	CIDUiccReadBinary      = 0x00000009
+	CIDUiccReadRecord      = 0x0000000A
+
+	CIDProxyControlConfiguration = 0x00000001
+	CIDDeviceSlotMappings        = 0x00000007
+)
+
+const (
+	SubscriberReadyStateInitialized   = 0x00000001
+	SubscriberReadyStateNoESIMProfile = 0x00000007
+)
+
+const (
+	CommandTypeQuery = 0x00000000
+	CommandTypeSet   = 0x00000001
+)
+
+const (
+	UiccApplicationTypeUSIM = 4
+	UiccApplicationTypeISIM = 6
+)
+
+const (
+	UiccFileTypeWorkingEF  = 1
+	UiccFileTypeInternalEF = 2
+	UiccFileTypeDFOrADF    = 3
+)
+
+const (
+	UiccFileStructureTransparent = 1
+	UiccFileStructureCyclic      = 2
+	UiccFileStructureLinear      = 3
+)
+
+const maxControlTransfer = 4096

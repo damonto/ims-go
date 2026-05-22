@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/damonto/ims-client/ims/registration"
@@ -37,6 +38,30 @@ type connectSetup struct {
 	reg        *registration.Service
 	sms        *imssms.Service
 	ussd       *imsussd.Service
+}
+
+type tunnelDatagramTransport struct {
+	session *swutunnel.Session
+}
+
+func (t tunnelDatagramTransport) LocalAddr() net.Addr {
+	return t.session.LocalAddr()
+}
+
+func (t tunnelDatagramTransport) RemoteAddr() net.Addr {
+	return t.session.RemoteAddr()
+}
+
+func (t tunnelDatagramTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.session.WritePacket(ctx, data)
+}
+
+func (t tunnelDatagramTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	return t.session.ReadPacket(ctx)
+}
+
+func (t tunnelDatagramTransport) Close() error {
+	return nil
 }
 
 const defaultCloseTimeout = 5 * time.Second
@@ -247,11 +272,41 @@ func (c *Client) openTunnel(setup *connectSetup) (swutunnel.Info, error) {
 
 func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imssession.Transport, error) {
 	setup.imsCfg.dialSecureTCP = nil
+	setup.imsCfg.dialSecureUDP = nil
 	setup.imsCfg.listenSecureTCP = nil
 	setup.imsCfg.listenSecureUDP = nil
 
-	var transport imssession.Transport = setup.session
+	var transport imssession.Transport = tunnelDatagramTransport{session: setup.session}
 	if setup.imsCfg.Transport != "tcp" {
+		setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
+			return swutransport.DialSecureUDP(ctx, setup.session, swutransport.SecureUDPConfig{
+				TCPConfig: swutransport.TCPConfig{
+					LocalPort:  cfg.LocalPort,
+					RemotePort: cfg.RemotePort,
+				},
+				OutboundSPI:   cfg.OutboundSPI,
+				InboundSPI:    cfg.InboundSPI,
+				Encryption:    cfg.Encryption,
+				EncryptionKey: cfg.EncryptionKey,
+				Integrity:     cfg.Integrity,
+				IntegrityKey:  cfg.IntegrityKey,
+			})
+		}
+		setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
+			_ = ctx
+			return swutransport.ListenSecureUDP(setup.session, swutransport.SecureUDPConfig{
+				TCPConfig: swutransport.TCPConfig{
+					LocalPort:  cfg.LocalPort,
+					RemotePort: cfg.RemotePort,
+				},
+				OutboundSPI:   cfg.OutboundSPI,
+				InboundSPI:    cfg.InboundSPI,
+				Encryption:    cfg.Encryption,
+				EncryptionKey: cfg.EncryptionKey,
+				Integrity:     cfg.Integrity,
+				IntegrityKey:  cfg.IntegrityKey,
+			})
+		}
 		return transport, nil
 	}
 
@@ -320,6 +375,7 @@ func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 		RegisterExpires:   cfg.RegisterExpires,
 		IMEI:              cfg.IMEI,
 		DialSecureTCP:     cfg.dialSecureTCP,
+		DialSecureUDP:     cfg.dialSecureUDP,
 		ListenSecureTCP:   cfg.listenSecureTCP,
 		ListenSecureUDP:   cfg.listenSecureUDP,
 	}

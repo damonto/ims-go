@@ -356,16 +356,14 @@ func (f *akaAuthFlow) buildChallengeResponse(message eapaka.AKAMessage, eapData 
 	if !aka.IsSuccess() {
 		return f.clientErrorResponse(message.Identifier, "processing aka result", errors.New("aka result is incomplete"))
 	}
-	if logger := f.logger(); logger != nil {
-		logger.Debug(
-			"calculated AKA response",
-			"res_len", len(aka.RES),
-			"ck_len", len(aka.CK),
-			"ik_len", len(aka.IK),
-			"challenge_has_result_ind", eapaka.HasAttribute(message.Attributes, akaAttrResultInd),
-			"challenge_has_checkcode", eapaka.HasAttribute(message.Attributes, akaAttrCheckcode),
-		)
-	}
+	f.logger().Debug(
+		"calculated AKA response",
+		"res_len", len(aka.RES),
+		"ck_len", len(aka.CK),
+		"ik_len", len(aka.IK),
+		"challenge_has_result_ind", eapaka.HasAttribute(message.Attributes, akaAttrResultInd),
+		"challenge_has_checkcode", eapaka.HasAttribute(message.Attributes, akaAttrCheckcode),
+	)
 	if err := f.crypto.DeriveEAPKeys([]byte(f.eapIdentity), aka.RES, aka.IK, aka.CK); err != nil {
 		return f.clientErrorResponse(message.Identifier, "deriving eap keys", err)
 	}
@@ -430,7 +428,7 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 	f.currentEncrKey = append([]byte(nil), f.currentState.KEncr...)
 	f.currentCounter = reauth.Counter
 	f.fastReauth = true
-	if reauth.Counter < f.currentState.Counter {
+	if reauth.Counter <= f.currentState.Counter {
 		data, err := eapaka.BuildReauthenticationResponsePacket(message.Identifier, reauth.Counter, true, reauth.UseResultInd, f.currentState.KAut, f.currentState.KEncr, reauth.NonceS)
 		if err != nil {
 			return akaResponse{}, fmt.Errorf("connecting swu session: building reauth counter-too-small response: %w", err)
@@ -552,9 +550,6 @@ func openIKEAuthResponse(packet ike.IKEPacket, crypto *ikeCrypto, action string)
 }
 
 func (f *akaAuthFlow) logger() *slog.Logger {
-	if f == nil || f.session == nil {
-		return nil
-	}
 	return f.session.logger
 }
 
@@ -574,9 +569,6 @@ func plaintextIKENotifyError(payloads []ike.Payload) error {
 }
 
 func logEAPPacket(logger *slog.Logger, msg, direction string, messageID uint32, data []byte) {
-	if logger == nil {
-		return
-	}
 	var packet eapaka.EAPPacket
 	if err := packet.UnmarshalBinary(data); err != nil {
 		logger.Debug(msg, "direction", direction, "message_id", messageID, "parse_err", err)

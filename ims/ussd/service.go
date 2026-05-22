@@ -829,22 +829,29 @@ func (s *Session) handleInfo(ctx context.Context, req session.Request) error {
 
 func (s *Session) handleBye(ctx context.Context, req session.Request) error {
 	s.releaseInfoExchange()
-	if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
-		return err
+	var payload Message
+	hasPayload := len(req.Message.Body) > 0 || strings.TrimSpace(req.Message.Header("Content-Type")) != ""
+	if hasPayload {
+		decoded, err := decodeSingleUSSDPayload("parsing USSD BYE", req.Message)
+		if err != nil {
+			return s.service.sess.WriteStatus(ctx, req, 415, "Unsupported Media Type")
+		}
+		payload = decoded
 	}
 	if s.isDuplicateRemote(req.Message) {
+		if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
+			return err
+		}
 		s.service.logger.Debug("suppressing duplicate USSD request", "call_id", s.callID, "cseq", req.Message.Header("CSeq"))
 		return nil
 	}
-	payload, err := decodeUSSDPayload(req.Message)
-	if err != nil {
-		s.finish(true)
-		return nil
+	if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
+		return err
 	}
 	payload.Final = true
 	s.setLanguage(payload.Language)
 	s.setDialogKind(payload)
-	if len(req.Message.Body) > 0 {
+	if hasPayload {
 		s.emit(payload)
 	}
 	s.finish(true)
@@ -1068,7 +1075,7 @@ func validateInboundUSSDInfo(msg sip.Message, requireRequestMarker bool) (Messag
 	if !strings.EqualFold(contentDispositionType(msg.Header("Content-Disposition")), "info-package") {
 		return Message{}, errors.New("missing Content-Disposition info-package")
 	}
-	payload, err := decodeUSSDPayload(msg)
+	payload, err := decodeSingleUSSDPayload("parsing USSD INFO", msg)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1176,13 +1183,13 @@ func validateMessageSDP(msg sip.Message) error {
 
 func validateSDPBody(body []byte) error {
 	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
-	haveMedia := false
+	mediaCount := 0
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if !strings.HasPrefix(line, "m=") {
 			continue
 		}
-		haveMedia = true
+		mediaCount++
 		fields := strings.Fields(strings.TrimPrefix(line, "m="))
 		if len(fields) < 2 {
 			return errors.New("malformed media description")
@@ -1191,10 +1198,14 @@ func validateSDPBody(body []byte) error {
 			return fmt.Errorf("media port %q is not zero", fields[1])
 		}
 	}
-	if !haveMedia {
+	switch mediaCount {
+	case 0:
 		return errors.New("missing media description")
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("expected one media description, got %d", mediaCount)
 	}
-	return nil
 }
 
 func decodeUSSDPayload(msg sip.Message) (Message, error) {
@@ -1221,6 +1232,17 @@ func decodeUSSDPayload(msg sip.Message) (Message, error) {
 	default:
 		return Message{}, fmt.Errorf("parsing USSD payload: unsupported content type %q", mediaType)
 	}
+}
+
+func decodeSingleUSSDPayload(action string, msg sip.Message) (Message, error) {
+	mediaType, _, err := splitContentTypeHeader(action, msg.Header("Content-Type"))
+	if err != nil {
+		return Message{}, err
+	}
+	if mediaType != ussdContentType {
+		return Message{}, fmt.Errorf("%s: unsupported content type %q", action, mediaType)
+	}
+	return decodeUSSDXML(msg.Body)
 }
 
 func decodeUSSDXML(data []byte) (Message, error) {

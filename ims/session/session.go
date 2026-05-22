@@ -508,12 +508,17 @@ func responseDestination(remote net.Addr, via string) net.Addr {
 	if !ok || udpRemote == nil {
 		return nil
 	}
-	target := &net.UDPAddr{IP: append(net.IP(nil), udpRemote.IP...), Port: udpRemote.Port, Zone: udpRemote.Zone}
+	target := &net.UDPAddr{IP: append(net.IP(nil), udpRemote.IP...), Port: topViaResponsePort(via, udpRemote.Port), Zone: udpRemote.Zone}
 	if received := sip.TopViaReceived(via); received != "" {
 		if ip := net.ParseIP(stripHostBrackets(received)); ip != nil {
 			target.IP = ip
 		}
-		target.Port = topViaResponsePort(via, udpRemote.Port)
+		return target
+	}
+	if host := topViaSentByHost(via); host != "" {
+		if ip := net.ParseIP(stripHostBrackets(host)); ip != nil {
+			target.IP = ip
+		}
 	}
 	return target
 }
@@ -552,6 +557,18 @@ func topViaResponsePort(via string, remotePort int) int {
 		return 5060
 	}
 	return port
+}
+
+func topViaSentByHost(via string) string {
+	sentBy := sip.TopViaSentBy(via)
+	if sentBy == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(sentBy)
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(strings.Trim(sentBy, "[]"))
 }
 
 func stripHostBrackets(host string) string {

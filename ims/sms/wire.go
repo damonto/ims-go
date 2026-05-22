@@ -25,6 +25,8 @@ const (
 const (
 	rpCauseInvalidShortMessageTransferReference = 81
 	rpCauseInvalidMandatoryInformation          = 96
+	rpCauseMessageTypeNotImplemented            = 97
+	rpCauseMessageNotCompatibleWithState        = 98
 	rpCauseProtocolErrorUnspecified             = 111
 )
 

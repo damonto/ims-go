@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -451,6 +452,7 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			flow := akaAuthFlow{
+				session:     &Session{logger: slog.Default()},
 				card:        akaChallengeTestCard{result: akaResult},
 				identity:    tt.identity,
 				eapIdentity: tt.identity,
@@ -538,6 +540,55 @@ func TestAKAAuthFlowBuildReauthenticationResponseUsesCurrentEAPIdentity(t *testi
 	}
 	if !bytes.Equal(flow.crypto.eap.EMSK, wantEMSK) {
 		t.Fatalf("EMSK = %X, want %X", flow.crypto.eap.EMSK, wantEMSK)
+	}
+}
+
+func TestAKAAuthFlowRejectsStaleReauthenticationCounter(t *testing.T) {
+	tests := []struct {
+		name    string
+		current uint16
+		request uint16
+	}{
+		{name: "lower", current: 5, request: 4},
+		{name: "equal", current: 5, request: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			identity := "reauth123@nai.epc.mnc001.mcc001.3gppnetwork.org"
+			mk := bytes.Repeat([]byte{0x77}, 20)
+			kAut := bytes.Repeat([]byte{0x11}, 16)
+			kEncr := bytes.Repeat([]byte{0x22}, 16)
+			nonceS := bytes.Repeat([]byte{0x33}, 16)
+			flow := akaAuthFlow{
+				eapIdentity: identity,
+				currentState: usim.AKAIdentityState{
+					ReauthIdentity: identity,
+					Counter:        tt.current,
+					MK:             mk,
+					KAut:           kAut,
+					KEncr:          kEncr,
+				},
+				crypto: &ikeCrypto{},
+			}
+
+			wire := buildSignedAKAReauthRequest(t, 9, tt.request, nonceS, kAut, kEncr)
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildReauthenticationResponse(message, wire)
+			if err != nil {
+				t.Fatalf("buildReauthenticationResponse() error = %v", err)
+			}
+			if len(response.data) == 0 {
+				t.Fatal("buildReauthenticationResponse() data is empty")
+			}
+			if response.afterSend == nil {
+				t.Fatal("buildReauthenticationResponse() afterSend = nil, want stale counter error")
+			}
+		})
 	}
 }
 

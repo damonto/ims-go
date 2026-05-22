@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -28,8 +29,12 @@ type multipartBody struct {
 }
 
 func (b ussdXMLBody) MarshalText() ([]byte, error) {
+	language := strings.TrimSpace(b.Message.Language)
+	if err := validateUSSDLanguage(language); err != nil {
+		return nil, err
+	}
 	payload := ussdXML{
-		Language:  strings.TrimSpace(b.Message.Language),
+		Language:  language,
 		String:    b.Message.Text,
 		ErrorCode: normalizeUSSDErrorCode(b.Message.ErrorCode),
 	}
@@ -53,9 +58,15 @@ func (b ussdXMLBody) MarshalText() ([]byte, error) {
 }
 
 func (b *ussdXMLBody) UnmarshalText(text []byte) error {
+	if err := validateUSSDXMLShape(text); err != nil {
+		return err
+	}
 	var payload ussdXML
 	if err := xml.Unmarshal(text, &payload); err != nil {
 		return fmt.Errorf("parsing USSD XML: %w", err)
+	}
+	if err := validateUSSDLanguage(payload.Language); err != nil {
+		return err
 	}
 	msg := USSDMessage{
 		Text:      strings.TrimSpace(payload.String),
@@ -70,6 +81,72 @@ func (b *ussdXMLBody) UnmarshalText(text []byte) error {
 		msg.Notify = payload.AnyExt.Notify != nil
 	}
 	b.Message = msg
+	return nil
+}
+
+func validateUSSDXMLShape(text []byte) error {
+	decoder := xml.NewDecoder(bytes.NewReader(text))
+	depth := 0
+	rootSeen := false
+	counts := map[string]int{
+		"language":    0,
+		"ussd-string": 0,
+		"error-code":  0,
+		"anyExt":      0,
+	}
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("parsing USSD XML: %w", err)
+		}
+		switch elem := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if rootSeen {
+					return errors.New("parsing USSD XML: multiple root elements")
+				}
+				rootSeen = true
+				if elem.Name.Local != "ussd-data" {
+					return fmt.Errorf("parsing USSD XML: unexpected root element %q", elem.Name.Local)
+				}
+			} else if depth == 1 && elem.Name.Space == "" {
+				if _, ok := counts[elem.Name.Local]; ok {
+					counts[elem.Name.Local]++
+					if counts[elem.Name.Local] > 1 {
+						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
+					}
+				}
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	if !rootSeen {
+		return errors.New("parsing USSD XML: missing ussd-data root element")
+	}
+	return nil
+}
+
+func validateUSSDLanguage(language string) error {
+	language = strings.TrimSpace(language)
+	if language == "" {
+		return nil
+	}
+	if strings.Contains(language, "-") {
+		return fmt.Errorf("parsing USSD XML: language %q contains more than one subtag", language)
+	}
+	if len(language) < 2 || len(language) > 8 {
+		return fmt.Errorf("parsing USSD XML: language %q is not a single RFC 5646 subtag", language)
+	}
+	for _, r := range language {
+		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			return fmt.Errorf("parsing USSD XML: language %q is not a single RFC 5646 subtag", language)
+		}
+	}
 	return nil
 }
 

@@ -49,23 +49,37 @@ type inboundPacket struct {
 	err  error
 }
 
+func DialSecureUDP(ctx context.Context, s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
+	ctx = normalizeContext(ctx)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return newSecureUDPConn(s, cfg, "dialing secure udp transport")
+}
+
 func ListenSecureUDP(s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
+	return newSecureUDPConn(s, cfg, "listening secure udp transport")
+}
+
+func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action string) (*UDPConn, error) {
 	innerLocal, innerRemote, err := connectedUDPAddrs(s)
 	if err != nil {
-		return nil, fmt.Errorf("listening secure udp transport: %w", err)
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
 	if cfg.LocalPort == 0 || cfg.RemotePort == 0 {
-		return nil, errors.New("listening secure udp transport: ports are required")
+		return nil, fmt.Errorf("%s: ports are required", action)
 	}
 	if cfg.OutboundSPI == 0 || cfg.InboundSPI == 0 {
-		return nil, errors.New("listening secure udp transport: spi is zero")
+		return nil, fmt.Errorf("%s: spi is zero", action)
 	}
 	if len(cfg.IntegrityKey) == 0 {
-		return nil, errors.New("listening secure udp transport: integrity key is empty")
+		return nil, fmt.Errorf("%s: integrity key is empty", action)
 	}
 	encryption := secureEncryption(cfg.Encryption)
 	if encryption == esp.EncryptionAESCBC && len(cfg.EncryptionKey) == 0 {
-		return nil, errors.New("listening secure udp transport: encryption key is empty")
+		return nil, fmt.Errorf("%s: encryption key is empty", action)
 	}
 	conn := &UDPConn{
 		session:     s,
@@ -78,7 +92,7 @@ func ListenSecureUDP(s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
-		return nil, fmt.Errorf("listening secure udp transport: %w", err)
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
 	conn.attachment = attachment
 	return conn, nil

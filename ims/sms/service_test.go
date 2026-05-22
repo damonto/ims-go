@@ -22,6 +22,10 @@ type serviceStubTransport struct {
 }
 
 type serviceStubCard struct{}
+type serviceCentreStubCard struct {
+	serviceStubCard
+	centre usim.ServiceCentre
+}
 
 func (t *serviceStubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *serviceStubTransport) RemoteAddr() net.Addr { return t.remote }
@@ -52,6 +56,14 @@ func (serviceStubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 		RES: []byte("password"),
 		IK:  []byte("client-test-ik"),
 	}, nil
+}
+
+func (c serviceCentreStubCard) SMSC() string {
+	return c.centre.Address
+}
+
+func (c serviceCentreStubCard) ServiceCentre() usim.ServiceCentre {
+	return c.centre
 }
 
 func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
@@ -102,6 +114,41 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 	}
 	if got[0].CallID == "" {
 		t.Fatal("Send()[0].CallID = empty")
+	}
+}
+
+func TestSendUsesServiceCentrePSIForSIPTargetAndAddressForRP(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	card := serviceCentreStubCard{centre: usim.ServiceCentre{
+		Address: "+15550000000",
+		PSI:     "sip:smsc@example.com",
+	}}
+	svc, err := New(Config{}, sess, reg, card)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		if got := sip.RequestURI(req); got != "sip:smsc@example.com" {
+			t.Fatalf("Request-URI = %q, want sip:smsc@example.com", got)
+		}
+		var rp rpMessage
+		if err := rp.UnmarshalBinary(req.Body); err != nil {
+			t.Fatalf("RP unmarshal error = %v", err)
+		}
+		if rp.Destination != "+15550000000" {
+			t.Fatalf("RP Destination = %q, want +15550000000", rp.Destination)
+		}
+		transport.queue(newSMSResponse(req, 202, "Accepted"))
+	}
+
+	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+		t.Fatalf("Send() error = %v", err)
 	}
 }
 
@@ -166,6 +213,7 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	ackSMSReports(t, transport)
 
 	inboundTransport := newServiceTransport()
 	tpdu, err := buildSMSDeliver("+15551234567", "hello")
@@ -281,14 +329,15 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 	}
 }
 
-func TestSendRetriesOnSubmitReportTimeout(t *testing.T) {
+func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
 	oldTimeout := currentSMSSubmitReportTimeout()
 	setSMSSubmitReportTimeout(20 * time.Millisecond)
 	defer setSMSSubmitReportTimeout(oldTimeout)
 
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	errCh := make(chan error, 1)
+	svc, err := New(Config{OnError: func(err error) { errCh <- err }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -321,29 +370,70 @@ func TestSendRetriesOnSubmitReportTimeout(t *testing.T) {
 		t.Fatalf("first RP unmarshal error = %v", err)
 	}
 
-	var second sip.Message
 	select {
 	case data := <-requests:
-		second = mustParseSMSMessage(t, data)
+		t.Fatalf("unexpected retried MESSAGE: %s", mustParseSMSMessage(t, data).StartLine)
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "submit report not received") {
+			t.Fatalf("OnError = %v, want submit report timeout", err)
+		}
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("waiting for retried MESSAGE")
+		t.Fatal("waiting for submit report timeout")
+	}
+}
+
+func TestHandleInboundReservedRPDirectionReturnsRPError97(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
 
-	var secondRP rpMessage
-	if err := secondRP.UnmarshalBinary(second.Body); err != nil {
-		t.Fatalf("second RP unmarshal error = %v", err)
+	reports := make(chan sip.Message, 1)
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		reports <- req
+		transport.queue(newSMSResponse(req, 202, "Accepted"))
 	}
-	if len(firstRP.TPDU) < 2 || len(secondRP.TPDU) < 2 {
-		t.Fatal("sms submit TPDU too short")
+
+	tpdu, err := buildSMSDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildSMSDeliver() error = %v", err)
 	}
-	if firstRP.TPDU[1] != secondRP.TPDU[1] {
-		t.Fatalf("TP-MR = %d then %d, want same value across retry", firstRP.TPDU[1], secondRP.TPDU[1])
+	rpdu, err := (rpMessage{
+		Type:      rpDataMSToNetwork,
+		Reference: 0x22,
+		TPDU:      tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
 	}
-	if firstRP.TPDU[0]&0x04 != 0 {
-		t.Fatalf("first TP-RD bit = 1, want 0")
+
+	inboundTransport := newServiceTransport()
+	req := session.Request{Message: newInboundSMSRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport}
+	handled, err := svc.HandleRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
 	}
-	if secondRP.TPDU[0]&0x04 == 0 {
-		t.Fatal("second TP-RD bit = 0, want 1")
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+
+	select {
+	case report := <-reports:
+		var got rpMessage
+		if err := got.UnmarshalBinary(report.Body); err != nil {
+			t.Fatalf("report RP unmarshal error = %v", err)
+		}
+		if got.Type != rpErrorMSToNetwork || got.Reference != 0x22 || got.Cause != rpCauseMessageTypeNotImplemented {
+			t.Fatalf("report RP = %+v, want RP-ERROR ref 0x22 cause 97", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for RP-ERROR report")
 	}
 }
 
@@ -352,6 +442,16 @@ func newServiceTransport() *serviceStubTransport {
 		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
 		remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 		readCh: make(chan []byte, 16),
+	}
+}
+
+func ackSMSReports(t *testing.T, transport *serviceStubTransport) {
+	t.Helper()
+	transport.onWrite = func(data []byte) {
+		req := mustParseSMSMessage(t, data)
+		if req.Method() == "MESSAGE" {
+			transport.queue(newSMSResponse(req, 202, "Accepted"))
+		}
 	}
 }
 

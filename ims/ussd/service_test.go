@@ -81,6 +81,75 @@ func TestUSSDXMLRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUSSDXMLValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name: "valid",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>*100#</ussd-string></ussd-data>`,
+		},
+		{
+			name: "unknown element ignored",
+			body: xml.Header + `<ussd-data><language>en</language><vendor-extension>ignored</vendor-extension><ussd-string>*100#</ussd-string></ussd-data>`,
+		},
+		{
+			name: "namespaced unknown element ignored",
+			body: xml.Header + `<ussd-data xmlns:x="urn:vendor"><language>en</language><x:language>ignored</x:language><ussd-string>*100#</ussd-string></ussd-data>`,
+		},
+		{
+			name:    "duplicate language",
+			body:    xml.Header + `<ussd-data><language>en</language><language>fr</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			wantErr: true,
+		},
+		{
+			name:    "language has region subtag",
+			body:    xml.Header + `<ussd-data><language>en-US</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			wantErr: true,
+		},
+		{
+			name:    "language is numeric",
+			body:    xml.Header + `<ussd-data><language>123</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			wantErr: true,
+		},
+		{
+			name:    "wrong root",
+			body:    xml.Header + `<ussd><language>en</language><ussd-string>*100#</ussd-string></ussd>`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decodeUSSDXML([]byte(tt.body))
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("decodeUSSDXML() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestMarshalUSSDXMLRejectsInvalidLanguage(t *testing.T) {
+	tests := []struct {
+		name    string
+		msg     Message
+		wantErr bool
+	}{
+		{name: "valid", msg: Message{Text: "*100#", Language: "en"}},
+		{name: "region subtag", msg: Message{Text: "*100#", Language: "en-US"}, wantErr: true},
+		{name: "numeric", msg: Message{Text: "*100#", Language: "123"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := (ussdXMLBody{Message: tt.msg}).MarshalText()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("MarshalText() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestMultipartBodyRoundTrip(t *testing.T) {
 	payload, err := (ussdXMLBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
 	if err != nil {
@@ -103,6 +172,127 @@ func TestMultipartBodyRoundTrip(t *testing.T) {
 	}
 	if got.Text != "Balance" || got.Language != "en" {
 		t.Fatalf("decodeUSSDPayload() = %+v", got)
+	}
+}
+
+func TestValidateSDPBodyRequiresOneZeroPortMedia(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "one zero port media", body: "v=0\r\nm=audio 0 RTP/AVP 97\r\n"},
+		{name: "no media", body: "v=0\r\ns=-\r\n", wantErr: true},
+		{name: "nonzero port", body: "v=0\r\nm=audio 49170 RTP/AVP 97\r\n", wantErr: true},
+		{name: "two media", body: "v=0\r\nm=audio 0 RTP/AVP 97\r\nm=video 0 RTP/AVP 98\r\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSDPBody([]byte(tt.body))
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("validateSDPBody() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateInboundUSSDInfoRequiresSingleUSSDXMLBody(t *testing.T) {
+	payload, err := (ussdXMLBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	multipartPayload, err := (multipartBody{
+		Boundary: "info",
+		Parts: []multipartBodyPart{
+			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		wantErr     bool
+	}{
+		{name: "single ussd xml", contentType: ussdContentType, body: payload},
+		{name: "multipart rejected", contentType: "multipart/mixed; boundary=info", body: multipartPayload, wantErr: true},
+		{name: "missing content type", body: payload, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := sip.NewRequest("INFO", "sip:ussias@example.com")
+			msg.Headers.Add("Info-Package", ussdInfoPackage)
+			msg.Headers.Add("Content-Disposition", "Info-Package")
+			if tt.contentType != "" {
+				msg.Headers.Add("Content-Type", tt.contentType)
+			}
+			msg.Body = tt.body
+			_, err := validateInboundUSSDInfo(msg, false)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("validateInboundUSSDInfo() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
+	payload, err := (ussdXMLBody{Message: Message{Text: "Done", Language: "en"}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	multipartPayload, err := (multipartBody{
+		Boundary: "bye",
+		Parts: []multipartBodyPart{
+			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	tests := []struct {
+		name        string
+		contentType string
+		body        []byte
+		wantStatus  int
+		wantClosed  bool
+	}{
+		{name: "single ussd xml", contentType: ussdContentType, body: payload, wantStatus: 200, wantClosed: true},
+		{name: "multipart rejected", contentType: "multipart/mixed; boundary=bye", body: multipartPayload, wantStatus: 415},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			us := &Session{
+				service:     svc,
+				callID:      "bye-call",
+				localTag:    "local",
+				remoteTag:   "remote",
+				remoteTo:    "<sip:network@example.com>;tag=remote",
+				targetURI:   "sip:network@example.com",
+				events:      make(chan Message, 1),
+				remoteCSeqs: make(map[string]struct{}),
+			}
+			bye := newDialogRequest("BYE", "sip:user@example.com", "<sip:network@example.com>;tag=remote", "<sip:user@example.com>;tag=local", "bye-call", "2 BYE")
+			bye.Headers.Add("Content-Type", tt.contentType)
+			bye.Body = tt.body
+			if err := us.handleBye(context.Background(), session.Request{Message: bye, Transport: transport}); err != nil {
+				t.Fatalf("handleBye() error = %v", err)
+			}
+			resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+			if got := resp.StatusCode(); got != tt.wantStatus {
+				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
+			}
+			if got := us.isClosed(); got != tt.wantClosed {
+				t.Fatalf("isClosed() = %t, want %t", got, tt.wantClosed)
+			}
+		})
 	}
 }
 

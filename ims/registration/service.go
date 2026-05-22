@@ -30,6 +30,7 @@ type Config struct {
 	IMEI              string
 
 	DialSecureTCP   func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
+	DialSecureUDP   func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
 	ListenSecureTCP func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
 	ListenSecureUDP func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
 }
@@ -839,13 +840,31 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 
 func (s *Service) upgradeSecureTransport(ctx context.Context) error {
 	verify := s.currentSecurityVerify()
-	if !s.shouldUpgradeSecureTransport(verify) {
+	if verify == nil {
 		return nil
 	}
 	flow := s.CurrentFlow()
-	secureTransport, err := s.cfg.DialSecureTCP(ctx, s.secureTransportConfig(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC))
-	if err != nil {
-		return fmt.Errorf("dialing secure IMS transport: %w", err)
+	var (
+		secureTransport session.Transport
+		err             error
+	)
+	switch sip.TransportToken(s.sess.LocalAddr()) {
+	case "TCP":
+		if s.cfg.DialSecureTCP == nil {
+			return nil
+		}
+		secureTransport, err = s.cfg.DialSecureTCP(ctx, s.secureTransportConfig(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC))
+		if err != nil {
+			return fmt.Errorf("dialing secure IMS transport: %w", err)
+		}
+	default:
+		if s.cfg.DialSecureUDP == nil {
+			return nil
+		}
+		secureTransport, err = s.cfg.DialSecureUDP(ctx, s.secureDatagramTransportConfig(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC))
+		if err != nil {
+			return fmt.Errorf("dialing secure IMS datagram transport: %w", err)
+		}
 	}
 	if err := s.sess.ReplacePrimary(secureTransport); err != nil {
 		return fmt.Errorf("replacing secure IMS transport: %w", err)
@@ -854,10 +873,6 @@ func (s *Service) upgradeSecureTransport(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-func (s *Service) shouldUpgradeSecureTransport(verify *security.Param) bool {
-	return strings.EqualFold(sip.TransportToken(s.sess.LocalAddr()), "TCP") && verify != nil && s.cfg.DialSecureTCP != nil
 }
 
 func (s *Service) secureTransportConfig(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32) session.SecureTCPConfig {

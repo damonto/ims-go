@@ -16,6 +16,7 @@ import (
 	"github.com/damonto/ims-client"
 	"github.com/damonto/ims-client/driver/at"
 	"github.com/damonto/ims-client/driver/ccid"
+	"github.com/damonto/ims-client/driver/mbim"
 	"github.com/damonto/ims-client/driver/qmi"
 	"github.com/damonto/ims-client/swu/tunnel"
 	usimreader "github.com/damonto/ims-client/usim/reader"
@@ -61,11 +62,11 @@ func main() {
 func parseFlags() options {
 	opt := options{}
 	flag.BoolVar(&opt.debug, "debug", false, "enable verbose debug logs")
-	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, at, qmi, or qrtr")
+	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, at, qmi, qrtr, or mbim")
 	flag.BoolVar(&opt.listReaders, "list-readers", false, "list available PC/SC readers and exit")
 	flag.StringVar(&opt.readerName, "reader", "", "PC/SC reader name; required for -driver pcsc")
-	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device or qmi-proxy modem path, for example /dev/ttyUSB7")
-	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi")
+	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device, qmi-proxy modem path, or mbim-proxy modem path, for example /dev/ttyUSB7")
+	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi or -driver mbim")
 	flag.StringVar(&opt.imei, "imei", "", "UE IMEI used for SWu authentication")
 	flag.StringVar(&opt.epdgAddr, "epdg", "", "optional ePDG host:port or host; default uses MCC/MNC from the card")
 	flag.StringVar(&opt.transport, "transport", "", "IMS SIP transport override: tcp or udp")
@@ -287,6 +288,15 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 		drv, err := qmi.OpenQRTR(ctx, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QRTR driver: %w", err)
+		}
+		return drv, nil
+	case "mbim":
+		if opt.device == "" {
+			return nil, errors.New("opening MBIM driver: -device is required")
+		}
+		drv, err := mbim.Open(ctx, opt.device, opt.slot)
+		if err != nil {
+			return nil, fmt.Errorf("opening MBIM driver: %w", err)
 		}
 		return drv, nil
 	default:

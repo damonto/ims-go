@@ -460,6 +460,16 @@ func TestResponseDestinationUsesTopViaReceivedAndPort(t *testing.T) {
 			via:  "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1;received=198.51.100.10;rport",
 			want: &net.UDPAddr{IP: net.ParseIP("198.51.100.10"), Port: 5060},
 		},
+		{
+			name: "uses sent-by host and port without received",
+			via:  "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1",
+			want: &net.UDPAddr{IP: net.ParseIP("10.0.0.10"), Port: 5062},
+		},
+		{
+			name: "defaults sent-by port without received",
+			via:  "SIP/2.0/UDP 10.0.0.10;branch=z9hG4bK-1",
+			want: &net.UDPAddr{IP: net.ParseIP("10.0.0.10"), Port: 5060},
+		},
 	}
 
 	for _, tt := range tests {

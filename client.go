@@ -40,6 +40,7 @@ type IMSConfig struct {
 	IMEI              string
 
 	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
+	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
 	listenSecureTCP func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
 	listenSecureUDP func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
 }
