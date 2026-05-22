@@ -14,7 +14,6 @@ func TestConfigNormalized(t *testing.T) {
 		wantErr         bool
 		wantIMEI        string
 		wantEPDG        string
-		wantRegion      string
 		wantTransport   string
 		wantIMSIMEI     string
 		wantReconnect   time.Duration
@@ -29,11 +28,10 @@ func TestConfigNormalized(t *testing.T) {
 			},
 			wantIMEI:        "12345",
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantRegion:      "US",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     "12345",
 			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 10 * time.Minute,
+			wantRegisterExp: 600000 * time.Second,
 		},
 		{
 			name: "explicit epdg wins over automatic default",
@@ -43,11 +41,10 @@ func TestConfigNormalized(t *testing.T) {
 			},
 			wantIMEI:        "root-imei",
 			wantEPDG:        "epdg.example.com",
-			wantRegion:      "US",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     "root-imei",
 			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 10 * time.Minute,
+			wantRegisterExp: 600000 * time.Second,
 		},
 		{
 			name: "cfg nil clone still normalizes as zero config",
@@ -58,11 +55,10 @@ func TestConfigNormalized(t *testing.T) {
 			}(),
 			wantIMEI:        testIMEI,
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantRegion:      "US",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     testIMEI,
 			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 10 * time.Minute,
+			wantRegisterExp: 600000 * time.Second,
 		},
 		{
 			name: "explicit ims transport is preserved",
@@ -70,16 +66,14 @@ func TestConfigNormalized(t *testing.T) {
 				IMEI: testIMEI,
 				IMS: IMSConfig{
 					Transport: "udp",
-					Region:    " NZ ",
 				},
 			},
 			wantIMEI:        testIMEI,
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantRegion:      "NZ",
 			wantTransport:   "udp",
 			wantIMSIMEI:     testIMEI,
 			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 10 * time.Minute,
+			wantRegisterExp: 600000 * time.Second,
 		},
 		{
 			name: "missing imei fails",
@@ -121,9 +115,6 @@ func TestConfigNormalized(t *testing.T) {
 			}
 			if got.IMS.Transport != tt.wantTransport {
 				t.Fatalf("IMS.Transport = %q, want %q", got.IMS.Transport, tt.wantTransport)
-			}
-			if got.IMS.Region != tt.wantRegion {
-				t.Fatalf("IMS.Region = %q, want %q", got.IMS.Region, tt.wantRegion)
 			}
 			if got.IMS.IMEI != tt.wantIMSIMEI {
 				t.Fatalf("IMS.IMEI = %q, want %q", got.IMS.IMEI, tt.wantIMSIMEI)

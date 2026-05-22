@@ -23,12 +23,14 @@ type Transport interface {
 }
 
 type SecureTCPConfig struct {
-	LocalPort    int
-	RemotePort   int
-	OutboundSPI  uint32
-	InboundSPI   uint32
-	Integrity    string
-	IntegrityKey []byte
+	LocalPort     int
+	RemotePort    int
+	OutboundSPI   uint32
+	InboundSPI    uint32
+	Encryption    string
+	EncryptionKey []byte
+	Integrity     string
+	IntegrityKey  []byte
 }
 
 type SecureUDPConfig = SecureTCPConfig
@@ -280,13 +282,13 @@ func (s *Session) Run(ctx context.Context) error {
 				}
 				return inbound.err
 			}
+			s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
 			if inbound.msg.IsRequest() {
 				if err := s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport}); err != nil {
 					return err
 				}
 				continue
 			}
-			s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
 			s.dispatchResponse(inbound.msg)
 		}
 	}

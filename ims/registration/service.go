@@ -20,9 +20,9 @@ import (
 )
 
 type Config struct {
+	PrivateIdentity   string
 	PublicIdentity    string
 	HomeDomain        string
-	Region            string
 	UserAgent         string
 	AccessNetworkInfo string
 	WLANNodeID        string
@@ -78,6 +78,7 @@ type Service struct {
 	mu             sync.Mutex
 	state          State
 	flow           Flow
+	authCK         []byte
 	authIK         []byte
 	authNonce      string
 	authRealm      string
@@ -165,6 +166,10 @@ func (s *Service) Subscribe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("subscribing IMS registration: %w", err)
 	}
+	if resp.StatusCode() == 489 {
+		s.logger.Debug("registration event subscription unavailable", "status", resp.StatusCode())
+		return nil
+	}
 	if resp.StatusCode() != 200 {
 		return fmt.Errorf("subscribing IMS registration: expected 200, got %d", resp.StatusCode())
 	}
@@ -172,10 +177,7 @@ func (s *Service) Subscribe(ctx context.Context) error {
 }
 
 func (s *Service) Establish(ctx context.Context) error {
-	if err := s.Register(ctx); err != nil {
-		return err
-	}
-	return s.Subscribe(ctx)
+	return s.Register(ctx)
 }
 
 func (s *Service) Refresh(ctx context.Context) error {
@@ -393,7 +395,7 @@ func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration,
 	for _, value := range msg.HeadersByName("Contact") {
 		for _, part := range splitHeaderList(value) {
 			uri, params := contactURIAndParams(part)
-			if uri == "" || !strings.EqualFold(uri, contactURI) {
+			if uri == "" || !sameContactURI(uri, contactURI) {
 				continue
 			}
 			if expires, ok := parsePositiveSeconds(headerParamValue(params, "expires")); ok {
@@ -402,6 +404,29 @@ func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration,
 		}
 	}
 	return parsePositiveSeconds(msg.Header("Expires"))
+}
+
+func sameContactURI(got, want string) bool {
+	got = strings.TrimSpace(got)
+	want = strings.TrimSpace(want)
+	if strings.EqualFold(got, want) {
+		return true
+	}
+	gotHostPort := contactURIHostPort(got)
+	wantHostPort := contactURIHostPort(want)
+	return gotHostPort != "" && strings.EqualFold(gotHostPort, wantHostPort)
+}
+
+func contactURIHostPort(uri string) string {
+	uri = strings.TrimSpace(uri)
+	uri = strings.TrimPrefix(strings.ToLower(uri), "sip:")
+	if user, hostPort, ok := strings.Cut(uri, "@"); ok && user != "" {
+		uri = hostPort
+	}
+	if hostPort, _, ok := strings.Cut(uri, ";"); ok {
+		uri = hostPort
+	}
+	return strings.TrimSpace(uri)
 }
 
 func (s *Service) currentRegisterContactURI() string {
@@ -691,7 +716,11 @@ func (s *Service) buildRegisterAuthorization(ctx context.Context, realm, nonce, 
 	if len(result.IntegrityKey) != 0 {
 		s.authIK = append([]byte(nil), result.IntegrityKey...)
 	}
+	if len(result.EncryptionKey) != 0 {
+		s.authCK = append([]byte(nil), result.EncryptionKey...)
+	}
 	auth := result.Authorization
+	auth.IntegrityProtected = "yes"
 	return &auth, nil
 }
 
@@ -833,23 +862,27 @@ func (s *Service) shouldUpgradeSecureTransport(verify *security.Param) bool {
 
 func (s *Service) secureTransportConfig(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32) session.SecureTCPConfig {
 	return session.SecureTCPConfig{
-		LocalPort:    localPort,
-		RemotePort:   remotePort,
-		OutboundSPI:  outboundSPI,
-		InboundSPI:   inboundSPI,
-		Integrity:    verify.Alg,
-		IntegrityKey: append([]byte(nil), s.authIK...),
+		LocalPort:     localPort,
+		RemotePort:    remotePort,
+		OutboundSPI:   outboundSPI,
+		InboundSPI:    inboundSPI,
+		Encryption:    verify.EAlg,
+		EncryptionKey: append([]byte(nil), s.authCK...),
+		Integrity:     verify.Alg,
+		IntegrityKey:  append([]byte(nil), s.authIK...),
 	}
 }
 
 func (s *Service) secureDatagramTransportConfig(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32) session.SecureUDPConfig {
 	return session.SecureUDPConfig{
-		LocalPort:    localPort,
-		RemotePort:   remotePort,
-		OutboundSPI:  outboundSPI,
-		InboundSPI:   inboundSPI,
-		Integrity:    verify.Alg,
-		IntegrityKey: append([]byte(nil), s.authIK...),
+		LocalPort:     localPort,
+		RemotePort:    remotePort,
+		OutboundSPI:   outboundSPI,
+		InboundSPI:    inboundSPI,
+		Encryption:    verify.EAlg,
+		EncryptionKey: append([]byte(nil), s.authCK...),
+		Integrity:     verify.Alg,
+		IntegrityKey:  append([]byte(nil), s.authIK...),
 	}
 }
 
@@ -906,29 +939,28 @@ func (s *Service) registerRealm(auth *security.Authorization) string {
 
 func (s *Service) legacyEmptyAuthorizationValue() string {
 	text, _ := (security.Authorization{
-		Nonce:    "",
-		URI:      s.State().RegisterURI,
-		Response: "",
-		Username: s.State().PrivateIdentity,
-		Realm:    s.registerRealm(nil),
+		Nonce:              "",
+		URI:                s.State().RegisterURI,
+		Response:           "",
+		Username:           s.State().PrivateIdentity,
+		Realm:              s.registerRealm(nil),
+		IntegrityProtected: "no",
 	}).MarshalText()
 	return string(text)
 }
 
 func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int) sip.Message {
-	realm := s.registerRealm(auth)
 	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
 	msg := sip.NewRequest("REGISTER", state.RegisterURI)
 	msg.Headers.Add("To", fmt.Sprintf("<%s>", state.PublicIdentity))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, s.tag))
 	msg.Headers.Add("Expires", strconv.Itoa(expiresSeconds))
-	sip.SecurityAgreement{Verify: s.securityVerifyValue(verify), Required: true}.Apply(&msg)
+	verifyValue := s.securityVerifyValue(verify)
+	sip.SecurityAgreement{Verify: verifyValue, Required: true}.Apply(&msg)
 	msg.Headers.Add("Security-Client", state.SecurityClient.String())
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("Session-ID", s.sessionID)
-	msg.Headers.Add("Geolocation", fmt.Sprintf("<cid:%s@%s>", s.card.IMSI(), realm))
-	msg.Headers.Add("Geolocation-Routing", "yes")
 	msg.Headers.Add("Contact", contact)
 	if auth != nil {
 		msg.Headers.Add("Authorization", auth.String())
@@ -944,8 +976,6 @@ func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAutho
 		UserAgent:         state.UserAgent,
 		AccessNetworkInfo: state.AccessNetworkInfo,
 	}.Apply(&msg)
-	msg.Headers.Add("Content-Type", "application/pidf+xml")
-	msg.Body = []byte(s.registerPIDFBody())
 	return msg
 }
 
@@ -990,24 +1020,6 @@ func (s *Service) subscribeContactValue(port int) string {
 	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
 }
 
-func (s *Service) registerPIDFBody() string {
-	state := s.State()
-	return fmt.Sprintf(`<?xml version="1.0"?>
-<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:gp="urn:ietf:params:xml:ns:pidf:geopriv10" xmlns:gml="http://www.opengis.net/gml" xmlns:gs="http://www.opengis.net/pidflo/1.0" xmlns:cl="urn:ietf:params:xml:ns:pidf:geopriv10:civicAddr" entity="%s">
-<dm:device id="Wifi">
-<gp:geopriv>
-<gp:location-info>
-<cl:civicAddress>
-<cl:country>%s</cl:country>
-</cl:civicAddress>
-</gp:location-info>
-<gp:usage-rules/>
-</gp:geopriv>
-<dm:timestamp>%s</dm:timestamp>
-</dm:device>
-</presence>`, state.PublicIdentity, s.cfg.Region, time.Now().UTC().Format(time.RFC3339))
-}
-
 func (s *Service) registerContactValue(port int) string {
 	params := []string{
 		`+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
@@ -1030,14 +1042,17 @@ func contactURI(host string, port int) string {
 
 func resolveIdentity(cfg Config, card Card) clientIdentity {
 	identity := clientIdentity{
-		realm:          strings.TrimSpace(cfg.HomeDomain),
-		publicIdentity: strings.TrimSpace(cfg.PublicIdentity),
+		realm:           strings.TrimSpace(cfg.HomeDomain),
+		privateIdentity: strings.TrimSpace(cfg.PrivateIdentity),
+		publicIdentity:  strings.TrimSpace(cfg.PublicIdentity),
 	}
 	if idp, ok := card.(IdentityProvider); ok {
 		if identity.realm == "" {
 			identity.realm = strings.TrimSpace(idp.HomeDomain())
 		}
-		identity.privateIdentity = strings.TrimSpace(idp.PrivateIdentity())
+		if identity.privateIdentity == "" {
+			identity.privateIdentity = strings.TrimSpace(idp.PrivateIdentity())
+		}
 		if identity.publicIdentity == "" {
 			identity.publicIdentity = strings.TrimSpace(idp.PublicIdentity())
 		}
@@ -1070,16 +1085,13 @@ func resolveLocalAddr(addr net.Addr) (string, int, error) {
 }
 
 func normalizeConfig(cfg Config) Config {
+	cfg.PrivateIdentity = strings.TrimSpace(cfg.PrivateIdentity)
 	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
-	cfg.Region = strings.TrimSpace(cfg.Region)
 	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
-	if cfg.Region == "" {
-		cfg.Region = "IE"
-	}
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = defaultUserAgent()
 	}
@@ -1094,9 +1106,17 @@ func accessNetworkInfo(cfg Config) string {
 		return value
 	}
 	if nodeID := strings.TrimSpace(cfg.WLANNodeID); nodeID != "" {
-		return "IEEE-802.11;i-wlan-node-id=" + strings.ToLower(nodeID)
+		return "IEEE-802.11;i-wlan-node-id=" + normalizeWLANNodeID(nodeID)
 	}
 	return ""
+}
+
+func normalizeWLANNodeID(nodeID string) string {
+	nodeID = strings.ToLower(strings.TrimSpace(nodeID))
+	nodeID = strings.ReplaceAll(nodeID, ":", "")
+	nodeID = strings.ReplaceAll(nodeID, "-", "")
+	nodeID = strings.ReplaceAll(nodeID, ".", "")
+	return nodeID
 }
 
 func selectSecurityServer(values []string) (*security.Param, []string, error) {
@@ -1190,7 +1210,7 @@ func newSecurityClient(registerPort int) security.Param {
 	return security.Param{
 		Mechanism: "ipsec-3gpp",
 		Alg:       "hmac-sha-1-96",
-		EAlg:      "null",
+		EAlg:      "aes-cbc",
 		Mod:       "trans",
 		PortC:     clientPort,
 		PortS:     serverPort,

@@ -11,7 +11,7 @@ import (
 
 const (
 	DefaultClientAllow     = "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,REFER,UPDATE"
-	DefaultClientSupported = "100rel,path,replaces"
+	DefaultClientSupported = "100rel,path,replaces,sec-agree"
 )
 
 type SecurityAgreement struct {
@@ -120,7 +120,10 @@ func BuildVia(transport, host string, port int, branch string) string {
 
 func BuildViaWithOptions(transport, host string, port int, branch string, options ViaOptions) string {
 	var params []string
-	params = append(params, "branch=z9hG4bK"+branch, "rport")
+	params = append(params, "branch=z9hG4bK"+branch)
+	if strings.EqualFold(transport, "UDP") {
+		params = append(params, "rport")
+	}
 	if options.Keep {
 		params = append(params, "keep")
 	}

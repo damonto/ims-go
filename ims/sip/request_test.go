@@ -130,7 +130,7 @@ func TestTransportTokenAndVia(t *testing.T) {
 		})
 	}
 
-	if got, want := BuildVia("TCP", "127.0.0.1", 5060, "abc123"), "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKabc123;rport"; got != want {
+	if got, want := BuildVia("TCP", "127.0.0.1", 5060, "abc123"), "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKabc123"; got != want {
 		t.Fatalf("BuildVia() = %q, want %q", got, want)
 	}
 	if got, want := BuildViaWithOptions("UDP", "127.0.0.1", 5060, "abc123", ViaOptions{Keep: true}), "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKabc123;rport;keep"; got != want {

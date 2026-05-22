@@ -28,10 +28,12 @@ type TCPConfig struct {
 
 type SecureTCPConfig struct {
 	TCPConfig
-	OutboundSPI  uint32
-	InboundSPI   uint32
-	Integrity    string
-	IntegrityKey []byte
+	OutboundSPI   uint32
+	InboundSPI    uint32
+	Encryption    string
+	EncryptionKey []byte
+	Integrity     string
+	IntegrityKey  []byte
 }
 
 type TCPConn struct {
@@ -88,6 +90,10 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	if len(cfg.IntegrityKey) == 0 {
 		return nil, errors.New("listening secure tcp transport: integrity key is empty")
 	}
+	encryption := secureEncryption(cfg.Encryption)
+	if encryption == esp.EncryptionAESCBC && len(cfg.EncryptionKey) == 0 {
+		return nil, errors.New("listening secure tcp transport: encryption key is empty")
+	}
 	seq, err := randomUint32()
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
@@ -106,8 +112,8 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 		readyCh:     make(chan struct{}),
 		ackCh:       make(chan struct{}, 1),
 		done:        make(chan struct{}),
-		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: esp.EncryptionNull, Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: esp.EncryptionNull, Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
@@ -158,18 +164,24 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 		if len(secure.IntegrityKey) == 0 {
 			return nil, errors.New("dialing secure tcp transport: integrity key is empty")
 		}
+		encryption := secureEncryption(secure.Encryption)
+		if encryption == esp.EncryptionAESCBC && len(secure.EncryptionKey) == 0 {
+			return nil, errors.New("dialing secure tcp transport: encryption key is empty")
+		}
 		conn.secure = true
 		conn.outboundESP = esp.Codec{
-			SPI:          secure.OutboundSPI,
-			Encryption:   esp.EncryptionNull,
-			Integrity:    secure.Integrity,
-			IntegrityKey: append([]byte(nil), secure.IntegrityKey...),
+			SPI:           secure.OutboundSPI,
+			Encryption:    encryption,
+			EncryptionKey: append([]byte(nil), secure.EncryptionKey...),
+			Integrity:     secure.Integrity,
+			IntegrityKey:  append([]byte(nil), secure.IntegrityKey...),
 		}
 		conn.inboundESP = esp.Codec{
-			SPI:          secure.InboundSPI,
-			Encryption:   esp.EncryptionNull,
-			Integrity:    secure.Integrity,
-			IntegrityKey: append([]byte(nil), secure.IntegrityKey...),
+			SPI:           secure.InboundSPI,
+			Encryption:    encryption,
+			EncryptionKey: append([]byte(nil), secure.EncryptionKey...),
+			Integrity:     secure.Integrity,
+			IntegrityKey:  append([]byte(nil), secure.IntegrityKey...),
 		}
 	}
 	attachment, err := s.Attach(conn)
@@ -264,6 +276,9 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			if err := t.sendSegmentWithSeq(ctx, seq, t.currentAck(), flags, chunk); err != nil {
 				return err
 			}
+			if attempt == 0 {
+				t.noteSent(wantAck)
+			}
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			err := t.waitForAck(waitCtx, wantAck)
 			cancel()
@@ -279,9 +294,6 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 		if !acked {
 			return fmt.Errorf("writing tcp packet: waiting for ack %d", wantAck)
 		}
-		t.mu.Lock()
-		t.sendSeq = wantAck
-		t.mu.Unlock()
 		remaining = remaining[len(chunk):]
 	}
 	return nil
@@ -426,6 +438,14 @@ func (t *TCPConn) noteAckLocked(ack uint32) {
 	select {
 	case t.ackCh <- struct{}{}:
 	default:
+	}
+}
+
+func (t *TCPConn) noteSent(nextSeq uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if nextSeq > t.sendSeq {
+		t.sendSeq = nextSeq
 	}
 }
 

@@ -28,9 +28,9 @@ type Config struct {
 
 type IMSConfig struct {
 	Transport         string
+	PrivateIdentity   string
 	PublicIdentity    string
 	HomeDomain        string
-	Region            string
 	USSDLanguage      string
 	UserAgent         string
 	AccessNetworkInfo string

@@ -78,6 +78,7 @@ func (stubCard) MNC() string  { return "001" }
 func (stubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{
 		RES: []byte("password"),
+		CK:  []byte("client-test-ck"),
 		IK:  []byte("client-test-ik"),
 	}, nil
 }
@@ -112,6 +113,22 @@ func TestNewIdentityResolution(t *testing.T) {
 			},
 			wantPrivateIdentity: "alice@ims.example.com",
 			wantPublicIdentity:  "sip:alice@example.com",
+			wantRegisterURI:     "sip:ims.example.com",
+		},
+		{
+			name: "explicit private identity overrides card value",
+			cfg: Config{
+				PrivateIdentity: "bob@ims.example.com",
+				PublicIdentity:  "sip:bob@example.com",
+				HomeDomain:      "ims.example.com",
+			},
+			card: identityStubCard{
+				homeDomain:      "ignored.example.com",
+				privateIdentity: "alice@ignored.example.com",
+				publicIdentity:  "sip:alice@ignored.example.com",
+			},
+			wantPrivateIdentity: "bob@ims.example.com",
+			wantPublicIdentity:  "sip:bob@example.com",
 			wantRegisterURI:     "sip:ims.example.com",
 		},
 	}
@@ -221,6 +238,24 @@ func TestBuildRegisterUsesSpecDefaultExpires(t *testing.T) {
 	}
 }
 
+func TestBuildRegisterAuthorizationIntegrityProtected(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+
+	initial := svc.buildRegister(nil, nil)
+	if got := initial.Header("Authorization"); !strings.Contains(got, "integrity-protected=no") {
+		t.Fatalf("initial Authorization = %q, want integrity-protected=no", got)
+	}
+
+	auth, err := svc.buildRegisterAuthorization(context.Background(), "ims.mnc001.mcc001.3gppnetwork.org", testNonce, "auth")
+	if err != nil {
+		t.Fatalf("buildRegisterAuthorization() error = %v", err)
+	}
+	protected := svc.buildRegister(auth, nil)
+	if got := protected.Header("Authorization"); !strings.Contains(got, "integrity-protected=yes") {
+		t.Fatalf("protected Authorization = %q, want integrity-protected=yes", got)
+	}
+}
+
 func TestBuildRegisterViaKeepsIMSUDPProfile(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -291,42 +326,55 @@ func TestContactURIFormatting(t *testing.T) {
 	}
 }
 
-func TestNormalizeConfigRegion(t *testing.T) {
+func TestAccessNetworkInfo(t *testing.T) {
 	tests := []struct {
-		name       string
-		cfg        Config
-		wantRegion string
+		name string
+		cfg  Config
+		want string
 	}{
 		{
-			name:       "defaults to IE",
-			cfg:        Config{},
-			wantRegion: "IE",
+			name: "omits unknown access network",
+			cfg:  Config{},
+			want: "",
 		},
 		{
-			name: "trims explicit region",
+			name: "explicit value wins",
 			cfg: Config{
-				Region: " NZ ",
+				AccessNetworkInfo: "IEEE-802.11ac;i-wlan-node-id=aabbcc",
 			},
-			wantRegion: "NZ",
+			want: "IEEE-802.11ac;i-wlan-node-id=aabbcc",
+		},
+		{
+			name: "wlan node id adds access info",
+			cfg: Config{
+				WLANNodeID: "AA:BB:CC",
+			},
+			want: "IEEE-802.11;i-wlan-node-id=aabbcc",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeConfig(tt.cfg)
-			if got.Region != tt.wantRegion {
-				t.Fatalf("Region = %q, want %q", got.Region, tt.wantRegion)
+			got := accessNetworkInfo(tt.cfg)
+			if got != tt.want {
+				t.Fatalf("accessNetworkInfo() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestRegisterPIDFBodyUsesRegionValue(t *testing.T) {
-	svc := newTestService(t, Config{Region: "NZ"}, newUDPTransport(5062, 5060), stubCard{})
+func TestBuildRegisterOmitsGeolocationByDefault(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
 
-	body := svc.registerPIDFBody()
-	if !strings.Contains(body, "<cl:country>NZ</cl:country>") {
-		t.Fatalf("registerPIDFBody() = %q, want region in cl:country element", body)
+	msg := svc.buildRegister(nil, nil)
+	if got := msg.Header("Geolocation"); got != "" {
+		t.Fatalf("Geolocation = %q, want empty", got)
+	}
+	if got := msg.Header("Content-Type"); got != "" {
+		t.Fatalf("Content-Type = %q, want empty", got)
+	}
+	if len(msg.Body) != 0 {
+		t.Fatalf("Body length = %d, want 0", len(msg.Body))
 	}
 }
 
@@ -378,6 +426,22 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 				t.Helper()
 				if state.RegisterExpires != 2*time.Minute {
 					t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 2*time.Minute)
+				}
+			},
+		},
+		{
+			name: "matches registered contact with network user part",
+			headersFor: func(req sip.Message) []sip.Header {
+				uri, params := contactURIAndParams(req.Header("Contact"))
+				hostPort := strings.TrimPrefix(uri, "sip:")
+				return []sip.Header{
+					{Name: "Contact", Value: `<sip:001010123456789@` + hostPort + `>` + params + `;expires=1800`},
+				}
+			},
+			checkState: func(t *testing.T, state State) {
+				t.Helper()
+				if state.RegisterExpires != 30*time.Minute {
+					t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 30*time.Minute)
 				}
 			},
 		},
@@ -449,6 +513,23 @@ func TestBuildSubscribeUsesSubscriptionIdentity(t *testing.T) {
 				t.Fatalf("From = %q, want prefix <%s>;tag=", from, tt.wantIdentity)
 			}
 		})
+	}
+}
+
+func TestSubscribeIgnoresUnsupportedRegistrationEventPackage(t *testing.T) {
+	transport := newTCPTransport(5062, 5060)
+	svc := newTestService(t, Config{}, transport, stubCard{})
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "SUBSCRIBE" {
+			t.Fatalf("method = %q, want SUBSCRIBE", req.Method())
+		}
+		transport.queue(newResponse(req, 489, "Bad Event"))
+	}
+
+	if err := svc.Subscribe(context.Background()); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
 	}
 }
 
@@ -528,7 +609,7 @@ func TestRefreshUsesAuthenticationInfoNextNonce(t *testing.T) {
 	}
 }
 
-func TestEstablishUpgradesSecureTransportAndSubscribes(t *testing.T) {
+func TestEstablishUpgradesSecureTransport(t *testing.T) {
 	initial := newTCPTransport(5062, 5060)
 	secure := newTCPTransport(45000, 5060)
 	serverTCP := newTCPTransport(5063, 45000)
@@ -559,14 +640,10 @@ func TestEstablishUpgradesSecureTransportAndSubscribes(t *testing.T) {
 	}
 	secure.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		switch req.Method() {
-		case "REGISTER":
-			secure.queue(newResponse(req, 200, "OK"))
-		case "SUBSCRIBE":
-			secure.queue(newResponse(req, 200, "OK"))
-		default:
+		if req.Method() != "REGISTER" {
 			t.Fatalf("unexpected method %q", req.Method())
 		}
+		secure.queue(newResponse(req, 200, "OK"))
 	}
 
 	if err := svc.Establish(context.Background()); err != nil {

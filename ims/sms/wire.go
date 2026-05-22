@@ -88,7 +88,63 @@ type RPError struct {
 }
 
 func (e *RPError) Error() string {
+	if text := rpCauseText(e.Cause); text != "" {
+		return fmt.Sprintf("rp-error cause %d (%s)", e.Cause, text)
+	}
 	return fmt.Sprintf("rp-error cause %d", e.Cause)
+}
+
+func rpCauseText(cause byte) string {
+	switch cause {
+	case 1:
+		return "unassigned number"
+	case 8:
+		return "operator determined barring"
+	case 10:
+		return "call barred"
+	case 21:
+		return "short message transfer rejected"
+	case 22:
+		return "memory capacity exceeded"
+	case 27:
+		return "destination out of order"
+	case 28:
+		return "unidentified subscriber"
+	case 29:
+		return "facility rejected"
+	case 30:
+		return "unknown subscriber"
+	case 38:
+		return "network out of order"
+	case 41:
+		return "temporary failure"
+	case 42:
+		return "congestion"
+	case 47:
+		return "resources unavailable"
+	case 50:
+		return "requested facility not subscribed"
+	case 69:
+		return "requested facility not implemented"
+	case 81:
+		return "invalid short message transfer reference"
+	case 95:
+		return "semantically incorrect message"
+	case 96:
+		return "invalid mandatory information"
+	case 97:
+		return "message type not implemented"
+	case 98:
+		return "message not compatible with short message protocol state"
+	case 99:
+		return "information element not implemented"
+	case 111:
+		return "protocol error"
+	case 127:
+		return "interworking"
+	default:
+		return ""
+	}
 }
 
 type smsConcatInfo struct {

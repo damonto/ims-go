@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 
+	"github.com/damonto/ims-client/swu/esp"
 	"github.com/damonto/ims-client/swu/tunnel"
 )
 
@@ -25,6 +27,13 @@ func randomUint32() (uint32, error) {
 		return 0, fmt.Errorf("generating random value: %w", err)
 	}
 	return binary.BigEndian.Uint32(buf), nil
+}
+
+func secureEncryption(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), esp.EncryptionAESCBC) {
+		return esp.EncryptionAESCBC
+	}
+	return esp.EncryptionNull
 }
 
 func connectedUDPAddrs(s *tunnel.Session) (*net.UDPAddr, *net.UDPAddr, error) {

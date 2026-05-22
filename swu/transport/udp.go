@@ -17,10 +17,12 @@ var _ imssession.Transport = (*UDPConn)(nil)
 
 type SecureUDPConfig struct {
 	TCPConfig
-	OutboundSPI  uint32
-	InboundSPI   uint32
-	Integrity    string
-	IntegrityKey []byte
+	OutboundSPI   uint32
+	InboundSPI    uint32
+	Encryption    string
+	EncryptionKey []byte
+	Integrity     string
+	IntegrityKey  []byte
 }
 
 type UDPConn struct {
@@ -61,12 +63,16 @@ func ListenSecureUDP(s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
 	if len(cfg.IntegrityKey) == 0 {
 		return nil, errors.New("listening secure udp transport: integrity key is empty")
 	}
+	encryption := secureEncryption(cfg.Encryption)
+	if encryption == esp.EncryptionAESCBC && len(cfg.EncryptionKey) == 0 {
+		return nil, errors.New("listening secure udp transport: encryption key is empty")
+	}
 	conn := &UDPConn{
 		session:     s,
 		local:       &net.UDPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
 		remote:      &net.UDPAddr{IP: append(net.IP(nil), innerRemote.IP...), Port: cfg.RemotePort, Zone: innerRemote.Zone},
-		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: esp.EncryptionNull, Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: esp.EncryptionNull, Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
 		readCh:      make(chan inboundPacket, 16),
 		done:        make(chan struct{}),
 	}

@@ -267,6 +267,10 @@ func (s *Session) handleInnerPacket(pkt packet.InnerPacket, localUDPPort int) {
 	case packet.ProtocolUDP:
 		s.handleInnerUDPPacket(pkt, localUDPPort)
 	case packet.ProtocolTCP:
+		if pkt.TCP != nil {
+			s.logger.Debug("dropping inner TCP packet without attachment", "src_addr", pkt.TCP.Src, "dst_addr", pkt.TCP.Dst, "tcp_flags", pkt.TCP.Flags)
+			return
+		}
 		s.logger.Debug("dropping inner TCP packet without attachment", "src_ip", pkt.IP.SrcIP, "dst_ip", pkt.IP.DstIP)
 	case packet.ProtocolESP:
 		s.logger.Debug("dropping inner ESP packet without attachment", "src_ip", pkt.IP.SrcIP, "dst_ip", pkt.IP.DstIP)

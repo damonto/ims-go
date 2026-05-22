@@ -146,6 +146,34 @@ func TestRPEncodeDecode(t *testing.T) {
 	}
 }
 
+func TestRPErrorIncludesCauseText(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause byte
+		want  string
+	}{
+		{
+			name:  "known cause",
+			cause: 28,
+			want:  "rp-error cause 28 (unidentified subscriber)",
+		},
+		{
+			name:  "unknown cause",
+			cause: 2,
+			want:  "rp-error cause 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &RPError{Cause: tt.cause}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("Error() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEncodeRPAddressEmptyUsesZeroLengthOnly(t *testing.T) {
 	got := encodeRPAddress("")
 

@@ -30,7 +30,13 @@ type options struct {
 	slot        int
 	imei        string
 	epdgAddr    string
-	region      string
+	transport   string
+	expires     time.Duration
+	privateID   string
+	publicID    string
+	homeDomain  string
+	pani        string
+	wlanNodeID  string
 	sendTo      string
 	sendText    string
 	ussdCode    string
@@ -62,7 +68,13 @@ func parseFlags() options {
 	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi")
 	flag.StringVar(&opt.imei, "imei", "", "UE IMEI used for SWu authentication")
 	flag.StringVar(&opt.epdgAddr, "epdg", "", "optional ePDG host:port or host; default uses MCC/MNC from the card")
-	flag.StringVar(&opt.region, "region", "IE", "PIDF civic region code, for example NZ")
+	flag.StringVar(&opt.transport, "transport", "", "IMS SIP transport override: tcp or udp")
+	flag.DurationVar(&opt.expires, "register-expires", 0, "IMS registration expiration override, for example 1800s")
+	flag.StringVar(&opt.privateID, "private-identity", "", "IMS private user identity override")
+	flag.StringVar(&opt.publicID, "public-identity", "", "IMS public user identity override")
+	flag.StringVar(&opt.homeDomain, "home-domain", "", "IMS home domain override")
+	flag.StringVar(&opt.pani, "pani", "", "P-Access-Network-Info override")
+	flag.StringVar(&opt.wlanNodeID, "wlan-node-id", "", "WLAN AP MAC for i-wlan-node-id")
 	flag.StringVar(&opt.sendTo, "send-to", "", "destination MSISDN for one test SMS")
 	flag.StringVar(&opt.sendText, "send-text", "", "text body for one test SMS")
 	flag.StringVar(&opt.ussdCode, "ussd", "", "USSD code to dial, for example *100#")
@@ -102,7 +114,13 @@ func run(opt options) error {
 		Logger: slog.Default(),
 		Tunnel: tunnel.Config{},
 		IMS: imsclient.IMSConfig{
-			Region: opt.region,
+			Transport:         opt.transport,
+			PrivateIdentity:   opt.privateID,
+			PublicIdentity:    opt.publicID,
+			HomeDomain:        opt.homeDomain,
+			AccessNetworkInfo: opt.pani,
+			WLANNodeID:        opt.wlanNodeID,
+			RegisterExpires:   opt.expires,
 		},
 	}
 

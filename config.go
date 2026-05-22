@@ -101,9 +101,9 @@ func (cfg Config) normalizedIMS() (IMSConfig, error) {
 
 func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.Transport = strings.ToLower(strings.TrimSpace(cfg.Transport))
+	cfg.PrivateIdentity = strings.TrimSpace(cfg.PrivateIdentity)
 	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
-	cfg.Region = strings.TrimSpace(cfg.Region)
 	cfg.USSDLanguage = strings.TrimSpace(cfg.USSDLanguage)
 	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
@@ -119,9 +119,6 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	default:
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported transport %q", cfg.Transport)
 	}
-	if cfg.Region == "" {
-		cfg.Region = "US"
-	}
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = defaultUserAgent()
 	}
@@ -129,7 +126,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 		return IMSConfig{}, errors.New("normalizing ims config: register expires must be >= 0")
 	}
 	if cfg.RegisterExpires == 0 {
-		cfg.RegisterExpires = 10 * time.Minute
+		cfg.RegisterExpires = 600000 * time.Second
 	}
 	return cfg, nil
 }

@@ -41,14 +41,15 @@ type Info struct {
 }
 
 type Authorization struct {
-	Nonce      string
-	URI        string
-	Response   string
-	Username   string
-	Realm      string
-	QOP        string
-	NonceCount string
-	CNonce     string
+	Nonce              string
+	URI                string
+	Response           string
+	Username           string
+	Realm              string
+	IntegrityProtected string
+	QOP                string
+	NonceCount         string
+	CNonce             string
 }
 
 type Identity struct {
@@ -63,6 +64,7 @@ type AKAProvider interface {
 
 type AKAResult struct {
 	Authorization Authorization
+	EncryptionKey []byte
 	IntegrityKey  []byte
 }
 
@@ -76,7 +78,7 @@ func NormalizeParam(p Param) (Param, bool) {
 	if p.Prot == "" {
 		p.Prot = "esp"
 	}
-	if !strings.EqualFold(p.EAlg, "null") || !strings.EqualFold(p.Mod, "trans") || !strings.EqualFold(p.Prot, "esp") {
+	if !supportedEncryptionAlg(p.EAlg) || !strings.EqualFold(p.Mod, "trans") || !strings.EqualFold(p.Prot, "esp") {
 		return Param{}, false
 	}
 	alg, ok := normalizeIntegrityAlg(p.Alg)
@@ -137,6 +139,7 @@ func BuildAKAAuthorization(ctx context.Context, card AKAProvider, id Identity, c
 	auth.Response = response
 	return AKAResult{
 		Authorization: auth,
+		EncryptionKey: append([]byte(nil), aka.CK...),
 		IntegrityKey:  append([]byte(nil), aka.IK...),
 	}, nil
 }
@@ -212,7 +215,10 @@ func (i *Info) UnmarshalText(text []byte) error {
 }
 
 func (a Authorization) MarshalText() ([]byte, error) {
-	value := fmt.Sprintf(`Digest nonce="%s",uri="%s",response="%s",username="%s",algorithm=AKAv1-MD5,realm="%s"`, a.Nonce, a.URI, a.Response, a.Username, a.Realm)
+	value := fmt.Sprintf(`Digest nonce="%s",uri="%s",realm="%s",username="%s",response="%s",algorithm=AKAv1-MD5`, a.Nonce, a.URI, a.Realm, a.Username, a.Response)
+	if a.IntegrityProtected != "" {
+		value += fmt.Sprintf(`,integrity-protected=%s`, a.IntegrityProtected)
+	}
 	if a.QOP != "" {
 		value += fmt.Sprintf(`,qop=%s,nc=%s,cnonce="%s"`, a.QOP, a.NonceCount, a.CNonce)
 	}
@@ -290,6 +296,15 @@ func normalizeIntegrityAlg(alg string) (string, bool) {
 		return "hmac-sha256-128", true
 	default:
 		return "", false
+	}
+}
+
+func supportedEncryptionAlg(alg string) bool {
+	switch strings.ToLower(strings.TrimSpace(alg)) {
+	case "aes-cbc", "null":
+		return true
+	default:
+		return false
 	}
 }
 

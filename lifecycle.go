@@ -256,7 +256,6 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 	}
 
 	tcpTransport, err := swutransport.DialTCP(setup.setupCtx, setup.session, swutransport.TCPConfig{
-		LocalPort:  setup.tunnelCfg.LocalSIPPort,
 		RemotePort: setup.tunnelCfg.SIPPort,
 	})
 	if err != nil {
@@ -269,10 +268,12 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
 			},
-			OutboundSPI:  cfg.OutboundSPI,
-			InboundSPI:   cfg.InboundSPI,
-			Integrity:    cfg.Integrity,
-			IntegrityKey: cfg.IntegrityKey,
+			OutboundSPI:   cfg.OutboundSPI,
+			InboundSPI:    cfg.InboundSPI,
+			Encryption:    cfg.Encryption,
+			EncryptionKey: cfg.EncryptionKey,
+			Integrity:     cfg.Integrity,
+			IntegrityKey:  cfg.IntegrityKey,
 		})
 	}
 	setup.imsCfg.listenSecureTCP = func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
@@ -282,10 +283,12 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
 			},
-			OutboundSPI:  cfg.OutboundSPI,
-			InboundSPI:   cfg.InboundSPI,
-			Integrity:    cfg.Integrity,
-			IntegrityKey: cfg.IntegrityKey,
+			OutboundSPI:   cfg.OutboundSPI,
+			InboundSPI:    cfg.InboundSPI,
+			Encryption:    cfg.Encryption,
+			EncryptionKey: cfg.EncryptionKey,
+			Integrity:     cfg.Integrity,
+			IntegrityKey:  cfg.IntegrityKey,
 		})
 	}
 	setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
@@ -295,10 +298,12 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
 			},
-			OutboundSPI:  cfg.OutboundSPI,
-			InboundSPI:   cfg.InboundSPI,
-			Integrity:    cfg.Integrity,
-			IntegrityKey: cfg.IntegrityKey,
+			OutboundSPI:   cfg.OutboundSPI,
+			InboundSPI:    cfg.InboundSPI,
+			Encryption:    cfg.Encryption,
+			EncryptionKey: cfg.EncryptionKey,
+			Integrity:     cfg.Integrity,
+			IntegrityKey:  cfg.IntegrityKey,
 		})
 	}
 	return transport, nil
@@ -306,9 +311,9 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 
 func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 	return registration.Config{
+		PrivateIdentity:   cfg.PrivateIdentity,
 		PublicIdentity:    cfg.PublicIdentity,
 		HomeDomain:        cfg.HomeDomain,
-		Region:            cfg.Region,
 		UserAgent:         cfg.UserAgent,
 		AccessNetworkInfo: cfg.AccessNetworkInfo,
 		WLANNodeID:        cfg.WLANNodeID,

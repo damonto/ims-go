@@ -13,6 +13,7 @@ type stubAKAProvider struct{}
 func (stubAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{
 		RES: []byte("password"),
+		CK:  []byte("client-test-ck"),
 		IK:  []byte("client-test-ik"),
 	}, nil
 }
@@ -208,6 +209,9 @@ func TestBuildAKAAuthorization(t *testing.T) {
 	}
 	if !bytes.Equal(got.IntegrityKey, []byte("client-test-ik")) {
 		t.Fatalf("IntegrityKey = %q, want %q", got.IntegrityKey, []byte("client-test-ik"))
+	}
+	if !bytes.Equal(got.EncryptionKey, []byte("client-test-ck")) {
+		t.Fatalf("EncryptionKey = %q, want %q", got.EncryptionKey, []byte("client-test-ck"))
 	}
 	text, err := got.Authorization.MarshalText()
 	if err != nil {
