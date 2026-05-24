@@ -244,8 +244,12 @@ func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, e
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	raw := cloneConfig(cfg)
+	if raw.Logger == nil {
+		raw.Logger = slog.Default()
+	}
 
-	client, err := buildClient(ctx, reader, cfg)
+	client, err := buildClient(ctx, reader, raw)
 	if err != nil {
 		if reader != nil {
 			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
@@ -255,20 +259,13 @@ func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, e
 	return client, nil
 }
 
-func buildClient(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, error) {
-	raw := cloneConfig(cfg)
-	logger := raw.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-
-	card, err := usim.Load(ctx, reader, logger)
+func buildClient(ctx context.Context, reader usimreader.Reader, cfg Config) (*Client, error) {
+	card, err := usim.Load(ctx, reader, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating client: %w", err)
 	}
 
-	raw.Logger = logger
-	client, err := newClient(raw, card)
+	client, err := newClient(cfg, card)
 	if err != nil {
 		return nil, err
 	}

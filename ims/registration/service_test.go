@@ -380,6 +380,43 @@ func TestAccessNetworkInfo(t *testing.T) {
 	}
 }
 
+func TestDefaultUserAgent(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "default",
+			want: defaultUserAgent,
+		},
+		{
+			name: "explicit value wins",
+			cfg:  Config{UserAgent: "custom-agent"},
+			want: "custom-agent",
+		},
+		{
+			name: "trims explicit value",
+			cfg:  Config{UserAgent: " custom-agent "},
+			want: "custom-agent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newUDPTransport(5062, 5060)
+			svc := newTestService(t, tt.cfg, transport, stubCard{})
+
+			if got := svc.RequestPolicy().UserAgent; got != tt.want {
+				t.Fatalf("RequestPolicy().UserAgent = %q, want %q", got, tt.want)
+			}
+			if got := svc.buildRegister(nil, nil).Header("User-Agent"); got != tt.want {
+				t.Fatalf("REGISTER User-Agent = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildRegisterOmitsGeolocationByDefault(t *testing.T) {
 	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
 

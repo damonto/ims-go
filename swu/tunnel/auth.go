@@ -235,6 +235,17 @@ func (f *akaAuthFlow) verifyCheckcode(attrs []eapaka.AKAAttribute) error {
 	return nil
 }
 
+func (f *akaAuthFlow) challengeResponseCheckcode(attrs []eapaka.AKAAttribute) []byte {
+	if !eapaka.HasAttribute(attrs, akaAttrCheckcode) || len(f.identityPackets) == 0 {
+		return nil
+	}
+	sum := sha1.New()
+	for _, packet := range f.identityPackets {
+		_, _ = sum.Write(packet)
+	}
+	return append([]byte{0x00, 0x00}, sum.Sum(nil)...)
+}
+
 func (f *akaAuthFlow) clientErrorResponse(identifier byte, action string, cause error) (akaResponse, error) {
 	data, err := eapaka.BuildClientErrorPacket(identifier, akaClientErrorUnableToProcessPacket)
 	if err != nil {
@@ -461,7 +472,14 @@ func (f *akaAuthFlow) buildChallengeResponse(message eapaka.AKAMessage, eapData 
 		f.pendingState.KEncr = append([]byte(nil), f.crypto.eap.ENCR...)
 		f.pendingState.KAut = append([]byte(nil), f.crypto.eap.AUT...)
 	}
-	data, err := eapaka.BuildChallengeResponsePacket(message.Identifier, aka.RES, f.crypto.eap.AUT, eapaka.HasAttribute(message.Attributes, akaAttrResultInd))
+	responseCheckcode := f.challengeResponseCheckcode(message.Attributes)
+	data, err := eapaka.BuildChallengeResponsePacketWithCheckcode(
+		message.Identifier,
+		aka.RES,
+		f.crypto.eap.AUT,
+		eapaka.HasAttribute(message.Attributes, akaAttrResultInd),
+		responseCheckcode,
+	)
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("connecting swu session: building aka response: %w", err)
 	}

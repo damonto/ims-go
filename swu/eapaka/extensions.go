@@ -280,7 +280,14 @@ func akaUint16Bytes(value uint16) []byte {
 }
 
 func BuildChallengeResponsePacket(identifier byte, res, autKey []byte, useResultInd bool) ([]byte, error) {
+	return BuildChallengeResponsePacketWithCheckcode(identifier, res, autKey, useResultInd, nil)
+}
+
+func BuildChallengeResponsePacketWithCheckcode(identifier byte, res, autKey []byte, useResultInd bool, checkcode []byte) ([]byte, error) {
 	attrs := []AKAAttribute{{Type: akaAttrRES, Value: append(akaUint16Bytes(uint16(len(res)*8)), res...)}}
+	if len(checkcode) != 0 {
+		attrs = append(attrs, AKAAttribute{Type: akaAttrCheckcode, Value: append([]byte(nil), checkcode...)})
+	}
 	if useResultInd {
 		attrs = append(attrs, buildAKAUint16Attribute(akaAttrResultInd, 0))
 	}

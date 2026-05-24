@@ -91,6 +91,26 @@ func TestBuildAKAResponsePadsATRESValueToFourByteBoundary(t *testing.T) {
 	}
 }
 
+func TestBuildChallengeResponsePacketWithCheckcode(t *testing.T) {
+	checkcode := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x66}, 20)...)
+	wire, err := BuildChallengeResponsePacketWithCheckcode(3, []byte{0x01, 0x02, 0x03, 0x04}, bytes.Repeat([]byte{0x11}, 16), false, checkcode)
+	if err != nil {
+		t.Fatalf("BuildChallengeResponsePacketWithCheckcode() error = %v", err)
+	}
+
+	var got AKAMessage
+	if err := got.UnmarshalBinary(wire); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+	attr := FindAttribute(got.Attributes, akaAttrCheckcode)
+	if attr == nil {
+		t.Fatal("AT_CHECKCODE is missing")
+	}
+	if !bytes.Equal(attr.Value, checkcode) {
+		t.Fatalf("AT_CHECKCODE = % X, want % X", attr.Value, checkcode)
+	}
+}
+
 func TestParseAKAChallenge(t *testing.T) {
 	randValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)
 	autnValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x22}, 16)...)

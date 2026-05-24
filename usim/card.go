@@ -17,6 +17,7 @@ var (
 	fileEFIMSI    = mustHex("6F07")
 	fileEFAD      = mustHex("6FAD")
 	fileEFSMSP    = mustHex("6F42")
+	fileEFGID1    = mustHex("6F3E")
 	pathEFPSISMSC = mustHex("7F106FE5")
 	fileEFIMPI    = mustHex("6F02")
 	fileEFDomain  = mustHex("6F03")
@@ -34,6 +35,8 @@ type Card struct {
 	imsi            string
 	mcc             string
 	mnc             string
+	mncLength       int
+	gid1            string
 	serviceCentre   ServiceCentre
 	privateIdentity string
 	publicIdentity  string
@@ -45,6 +48,8 @@ func (u *Card) ICCID() string                              { return u.iccid }
 func (u *Card) IMSI() string                               { return u.imsi }
 func (u *Card) MCC() string                                { return u.mcc }
 func (u *Card) MNC() string                                { return u.mnc }
+func (u *Card) MNCLength() int                             { return u.mncLength }
+func (u *Card) GID1() string                               { return u.gid1 }
 func (u *Card) SMSC() string                               { return u.serviceCentre.Address }
 func (u *Card) ServiceCentre() ServiceCentre               { return u.serviceCentre }
 func (u *Card) PrivateIdentity() string                    { return u.privateIdentity }
@@ -135,6 +140,13 @@ func (u *Card) load(ctx context.Context) error {
 	u.imsi = imsi.Digits
 	u.mcc = imsi.MCC
 	u.mnc = mnc
+	u.mncLength = mncLength
+
+	if gid1, err := usimApp.ReadTransparentHex(ctx, fileEFGID1, "reading EF_GID1"); err == nil {
+		u.gid1 = gid1
+	} else {
+		u.logger.Debug("reading EF_GID1 from USIM failed", "err", err)
+	}
 
 	smsc, err := usimApp.ReadSMSC(ctx, fileEFSMSP)
 	if err == nil {

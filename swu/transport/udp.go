@@ -187,23 +187,23 @@ func (t *UDPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		return false
 	}
 	if !t.acceptInboundESP(espPacket.Sequence) {
-		loggerForSession(t.session).Debug("dropping replayed secure UDP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
+		t.session.Logger().Debug("dropping replayed secure UDP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
 		return false
 	}
 	if espPacket.NextHeader != packet.ProtocolUDP {
-		loggerForSession(t.session).Debug("secure ESP packet", "next_header", espPacket.NextHeader, "spi", spi, "local_addr", t.local, "remote_addr", t.remote)
+		t.session.Logger().Debug("secure ESP packet", "next_header", espPacket.NextHeader, "spi", spi, "local_addr", t.local, "remote_addr", t.remote)
 		return false
 	}
 	inner, err := packet.DecodePayload(packet.ProtocolUDP, pkt.IP.SrcIP, pkt.IP.DstIP, espPacket.Payload)
 	if err != nil || inner.UDP == nil {
-		loggerForSession(t.session).Debug("parsing secure UDP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
+		t.session.Logger().Debug("parsing secure UDP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
 		return false
 	}
 	if !inner.UDP.Src.IP.Equal(t.remote.IP) || inner.UDP.Src.Port != t.remote.Port || inner.UDP.Dst.Port != t.local.Port {
-		loggerForSession(t.session).Debug("secure UDP flow mismatch", "spi", spi, "peer_addr", inner.UDP.Src, "expected_remote_addr", t.remote, "expected_local_addr", t.local)
+		t.session.Logger().Debug("secure UDP flow mismatch", "spi", spi, "peer_addr", inner.UDP.Src, "expected_remote_addr", t.remote, "expected_local_addr", t.local)
 		return false
 	}
-	loggerForSession(t.session).Debug("received secure UDP packet", "peer_addr", inner.UDP.Src, "local_addr", t.local, "payload_len", len(inner.UDP.Payload))
+	t.session.Logger().Debug("received secure UDP packet", "peer_addr", inner.UDP.Src, "local_addr", t.local, "payload_len", len(inner.UDP.Payload))
 	t.deliver(inner.UDP.Payload, inner.UDP.Src)
 	return true
 }

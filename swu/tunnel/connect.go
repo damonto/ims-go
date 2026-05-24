@@ -335,7 +335,7 @@ func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState,
 }
 
 func finalizeIKEAuthState(state *connectState, finalPayloads []ike.Payload, nextMessageID uint32) error {
-	tunnel, err := tunnelInfoFromChildSA(finalPayloads)
+	tunnel, err := tunnelInfoFromChildSA(finalPayloads, state.input.Config)
 	if err != nil {
 		return err
 	}
@@ -514,7 +514,7 @@ func negotiatedIKESAFromProposal(proposal ike.Proposal) (negotiatedIKESA, error)
 	return parsed, nil
 }
 
-func tunnelInfoFromChildSA(payloads []ike.Payload) (Info, error) {
+func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config) (Info, error) {
 	config, proposal, err := childSAConfig(payloads)
 	if err != nil {
 		return Info{}, err
@@ -523,7 +523,7 @@ func tunnelInfoFromChildSA(payloads []ike.Payload) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	if err := applyTunnelAddresses(&tunnel, config); err != nil {
+	if err := applyTunnelAddresses(&tunnel, config, cfg); err != nil {
 		return Info{}, err
 	}
 	return tunnel, nil
@@ -565,11 +565,11 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 	return tunnel, nil
 }
 
-func applyTunnelAddresses(tunnel *Info, config *ike.ConfigPayload) error {
+func applyTunnelAddresses(tunnel *Info, config *ike.ConfigPayload, cfg handshake.Config) error {
 	if tunnel == nil || config == nil {
 		return errors.New("parsing ike_auth response: missing child sa or configuration")
 	}
-	internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 := tunnelAddresses(config.Attributes)
+	internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 := tunnelAddresses(config.Attributes, cfg.PCSCFIPv4ConfigAttribute, cfg.PCSCFIPv6ConfigAttribute)
 	switch {
 	case internalIPv6 != nil && pcscfIPv6 != nil:
 		tunnel.InnerIP = internalIPv6
@@ -583,7 +583,13 @@ func applyTunnelAddresses(tunnel *Info, config *ike.ConfigPayload) error {
 	return nil
 }
 
-func tunnelAddresses(attrs []ike.Attribute) (internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 net.IP) {
+func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16) (internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 net.IP) {
+	if pcscfIPv4Attr == 0 {
+		pcscfIPv4Attr = configAttrPCSCFIPv4Address
+	}
+	if pcscfIPv6Attr == 0 {
+		pcscfIPv6Attr = configAttrPCSCFIPv6Address
+	}
 	for _, attr := range attrs {
 		switch attr.Type {
 		case configAttrInternalIPv4Address:
@@ -598,11 +604,11 @@ func tunnelAddresses(attrs []ike.Attribute) (internalIPv4, internalIPv6, pcscfIP
 			if internalIPv6 == nil && len(attr.Value) >= net.IPv6len {
 				internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
-		case configAttrPCSCFIPv4Address:
+		case pcscfIPv4Attr:
 			if pcscfIPv4 == nil && len(attr.Value) >= net.IPv4len {
 				pcscfIPv4 = append(net.IP(nil), attr.Value[:net.IPv4len]...)
 			}
-		case configAttrPCSCFIPv6Address:
+		case pcscfIPv6Attr:
 			if pcscfIPv6 == nil && len(attr.Value) >= net.IPv6len {
 				pcscfIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
@@ -684,13 +690,14 @@ func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, re
 
 func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI uint32) ([]ike.Payload, error) {
 	childSA := &ike.SecurityAssociationPayload{Proposals: childSAProposals(cfg, espSPI)}
+	pcscfIPv4Attr, pcscfIPv6Attr := pcscfConfigAttributes(cfg)
 	config := &ike.ConfigPayload{ConfigType: configTypeRequest, Attributes: []ike.Attribute{
 		ike.NewTLVAttribute(configAttrInternalIPv4Address, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv4DNS, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv6Address, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv6DNS, nil),
-		ike.NewTLVAttribute(configAttrPCSCFIPv4Address, nil),
-		ike.NewTLVAttribute(configAttrPCSCFIPv6Address, nil),
+		ike.NewTLVAttribute(pcscfIPv4Attr, nil),
+		ike.NewTLVAttribute(pcscfIPv6Attr, nil),
 		ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, nil),
 	}}
 	selectors := ike.TrafficSelectorsAny()
@@ -703,6 +710,18 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 		&ike.TrafficSelectorPayload{Tag: payloadTypeTSr, Selectors: selectors},
 		&ike.NotifyPayload{ProtocolID: 0, NotifyType: notifyTypeEAPOnlyAuthentication},
 	}, nil
+}
+
+func pcscfConfigAttributes(cfg handshake.Config) (uint16, uint16) {
+	pcscfIPv4Attr := cfg.PCSCFIPv4ConfigAttribute
+	if pcscfIPv4Attr == 0 {
+		pcscfIPv4Attr = configAttrPCSCFIPv4Address
+	}
+	pcscfIPv6Attr := cfg.PCSCFIPv6ConfigAttribute
+	if pcscfIPv6Attr == 0 {
+		pcscfIPv6Attr = configAttrPCSCFIPv6Address
+	}
+	return pcscfIPv4Attr, pcscfIPv6Attr
 }
 
 func resolveOuterLocalAddr(conn net.PacketConn, remote *net.UDPAddr) (*net.UDPAddr, error) {

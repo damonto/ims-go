@@ -611,6 +611,17 @@ func TestAKAAuthFlowBuildChallengeResponseVerifiesCheckcode(t *testing.T) {
 			if response.afterSend != nil {
 				t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
 			}
+			var got eapaka.AKAMessage
+			if err := got.UnmarshalBinary(response.data); err != nil {
+				t.Fatalf("response UnmarshalBinary() error = %v", err)
+			}
+			attr := eapaka.FindAttribute(got.Attributes, akaAttrCheckcode)
+			if attr == nil {
+				t.Fatal("response AT_CHECKCODE is missing")
+			}
+			if want := checkcodeForTest(flow.identityPackets); !bytes.Equal(attr.Value, want) {
+				t.Fatalf("response AT_CHECKCODE = % X, want % X", attr.Value, want)
+			}
 		})
 	}
 }

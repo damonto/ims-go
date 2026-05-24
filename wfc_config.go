@@ -13,38 +13,41 @@ import (
 var embeddedWFCConfig []byte
 
 type wfcProfile struct {
-	MCC                    string        `json:"mcc"`
-	MNC                    string        `json:"mnc"`
-	EPDG                   string        `json:"epdg"`
-	EPDGAddresses          []string      `json:"epdgAddresses"`
-	InitialPort            int           `json:"initialPort"`
-	NATTPort               int           `json:"nattPort"`
-	LocalSIPPort           int           `json:"localSIPPort"`
-	SIPPort                int           `json:"sipPort"`
-	DHGroups               []uint16      `json:"dhGroups"`
-	IKEEncryptionKeyLens   []uint16      `json:"ikeEncryptionKeyLens"`
-	IKEIntegrity           []uint16      `json:"ikeIntegrity"`
-	IKEPRF                 []uint16      `json:"ikePRF"`
-	ChildEncryptionKeyLens []uint16      `json:"childEncryptionKeyLens"`
-	ChildIntegrity         []uint16      `json:"childIntegrity"`
-	NATKeepaliveInterval   *wfcDuration  `json:"natKeepaliveInterval"`
-	IKERetransmitDelays    []wfcDuration `json:"ikeRetransmitDelays"`
-	IMSTransport           string        `json:"imsTransport"`
-	IMSHomeDomain          string        `json:"imsHomeDomain"`
-	IMSPhoneContextDomain  string        `json:"imsPhoneContextDomain"`
-	IMSAccessNetworkInfo   string        `json:"imsAccessNetworkInfo"`
-	IMSUserAgent           string        `json:"imsUserAgent"`
-	IMSRegisterExpires     *wfcDuration  `json:"imsRegisterExpires"`
-	IMSSIPServerPort       int           `json:"imsSIPServerPort"`
-	IMSSIPTimerT1          *wfcDuration  `json:"imsSIPTimerT1"`
-	IMSSIPTimerT2          *wfcDuration  `json:"imsSIPTimerT2"`
-	IMSSIPTimerT4          *wfcDuration  `json:"imsSIPTimerT4"`
-	IMSSIPTimerB           *wfcDuration  `json:"imsSIPTimerB"`
-	IMSSIPTimerD           *wfcDuration  `json:"imsSIPTimerD"`
-	IMSSIPTimerF           *wfcDuration  `json:"imsSIPTimerF"`
-	IMSSIPTimerH           *wfcDuration  `json:"imsSIPTimerH"`
-	IMSSIPTimerJ           *wfcDuration  `json:"imsSIPTimerJ"`
-	WFCSPN                 string        `json:"wfcSPN"`
+	MCC                      string        `json:"mcc"`
+	MNC                      string        `json:"mnc"`
+	GID1                     string        `json:"gid1"`
+	EPDG                     string        `json:"epdg"`
+	EPDGAddresses            []string      `json:"epdgAddresses"`
+	InitialPort              int           `json:"initialPort"`
+	NATTPort                 int           `json:"nattPort"`
+	LocalSIPPort             int           `json:"localSIPPort"`
+	SIPPort                  int           `json:"sipPort"`
+	DHGroups                 []uint16      `json:"dhGroups"`
+	IKEEncryptionKeyLens     []uint16      `json:"ikeEncryptionKeyLens"`
+	IKEIntegrity             []uint16      `json:"ikeIntegrity"`
+	IKEPRF                   []uint16      `json:"ikePRF"`
+	ChildEncryptionKeyLens   []uint16      `json:"childEncryptionKeyLens"`
+	ChildIntegrity           []uint16      `json:"childIntegrity"`
+	PCSCFIPv4ConfigAttribute uint16        `json:"pcscfIPv4ConfigAttribute"`
+	PCSCFIPv6ConfigAttribute uint16        `json:"pcscfIPv6ConfigAttribute"`
+	NATKeepaliveInterval     *wfcDuration  `json:"natKeepaliveInterval"`
+	IKERetransmitDelays      []wfcDuration `json:"ikeRetransmitDelays"`
+	IMSTransport             string        `json:"imsTransport"`
+	IMSHomeDomain            string        `json:"imsHomeDomain"`
+	IMSPhoneContextDomain    string        `json:"imsPhoneContextDomain"`
+	IMSAccessNetworkInfo     string        `json:"imsAccessNetworkInfo"`
+	IMSUserAgent             string        `json:"imsUserAgent"`
+	IMSRegisterExpires       *wfcDuration  `json:"imsRegisterExpires"`
+	IMSSIPServerPort         int           `json:"imsSIPServerPort"`
+	IMSSIPTimerT1            *wfcDuration  `json:"imsSIPTimerT1"`
+	IMSSIPTimerT2            *wfcDuration  `json:"imsSIPTimerT2"`
+	IMSSIPTimerT4            *wfcDuration  `json:"imsSIPTimerT4"`
+	IMSSIPTimerB             *wfcDuration  `json:"imsSIPTimerB"`
+	IMSSIPTimerD             *wfcDuration  `json:"imsSIPTimerD"`
+	IMSSIPTimerF             *wfcDuration  `json:"imsSIPTimerF"`
+	IMSSIPTimerH             *wfcDuration  `json:"imsSIPTimerH"`
+	IMSSIPTimerJ             *wfcDuration  `json:"imsSIPTimerJ"`
+	WFCSPN                   string        `json:"wfcSPN"`
 }
 
 type wfcDuration struct {
@@ -83,22 +86,89 @@ func parseWFCProfile(raw []byte, card Card) (wfcProfile, bool, error) {
 		return wfcProfile{}, false, errors.New("loading wfc config: card is nil")
 	}
 
-	var profiles map[string]wfcProfile
+	var profiles []wfcProfile
 	if err := json.Unmarshal(raw, &profiles); err != nil {
 		return wfcProfile{}, false, fmt.Errorf("loading wfc config: decode json: %w", err)
 	}
 
 	mcc := strings.TrimSpace(card.MCC())
 	mnc := strings.TrimSpace(card.MNC())
-	if profile, ok := profiles[mcc+mnc]; ok {
-		return profile, true, nil
+	mncLength := cardMNCLength(card)
+	gid1 := cardGID1(card)
+	for _, profile := range profiles {
+		if profile.GID1 == "" {
+			continue
+		}
+		if samePLMNDigits(profile.MCC, profile.MNC, mcc, mnc, mncLength) && sameGID1(profile.GID1, gid1) {
+			return profile, true, nil
+		}
 	}
 	for _, profile := range profiles {
-		if strings.TrimSpace(profile.MCC) == mcc && strings.TrimSpace(profile.MNC) == mnc {
+		if profile.GID1 != "" {
+			continue
+		}
+		if samePLMNDigits(profile.MCC, profile.MNC, mcc, mnc, mncLength) {
 			return profile, true, nil
 		}
 	}
 	return wfcProfile{}, false, nil
+}
+
+type mncLengthCard interface {
+	MNCLength() int
+}
+
+func cardMNCLength(card Card) int {
+	lengthCard, ok := card.(mncLengthCard)
+	if !ok {
+		return 0
+	}
+	return lengthCard.MNCLength()
+}
+
+type gid1Card interface {
+	GID1() string
+}
+
+func cardGID1(card Card) string {
+	gid1Card, ok := card.(gid1Card)
+	if !ok {
+		return ""
+	}
+	return normalizeGID1(gid1Card.GID1())
+}
+
+func samePLMNDigits(profileMCC, profileMNC, cardMCC, cardMNC string, cardMNCLength int) bool {
+	profileMCC = strings.TrimSpace(profileMCC)
+	cardMCC = strings.TrimSpace(cardMCC)
+	if profileMCC != cardMCC {
+		return false
+	}
+
+	profileMNC = strings.TrimSpace(profileMNC)
+	cardMNC = strings.TrimSpace(cardMNC)
+	if profileMNC == cardMNC {
+		return true
+	}
+	if cardMNCLength != 2 || len(profileMNC) != 2 || len(cardMNC) != 3 {
+		return false
+	}
+	return cardMNC[0] == '0' && profileMNC == cardMNC[1:]
+}
+
+func sameGID1(profileGID1, cardGID1 string) bool {
+	profileGID1 = normalizeGID1(profileGID1)
+	if profileGID1 == "" || cardGID1 == "" {
+		return false
+	}
+	return strings.HasPrefix(cardGID1, profileGID1)
+}
+
+func normalizeGID1(gid1 string) string {
+	gid1 = strings.TrimSpace(gid1)
+	gid1 = strings.TrimPrefix(gid1, "0x")
+	gid1 = strings.TrimPrefix(gid1, "0X")
+	return strings.ToUpper(gid1)
 }
 
 func (cfg Config) withWFCProfile(profile wfcProfile) Config {
@@ -135,6 +205,12 @@ func (cfg Config) withWFCProfile(profile wfcProfile) Config {
 	}
 	if len(cfg.Tunnel.ChildIntegrity) == 0 {
 		cfg.Tunnel.ChildIntegrity = cloneUint16s(profile.ChildIntegrity)
+	}
+	if cfg.Tunnel.PCSCFIPv4ConfigAttribute == 0 {
+		cfg.Tunnel.PCSCFIPv4ConfigAttribute = profile.PCSCFIPv4ConfigAttribute
+	}
+	if cfg.Tunnel.PCSCFIPv6ConfigAttribute == 0 {
+		cfg.Tunnel.PCSCFIPv6ConfigAttribute = profile.PCSCFIPv6ConfigAttribute
 	}
 	if cfg.Tunnel.NATKeepaliveInterval == 0 && profile.NATKeepaliveInterval != nil {
 		cfg.Tunnel.NATKeepaliveInterval = profile.NATKeepaliveInterval.Duration

@@ -209,7 +209,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 			}
 			return conn, nil
 		case <-wait.C:
-			loggerForSession(s).Debug("TCP SYN timed out", "attempt", attempt+1)
+			s.Logger().Debug("TCP SYN timed out", "attempt", attempt+1)
 		}
 	}
 	_ = conn.Close()
@@ -289,7 +289,7 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			loggerForSession(t.session).Debug("TCP data ACK timed out", "seq", seq, "want_ack", wantAck, "attempt", attempt+1)
+			t.session.Logger().Debug("TCP data ACK timed out", "seq", seq, "want_ack", wantAck, "attempt", attempt+1)
 		}
 		if !acked {
 			return fmt.Errorf("writing tcp packet: waiting for ack %d", wantAck)
@@ -329,7 +329,7 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 			return false
 		}
 		if pkt.TCP.Dst.Port != t.local.Port || !pkt.TCP.Src.IP.Equal(t.remote.IP) || pkt.TCP.Src.Port != t.remote.Port {
-			loggerForSession(t.session).Debug("dropping TCP segment for unexpected flow", "src_addr", pkt.TCP.Src, "dst_addr", pkt.TCP.Dst)
+			t.session.Logger().Debug("dropping TCP segment for unexpected flow", "src_addr", pkt.TCP.Src, "dst_addr", pkt.TCP.Dst)
 			return false
 		}
 		t.handleSegment(*pkt.TCP)
@@ -344,7 +344,7 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		return false
 	}
 	if !t.acceptInboundESP(espPacket.Sequence) {
-		loggerForSession(t.session).Debug("dropping replayed secure TCP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
+		t.session.Logger().Debug("dropping replayed secure TCP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
 		return false
 	}
 	if espPacket.NextHeader != packet.ProtocolTCP {
@@ -352,11 +352,11 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	}
 	inner, err := packet.DecodePayload(packet.ProtocolTCP, pkt.IP.SrcIP, pkt.IP.DstIP, espPacket.Payload)
 	if err != nil || inner.TCP == nil {
-		loggerForSession(t.session).Debug("parsing secure TCP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
+		t.session.Logger().Debug("parsing secure TCP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
 		return false
 	}
 	if inner.TCP.Dst.Port != t.local.Port || !inner.TCP.Src.IP.Equal(t.remote.IP) || inner.TCP.Src.Port != t.remote.Port {
-		loggerForSession(t.session).Debug("secure TCP flow mismatch", "spi", spi, "src_addr", inner.TCP.Src, "dst_addr", inner.TCP.Dst, "expected_remote_addr", t.remote, "expected_local_addr", t.local)
+		t.session.Logger().Debug("secure TCP flow mismatch", "spi", spi, "src_addr", inner.TCP.Src, "dst_addr", inner.TCP.Dst, "expected_remote_addr", t.remote, "expected_local_addr", t.local)
 		return false
 	}
 	t.handleSegment(*inner.TCP)
@@ -459,7 +459,7 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 	if t.closed {
 		return
 	}
-	loggerForSession(t.session).Debug("received TCP segment", "src_addr", segment.Src, "dst_addr", segment.Dst, "tcp_flags", segment.Flags, "seq", segment.Seq, "ack", segment.Ack, "payload_len", len(segment.Payload))
+	t.session.Logger().Debug("received TCP segment", "src_addr", segment.Src, "dst_addr", segment.Dst, "tcp_flags", segment.Flags, "seq", segment.Seq, "ack", segment.Ack, "payload_len", len(segment.Payload))
 
 	if !t.established {
 		if t.passive {
@@ -589,7 +589,7 @@ func (t *TCPConn) readyResult(action string) error {
 }
 
 func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags byte, payload []byte) error {
-	loggerForSession(t.session).Debug("sending TCP segment", "src_addr", t.local, "dst_addr", t.remote, "tcp_flags", flags, "seq", seq, "ack", ack, "payload_len", len(payload), "secure", t.secure)
+	t.session.Logger().Debug("sending TCP segment", "src_addr", t.local, "dst_addr", t.remote, "tcp_flags", flags, "seq", seq, "ack", ack, "payload_len", len(payload), "secure", t.secure)
 	segment := packet.TCPSegment{
 		Src:     cloneTCPAddr(t.local),
 		Dst:     cloneTCPAddr(t.remote),

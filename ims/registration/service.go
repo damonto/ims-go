@@ -91,6 +91,8 @@ type Service struct {
 	cseq           int64
 }
 
+const defaultUserAgent = "Google_Pixel 3XLAndroid12SQ3A.220705.004"
+
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	if sess == nil {
 		return nil, errors.New("creating registration service: session is nil")
@@ -1131,6 +1133,9 @@ func normalizeConfig(cfg Config) Config {
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = defaultUserAgent
+	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
 	}

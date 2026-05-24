@@ -3,6 +3,7 @@ package command
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -92,6 +93,23 @@ func (a App) ReadMNCLength(ctx context.Context, id []byte) (int, error) {
 		return 0, err
 	}
 	return simfile.DecodeMNCLength(data)
+}
+
+func (a App) ReadTransparentHex(ctx context.Context, id []byte, action string) (string, error) {
+	file := a.file(id)
+	attrs, err := a.fileStructure(ctx, file, action, simfile.StructureTransparent)
+	if err != nil {
+		return "", err
+	}
+
+	data, err := a.Reader.ReadTransparent(ctx, usimreader.TransparentRead{
+		File:   file,
+		Length: attrs.FileSize,
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.ToUpper(hex.EncodeToString(data)), nil
 }
 
 func (a App) ReadTransparentText(ctx context.Context, id []byte, action string) (string, error) {

@@ -56,13 +56,61 @@ func TestTunnelAddressesAcceptsIPv6Subnet(t *testing.T) {
 	_, internalIPv6, _, pcscfIPv6 := tunnelAddresses([]ike.Attribute{
 		ike.NewTLVAttribute(configAttrInternalIPv6Subnet, subnetValue),
 		ike.NewTLVAttribute(configAttrPCSCFIPv6Address, pcscf),
-	})
+	}, 0, 0)
 	if !internalIPv6.Equal(net.ParseIP("2001:db8::")) {
 		t.Fatalf("internalIPv6 = %s, want 2001:db8::", internalIPv6)
 	}
 	if !pcscfIPv6.Equal(net.ParseIP("2001:db8::100")) {
 		t.Fatalf("pcscfIPv6 = %s, want 2001:db8::100", pcscfIPv6)
 	}
+}
+
+func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
+	internal := net.IPv4(10, 1, 2, 3).To4()
+	pcscf := net.IPv4(10, 9, 8, 7).To4()
+	internalIPv4, _, pcscfIPv4, _ := tunnelAddresses([]ike.Attribute{
+		ike.NewTLVAttribute(configAttrInternalIPv4Address, internal),
+		ike.NewTLVAttribute(16384, pcscf),
+	}, 16384, 16386)
+	if !internalIPv4.Equal(internal) {
+		t.Fatalf("internalIPv4 = %s, want %s", internalIPv4, internal)
+	}
+	if !pcscfIPv4.Equal(pcscf) {
+		t.Fatalf("pcscfIPv4 = %s, want %s", pcscfIPv4, pcscf)
+	}
+}
+
+func TestDefaultIKEAuthInitPayloadsUsesConfiguredPCSCFAttributes(t *testing.T) {
+	payloads, err := defaultIKEAuthInitPayloads(handshake.Config{
+		PCSCFIPv4ConfigAttribute: 16384,
+		PCSCFIPv6ConfigAttribute: 16386,
+	}, "0454000121084653@nai.epc.mnc000.mcc454.3gppnetwork.org", 0x01020304)
+	if err != nil {
+		t.Fatalf("defaultIKEAuthInitPayloads() error = %v", err)
+	}
+	idr, ok := payloads[1].(*ike.IDPayload)
+	if !ok {
+		t.Fatalf("payload[1] = %T, want *ike.IDPayload", payloads[1])
+	}
+	if got := string(idr.Data); got != "ims" {
+		t.Fatalf("IDr = %q, want ims", got)
+	}
+	config := ike.FindConfigPayload(payloads)
+	if config == nil {
+		t.Fatal("config payload is missing")
+	}
+	if !hasConfigAttribute(config.Attributes, 16384) || !hasConfigAttribute(config.Attributes, 16386) {
+		t.Fatalf("config attrs = %v, want P-CSCF attrs 16384 and 16386", config.Attributes)
+	}
+}
+
+func hasConfigAttribute(attrs []ike.Attribute, attrType uint16) bool {
+	for _, attr := range attrs {
+		if attr.Type == attrType {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSAProposalsUseConfigWithoutFallback(t *testing.T) {

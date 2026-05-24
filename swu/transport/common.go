@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"strings"
 
@@ -67,13 +66,6 @@ func cloneTCPAddr(addr *net.TCPAddr) *net.TCPAddr {
 		return nil
 	}
 	return &net.TCPAddr{IP: append(net.IP(nil), addr.IP...), Port: addr.Port, Zone: addr.Zone}
-}
-
-func loggerForSession(s *tunnel.Session) *slog.Logger {
-	if s != nil && s.Logger() != nil {
-		return s.Logger()
-	}
-	return slog.Default()
 }
 
 func packetSPI(packet []byte) uint32 {

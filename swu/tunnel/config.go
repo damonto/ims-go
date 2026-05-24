@@ -85,6 +85,12 @@ func (cfg Config) Normalized() (Config, error) {
 	if err := validateIntegrityTransforms("child integrity transforms", cfg.ChildIntegrity); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
+	if cfg.PCSCFIPv4ConfigAttribute == 0 {
+		cfg.PCSCFIPv4ConfigAttribute = configAttrPCSCFIPv4Address
+	}
+	if cfg.PCSCFIPv6ConfigAttribute == 0 {
+		cfg.PCSCFIPv6ConfigAttribute = configAttrPCSCFIPv6Address
+	}
 	if cfg.NATKeepaliveInterval == 0 {
 		cfg.NATKeepaliveInterval = 20 * time.Second
 	}

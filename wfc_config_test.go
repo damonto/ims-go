@@ -10,6 +10,21 @@ import (
 )
 
 type wfcTestCard struct{}
+type paddedTwoDigitMNCCard struct{}
+type gid1WFCCard struct {
+	wfcTestCard
+	gid1 string
+}
+type paddedTwoDigitGID1Card struct {
+	paddedTwoDigitMNCCard
+	gid1 string
+}
+type plmnWFCCard struct {
+	mcc       string
+	mnc       string
+	mncLength int
+	gid1      string
+}
 
 func (wfcTestCard) ICCID() string { return "" }
 func (wfcTestCard) IMSI() string  { return "530240123456789" }
@@ -17,6 +32,31 @@ func (wfcTestCard) MCC() string   { return "530" }
 func (wfcTestCard) MNC() string   { return "24" }
 func (wfcTestCard) SMSC() string  { return "" }
 func (wfcTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{}, nil
+}
+
+func (c gid1WFCCard) GID1() string { return c.gid1 }
+func (c paddedTwoDigitGID1Card) GID1() string {
+	return c.gid1
+}
+func (c plmnWFCCard) ICCID() string  { return "" }
+func (c plmnWFCCard) IMSI() string   { return c.mcc + c.mnc + "0123456789" }
+func (c plmnWFCCard) MCC() string    { return c.mcc }
+func (c plmnWFCCard) MNC() string    { return c.mnc }
+func (c plmnWFCCard) MNCLength() int { return c.mncLength }
+func (c plmnWFCCard) SMSC() string   { return "" }
+func (c plmnWFCCard) GID1() string   { return c.gid1 }
+func (c plmnWFCCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{}, nil
+}
+
+func (paddedTwoDigitMNCCard) ICCID() string  { return "" }
+func (paddedTwoDigitMNCCard) IMSI() string   { return "454000121084653" }
+func (paddedTwoDigitMNCCard) MCC() string    { return "454" }
+func (paddedTwoDigitMNCCard) MNC() string    { return "000" }
+func (paddedTwoDigitMNCCard) MNCLength() int { return 2 }
+func (paddedTwoDigitMNCCard) SMSC() string   { return "" }
+func (paddedTwoDigitMNCCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{}, nil
 }
 
@@ -28,8 +68,8 @@ func tunnelConfigForWFCOverride() swutunnel.Config {
 }
 
 func TestConfigNormalizedWFCProfile(t *testing.T) {
-	data := []byte(`{
-  "53024": {
+	data := []byte(`[
+  {
     "mcc": "530",
     "mnc": "24",
     "epdg": "epdg.ims.2degrees.net.nz",
@@ -43,6 +83,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "ikePRF": [5],
     "childEncryptionKeyLens": [128],
     "childIntegrity": [2],
+    "pcscfIPv4ConfigAttribute": 16384,
+    "pcscfIPv6ConfigAttribute": 16386,
     "natKeepaliveInterval": "60s",
     "ikeRetransmitDelays": ["1s", "2s", "4s"],
     "imsTransport": "tcp",
@@ -62,7 +104,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "imsSIPTimerH": "12s",
     "imsSIPTimerJ": "13s"
   }
-}`)
+]`)
 	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
 	if err != nil {
 		t.Fatalf("parseWFCProfile() error = %v", err)
@@ -94,6 +136,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				}
 				if got.Tunnel.NATKeepaliveInterval != 60*time.Second {
 					t.Fatalf("Tunnel.NATKeepaliveInterval = %v, want 60s", got.Tunnel.NATKeepaliveInterval)
+				}
+				if got.Tunnel.PCSCFIPv4ConfigAttribute != 16384 || got.Tunnel.PCSCFIPv6ConfigAttribute != 16386 {
+					t.Fatalf("Tunnel P-CSCF attrs = %d/%d, want 16384/16386", got.Tunnel.PCSCFIPv4ConfigAttribute, got.Tunnel.PCSCFIPv6ConfigAttribute)
 				}
 				if len(got.Tunnel.IKERetransmitDelays) != 3 || got.Tunnel.IKERetransmitDelays[2] != 4*time.Second {
 					t.Fatalf("Tunnel.IKERetransmitDelays = %v, want [1s 2s 4s]", got.Tunnel.IKERetransmitDelays)
@@ -135,6 +180,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.Tunnel.InitialPort != 502 || got.Tunnel.SIPPort != 5091 {
 					t.Fatalf("Tunnel ports = %d/%d, want explicit values", got.Tunnel.InitialPort, got.Tunnel.SIPPort)
 				}
+				if got.Tunnel.PCSCFIPv4ConfigAttribute != 16384 || got.Tunnel.PCSCFIPv6ConfigAttribute != 16386 {
+					t.Fatalf("Tunnel P-CSCF attrs = %d/%d, want profile values", got.Tunnel.PCSCFIPv4ConfigAttribute, got.Tunnel.PCSCFIPv6ConfigAttribute)
+				}
 				if got.IMS.Transport != "udp" || got.IMS.HomeDomain != "ims.example.com" {
 					t.Fatalf("IMS transport/domain = %q/%q, want explicit values", got.IMS.Transport, got.IMS.HomeDomain)
 				}
@@ -163,10 +211,64 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 	}
 }
 
+func TestParseWFCProfileGID1(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.base.example"
+  },
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "gid1": "ABCD",
+    "epdg": "epdg.gid.example"
+  }
+]`)
+
+	tests := []struct {
+		name     string
+		card     Card
+		wantEPDG string
+	}{
+		{
+			name:     "gid profile wins when gid matches",
+			card:     gid1WFCCard{gid1: "abcdffff"},
+			wantEPDG: "epdg.gid.example",
+		},
+		{
+			name:     "base profile wins when gid is absent",
+			card:     wfcTestCard{},
+			wantEPDG: "epdg.base.example",
+		},
+		{
+			name:     "base profile wins when gid does not match",
+			card:     gid1WFCCard{gid1: "1234"},
+			wantEPDG: "epdg.base.example",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseWFCProfile(data, tt.card)
+			if err != nil {
+				t.Fatalf("parseWFCProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseWFCProfile() ok = false, want true")
+			}
+			if profile.EPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", profile.EPDG, tt.wantEPDG)
+			}
+		})
+	}
+}
+
 func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 	tests := []struct {
 		name     string
 		cfg      Config
+		card     Card
 		wantEPDG string
 	}{
 		{
@@ -174,6 +276,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			cfg: Config{
 				IMEI: testIMEI,
 			},
+			card:     wfcTestCard{},
 			wantEPDG: "epdg.ims.2degrees.net.nz",
 		},
 		{
@@ -182,13 +285,76 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 				IMEI: testIMEI,
 				EPDG: "epdg.example.com",
 			},
+			card:     wfcTestCard{},
 			wantEPDG: "epdg.example.com",
+		},
+		{
+			name: "embedded two digit mnc profile matches padded card mnc",
+			cfg: Config{
+				IMEI: testIMEI,
+			},
+			card:     paddedTwoDigitMNCCard{},
+			wantEPDG: "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org",
+		},
+		{
+			name: "embedded gid profile wins over base profile",
+			cfg: Config{
+				IMEI: testIMEI,
+			},
+			card:     paddedTwoDigitGID1Card{gid1: "547275554B3030656EFFFF"},
+			wantEPDG: "epdg.eps.truphone.net",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.cfg.normalized(wfcTestCard{})
+			got, err := tt.cfg.normalized(tt.card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+			if got.EPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
+			}
+		})
+	}
+}
+
+func TestEmbeddedWFCConfigHonorEPDG(t *testing.T) {
+	tests := []struct {
+		name     string
+		card     plmnWFCCard
+		wantEPDG string
+	}{
+		{
+			name:     "csl hk base uses honor",
+			card:     plmnWFCCard{mcc: "454", mnc: "000", mncLength: 2},
+			wantEPDG: "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org",
+		},
+		{
+			name:     "truphone hk gid keeps pixel override",
+			card:     plmnWFCCard{mcc: "454", mnc: "000", mncLength: 2, gid1: "547275554B3030656EFFFF"},
+			wantEPDG: "epdg.eps.truphone.net",
+		},
+		{
+			name:     "austria 23210 base uses honor",
+			card:     plmnWFCCard{mcc: "232", mnc: "10", mncLength: 2},
+			wantEPDG: "epdg.epc.mnc010.mcc232.pub.3gppnetwork.org",
+		},
+		{
+			name:     "att mexico base uses honor",
+			card:     plmnWFCCard{mcc: "334", mnc: "050", mncLength: 3},
+			wantEPDG: "epdg.ims.attmex.mx",
+		},
+		{
+			name:     "singapore 52502 base uses honor",
+			card:     plmnWFCCard{mcc: "525", mnc: "02", mncLength: 2},
+			wantEPDG: "epdg.epc.mnc002.mcc525.pub.3gppnetwork.org",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Config{IMEI: testIMEI}.normalized(tt.card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
