@@ -921,6 +921,7 @@ func (s *Service) sendSMSDeliveryReport(ctx context.Context, msg sip.Message, re
 
 func (s *Service) deliverIncomingSMS(msg sip.Message, rp rpMessage, tpdu smsDeliverTPDU) {
 	incoming := tpdu.Message
+	incoming.CallID = strings.TrimSpace(msg.Header("Call-ID"))
 	incoming.To = incomingSMSRecipient(msg)
 	incoming.ServiceCenter = rp.Originator
 	if tpdu.Concat != nil {

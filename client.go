@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -78,6 +77,7 @@ var (
 )
 
 type SMS struct {
+	CallID        string
 	From          string
 	To            string
 	ServiceCenter string
@@ -195,7 +195,7 @@ func (e *USSDEvents) Close() {
 type Client struct {
 	cfg    Config
 	card   Card
-	reader io.Closer
+	reader usimreader.Reader
 	logger *slog.Logger
 
 	lifecycleCtx    context.Context
@@ -237,57 +237,35 @@ type Session struct {
 	watchOnce sync.Once
 }
 
-// New loads the SIM state and takes ownership of reader.
-// On failure it closes reader before returning the error.
+// New takes ownership of reader. The SIM state is loaded by Connect(ctx), so
+// callers can cancel the first connect attempt with ctx.
+// On construction failure it closes reader before returning the error.
 // The returned Client closes the underlying reader when Close is called.
-func New(ctx context.Context, reader usimreader.Reader, cfg *Config) (*Client, error) {
-	if ctx == nil {
-		ctx = context.Background()
+func New(reader usimreader.Reader, cfg *Config) (*Client, error) {
+	if reader == nil {
+		return nil, errors.New("creating client: reader is nil")
 	}
 	raw := cloneConfig(cfg)
 	if raw.Logger == nil {
 		raw.Logger = slog.Default()
 	}
-
-	client, err := buildClient(ctx, reader, raw)
-	if err != nil {
-		if reader != nil {
-			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
-		}
-		return nil, err
+	raw = raw.trimmed()
+	if err := raw.validate(); err != nil {
+		return nil, errors.Join(fmt.Errorf("creating client: %w", err), wrapCloseError("closing reader", reader.Close()))
 	}
-	return client, nil
-}
-
-func buildClient(ctx context.Context, reader usimreader.Reader, cfg Config) (*Client, error) {
-	card, err := usim.Load(ctx, reader, cfg.Logger)
-	if err != nil {
-		return nil, fmt.Errorf("creating client: %w", err)
+	if raw.IMEI == "" {
+		return nil, errors.Join(errors.New("creating client: imei is empty"), wrapCloseError("closing reader", reader.Close()))
 	}
-
-	client, err := newClient(cfg, card)
-	if err != nil {
-		return nil, err
-	}
+	client := newClient(raw)
 	client.reader = reader
 	return client, nil
 }
 
-func newClient(cfg Config, card Card) (*Client, error) {
-	if card == nil {
-		return nil, errors.New("creating client: card is nil")
-	}
-
-	normalized, err := cfg.normalized(card)
-	if err != nil {
-		return nil, fmt.Errorf("creating client: %w", err)
-	}
-
+func newClient(cfg Config) *Client {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	client := &Client{
-		cfg:             normalized,
-		card:            card,
-		logger:          normalized.Logger.With("component", "ims-client"),
+		cfg:             cfg,
+		logger:          cfg.Logger.With("component", "ims-client"),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		events:          newEventHub(),
@@ -295,7 +273,7 @@ func newClient(cfg Config, card Card) (*Client, error) {
 	}
 	client.sms.client = client
 	client.ussd.client = client
-	return client, nil
+	return client
 }
 
 func (c *Client) SMS() *SMSService {

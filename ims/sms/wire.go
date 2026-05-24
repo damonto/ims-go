@@ -46,6 +46,7 @@ const (
 )
 
 type IncomingSMS struct {
+	CallID        string
 	From          string
 	To            string
 	ServiceCenter string

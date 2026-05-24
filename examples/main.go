@@ -3,15 +3,22 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ElMostafaIdrassi/goscard"
 
 	"github.com/damonto/ims-client"
 	"github.com/damonto/ims-client/driver/at"
@@ -20,7 +27,13 @@ import (
 	"github.com/damonto/ims-client/driver/qmi"
 	imssession "github.com/damonto/ims-client/ims/session"
 	"github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/ims-client/usim"
 	usimreader "github.com/damonto/ims-client/usim/reader"
+)
+
+const (
+	defaultAPDUTimeout    = 30 * time.Second
+	maxTCPAPDUFrameLength = 64 * 1024
 )
 
 type options struct {
@@ -29,6 +42,8 @@ type options struct {
 	listReaders   bool
 	readerName    string
 	device        string
+	ccidTCPListen string
+	apduTimeout   time.Duration
 	slot          int
 	imei          string
 	epdgAddr      string
@@ -77,10 +92,12 @@ func main() {
 func parseFlags() options {
 	opt := options{}
 	flag.BoolVar(&opt.debug, "debug", false, "enable verbose debug logs")
-	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, at, qmi, qrtr, or mbim")
+	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, ccid-tcp, at, qmi, qrtr, or mbim")
 	flag.BoolVar(&opt.listReaders, "list-readers", false, "list available PC/SC readers and exit")
 	flag.StringVar(&opt.readerName, "reader", "", "PC/SC reader name; required for -driver pcsc")
-	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device, qmi-proxy modem path, or mbim-proxy modem path, for example /dev/ttyUSB7")
+	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device, QMI/MBIM modem path, or ccid-tcp host:port")
+	flag.StringVar(&opt.ccidTCPListen, "ccid-tcp-listen", "", "listen address for temporary CCID TCP APDU server, for example :9999")
+	flag.DurationVar(&opt.apduTimeout, "apdu-timeout", defaultAPDUTimeout, "APDU TCP read/write timeout for -driver ccid-tcp")
 	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi or -driver mbim")
 	flag.StringVar(&opt.imei, "imei", "", "UE IMEI used for SWu authentication")
 	flag.StringVar(&opt.epdgAddr, "epdg", "", "optional ePDG host:port or host; default uses MCC/MNC from the card")
@@ -157,6 +174,10 @@ func run(opt options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if opt.ccidTCPListen != "" {
+		return serveTCPAPDUServer(ctx, opt)
+	}
+
 	if opt.imei == "" {
 		return errors.New("running example: -imei is required")
 	}
@@ -201,7 +222,7 @@ func run(opt options) error {
 		},
 	}
 
-	client, err := imsclient.New(ctx, reader, cfg)
+	client, err := imsclient.New(reader, cfg)
 	if err != nil {
 		return err
 	}
@@ -351,6 +372,15 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
 		}
 		return drv, nil
+	case "ccid-tcp", "tcp-ccid":
+		if opt.device == "" {
+			return nil, errors.New("opening CCID TCP driver: -device host:port is required")
+		}
+		drv, err := openTCPAPDUReader(ctx, opt.device, opt.apduTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("opening CCID TCP driver: %w", err)
+		}
+		return drv, nil
 	case "qmi":
 		if opt.device == "" {
 			return nil, errors.New("opening QMI driver: -device is required")
@@ -379,6 +409,358 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 		return nil, fmt.Errorf("opening driver: unsupported kind %q", opt.driverKind)
 	}
 }
+
+type tcpAPDUTransmitter struct {
+	conn    net.Conn
+	timeout time.Duration
+
+	mu     sync.Mutex
+	closed bool
+}
+
+func openTCPAPDUReader(ctx context.Context, addr string, timeout time.Duration) (usimreader.Reader, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil, errors.New("opening TCP APDU reader: address is empty")
+	}
+	if timeout <= 0 {
+		timeout = defaultAPDUTimeout
+	}
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dialing %s: %w", addr, err)
+	}
+	return usim.New(&tcpAPDUTransmitter{
+		conn:    conn,
+		timeout: timeout,
+	}), nil
+}
+
+func (t *tcpAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, error) {
+	if len(req) == 0 {
+		return nil, errors.New("transmitting APDU: request is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil, errors.New("transmitting APDU: reader is closed")
+	}
+	if err := t.setDeadline(ctx); err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = t.conn.SetDeadline(time.Time{})
+	}()
+
+	if err := writeTCPAPDUFrame(t.conn, req); err != nil {
+		return nil, fmt.Errorf("writing APDU %X: %w", req, err)
+	}
+	resp, err := readTCPAPDUFrame(t.conn)
+	if err != nil {
+		if isCleanTCPAPDUClose(err) {
+			return nil, fmt.Errorf("remote closed before APDU response for %X: %w", req, err)
+		}
+		return nil, fmt.Errorf("reading response for APDU %X: %w", req, err)
+	}
+	return resp, nil
+}
+
+func (t *tcpAPDUTransmitter) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	return t.conn.Close()
+}
+
+func (t *tcpAPDUTransmitter) setDeadline(ctx context.Context) error {
+	deadline := time.Now().Add(t.timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := t.conn.SetDeadline(deadline); err != nil {
+		return fmt.Errorf("setting APDU TCP deadline: %w", err)
+	}
+	return nil
+}
+
+func writeTCPAPDUFrame(w io.Writer, payload []byte) error {
+	if len(payload) == 0 {
+		return errors.New("writing APDU frame: payload is empty")
+	}
+	if len(payload) > maxTCPAPDUFrameLength {
+		return fmt.Errorf("writing APDU frame: payload length %d exceeds limit %d", len(payload), maxTCPAPDUFrameLength)
+	}
+
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+	if err := writeAll(w, header[:]); err != nil {
+		return fmt.Errorf("writing APDU frame header: %w", err)
+	}
+	if err := writeAll(w, payload); err != nil {
+		return fmt.Errorf("writing APDU frame payload: %w", err)
+	}
+	return nil
+}
+
+func readTCPAPDUFrame(r io.Reader) ([]byte, error) {
+	var header [4]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return nil, fmt.Errorf("reading APDU frame header: %w", err)
+	}
+
+	length := binary.BigEndian.Uint32(header[:])
+	if length == 0 {
+		return nil, errors.New("reading APDU frame: payload is empty")
+	}
+	if length > maxTCPAPDUFrameLength {
+		return nil, fmt.Errorf("reading APDU frame: payload length %d exceeds limit %d", length, maxTCPAPDUFrameLength)
+	}
+
+	payload := make([]byte, int(length))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, fmt.Errorf("reading APDU frame payload: %w", err)
+	}
+	return payload, nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+var _ usimreader.Transmitter = (*tcpAPDUTransmitter)(nil)
+
+type pcscAPDUTransmitter struct {
+	ctx  *goscard.Context
+	card *goscard.Card
+}
+
+var (
+	examplePCSCInitOnce sync.Once
+	examplePCSCInitErr  error
+)
+
+func serveTCPAPDUServer(ctx context.Context, opt options) error {
+	addr := strings.TrimSpace(opt.ccidTCPListen)
+	if addr == "" {
+		return errors.New("serving CCID TCP: listen address is empty")
+	}
+	if strings.TrimSpace(opt.readerName) == "" {
+		readers, err := availableCCIDReaders()
+		if err != nil {
+			return err
+		}
+		if len(readers) == 0 {
+			return errors.New("serving CCID TCP: no pcsc readers found")
+		}
+		return fmt.Errorf("serving CCID TCP: -reader is required; available readers: %s", strings.Join(readers, ", "))
+	}
+
+	tx, err := openExamplePCSCTransmitter(opt.readerName)
+	if err != nil {
+		return fmt.Errorf("opening server pcsc reader: %w", err)
+	}
+	defer func() {
+		if err := tx.Close(); err != nil {
+			slog.Warn("close pcsc reader", "err", err)
+		}
+	}()
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listening for CCID TCP: %w", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	timeout := opt.apduTimeout
+	if timeout <= 0 {
+		timeout = defaultAPDUTimeout
+	}
+	slog.Info("ccid tcp server listening", "addr", ln.Addr().String(), "reader", opt.readerName)
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("accepting CCID TCP connection: %w", err)
+		}
+
+		remote := conn.RemoteAddr().String()
+		slog.Info("ccid tcp client connected", "remote", remote)
+		if err := serveTCPAPDUConn(ctx, conn, tx, timeout); err != nil {
+			slog.Error("ccid tcp client error", "remote", remote, "err", err)
+		}
+		slog.Info("ccid tcp client disconnected", "remote", remote)
+	}
+}
+
+func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimreader.Transmitter, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultAPDUTimeout
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
+	defer conn.Close()
+
+	for {
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			if isCleanTCPAPDUClose(err) {
+				return nil
+			}
+			return fmt.Errorf("setting CCID TCP deadline: %w", err)
+		}
+		req, err := readTCPAPDUFrame(conn)
+		if err != nil {
+			if isCleanTCPAPDUClose(err) {
+				return nil
+			}
+			return fmt.Errorf("reading CCID TCP APDU: %w", err)
+		}
+		slog.Debug("ccid tcp apdu request", "apdu", fmt.Sprintf("%X", req))
+
+		apduCtx, cancel := context.WithTimeout(ctx, timeout)
+		resp, err := tx.Transmit(apduCtx, req)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("transmitting APDU to pcsc reader: %w", err)
+		}
+
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			if isCleanTCPAPDUClose(err) {
+				return nil
+			}
+			return fmt.Errorf("setting CCID TCP deadline: %w", err)
+		}
+		if err := writeTCPAPDUFrame(conn, resp); err != nil {
+			return fmt.Errorf("writing CCID TCP response: %w", err)
+		}
+		slog.Debug("ccid tcp apdu response", "apdu", fmt.Sprintf("%X", resp))
+	}
+}
+
+func isCleanTCPAPDUClose(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
+}
+
+func openExamplePCSCTransmitter(readerName string) (usimreader.Transmitter, error) {
+	readerName = strings.TrimSpace(readerName)
+	if readerName == "" {
+		return nil, errors.New("opening pcsc reader: reader name is empty")
+	}
+
+	ctx, err := newExamplePCSCContext()
+	if err != nil {
+		return nil, err
+	}
+
+	readers, _, err := ctx.ListReaders(nil)
+	if err != nil {
+		_, _ = ctx.Release()
+		return nil, fmt.Errorf("listing pcsc readers: %w", err)
+	}
+	if !slices.Contains(readers, readerName) {
+		_, _ = ctx.Release()
+		return nil, fmt.Errorf("selecting %q: %w", readerName, ccid.ErrReaderNotFound)
+	}
+
+	card, _, err := ctx.Connect(readerName, goscard.SCardShareShared, goscard.SCardProtocolT0|goscard.SCardProtocolT1)
+	if err != nil {
+		_, _ = ctx.Release()
+		return nil, fmt.Errorf("connecting to %s: %w", readerName, err)
+	}
+
+	return &pcscAPDUTransmitter{
+		ctx:  &ctx,
+		card: &card,
+	}, nil
+}
+
+func newExamplePCSCContext() (goscard.Context, error) {
+	examplePCSCInitOnce.Do(func() {
+		examplePCSCInitErr = goscard.Initialize(goscard.NewDefaultLogger(goscard.LogLevelNone))
+	})
+	if examplePCSCInitErr != nil {
+		return goscard.Context{}, fmt.Errorf("initializing pcsc: %w", examplePCSCInitErr)
+	}
+
+	ctx, _, err := goscard.NewContext(goscard.SCardScopeSystem, nil, nil)
+	if err != nil {
+		return goscard.Context{}, fmt.Errorf("creating pcsc context: %w", err)
+	}
+	return ctx, nil
+}
+
+func (p *pcscAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, error) {
+	if p.card == nil {
+		return nil, errors.New("transmitting APDU: pcsc reader is closed")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	pci := goscard.SCardIoRequestT1
+	if p.card.ActiveProtocol() == goscard.SCardProtocolT0 {
+		pci = goscard.SCardIoRequestT0
+	}
+
+	resp, _, err := p.card.Transmit(&pci, req, nil)
+	if err != nil {
+		return nil, fmt.Errorf("transmitting APDU %X: %w", req, err)
+	}
+	return resp, nil
+}
+
+func (p *pcscAPDUTransmitter) Close() error {
+	var errs []error
+	if p.card != nil {
+		if _, err := p.card.Disconnect(goscard.SCardLeaveCard); err != nil {
+			errs = append(errs, fmt.Errorf("disconnecting pcsc card: %w", err))
+		}
+		p.card = nil
+	}
+	if p.ctx != nil {
+		if _, err := p.ctx.Release(); err != nil {
+			errs = append(errs, fmt.Errorf("releasing pcsc context: %w", err))
+		}
+		p.ctx = nil
+	}
+	return errors.Join(errs...)
+}
+
+var _ usimreader.Transmitter = (*pcscAPDUTransmitter)(nil)
 
 func logClientEvents(events *imsclient.Events) {
 	for {

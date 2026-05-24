@@ -56,6 +56,7 @@ func (c *Client) currentSMSService() (*imssms.Service, error) {
 
 func (c *Client) handleSMS(msg imssms.Incoming) {
 	c.emitSMS(SMS{
+		CallID:        msg.CallID,
 		From:          msg.From,
 		To:            msg.To,
 		ServiceCenter: msg.ServiceCenter,

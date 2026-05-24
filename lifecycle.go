@@ -13,6 +13,7 @@ import (
 	imsussd "github.com/damonto/ims-client/ims/ussd"
 	swutransport "github.com/damonto/ims-client/swu/transport"
 	swutunnel "github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/ims-client/usim"
 )
 
 type activeConn struct {
@@ -208,6 +209,12 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 
 	setupCtx, setupStop := c.newSetupContext(ctx, internal)
 
+	if err := c.ensureReady(setupCtx); err != nil {
+		setupStop()
+		c.finishConnectAttempt()
+		return nil, err
+	}
+
 	// The setup context may time out, but a successful registration should keep running
 	// until the client is closed or the active connection is canceled.
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -253,6 +260,38 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 		tunnelCfg: tunnelCfg,
 		imsCfg:    imsCfg,
 	}, nil
+}
+
+func (c *Client) ensureReady(ctx context.Context) error {
+	c.mu.Lock()
+	if c.card != nil {
+		c.mu.Unlock()
+		return nil
+	}
+	reader := c.reader
+	cfg := c.cfg
+	c.mu.Unlock()
+
+	card, err := usim.Load(ctx, reader, cfg.Logger)
+	if err != nil {
+		return fmt.Errorf("loading USIM: %w", err)
+	}
+	normalized, err := cfg.normalized(card)
+	if err != nil {
+		return fmt.Errorf("normalizing client config: %w", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return fmt.Errorf("connecting client: %w", ErrClientClosed)
+	}
+	if c.card == nil {
+		c.card = card
+		c.cfg = normalized
+		c.logger = normalized.Logger.With("component", "ims-client")
+	}
+	return nil
 }
 
 func (c *Client) openTunnel(setup *connectSetup) (swutunnel.Info, error) {

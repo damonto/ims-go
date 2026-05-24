@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -162,15 +163,27 @@ const (
 
 func newStandaloneClient(t *testing.T) *Client {
 	t.Helper()
-	client, err := newClient(Config{
+	return newReadyClient(t, Config{
 		IMEI: testIMEI,
 		IMS: IMSConfig{
 			RegisterExpires: time.Minute,
 		},
-	}, stubCard{})
-	if err != nil {
-		t.Fatalf("newClient() error = %v", err)
+	})
+}
+
+func newReadyClient(t *testing.T, cfg Config) *Client {
+	t.Helper()
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
+	client := newClient(cfg)
+	normalized, err := cfg.normalized(stubCard{})
+	if err != nil {
+		t.Fatalf("Config.normalized() error = %v", err)
+	}
+	client.card = stubCard{}
+	client.cfg = normalized
+	client.logger = normalized.Logger.With("component", "ims-client")
 	return client
 }
 
@@ -209,13 +222,16 @@ func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
 	})
 	defer stop()
 
-	client.handleSMS(imssms.Incoming{From: "+1", To: "+2", ServiceCenter: "+3", Text: "hello"})
+	client.handleSMS(imssms.Incoming{CallID: "sms-call-id", From: "+1", To: "+2", ServiceCenter: "+3", Text: "hello"})
 
 	for i, events := range []*SMSEvents{smsEventsA, smsEventsB} {
 		select {
 		case msg := <-events.Incoming:
 			if msg.Text != "hello" {
 				t.Fatalf("subscriber %d msg = %+v", i, msg)
+			}
+			if msg.CallID != "sms-call-id" {
+				t.Fatalf("subscriber %d msg.CallID = %q, want sms-call-id", i, msg.CallID)
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("waiting for sms subscriber %d", i)
@@ -366,29 +382,120 @@ func bytesOf(value byte, count int) []byte {
 }
 
 func TestNewNilDriver(t *testing.T) {
-	_, err := New(context.Background(), nil, nil)
+	_, err := New(nil, nil)
 	if err == nil {
 		t.Fatal("New() error = nil, want non-nil")
 	}
 }
 
-func TestNewClosesReaderOnUSIMLoadError(t *testing.T) {
+func TestConnectReportsUSIMLoadError(t *testing.T) {
 	reader := &readerStub{
 		listApplications: func(context.Context) ([]usimreader.Application, error) {
 			return nil, errors.New("boom")
 		},
 	}
 
-	_, err := New(context.Background(), reader, nil)
+	client, err := New(reader, &Config{IMEI: testIMEI})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	err = client.Connect(context.Background())
 	if err == nil {
-		t.Fatal("New() error = nil, want non-nil")
+		t.Fatal("Connect() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Connect() error = %v, want load error text", err)
+	}
+	if reader.closeCalls != 0 {
+		t.Fatalf("reader Close() calls = %d, want 0 before Close", reader.closeCalls)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if reader.closeCalls != 1 {
+		t.Fatalf("reader Close() calls = %d, want 1 after Close", reader.closeCalls)
+	}
+}
+
+func TestConnectUsesContextForUSIMLoad(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  func() context.Context
+	}{
+		{
+			name: "canceled before connect",
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &readerStub{
+				listApplications: func(ctx context.Context) ([]usimreader.Application, error) {
+					return nil, ctx.Err()
+				},
+			}
+			client, err := New(reader, &Config{IMEI: testIMEI})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer client.Close()
+			err = client.Connect(tt.ctx())
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Connect() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
+	started := make(chan struct{})
+	reader := &readerStub{
+		listApplications: func(ctx context.Context) ([]usimreader.Application, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	client, err := New(reader, &Config{IMEI: testIMEI})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	connectErr := make(chan error, 1)
+	go func() {
+		connectErr <- client.Connect(context.Background())
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for USIM load to start")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.CloseContext(closeCtx); err != nil {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+
+	select {
+	case err := <-connectErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Connect() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for Connect to exit")
 	}
 	if reader.closeCalls != 1 {
 		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
 	}
 }
 
-func TestNewJoinsReaderCloseErrorOnFailure(t *testing.T) {
+func TestConnectLeavesReaderOwnedAfterUSIMLoadError(t *testing.T) {
 	reader := &readerStub{
 		closeErr: errors.New("close boom"),
 		listApplications: func(context.Context) ([]usimreader.Application, error) {
@@ -396,25 +503,26 @@ func TestNewJoinsReaderCloseErrorOnFailure(t *testing.T) {
 		},
 	}
 
-	_, err := New(context.Background(), reader, nil)
+	client, err := New(reader, &Config{IMEI: testIMEI})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	err = client.Connect(context.Background())
 	if err == nil {
-		t.Fatal("New() error = nil, want non-nil")
+		t.Fatal("Connect() error = nil, want non-nil")
 	}
 	if !strings.Contains(err.Error(), "load boom") {
-		t.Fatalf("New() error = %v, want load error text", err)
+		t.Fatalf("Connect() error = %v, want load error text", err)
 	}
-	if !strings.Contains(err.Error(), "closing reader: close boom") {
-		t.Fatalf("New() error = %v, want close error text", err)
-	}
-	if reader.closeCalls != 1 {
-		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
+	if err := client.Close(); err == nil || !strings.Contains(err.Error(), "close boom") {
+		t.Fatalf("Close() error = %v, want close boom", err)
 	}
 }
 
 func TestNewClosesReaderOnConfigError(t *testing.T) {
 	reader := newReaderStubForUSIMLoad()
 
-	_, err := New(context.Background(), reader, &Config{})
+	_, err := New(reader, &Config{})
 	if err == nil {
 		t.Fatal("New() error = nil, want non-nil")
 	}
@@ -480,15 +588,12 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	client, err := newClient(Config{
+	client := newReadyClient(t, Config{
 		IMEI: testIMEI,
 		IMS: IMSConfig{
 			RegisterExpires: time.Minute,
 		},
-	}, stubCard{})
-	if err != nil {
-		t.Fatalf("newClient() error = %v", err)
-	}
+	})
 	defer client.Close()
 
 	runCtx, cancelRun := context.WithCancel(context.Background())
