@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	imssms "github.com/damonto/ims-client/ims/sms"
 	"github.com/damonto/ims-client/swu/tunnel"
 )
 
@@ -34,6 +35,13 @@ func (cfg Config) normalized(card Card) (Config, error) {
 	if cfg.IMEI == "" {
 		return Config{}, errors.New("normalizing client config: imei is empty")
 	}
+	profile, ok, err := loadWFCProfile(card)
+	if err != nil {
+		return Config{}, err
+	}
+	if ok {
+		cfg = cfg.withWFCProfile(profile)
+	}
 	if cfg.EPDG == "" {
 		epdg, err := defaultEPDGAddress(card)
 		if err != nil {
@@ -42,17 +50,17 @@ func (cfg Config) normalized(card Card) (Config, error) {
 		cfg.EPDG = epdg
 	}
 
-	tunnelCfg, err := cfg.normalizedTunnel()
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.Tunnel = tunnelCfg
-
 	imsCfg, err := cfg.normalizedIMS()
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.IMS = imsCfg
+
+	tunnelCfg, err := cfg.normalizedTunnel()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Tunnel = tunnelCfg
 
 	return cfg, nil
 }
@@ -75,6 +83,9 @@ func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
 	if tunnelCfg.Logger == nil {
 		tunnelCfg.Logger = cfg.Logger
 	}
+	if tunnelCfg.SIPPort == 0 && cfg.IMS.SIPServerPort != 0 {
+		tunnelCfg.SIPPort = cfg.IMS.SIPServerPort
+	}
 	normalized, err := tunnelCfg.Normalized()
 	if err != nil {
 		return tunnel.Config{}, fmt.Errorf("normalizing tunnel config: %w", err)
@@ -92,6 +103,9 @@ func (cfg Config) normalizedIMS() (IMSConfig, error) {
 	if strings.TrimSpace(imsCfg.Transport) == "" && strings.TrimSpace(cfg.EPDG) != "" {
 		imsCfg.Transport = "tcp"
 	}
+	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && strings.TrimSpace(imsCfg.WLANNodeID) == "" && strings.TrimSpace(cfg.EPDG) != "" {
+		imsCfg.AccessNetworkInfo = "IEEE-802.11"
+	}
 	normalized, err := imsCfg.Normalized()
 	if err != nil {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
@@ -104,12 +118,18 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.PrivateIdentity = strings.TrimSpace(cfg.PrivateIdentity)
 	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
+	cfg.PhoneContextDomain = strings.TrimSpace(cfg.PhoneContextDomain)
 	cfg.USSDLanguage = strings.TrimSpace(cfg.USSDLanguage)
 	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
+	timers, err := cfg.SIPTimers.Normalized()
+	if err != nil {
+		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+	}
+	cfg.SIPTimers = timers
 
 	if cfg.Transport == "" {
 		cfg.Transport = "udp"
@@ -127,6 +147,15 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
+	}
+	if cfg.SIPServerPort < 0 || cfg.SIPServerPort > 65535 {
+		return IMSConfig{}, errors.New("normalizing ims config: sip server port must be between 0 and 65535")
+	}
+	if cfg.SMSSubmitReportTimeout < 0 {
+		return IMSConfig{}, errors.New("normalizing ims config: sms submit report timeout must be >= 0")
+	}
+	if cfg.SMSSubmitReportTimeout == 0 {
+		cfg.SMSSubmitReportTimeout = imssms.DefaultSubmitReportTimeout()
 	}
 	return cfg, nil
 }

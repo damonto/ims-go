@@ -184,7 +184,11 @@ func (tx *serverTransaction) recordResponse(resp sip.Message) {
 		tx.terminate()
 		return
 	}
-	tx.scheduleTermination(64 * defaultTransactionTimers.T1)
+	if tx.method == "INVITE" && tx.finalStatus >= 300 {
+		tx.scheduleTermination(tx.session.cfg.TransactionTimers.TH)
+		return
+	}
+	tx.scheduleTermination(tx.session.cfg.TransactionTimers.TJ)
 }
 
 func (tx *serverTransaction) retransmit(ctx context.Context) error {

@@ -38,6 +38,8 @@ type identityStubCard struct {
 	publicIdentity  string
 }
 
+type twoDigitMNCStubCard struct{}
+
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
 
@@ -83,6 +85,13 @@ func (stubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, err
 	}, nil
 }
 
+func (twoDigitMNCStubCard) IMSI() string { return "204020123456789" }
+func (twoDigitMNCStubCard) MCC() string  { return "204" }
+func (twoDigitMNCStubCard) MNC() string  { return "02" }
+func (twoDigitMNCStubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	return stubCard{}.AKA(ctx, rand, autn)
+}
+
 func (c identityStubCard) HomeDomain() string      { return c.homeDomain }
 func (c identityStubCard) PrivateIdentity() string { return c.privateIdentity }
 func (c identityStubCard) PublicIdentity() string  { return c.publicIdentity }
@@ -103,6 +112,14 @@ func TestNewIdentityResolution(t *testing.T) {
 			wantPrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 			wantPublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 			wantRegisterURI:     "sip:ims.mnc001.mcc001.3gppnetwork.org",
+		},
+		{
+			name:                "pads two digit mnc in fallback realm",
+			cfg:                 Config{},
+			card:                twoDigitMNCStubCard{},
+			wantPrivateIdentity: "204020123456789@ims.mnc002.mcc204.3gppnetwork.org",
+			wantPublicIdentity:  "sip:204020123456789@ims.mnc002.mcc204.3gppnetwork.org",
+			wantRegisterURI:     "sip:ims.mnc002.mcc204.3gppnetwork.org",
 		},
 		{
 			name: "uses identity provider",

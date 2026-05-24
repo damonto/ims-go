@@ -801,7 +801,7 @@ func extractStubTransport(t Transport) *stubTransport {
 	}
 }
 
-func useTransactionTimers(t *testing.T, timers transactionTimers) {
+func useTransactionTimers(t *testing.T, timers TransactionTimers) {
 	t.Helper()
 	previous := defaultTransactionTimers
 	defaultTransactionTimers = timers
@@ -811,7 +811,7 @@ func useTransactionTimers(t *testing.T, timers transactionTimers) {
 }
 
 func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
-	useTransactionTimers(t, transactionTimers{
+	useTransactionTimers(t, TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
@@ -861,7 +861,7 @@ func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
 }
 
 func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
-	useTransactionTimers(t, transactionTimers{
+	useTransactionTimers(t, TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
@@ -900,7 +900,7 @@ func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
 }
 
 func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
-	useTransactionTimers(t, transactionTimers{
+	useTransactionTimers(t, TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
@@ -965,7 +965,7 @@ func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
 }
 
 func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
-	useTransactionTimers(t, transactionTimers{
+	useTransactionTimers(t, TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
@@ -1036,14 +1036,14 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 	}
 }
 
-func TestInviteTransactionDefaultTimerDMeetsRFCMinimum(t *testing.T) {
+func TestInviteTransactionDefaultTimerDUsesIMSProfile(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
 	sess, err := Open(Config{}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	tx := newClientTransaction(sess, transport, newRequest("INVITE", "call-d", "1 INVITE"))
-	if got := tx.timerD(); got < 32*time.Second {
-		t.Fatalf("timerD() = %v, want at least 32s", got)
+	if got := tx.timerD(); got != 130*time.Second {
+		t.Fatalf("timerD() = %v, want 130s", got)
 	}
 }

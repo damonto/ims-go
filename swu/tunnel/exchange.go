@@ -26,23 +26,35 @@ func (s *Session) writeIKERequest(ctx context.Context, addr *net.UDPAddr, reques
 	return nil
 }
 
-func (s *Session) awaitIKEAttempt(ctx context.Context, messageID uint32, attempt int) ([]byte, *net.UDPAddr, error) {
-	response, peer, err := s.readIKEMessage(ctx, messageID, ikeRetransmitDelay(attempt))
+func (s *Session) awaitIKEAttempt(ctx context.Context, expected ikeResponseMatch, attempt int) ([]byte, *net.UDPAddr, error) {
+	return s.awaitIKEAttemptWithDelay(ctx, expected, attempt, ikeRetransmitDelay(attempt))
+}
+
+func (s *Session) awaitIKEAttemptWithDelay(ctx context.Context, expected ikeResponseMatch, attempt int, delay time.Duration) ([]byte, *net.UDPAddr, error) {
+	response, peer, err := s.readIKEMessage(ctx, expected, delay)
 	if err == nil {
-		s.logger.Debug("received IKE message", "message_id", messageID, "peer_addr", peer, "response_len", len(response))
+		s.logger.Debug("received IKE message", "message_id", expected.messageID, "peer_addr", peer, "response_len", len(response))
 		return response, peer, nil
 	}
-	s.logger.Debug("waiting for IKE message", "message_id", messageID, "attempt", attempt+1, "err", err)
+	s.logger.Debug("waiting for IKE message", "message_id", expected.messageID, "attempt", attempt+1, "err", err)
 	return nil, nil, err
 }
 
 func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []byte, nat bool, messageID uint32) ([]byte, *net.UDPAddr, error) {
 	s.logger.Debug("sending IKE message", "message_id", messageID, "use_natt", nat, "remote_addr", addr, "request_len", len(request))
-	for attempt := range ikeRetransmitAttempts {
+	expected, err := newIKEResponseMatch(request, addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	delays := s.cfg.IKERetransmitDelays
+	if len(delays) == 0 {
+		delays = defaultIKERetransmitDelays
+	}
+	for attempt, delay := range delays {
 		if err := s.writeIKERequest(ctx, addr, request, nat, messageID); err != nil {
 			return nil, nil, err
 		}
-		response, peer, err := s.awaitIKEAttempt(ctx, messageID, attempt)
+		response, peer, err := s.awaitIKEAttemptWithDelay(ctx, expected, attempt, delay)
 		if err == nil {
 			return response, peer, nil
 		}
@@ -59,12 +71,26 @@ var (
 )
 
 const (
-	ikeRetransmitAttempts           = 6
 	informationalRetransmitAttempts = 8
 )
 
+var defaultIKERetransmitDelays = []time.Duration{
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	8 * time.Second,
+}
+
 func ikeRetransmitDelay(attempt int) time.Duration {
-	return retransmitDelay(attempt, 8*time.Second)
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt >= len(defaultIKERetransmitDelays) {
+		return defaultIKERetransmitDelays[len(defaultIKERetransmitDelays)-1]
+	}
+	return defaultIKERetransmitDelays[attempt]
 }
 
 func informationalRetransmitDelay(attempt int) time.Duration {
@@ -85,7 +111,7 @@ func retransmitDelay(attempt int, maxDelay time.Duration) time.Duration {
 	return delay
 }
 
-func (s *Session) readIKEMessage(ctx context.Context, messageID uint32, timeout time.Duration) ([]byte, *net.UDPAddr, error) {
+func (s *Session) readIKEMessage(ctx context.Context, expected ikeResponseMatch, timeout time.Duration) ([]byte, *net.UDPAddr, error) {
 	deadline := time.Now().Add(timeout)
 	buf := make([]byte, 64*1024)
 	for {
@@ -102,7 +128,7 @@ func (s *Session) readIKEMessage(ctx context.Context, messageID uint32, timeout 
 			}
 			return nil, nil, err
 		}
-		if !matchesIKEMessage(packet, messageID) {
+		if !matchesIKEMessage(packet, udpAddr, expected) {
 			continue
 		}
 		return packet, udpAddr, nil
@@ -145,12 +171,59 @@ func normalizeIKEPacket(packet []byte) []byte {
 	return packet
 }
 
-func matchesIKEMessage(packet []byte, messageID uint32) bool {
+type ikeResponseMatch struct {
+	peer         *net.UDPAddr
+	initiatorSPI uint64
+	responderSPI uint64
+	exchangeType byte
+	messageID    uint32
+}
+
+func newIKEResponseMatch(request []byte, peer *net.UDPAddr) (ikeResponseMatch, error) {
+	var header ike.IKEHeader
+	if err := header.UnmarshalBinary(request); err != nil {
+		return ikeResponseMatch{}, fmt.Errorf("connecting swu session: parsing outbound ike header: %w", err)
+	}
+	return ikeResponseMatch{
+		peer:         cloneUDPAddr(peer),
+		initiatorSPI: header.InitiatorSPI,
+		responderSPI: header.ResponderSPI,
+		exchangeType: header.ExchangeType,
+		messageID:    header.MessageID,
+	}, nil
+}
+
+func matchesIKEMessage(packet []byte, peer *net.UDPAddr, expected ikeResponseMatch) bool {
 	var header ike.IKEHeader
 	if err := header.UnmarshalBinary(packet); err != nil {
 		return false
 	}
-	return header.MessageID == messageID
+	if expected.peer != nil && !sameUDPAddr(peer, expected.peer) {
+		return false
+	}
+	if header.Version>>4 != 2 {
+		return false
+	}
+	if header.MessageID != expected.messageID || header.ExchangeType != expected.exchangeType {
+		return false
+	}
+	if header.InitiatorSPI != expected.initiatorSPI {
+		return false
+	}
+	if expected.responderSPI != 0 && header.ResponderSPI != expected.responderSPI {
+		return false
+	}
+	if header.Flags&flagResponse == 0 {
+		return false
+	}
+	return header.Flags&flagInitiator == 0
+}
+
+func sameUDPAddr(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
 }
 
 func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) error {

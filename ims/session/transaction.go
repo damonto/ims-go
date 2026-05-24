@@ -12,11 +12,15 @@ import (
 	"github.com/damonto/ims-client/ims/sip"
 )
 
-type transactionTimers struct {
+type TransactionTimers struct {
 	T1 time.Duration
 	T2 time.Duration
 	T4 time.Duration
+	TB time.Duration
 	TD time.Duration
+	TF time.Duration
+	TH time.Duration
+	TJ time.Duration
 }
 
 type clientTransaction struct {
@@ -26,7 +30,7 @@ type clientTransaction struct {
 	key       string
 	method    string
 	reliable  bool
-	timers    transactionTimers
+	timers    TransactionTimers
 
 	responseCh chan sip.Message
 	resultCh   chan transactionResult
@@ -40,11 +44,72 @@ type transactionResult struct {
 	err error
 }
 
-var defaultTransactionTimers = transactionTimers{
-	T1: 500 * time.Millisecond,
-	T2: 4 * time.Second,
-	T4: 5 * time.Second,
-	TD: 32 * time.Second,
+var defaultTransactionTimers = TransactionTimers{
+	T1: 2 * time.Second,
+	T2: 16 * time.Second,
+	T4: 17 * time.Second,
+	TB: 128 * time.Second,
+	TD: 130 * time.Second,
+	TF: 128 * time.Second,
+	TH: 128 * time.Second,
+	TJ: 128 * time.Second,
+}
+
+func DefaultTransactionTimers() TransactionTimers {
+	return defaultTransactionTimers
+}
+
+func (timers TransactionTimers) Normalized() (TransactionTimers, error) {
+	if timers.T1 < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: T1 must be >= 0")
+	}
+	if timers.T2 < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: T2 must be >= 0")
+	}
+	if timers.T4 < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: T4 must be >= 0")
+	}
+	if timers.TB < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer B must be >= 0")
+	}
+	if timers.TD < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer D must be >= 0")
+	}
+	if timers.TF < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer F must be >= 0")
+	}
+	if timers.TH < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer H must be >= 0")
+	}
+	if timers.TJ < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer J must be >= 0")
+	}
+	defaults := DefaultTransactionTimers()
+	if timers.T1 == 0 {
+		timers.T1 = defaults.T1
+	}
+	if timers.T2 == 0 {
+		timers.T2 = defaults.T2
+	}
+	if timers.T4 == 0 {
+		timers.T4 = defaults.T4
+	}
+	if timers.TB == 0 {
+		timers.TB = 64 * timers.T1
+	}
+	if timers.TD == 0 {
+		timers.TD = defaults.TD
+	}
+	if timers.TF == 0 {
+		timers.TF = 64 * timers.T1
+	}
+	if timers.TH == 0 {
+		timers.TH = 64 * timers.T1
+	}
+	if timers.TJ == 0 {
+		timers.TJ = 64 * timers.T1
+	}
+	return timers, nil
 }
 
 func newClientTransaction(s *Session, transport Transport, req sip.Message) *clientTransaction {
@@ -55,7 +120,7 @@ func newClientTransaction(s *Session, transport Transport, req sip.Message) *cli
 		key:        sip.PendingKey(req),
 		method:     strings.ToUpper(req.Method()),
 		reliable:   transportIsReliable(transport),
-		timers:     defaultTransactionTimers,
+		timers:     s.cfg.TransactionTimers,
 		responseCh: make(chan sip.Message, 8),
 		resultCh:   make(chan transactionResult, 1),
 		cancelCh:   make(chan struct{}),
@@ -132,7 +197,7 @@ func (tx *clientTransaction) run() {
 }
 
 func (tx *clientTransaction) runNonInvite() {
-	timerF := time.NewTimer(64 * tx.timers.T1)
+	timerF := time.NewTimer(tx.timers.TF)
 	defer timerF.Stop()
 
 	retransmitDelay := tx.timers.T1
@@ -178,7 +243,7 @@ func (tx *clientTransaction) runNonInvite() {
 }
 
 func (tx *clientTransaction) runInvite() {
-	timerB := time.NewTimer(64 * tx.timers.T1)
+	timerB := time.NewTimer(tx.timers.TB)
 	defer timerB.Stop()
 
 	retransmitDelay := tx.timers.T1

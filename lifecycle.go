@@ -126,8 +126,9 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	}
 
 	imsSession, err := imssession.Open(imssession.Config{
-		Transport: setup.imsCfg.Transport,
-		Logger:    c.logger,
+		Transport:         setup.imsCfg.Transport,
+		Logger:            c.logger,
+		TransactionTimers: setup.imsCfg.SIPTimers,
 	}, transport)
 	if err != nil {
 		wrapped := fmt.Errorf("opening IMS session: %w", err)
@@ -152,10 +153,11 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	}
 
 	sms, err := imssms.New(imssms.Config{
-		ServiceCenter:  setup.imsCfg.ServiceCenter,
-		OnIncoming:     c.handleSMS,
-		OnStatusReport: c.handleSMSStatusReport,
-		OnError:        c.emitError,
+		ServiceCenter:       setup.imsCfg.ServiceCenter,
+		SubmitReportTimeout: setup.imsCfg.SMSSubmitReportTimeout,
+		OnIncoming:          c.handleSMS,
+		OnStatusReport:      c.handleSMSStatusReport,
+		OnError:             c.emitError,
 	}, imsSession, reg, c.card)
 	if err != nil {
 		wrapped := fmt.Errorf("creating SMS service: %w", err)
@@ -165,8 +167,9 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	setup.sms = sms
 
 	ussd, err := imsussd.New(imsussd.Config{
-		Language:   setup.imsCfg.USSDLanguage,
-		OnIncoming: c.handleUSSD,
+		Language:           setup.imsCfg.USSDLanguage,
+		PhoneContextDomain: setup.imsCfg.PhoneContextDomain,
+		OnIncoming:         c.handleUSSD,
 	}, imsSession, reg)
 	if err != nil {
 		wrapped := fmt.Errorf("creating USSD service: %w", err)

@@ -100,7 +100,10 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	}
 	cfg = normalizeConfig(cfg)
 
-	identity := resolveIdentity(cfg, card)
+	identity, err := resolveIdentity(cfg, card)
+	if err != nil {
+		return nil, fmt.Errorf("creating registration service: %w", err)
+	}
 	host, port, err := resolveLocalAddr(sess.LocalAddr())
 	if err != nil {
 		return nil, fmt.Errorf("creating registration service: %w", err)
@@ -1055,7 +1058,24 @@ func contactURI(host string, port int) string {
 	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func resolveIdentity(cfg Config, card Card) clientIdentity {
+func normalizedPLMNDigits(card Card) (string, string, error) {
+	mcc := strings.TrimSpace(card.MCC())
+	if len(mcc) != 3 {
+		return "", "", fmt.Errorf("mcc %q must be 3 digits", mcc)
+	}
+
+	mnc := strings.TrimSpace(card.MNC())
+	switch len(mnc) {
+	case 2:
+		mnc = "0" + mnc
+	case 3:
+	default:
+		return "", "", fmt.Errorf("mnc %q must be 2 or 3 digits", mnc)
+	}
+	return mcc, mnc, nil
+}
+
+func resolveIdentity(cfg Config, card Card) (clientIdentity, error) {
 	identity := clientIdentity{
 		realm:           strings.TrimSpace(cfg.HomeDomain),
 		privateIdentity: strings.TrimSpace(cfg.PrivateIdentity),
@@ -1073,7 +1093,11 @@ func resolveIdentity(cfg Config, card Card) clientIdentity {
 		}
 	}
 	if identity.realm == "" {
-		identity.realm = fmt.Sprintf("ims.mnc%s.mcc%s.3gppnetwork.org", card.MNC(), card.MCC())
+		mcc, mnc, err := normalizedPLMNDigits(card)
+		if err != nil {
+			return clientIdentity{}, err
+		}
+		identity.realm = fmt.Sprintf("ims.mnc%s.mcc%s.3gppnetwork.org", mnc, mcc)
 	}
 	if identity.privateIdentity == "" {
 		identity.privateIdentity = fmt.Sprintf("%s@%s", card.IMSI(), identity.realm)
@@ -1081,7 +1105,7 @@ func resolveIdentity(cfg Config, card Card) clientIdentity {
 	if identity.publicIdentity == "" {
 		identity.publicIdentity = "sip:" + identity.privateIdentity
 	}
-	return identity
+	return identity, nil
 }
 
 func resolveLocalAddr(addr net.Addr) (string, int, error) {
@@ -1107,9 +1131,6 @@ func normalizeConfig(cfg Config) Config {
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
-	if cfg.UserAgent == "" {
-		cfg.UserAgent = defaultUserAgent()
-	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
 	}

@@ -18,10 +18,11 @@ import (
 )
 
 type Config struct {
-	ServiceCenter  string
-	OnIncoming     func(Incoming)
-	OnStatusReport func(StatusReport)
-	OnError        func(error)
+	ServiceCenter       string
+	SubmitReportTimeout time.Duration
+	OnIncoming          func(Incoming)
+	OnStatusReport      func(StatusReport)
+	OnError             func(error)
 }
 
 type Card interface {
@@ -118,14 +119,32 @@ type serviceCentreProvider interface {
 }
 
 const (
-	concatSMSRetention = 10 * time.Minute
-	smsSubmitRetention = 5 * time.Minute
+	concatSMSRetention       = 10 * time.Minute
+	smsSubmitRetention       = 5 * time.Minute
+	smsDeliveryReportTimeout = 30 * time.Second
 )
 
 var smsSubmitReportTimeoutNanos atomic.Int64
 
 func init() {
-	setSMSSubmitReportTimeout(40 * time.Second)
+	setSMSSubmitReportTimeout(defaultSubmitReportTimeout)
+}
+
+const defaultSubmitReportTimeout = 130 * time.Second
+
+func DefaultSubmitReportTimeout() time.Duration {
+	return defaultSubmitReportTimeout
+}
+
+func normalizeConfig(cfg Config) (Config, error) {
+	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
+	if cfg.SubmitReportTimeout < 0 {
+		return Config{}, errors.New("creating sms service: submit report timeout must be >= 0")
+	}
+	if cfg.SubmitReportTimeout == 0 {
+		cfg.SubmitReportTimeout = currentSMSSubmitReportTimeout()
+	}
+	return cfg, nil
 }
 
 func New(cfg Config, sess *session.Session, reg *registration.Service, card Card) (*Service, error) {
@@ -138,10 +157,13 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 	if card == nil {
 		return nil, errors.New("creating sms service: card is nil")
 	}
-	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
+	normalized, err := normalizeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	s := &Service{
-		cfg:           cfg,
+		cfg:           normalized,
 		sess:          sess,
 		reg:           reg,
 		card:          card,
@@ -159,11 +181,9 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 		return nil, fmt.Errorf("creating sms service: %w", err)
 	}
 	s.attachment = attachment
-	s.cleanupWG.Add(1)
-	go func() {
-		defer s.cleanupWG.Done()
+	s.cleanupWG.Go(func() {
 		s.runSMSSubmitCleanup()
-	}()
+	})
 	return s, nil
 }
 
@@ -398,8 +418,8 @@ func (s *Service) completeSMSSubmitted(callID string) {
 	s.mu.Unlock()
 }
 
-func smsSubmitSweepInterval() time.Duration {
-	interval := currentSMSSubmitReportTimeout() / 4
+func (s *Service) smsSubmitSweepInterval() time.Duration {
+	interval := s.cfg.SubmitReportTimeout / 4
 	if interval < 10*time.Millisecond {
 		return 10 * time.Millisecond
 	}
@@ -410,7 +430,7 @@ func smsSubmitSweepInterval() time.Duration {
 }
 
 func (s *Service) runSMSSubmitCleanup() {
-	timer := time.NewTimer(smsSubmitSweepInterval())
+	timer := time.NewTimer(s.smsSubmitSweepInterval())
 	defer timer.Stop()
 	for {
 		select {
@@ -418,7 +438,7 @@ func (s *Service) runSMSSubmitCleanup() {
 			return
 		case <-timer.C:
 			s.expireSMSSubmitState(time.Now())
-			timer.Reset(smsSubmitSweepInterval())
+			timer.Reset(s.smsSubmitSweepInterval())
 		}
 	}
 }
@@ -464,7 +484,7 @@ func (s *Service) activateSMSPendingAsync(segment outboundSMSSegment, response s
 	}
 	entry.segment = segment
 	entry.response = response
-	entry.expiresAt = now.Add(currentSMSSubmitReportTimeout())
+	entry.expiresAt = now.Add(s.cfg.SubmitReportTimeout)
 	entry.async = true
 	s.smsPending[segment.callID] = entry
 	select {
@@ -732,7 +752,7 @@ func (s *Service) handleSMSSegmentReport(segment outboundSMSSegment, response sm
 	}
 }
 
-func (s *Service) finishSMSSegmentReportWithContext(ctx context.Context, segment outboundSMSSegment, response smsSubmitResponse, report rpMessage) error {
+func (s *Service) finishSMSSegmentReportWithContext(_ context.Context, segment outboundSMSSegment, response smsSubmitResponse, report rpMessage) error {
 	return s.handleSMSSegmentReport(segment, response, report)
 }
 
@@ -851,14 +871,31 @@ func isSMSReport(rp rpMessage) bool {
 }
 
 func (s *Service) sendInboundSMSDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage) bool {
+	ctx = normalizeContext(ctx)
 	if !s.markSMSDeliveryReportSent(msg) {
 		return true
 	}
-	if err := s.sendSMSDeliveryReport(ctx, msg, report); err != nil {
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
 		s.clearSMSDeliveryReportSent(msg)
-		s.logger.Warn("sending inbound sms delivery report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
 		return false
 	}
+	s.cleanupWG.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.cleanupWG.Done()
+		reportCtx, cancel := context.WithTimeout(s.cleanupCtx, smsDeliveryReportTimeout)
+		defer cancel()
+		if err := s.sendSMSDeliveryReport(reportCtx, msg, report); err != nil {
+			s.clearSMSDeliveryReportSent(msg)
+			if ctx.Err() == nil && s.cleanupCtx.Err() == nil {
+				s.logger.Warn("sending inbound sms delivery report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
+			}
+		}
+	}()
 	return true
 }
 
@@ -872,10 +909,7 @@ func (s *Service) sendSMSDeliveryReport(ctx context.Context, msg sip.Message, re
 		return fmt.Errorf("building sms delivery report: %w", err)
 	}
 	reportMsg := s.buildMessage(target, payload, msg.Header("Call-ID"))
-	ctx = normalizeContext(ctx)
-	reportCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	resp, err := s.sess.Exchange(reportCtx, reportMsg)
+	resp, err := s.sess.Exchange(normalizeContext(ctx), reportMsg)
 	if err != nil {
 		return fmt.Errorf("sending sms delivery report: %w", err)
 	}

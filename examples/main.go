@@ -18,29 +18,44 @@ import (
 	"github.com/damonto/ims-client/driver/ccid"
 	"github.com/damonto/ims-client/driver/mbim"
 	"github.com/damonto/ims-client/driver/qmi"
+	imssession "github.com/damonto/ims-client/ims/session"
 	"github.com/damonto/ims-client/swu/tunnel"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
 type options struct {
-	debug       bool
-	driverKind  string
-	listReaders bool
-	readerName  string
-	device      string
-	slot        int
-	imei        string
-	epdgAddr    string
-	transport   string
-	expires     time.Duration
-	privateID   string
-	publicID    string
-	homeDomain  string
-	pani        string
-	wlanNodeID  string
-	sendTo      string
-	sendText    string
-	ussdCode    string
+	debug         bool
+	driverKind    string
+	listReaders   bool
+	readerName    string
+	device        string
+	slot          int
+	imei          string
+	epdgAddr      string
+	transport     string
+	expires       time.Duration
+	privateID     string
+	publicID      string
+	homeDomain    string
+	phoneContext  string
+	userAgent     string
+	pani          string
+	wlanNodeID    string
+	sipPort       int
+	sipT1         time.Duration
+	sipT2         time.Duration
+	sipT4         time.Duration
+	sipTimerB     time.Duration
+	sipTimerD     time.Duration
+	sipTimerF     time.Duration
+	sipTimerH     time.Duration
+	sipTimerJ     time.Duration
+	smsTR1        time.Duration
+	nattKeepalive time.Duration
+	ikeRetransmit string
+	sendTo        string
+	sendText      string
+	ussdCode      string
 }
 
 func main() {
@@ -74,13 +89,61 @@ func parseFlags() options {
 	flag.StringVar(&opt.privateID, "private-identity", "", "IMS private user identity override")
 	flag.StringVar(&opt.publicID, "public-identity", "", "IMS public user identity override")
 	flag.StringVar(&opt.homeDomain, "home-domain", "", "IMS home domain override")
+	flag.StringVar(&opt.phoneContext, "phone-context", "", "phone-context domain override, maps ims.phone_context_domain_name_string")
+	flag.StringVar(&opt.userAgent, "user-agent", "", "IMS User-Agent override")
 	flag.StringVar(&opt.pani, "pani", "", "P-Access-Network-Info override")
 	flag.StringVar(&opt.wlanNodeID, "wlan-node-id", "", "WLAN AP MAC for i-wlan-node-id")
+	flag.IntVar(&opt.sipPort, "sip-port", 0, "IMS SIP server port override, maps ims.sip_server_port_number_int")
+	flag.DurationVar(&opt.sipT1, "sip-timer-t1", 0, "SIP timer T1 override, for example 500ms or 2s")
+	flag.DurationVar(&opt.sipT2, "sip-timer-t2", 0, "SIP timer T2 override")
+	flag.DurationVar(&opt.sipT4, "sip-timer-t4", 0, "SIP timer T4 override")
+	flag.DurationVar(&opt.sipTimerB, "sip-timer-b", 0, "SIP timer B override")
+	flag.DurationVar(&opt.sipTimerD, "sip-timer-d", 0, "SIP timer D override")
+	flag.DurationVar(&opt.sipTimerF, "sip-timer-f", 0, "SIP timer F override")
+	flag.DurationVar(&opt.sipTimerH, "sip-timer-h", 0, "SIP timer H override")
+	flag.DurationVar(&opt.sipTimerJ, "sip-timer-j", 0, "SIP timer J override")
+	flag.DurationVar(&opt.smsTR1, "sms-tr1", 0, "SMS submit report TR1 timeout override")
+	flag.DurationVar(&opt.nattKeepalive, "natt-keepalive", 0, "IWLAN NAT-T keepalive override, maps iwlan.natt_keep_alive_timer_sec_int")
+	flag.StringVar(&opt.ikeRetransmit, "ike-retransmit", "", "comma-separated IKE retransmit delays, for example 1s,2s,4s")
 	flag.StringVar(&opt.sendTo, "send-to", "", "destination MSISDN for one test SMS")
 	flag.StringVar(&opt.sendText, "send-text", "", "text body for one test SMS")
 	flag.StringVar(&opt.ussdCode, "ussd", "", "USSD code to dial, for example *100#")
 	flag.Parse()
 	return opt
+}
+
+func sipTimersFromOptions(opt options) imssession.TransactionTimers {
+	return imssession.TransactionTimers{
+		T1: opt.sipT1,
+		T2: opt.sipT2,
+		T4: opt.sipT4,
+		TB: opt.sipTimerB,
+		TD: opt.sipTimerD,
+		TF: opt.sipTimerF,
+		TH: opt.sipTimerH,
+		TJ: opt.sipTimerJ,
+	}
+}
+
+func parseDurationList(value string) ([]time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	delays := make([]time.Duration, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, errors.New("parsing IKE retransmit delays: empty entry")
+		}
+		delay, err := time.ParseDuration(part)
+		if err != nil {
+			return nil, fmt.Errorf("parsing IKE retransmit delay %q: %w", part, err)
+		}
+		delays = append(delays, delay)
+	}
+	return delays, nil
 }
 
 func run(opt options) error {
@@ -103,6 +166,10 @@ func run(opt options) error {
 	if opt.sendTo != "" && opt.ussdCode != "" {
 		return errors.New("running example: choose either SMS flags or -ussd")
 	}
+	ikeRetransmit, err := parseDurationList(opt.ikeRetransmit)
+	if err != nil {
+		return err
+	}
 
 	reader, err := openDriver(ctx, opt)
 	if err != nil {
@@ -113,15 +180,24 @@ func run(opt options) error {
 		IMEI:   opt.imei,
 		EPDG:   opt.epdgAddr,
 		Logger: slog.Default(),
-		Tunnel: tunnel.Config{},
+		Tunnel: tunnel.Config{
+			SIPPort:              opt.sipPort,
+			NATKeepaliveInterval: opt.nattKeepalive,
+			IKERetransmitDelays:  ikeRetransmit,
+		},
 		IMS: imsclient.IMSConfig{
-			Transport:         opt.transport,
-			PrivateIdentity:   opt.privateID,
-			PublicIdentity:    opt.publicID,
-			HomeDomain:        opt.homeDomain,
-			AccessNetworkInfo: opt.pani,
-			WLANNodeID:        opt.wlanNodeID,
-			RegisterExpires:   opt.expires,
+			Transport:              opt.transport,
+			PrivateIdentity:        opt.privateID,
+			PublicIdentity:         opt.publicID,
+			HomeDomain:             opt.homeDomain,
+			PhoneContextDomain:     opt.phoneContext,
+			UserAgent:              opt.userAgent,
+			AccessNetworkInfo:      opt.pani,
+			WLANNodeID:             opt.wlanNodeID,
+			RegisterExpires:        opt.expires,
+			SIPServerPort:          opt.sipPort,
+			SIPTimers:              sipTimersFromOptions(opt),
+			SMSSubmitReportTimeout: opt.smsTR1,
 		},
 	}
 

@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	imssession "github.com/damonto/ims-client/ims/session"
 )
 
 func TestConfigNormalized(t *testing.T) {
@@ -16,8 +18,14 @@ func TestConfigNormalized(t *testing.T) {
 		wantEPDG        string
 		wantTransport   string
 		wantIMSIMEI     string
+		wantPhoneCtx    string
+		wantAccessInfo  string
 		wantReconnect   time.Duration
 		wantRegisterExp time.Duration
+		wantSIPPort     int
+		wantSIPT1       time.Duration
+		wantSIPTF       time.Duration
+		wantSMSTR1      time.Duration
 	}{
 		{
 			name: "defaults build epdg from card",
@@ -30,8 +38,13 @@ func TestConfigNormalized(t *testing.T) {
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     "12345",
+			wantAccessInfo:  "IEEE-802.11",
 			wantReconnect:   defaultReconnectDelay,
 			wantRegisterExp: 600000 * time.Second,
+			wantSIPPort:     5060,
+			wantSIPT1:       2 * time.Second,
+			wantSIPTF:       128 * time.Second,
+			wantSMSTR1:      130 * time.Second,
 		},
 		{
 			name: "explicit epdg wins over automatic default",
@@ -43,8 +56,13 @@ func TestConfigNormalized(t *testing.T) {
 			wantEPDG:        "epdg.example.com",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     "root-imei",
+			wantAccessInfo:  "IEEE-802.11",
 			wantReconnect:   defaultReconnectDelay,
 			wantRegisterExp: 600000 * time.Second,
+			wantSIPPort:     5060,
+			wantSIPT1:       2 * time.Second,
+			wantSIPTF:       128 * time.Second,
+			wantSMSTR1:      130 * time.Second,
 		},
 		{
 			name: "cfg nil clone still normalizes as zero config",
@@ -57,8 +75,13 @@ func TestConfigNormalized(t *testing.T) {
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     testIMEI,
+			wantAccessInfo:  "IEEE-802.11",
 			wantReconnect:   defaultReconnectDelay,
 			wantRegisterExp: 600000 * time.Second,
+			wantSIPPort:     5060,
+			wantSIPT1:       2 * time.Second,
+			wantSIPTF:       128 * time.Second,
+			wantSMSTR1:      130 * time.Second,
 		},
 		{
 			name: "explicit ims transport is preserved",
@@ -72,8 +95,38 @@ func TestConfigNormalized(t *testing.T) {
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "udp",
 			wantIMSIMEI:     testIMEI,
+			wantAccessInfo:  "IEEE-802.11",
 			wantReconnect:   defaultReconnectDelay,
 			wantRegisterExp: 600000 * time.Second,
+			wantSIPPort:     5060,
+			wantSIPT1:       2 * time.Second,
+			wantSIPTF:       128 * time.Second,
+			wantSMSTR1:      130 * time.Second,
+		},
+		{
+			name: "explicit ims profile values are preserved",
+			cfg: Config{
+				IMEI: testIMEI,
+				IMS: IMSConfig{
+					AccessNetworkInfo:      "IEEE-802.11ac;i-wlan-node-id=aabbcc",
+					PhoneContextDomain:     "ims.example",
+					SIPServerPort:          5070,
+					SIPTimers:              imssession.TransactionTimers{T1: time.Second, TF: 45 * time.Second},
+					SMSSubmitReportTimeout: 45 * time.Second,
+				},
+			},
+			wantIMEI:        testIMEI,
+			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:   "tcp",
+			wantIMSIMEI:     testIMEI,
+			wantPhoneCtx:    "ims.example",
+			wantAccessInfo:  "IEEE-802.11ac;i-wlan-node-id=aabbcc",
+			wantReconnect:   defaultReconnectDelay,
+			wantRegisterExp: 600000 * time.Second,
+			wantSIPPort:     5070,
+			wantSIPT1:       time.Second,
+			wantSIPTF:       45 * time.Second,
+			wantSMSTR1:      45 * time.Second,
 		},
 		{
 			name: "missing imei fails",
@@ -87,6 +140,36 @@ func TestConfigNormalized(t *testing.T) {
 			cfg: Config{
 				IMEI:           testIMEI,
 				ReconnectDelay: -time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative sip timer fails",
+			cfg: Config{
+				IMEI: testIMEI,
+				IMS: IMSConfig{
+					SIPTimers: imssession.TransactionTimers{T1: -time.Second},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative sms submit report timeout fails",
+			cfg: Config{
+				IMEI: testIMEI,
+				IMS: IMSConfig{
+					SMSSubmitReportTimeout: -time.Second,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid sip server port fails",
+			cfg: Config{
+				IMEI: testIMEI,
+				IMS: IMSConfig{
+					SIPServerPort: 70000,
+				},
 			},
 			wantErr: true,
 		},
@@ -119,11 +202,32 @@ func TestConfigNormalized(t *testing.T) {
 			if got.IMS.IMEI != tt.wantIMSIMEI {
 				t.Fatalf("IMS.IMEI = %q, want %q", got.IMS.IMEI, tt.wantIMSIMEI)
 			}
+			if got.IMS.PhoneContextDomain != tt.wantPhoneCtx {
+				t.Fatalf("IMS.PhoneContextDomain = %q, want %q", got.IMS.PhoneContextDomain, tt.wantPhoneCtx)
+			}
+			if got.IMS.AccessNetworkInfo != tt.wantAccessInfo {
+				t.Fatalf("IMS.AccessNetworkInfo = %q, want %q", got.IMS.AccessNetworkInfo, tt.wantAccessInfo)
+			}
 			if got.ReconnectDelay != tt.wantReconnect {
 				t.Fatalf("ReconnectDelay = %v, want %v", got.ReconnectDelay, tt.wantReconnect)
 			}
 			if got.IMS.RegisterExpires != tt.wantRegisterExp {
 				t.Fatalf("IMS.RegisterExpires = %v, want %v", got.IMS.RegisterExpires, tt.wantRegisterExp)
+			}
+			if got.Tunnel.SIPPort != tt.wantSIPPort {
+				t.Fatalf("Tunnel.SIPPort = %d, want %d", got.Tunnel.SIPPort, tt.wantSIPPort)
+			}
+			if got.IMS.SIPServerPort != 0 && got.IMS.SIPServerPort != tt.wantSIPPort {
+				t.Fatalf("IMS.SIPServerPort = %d, want %d", got.IMS.SIPServerPort, tt.wantSIPPort)
+			}
+			if got.IMS.SIPTimers.T1 != tt.wantSIPT1 {
+				t.Fatalf("IMS.SIPTimers.T1 = %v, want %v", got.IMS.SIPTimers.T1, tt.wantSIPT1)
+			}
+			if got.IMS.SIPTimers.TF != tt.wantSIPTF {
+				t.Fatalf("IMS.SIPTimers.TF = %v, want %v", got.IMS.SIPTimers.TF, tt.wantSIPTF)
+			}
+			if got.IMS.SMSSubmitReportTimeout != tt.wantSMSTR1 {
+				t.Fatalf("IMS.SMSSubmitReportTimeout = %v, want %v", got.IMS.SMSSubmitReportTimeout, tt.wantSMSTR1)
 			}
 		})
 	}

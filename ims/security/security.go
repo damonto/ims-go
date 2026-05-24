@@ -247,41 +247,43 @@ func (p *Param) unmarshalText(text string) error {
 		if !ok {
 			continue
 		}
-		switch strings.ToLower(name) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		value := strings.TrimSpace(rawValue)
+		switch name {
 		case "alg":
-			param.Alg = rawValue
+			param.Alg = value
 		case "ealg":
-			param.EAlg = rawValue
+			param.EAlg = value
 		case "mod":
-			param.Mod = rawValue
+			param.Mod = value
 		case "prot":
-			param.Prot = rawValue
+			param.Prot = value
 		case "port-c":
-			port, err := strconv.Atoi(rawValue)
+			port, err := strconv.Atoi(value)
 			if err != nil {
-				return fmt.Errorf("parsing security header port-c %q: %w", rawValue, err)
+				return fmt.Errorf("parsing security header port-c %q: %w", value, err)
 			}
 			param.PortC = port
 		case "port-s":
-			port, err := strconv.Atoi(rawValue)
+			port, err := strconv.Atoi(value)
 			if err != nil {
-				return fmt.Errorf("parsing security header port-s %q: %w", rawValue, err)
+				return fmt.Errorf("parsing security header port-s %q: %w", value, err)
 			}
 			param.PortS = port
 		case "spi-c":
-			value64, err := strconv.ParseUint(rawValue, 10, 32)
+			value64, err := strconv.ParseUint(value, 10, 32)
 			if err != nil {
-				return fmt.Errorf("parsing security header spi-c %q: %w", rawValue, err)
+				return fmt.Errorf("parsing security header spi-c %q: %w", value, err)
 			}
 			param.SPIC = uint32(value64)
 		case "spi-s":
-			value64, err := strconv.ParseUint(rawValue, 10, 32)
+			value64, err := strconv.ParseUint(value, 10, 32)
 			if err != nil {
-				return fmt.Errorf("parsing security header spi-s %q: %w", rawValue, err)
+				return fmt.Errorf("parsing security header spi-s %q: %w", value, err)
 			}
 			param.SPIS = uint32(value64)
 		case "q":
-			param.Q = rawValue
+			param.Q = value
 		}
 	}
 	*p = param

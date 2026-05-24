@@ -19,24 +19,59 @@ func (stubAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 }
 
 func TestParamUnmarshalText(t *testing.T) {
-	var got Params
-	err := got.UnmarshalText([]byte("ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20"))
-	if err != nil {
-		t.Fatalf("UnmarshalText() error = %v", err)
+	tests := []struct {
+		name  string
+		value string
+		want  Params
+	}{
+		{
+			name:  "compact",
+			value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20",
+			want: Params{{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5060,
+				Prot:      "esp",
+				SPIC:      10,
+				SPIS:      20,
+			}},
+		},
+		{
+			name:  "optional whitespace",
+			value: " ipsec-3gpp ; alg = hmac-sha-1-96 ; ealg = null ; mod = trans ; port-c = 5062 ; port-s= 5060 ; prot = esp ; spi-c = 2291967259 ; spi-s = 20 ; q = 0.9 ",
+			want: Params{{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5060,
+				Prot:      "esp",
+				SPIC:      2291967259,
+				SPIS:      20,
+				Q:         "0.9",
+			}},
+		},
 	}
-	want := Param{
-		Mechanism: "ipsec-3gpp",
-		Alg:       "hmac-sha-1-96",
-		EAlg:      "null",
-		Mod:       "trans",
-		PortC:     5062,
-		PortS:     5060,
-		Prot:      "esp",
-		SPIC:      10,
-		SPIS:      20,
-	}
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("UnmarshalText() = %+v, want %+v", got, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got Params
+			if err := got.UnmarshalText([]byte(tt.value)); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("len(UnmarshalText()) = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("UnmarshalText()[%d] = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }
 

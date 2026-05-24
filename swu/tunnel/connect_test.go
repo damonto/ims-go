@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/damonto/ims-client/swu/handshake"
 	"github.com/damonto/ims-client/swu/ike"
 )
 
@@ -19,6 +20,119 @@ func TestNewConnectCryptoStateUses32ByteNonce(t *testing.T) {
 	}
 	if len(crypto.nonceI) != 32 {
 		t.Fatalf("len(crypto.nonceI) = %d, want 32", len(crypto.nonceI))
+	}
+}
+
+func TestNewConnectStateUsesConfiguredDHGroup(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  handshake.Config
+		want uint16
+	}{
+		{name: "configured", cfg: handshake.Config{DHGroups: []uint16{transformDH2048MODP}}, want: transformDH2048MODP},
+		{name: "fallback", cfg: handshake.Config{}, want: transformDH2048MODP},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, err := newConnectState(handshake.ConnectInput{
+				IMEI:        "356789012345678",
+				Card:        sessionTestCard{},
+				OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 500},
+				Config:      tt.cfg,
+			})
+			if err != nil {
+				t.Fatalf("newConnectState() error = %v", err)
+			}
+			if state.saInit.DHGroup != tt.want {
+				t.Fatalf("DHGroup = %d, want %d", state.saInit.DHGroup, tt.want)
+			}
+		})
+	}
+}
+
+func TestTunnelAddressesAcceptsIPv6Subnet(t *testing.T) {
+	subnetValue := append(net.ParseIP("2001:db8::").To16(), 64)
+	pcscf := net.ParseIP("2001:db8::100").To16()
+	_, internalIPv6, _, pcscfIPv6 := tunnelAddresses([]ike.Attribute{
+		ike.NewTLVAttribute(configAttrInternalIPv6Subnet, subnetValue),
+		ike.NewTLVAttribute(configAttrPCSCFIPv6Address, pcscf),
+	})
+	if !internalIPv6.Equal(net.ParseIP("2001:db8::")) {
+		t.Fatalf("internalIPv6 = %s, want 2001:db8::", internalIPv6)
+	}
+	if !pcscfIPv6.Equal(net.ParseIP("2001:db8::100")) {
+		t.Fatalf("pcscfIPv6 = %s, want 2001:db8::100", pcscfIPv6)
+	}
+}
+
+func TestSAProposalsUseConfigWithoutFallback(t *testing.T) {
+	tests := []struct {
+		name            string
+		cfg             handshake.Config
+		wantIKE         int
+		wantChild       int
+		wantIKEKeyLen   uint16
+		wantIKEInteg    uint16
+		wantIKEPRF      uint16
+		wantChildKeyLen uint16
+		wantChildInteg  uint16
+	}{
+		{
+			name:            "defaults are pixel supported intersection",
+			cfg:             handshake.Config{},
+			wantIKE:         4,
+			wantChild:       2,
+			wantIKEKeyLen:   128,
+			wantIKEInteg:    transformINTEGHMACSHA256,
+			wantIKEPRF:      transformPRFHMACSHA1,
+			wantChildKeyLen: 128,
+			wantChildInteg:  transformINTEGHMACSHA256,
+		},
+		{
+			name: "custom values are not expanded",
+			cfg: handshake.Config{
+				IKEEncryptionKeyLens:   []uint16{256},
+				IKEIntegrity:           []uint16{transformINTEGHMACSHA196},
+				IKEPRF:                 []uint16{transformPRFHMACSHA1},
+				ChildEncryptionKeyLens: []uint16{256},
+				ChildIntegrity:         []uint16{transformINTEGHMACSHA196},
+			},
+			wantIKE:         1,
+			wantChild:       1,
+			wantIKEKeyLen:   256,
+			wantIKEInteg:    transformINTEGHMACSHA196,
+			wantIKEPRF:      transformPRFHMACSHA1,
+			wantChildKeyLen: 256,
+			wantChildInteg:  transformINTEGHMACSHA196,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ikeProposals := ikeSAProposals(tt.cfg, transformDH2048MODP)
+			if len(ikeProposals) != tt.wantIKE {
+				t.Fatalf("len(ikeProposals) = %d, want %d", len(ikeProposals), tt.wantIKE)
+			}
+			if got := proposalKeyLength(t, ikeProposals[0]); got != tt.wantIKEKeyLen {
+				t.Fatalf("ike key len = %d, want %d", got, tt.wantIKEKeyLen)
+			}
+			if got := proposalTransformID(ikeProposals[0], transformTypeINTEG); got != tt.wantIKEInteg {
+				t.Fatalf("ike integ = %d, want %d", got, tt.wantIKEInteg)
+			}
+			if got := proposalTransformID(ikeProposals[0], transformTypePRF); got != tt.wantIKEPRF {
+				t.Fatalf("ike prf = %d, want %d", got, tt.wantIKEPRF)
+			}
+
+			childProposals := childSAProposals(tt.cfg, 0x01020304)
+			if len(childProposals) != tt.wantChild {
+				t.Fatalf("len(childProposals) = %d, want %d", len(childProposals), tt.wantChild)
+			}
+			if got := proposalKeyLength(t, childProposals[0]); got != tt.wantChildKeyLen {
+				t.Fatalf("child key len = %d, want %d", got, tt.wantChildKeyLen)
+			}
+			if got := proposalTransformID(childProposals[0], transformTypeINTEG); got != tt.wantChildInteg {
+				t.Fatalf("child integ = %d, want %d", got, tt.wantChildInteg)
+			}
+		})
 	}
 }
 
@@ -151,10 +265,84 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 				t.Fatalf("prepareConnect() error = %v", err)
 			}
 			defer finish()
+			state.initiatorSPI = 0x0102030405060708
+			state.saInit.InitiatorSPI = state.initiatorSPI
 			err = session.exchangeIKESAInit(context.Background(), state)
 			tt.check(t, conn, err)
 		})
 	}
+}
+
+func TestMatchesIKEMessageRequiresResponseContext(t *testing.T) {
+	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
+	expected := ikeResponseMatch{
+		peer:         peer,
+		initiatorSPI: 0x0102030405060708,
+		responderSPI: 0x1112131415161718,
+		exchangeType: exchangeTypeIKEAuth,
+		messageID:    2,
+	}
+	packet := func(header ike.IKEHeader) []byte {
+		return mustIKEPacket(t, header, nil)
+	}
+	validHeader := ike.IKEHeader{
+		InitiatorSPI: expected.initiatorSPI,
+		ResponderSPI: expected.responderSPI,
+		Version:      ike.Version20,
+		ExchangeType: expected.exchangeType,
+		Flags:        ike.FlagResponse,
+		MessageID:    expected.messageID,
+	}
+	tests := []struct {
+		name   string
+		header ike.IKEHeader
+		peer   *net.UDPAddr
+		want   bool
+	}{
+		{name: "valid response", header: validHeader, peer: peer, want: true},
+		{name: "same id request is rejected", header: func() ike.IKEHeader { h := validHeader; h.Flags = ike.FlagInitiator; return h }(), peer: peer},
+		{name: "initiator response is rejected", header: func() ike.IKEHeader { h := validHeader; h.Flags = ike.FlagResponse | ike.FlagInitiator; return h }(), peer: peer},
+		{name: "wrong exchange is rejected", header: func() ike.IKEHeader { h := validHeader; h.ExchangeType = exchangeTypeInformational; return h }(), peer: peer},
+		{name: "wrong responder spi is rejected", header: func() ike.IKEHeader { h := validHeader; h.ResponderSPI++; return h }(), peer: peer},
+		{name: "wrong peer is rejected", header: validHeader, peer: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 4500}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesIKEMessage(packet(tt.header), tt.peer, expected); got != tt.want {
+				t.Fatalf("matchesIKEMessage() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func proposalTransformID(proposal ike.Proposal, transformType byte) uint16 {
+	for _, transform := range proposal.Transforms {
+		if transform.TransformType == transformType {
+			return transform.ID
+		}
+	}
+	return 0
+}
+
+func proposalKeyLength(t *testing.T, proposal ike.Proposal) uint16 {
+	t.Helper()
+	for _, transform := range proposal.Transforms {
+		if transform.TransformType != transformTypeENCR {
+			continue
+		}
+		for _, attr := range transform.Attributes {
+			if attr.Type != transformAttrKeyLength {
+				continue
+			}
+			value, ok := attr.Uint16()
+			if !ok {
+				t.Fatal("key length attr is not TV encoded")
+			}
+			return value
+		}
+	}
+	t.Fatal("key length attr is missing")
+	return 0
 }
 
 func mustIKEPacket(t *testing.T, header ike.IKEHeader, payloads []ike.Payload) []byte {

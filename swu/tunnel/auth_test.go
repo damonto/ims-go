@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha1"
 	"encoding/binary"
 	"log/slog"
 	"net"
@@ -23,25 +24,35 @@ type akaChallengeTestCard struct {
 	result usim.AKAResult
 }
 
+type twoDigitMNCCard struct {
+	sessionTestCard
+}
+
+func (twoDigitMNCCard) IMSI() string { return "204020123456789" }
+func (twoDigitMNCCard) MCC() string  { return "204" }
+func (twoDigitMNCCard) MNC() string  { return "02" }
+
 func (c akaChallengeTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return c.result, nil
 }
 
-func buildSignedAKAChallenge(t *testing.T, identifier byte, identity string, rand, autn []byte, result usim.AKAResult) []byte {
+func buildSignedAKAChallenge(t *testing.T, identifier byte, identity string, rand, autn []byte, result usim.AKAResult, extraAttrs ...eapaka.AKAAttribute) []byte {
 	t.Helper()
 
 	keys, err := deriveEAPKeys([]byte(identity), result.IK, result.CK)
 	if err != nil {
 		t.Fatalf("deriveEAPKeys() error = %v", err)
 	}
+	attrs := []eapaka.AKAAttribute{
+		{Type: akaAttrRAND, Value: append([]byte{0x00, 0x00}, rand...)},
+		{Type: akaAttrAUTN, Value: append([]byte{0x00, 0x00}, autn...)},
+	}
+	attrs = append(attrs, extraAttrs...)
 	wire, err := (eapaka.AKAMessage{
 		Code:       eapaka.CodeRequest,
 		Identifier: identifier,
 		Subtype:    eapaka.SubtypeChallenge,
-		Attributes: []eapaka.AKAAttribute{
-			{Type: akaAttrRAND, Value: append([]byte{0x00, 0x00}, rand...)},
-			{Type: akaAttrAUTN, Value: append([]byte{0x00, 0x00}, autn...)},
-		},
+		Attributes: attrs,
 	}).MarshalSigned(keys.AUT, nil)
 	if err != nil {
 		t.Fatalf("MarshalSigned() error = %v", err)
@@ -99,6 +110,47 @@ func buildSignedAKAReauthRequest(t *testing.T, identifier byte, counter uint16, 
 		t.Fatalf("MarshalSigned() error = %v", err)
 	}
 	return wire
+}
+
+func buildIdentityResponseForTest(t *testing.T, flow *akaAuthFlow, message eapaka.AKAMessage) akaResponse {
+	t.Helper()
+	if message.Code == 0 {
+		message.Code = eapaka.CodeRequest
+	}
+	if message.Subtype == 0 {
+		message.Subtype = eapaka.SubtypeIdentity
+	}
+	wire, err := message.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	response, err := flow.buildIdentityResponse(message, wire)
+	if err != nil {
+		t.Fatalf("buildIdentityResponse() error = %v", err)
+	}
+	return response
+}
+
+func checkcodeForTest(packets [][]byte) []byte {
+	sum := sha1.New()
+	for _, packet := range packets {
+		_, _ = sum.Write(packet)
+	}
+	return append([]byte{0x00, 0x00}, sum.Sum(nil)...)
+}
+
+func TestInitialAKAIdentityPadsTwoDigitMNC(t *testing.T) {
+	identity, realm, _, err := initialAKAIdentity(twoDigitMNCCard{})
+	if err != nil {
+		t.Fatalf("initialAKAIdentity() error = %v", err)
+	}
+
+	if realm != "nai.epc.mnc002.mcc204.3gppnetwork.org" {
+		t.Fatalf("realm = %q, want %q", realm, "nai.epc.mnc002.mcc204.3gppnetwork.org")
+	}
+	if identity != "0204020123456789@nai.epc.mnc002.mcc204.3gppnetwork.org" {
+		t.Fatalf("identity = %q, want %q", identity, "0204020123456789@nai.epc.mnc002.mcc204.3gppnetwork.org")
+	}
 }
 
 func TestAKAAuthFlowBuildIdentityResponse(t *testing.T) {
@@ -226,10 +278,7 @@ func TestAKAAuthFlowBuildIdentityResponse(t *testing.T) {
 				Attributes: tt.attrs,
 			}
 
-			response, err := tt.flow.buildIdentityResponse(message)
-			if err != nil {
-				t.Fatalf("buildIdentityResponse() error = %v", err)
-			}
+			response := buildIdentityResponseForTest(t, &tt.flow, message)
 
 			if tt.wantClientError {
 				if response.afterSend == nil {
@@ -280,18 +329,12 @@ func TestAKAAuthFlowRepeatedAnyIdentityRequestReturnsClientError(t *testing.T) {
 		Attributes: []eapaka.AKAAttribute{{Type: akaAttrAnyIDReq, Value: []byte{0x00, 0x00}}},
 	}
 
-	first, err := flow.buildIdentityResponse(message)
-	if err != nil {
-		t.Fatalf("first buildIdentityResponse() error = %v", err)
-	}
+	first := buildIdentityResponseForTest(t, &flow, message)
 	if first.afterSend != nil {
 		t.Fatalf("first buildIdentityResponse() afterSend = %v, want nil", first.afterSend)
 	}
 
-	second, err := flow.buildIdentityResponse(message)
-	if err != nil {
-		t.Fatalf("second buildIdentityResponse() error = %v", err)
-	}
+	second := buildIdentityResponseForTest(t, &flow, message)
 	if second.afterSend == nil {
 		t.Fatal("second buildIdentityResponse() afterSend = nil, want client error")
 	}
@@ -317,10 +360,7 @@ func TestAKAAuthFlowDuplicateIdentityRequestReturnsClientError(t *testing.T) {
 		},
 	}
 
-	response, err := flow.buildIdentityResponse(message)
-	if err != nil {
-		t.Fatalf("buildIdentityResponse() error = %v", err)
-	}
+	response := buildIdentityResponseForTest(t, &flow, message)
 	if response.afterSend == nil {
 		t.Fatal("buildIdentityResponse() afterSend = nil, want client error")
 	}
@@ -460,13 +500,10 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 				crypto:      &ikeCrypto{},
 			}
 			if len(tt.identityRequest) != 0 {
-				response, err := flow.buildIdentityResponse(eapaka.AKAMessage{
+				response := buildIdentityResponseForTest(t, &flow, eapaka.AKAMessage{
 					Identifier: 7,
 					Attributes: tt.identityRequest,
 				})
-				if err != nil {
-					t.Fatalf("buildIdentityResponse() error = %v", err)
-				}
 				if response.afterSend != nil {
 					t.Fatalf("buildIdentityResponse() afterSend = %v, want nil", response.afterSend)
 				}
@@ -492,6 +529,87 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 			}
 			if got.Subtype != eapaka.SubtypeChallenge {
 				t.Fatalf("response subtype = %d, want %d", got.Subtype, eapaka.SubtypeChallenge)
+			}
+		})
+	}
+}
+
+func TestAKAAuthFlowBuildChallengeResponseVerifiesCheckcode(t *testing.T) {
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := bytes.Repeat([]byte{0x22}, 16)
+	akaResult := usim.AKAResult{
+		RES: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		IK:  bytes.Repeat([]byte{0x33}, 16),
+		CK:  bytes.Repeat([]byte{0x44}, 16),
+	}
+	identity := "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
+
+	tests := []struct {
+		name           string
+		checkcodeValue func([][]byte) []byte
+		wantClientErr  bool
+	}{
+		{
+			name: "valid checkcode succeeds",
+			checkcodeValue: func(packets [][]byte) []byte {
+				return checkcodeForTest(packets)
+			},
+		},
+		{
+			name: "invalid checkcode returns client error",
+			checkcodeValue: func([][]byte) []byte {
+				return append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x66}, sha1.Size)...)
+			},
+			wantClientErr: true,
+		},
+		{
+			name: "empty checkcode after identity round returns client error",
+			checkcodeValue: func([][]byte) []byte {
+				return []byte{0x00, 0x00}
+			},
+			wantClientErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := akaAuthFlow{
+				session:     &Session{logger: slog.Default()},
+				card:        akaChallengeTestCard{result: akaResult},
+				identity:    identity,
+				eapIdentity: identity,
+				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:      &ikeCrypto{},
+			}
+			identityRequest := eapaka.AKAMessage{
+				Code:       eapaka.CodeRequest,
+				Identifier: 7,
+				Subtype:    eapaka.SubtypeIdentity,
+				Attributes: []eapaka.AKAAttribute{{Type: akaAttrPermanentIDReq, Value: []byte{0x00, 0x00}}},
+			}
+			if response := buildIdentityResponseForTest(t, &flow, identityRequest); response.afterSend != nil {
+				t.Fatalf("buildIdentityResponse() afterSend = %v, want nil", response.afterSend)
+			}
+
+			wire := buildSignedAKAChallenge(t, 8, identity, rand, autn, akaResult, eapaka.AKAAttribute{
+				Type:  akaAttrCheckcode,
+				Value: tt.checkcodeValue(flow.identityPackets),
+			})
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			response, err := flow.buildChallengeResponse(message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if tt.wantClientErr {
+				if response.afterSend == nil {
+					t.Fatal("buildChallengeResponse() afterSend = nil, want client error")
+				}
+				return
+			}
+			if response.afterSend != nil {
+				t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
 			}
 		})
 	}

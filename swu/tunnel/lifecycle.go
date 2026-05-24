@@ -32,7 +32,7 @@ func (s *Session) commitConnect(state *connectState) {
 	s.lastProtectedRx = time.Now()
 	s.lastProtectedTx = time.Now()
 	s.livenessTimeout = state.established.LivenessTimeout
-	s.natKeepaliveInterval = 20 * time.Second
+	s.natKeepaliveInterval = s.cfg.NATKeepaliveInterval
 	s.informWaiters = make(map[uint32]chan inboundIKE)
 	s.informResponses = make(map[uint32][]byte)
 	s.outboundESP = state.outboundESPCodec()

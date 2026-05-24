@@ -31,8 +31,9 @@ const (
 )
 
 type Config struct {
-	Language   string
-	OnIncoming func(*Session, Message)
+	Language           string
+	PhoneContextDomain string
+	OnIncoming         func(*Session, Message)
 }
 
 type Message struct {
@@ -518,8 +519,12 @@ func (s *Service) removeSession(key string) {
 
 func (s *Service) ussdTargetURI(code string) string {
 	realm := strings.TrimPrefix(s.reg.State().RegisterURI, "sip:")
+	phoneContext := strings.TrimSpace(s.cfg.PhoneContextDomain)
+	if phoneContext == "" {
+		phoneContext = realm
+	}
 	dial := strings.ReplaceAll(code, "#", "%23")
-	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=dialstring", dial, realm, realm)
+	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=dialstring", dial, phoneContext, realm)
 }
 
 func (s *Service) ussdSDP() string {

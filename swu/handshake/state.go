@@ -20,12 +20,20 @@ type Card interface {
 }
 
 type Config struct {
-	LocalAddr    string
-	RemoteAddr   string
-	InitialPort  int
-	NATTPort     int
-	LocalSIPPort int
-	SIPPort      int
+	LocalAddr              string
+	RemoteAddr             string
+	InitialPort            int
+	NATTPort               int
+	LocalSIPPort           int
+	SIPPort                int
+	DHGroups               []uint16
+	IKEEncryptionKeyLens   []uint16
+	IKEIntegrity           []uint16
+	IKEPRF                 []uint16
+	ChildEncryptionKeyLens []uint16
+	ChildIntegrity         []uint16
+	NATKeepaliveInterval   time.Duration
+	IKERetransmitDelays    []time.Duration
 }
 
 type Info struct {

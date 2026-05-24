@@ -77,6 +77,7 @@ const (
 	configAttrInternalIPv4DNS               uint16 = 3
 	configAttrInternalIPv6Address           uint16 = 8
 	configAttrInternalIPv6DNS               uint16 = 10
+	configAttrInternalIPv6Subnet            uint16 = 15
 	configAttrPCSCFIPv4Address              uint16 = 20
 	configAttrPCSCFIPv6Address              uint16 = 21
 	configAttrTimeoutPeriodForLivenessCheck uint16 = 24

@@ -27,17 +27,21 @@ type Config struct {
 }
 
 type IMSConfig struct {
-	Transport         string
-	PrivateIdentity   string
-	PublicIdentity    string
-	HomeDomain        string
-	USSDLanguage      string
-	UserAgent         string
-	AccessNetworkInfo string
-	WLANNodeID        string
-	RegisterExpires   time.Duration
-	ServiceCenter     string
-	IMEI              string
+	Transport              string
+	PrivateIdentity        string
+	PublicIdentity         string
+	HomeDomain             string
+	PhoneContextDomain     string
+	USSDLanguage           string
+	UserAgent              string
+	AccessNetworkInfo      string
+	WLANNodeID             string
+	RegisterExpires        time.Duration
+	ServiceCenter          string
+	IMEI                   string
+	SIPServerPort          int
+	SIPTimers              imssession.TransactionTimers
+	SMSSubmitReportTimeout time.Duration
 
 	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
 	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)

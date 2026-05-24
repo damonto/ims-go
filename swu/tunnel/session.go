@@ -17,14 +17,22 @@ import (
 )
 
 type Config struct {
-	LocalAddr    string
-	RemoteAddr   string
-	PacketConn   net.PacketConn
-	InitialPort  int
-	NATTPort     int
-	LocalSIPPort int
-	SIPPort      int
-	Logger       *slog.Logger
+	LocalAddr              string
+	RemoteAddr             string
+	PacketConn             net.PacketConn
+	InitialPort            int
+	NATTPort               int
+	LocalSIPPort           int
+	SIPPort                int
+	DHGroups               []uint16
+	IKEEncryptionKeyLens   []uint16
+	IKEIntegrity           []uint16
+	IKEPRF                 []uint16
+	ChildEncryptionKeyLens []uint16
+	ChildIntegrity         []uint16
+	NATKeepaliveInterval   time.Duration
+	IKERetransmitDelays    []time.Duration
+	Logger                 *slog.Logger
 }
 
 type Card interface {
@@ -130,12 +138,20 @@ func normalizeContext(ctx context.Context) context.Context {
 
 func handshakeConfig(cfg Config) handshake.Config {
 	return handshake.Config{
-		LocalAddr:    cfg.LocalAddr,
-		RemoteAddr:   cfg.RemoteAddr,
-		InitialPort:  cfg.InitialPort,
-		NATTPort:     cfg.NATTPort,
-		LocalSIPPort: cfg.LocalSIPPort,
-		SIPPort:      cfg.SIPPort,
+		LocalAddr:              cfg.LocalAddr,
+		RemoteAddr:             cfg.RemoteAddr,
+		InitialPort:            cfg.InitialPort,
+		NATTPort:               cfg.NATTPort,
+		LocalSIPPort:           cfg.LocalSIPPort,
+		SIPPort:                cfg.SIPPort,
+		DHGroups:               append([]uint16(nil), cfg.DHGroups...),
+		IKEEncryptionKeyLens:   append([]uint16(nil), cfg.IKEEncryptionKeyLens...),
+		IKEIntegrity:           append([]uint16(nil), cfg.IKEIntegrity...),
+		IKEPRF:                 append([]uint16(nil), cfg.IKEPRF...),
+		ChildEncryptionKeyLens: append([]uint16(nil), cfg.ChildEncryptionKeyLens...),
+		ChildIntegrity:         append([]uint16(nil), cfg.ChildIntegrity...),
+		NATKeepaliveInterval:   cfg.NATKeepaliveInterval,
+		IKERetransmitDelays:    append([]time.Duration(nil), cfg.IKERetransmitDelays...),
 	}
 }
 

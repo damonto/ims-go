@@ -472,6 +472,19 @@ func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
 	}
 }
 
+func TestUSSDTargetURIUsesConfiguredPhoneContext(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{PhoneContextDomain: "wifi.example"}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if got := svc.ussdTargetURI("*100#"); got != "sip:*100%23;phone-context=wifi.example@ims.mnc001.mcc001.3gppnetwork.org;user=dialstring" {
+		t.Fatalf("ussdTargetURI() = %q", got)
+	}
+}
+
 func TestLookupIncomingInviteSessionMatchesServerTransaction(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)

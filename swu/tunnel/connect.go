@@ -108,14 +108,21 @@ func (s *Session) beginConnect() (func(), error) {
 }
 
 func newConnectState(input handshake.ConnectInput) (*connectState, error) {
-	identity, realm, initialAKAState := initialAKAIdentity(input.Card)
-	crypto, initiatorSPI, espInitiatorSPI, nonceI, err := newConnectCryptoState(transformDH1024MODP)
+	identity, realm, initialAKAState, err := initialAKAIdentity(input.Card)
+	if err != nil {
+		return nil, fmt.Errorf("building aka identity: %w", err)
+	}
+	dhGroup := transformDH2048MODP
+	if len(input.Config.DHGroups) != 0 {
+		dhGroup = input.Config.DHGroups[0]
+	}
+	crypto, initiatorSPI, espInitiatorSPI, nonceI, err := newConnectCryptoState(dhGroup)
 	if err != nil {
 		return nil, err
 	}
 	return &connectState{
 		input:           input,
-		saInit:          handshake.SAInitState{InitiatorSPI: initiatorSPI, DHGroup: transformDH1024MODP, NonceI: append([]byte(nil), nonceI...), ChildInitiatorSPI: espInitiatorSPI},
+		saInit:          handshake.SAInitState{InitiatorSPI: initiatorSPI, DHGroup: dhGroup, NonceI: append([]byte(nil), nonceI...), ChildInitiatorSPI: espInitiatorSPI},
 		auth:            handshake.AuthState{Identity: identity, Realm: realm, CurrentMessageID: 1},
 		card:            input.Card,
 		imei:            input.IMEI,
@@ -170,7 +177,7 @@ func (state *connectState) resetDHGroup(dhGroup uint16) error {
 }
 
 func (state *connectState) buildIKESAInitRequest(outerLocal, outerRemote *net.UDPAddr) ([]byte, error) {
-	payloads := defaultIKESAInitPayloads(state.crypto, outerLocal, outerRemote)
+	payloads := defaultIKESAInitPayloads(state.input.Config, state.crypto, outerLocal, outerRemote)
 	if len(state.ikeInitCookie) != 0 {
 		payloads = append([]ike.Payload{
 			&ike.NotifyPayload{
@@ -298,7 +305,7 @@ func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) erro
 
 func buildIKEAuthRequest(state *connectState) ([]byte, []byte, error) {
 	idi := (&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(state.identity)}).RawData()
-	payloads, err := defaultIKEAuthInitPayloads(state.identity, state.espInitiatorSPI)
+	payloads, err := defaultIKEAuthInitPayloads(state.input.Config, state.identity, state.espInitiatorSPI)
 	if err != nil {
 		return nil, nil, fmt.Errorf("building ike_auth request: %w", err)
 	}
@@ -587,6 +594,10 @@ func tunnelAddresses(attrs []ike.Attribute) (internalIPv4, internalIPv6, pcscfIP
 			if len(attr.Value) >= net.IPv6len {
 				internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
+		case configAttrInternalIPv6Subnet:
+			if internalIPv6 == nil && len(attr.Value) >= net.IPv6len {
+				internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			}
 		case configAttrPCSCFIPv4Address:
 			if pcscfIPv4 == nil && len(attr.Value) >= net.IPv4len {
 				pcscfIPv4 = append(net.IP(nil), attr.Value[:net.IPv4len]...)
@@ -600,15 +611,66 @@ func tunnelAddresses(attrs []ike.Attribute) (internalIPv4, internalIPv6, pcscfIP
 	return internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6
 }
 
-func defaultIKESAInitPayloads(crypto *ikeCrypto, local, remote *net.UDPAddr) []ike.Payload {
-	proposals := []ike.Proposal{
-		{ProtocolID: proposalProtocolIKE, Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypePRF, ID: transformPRFHMACMD5}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypePRF, ID: transformPRFHMACMD5}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA1}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA256}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
-		{ProtocolID: proposalProtocolIKE, Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypePRF, ID: transformPRFHMACSHA256}, {TransformType: transformTypeDH, ID: crypto.dhGroup}}},
+func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
+	keyLens := uint16ValuesOrDefault(cfg.IKEEncryptionKeyLens, defaultEncryptionKeyLens)
+	integrity := uint16ValuesOrDefault(cfg.IKEIntegrity, defaultIKEIntegrity)
+	prfs := uint16ValuesOrDefault(cfg.IKEPRF, defaultIKEPRF)
+	proposals := make([]ike.Proposal, 0, len(keyLens)*len(integrity)*len(prfs))
+	for _, keyLen := range keyLens {
+		for _, integ := range integrity {
+			for _, prf := range prfs {
+				proposals = append(proposals, ike.Proposal{
+					ProtocolID: proposalProtocolIKE,
+					Transforms: []ike.Transform{
+						aesCBCTransform(keyLen),
+						{TransformType: transformTypeINTEG, ID: integ},
+						{TransformType: transformTypePRF, ID: prf},
+						{TransformType: transformTypeDH, ID: dhGroup},
+					},
+				})
+			}
+		}
 	}
+	return proposals
+}
+
+func childSAProposals(cfg handshake.Config, espSPI uint32) []ike.Proposal {
+	keyLens := uint16ValuesOrDefault(cfg.ChildEncryptionKeyLens, defaultEncryptionKeyLens)
+	integrity := uint16ValuesOrDefault(cfg.ChildIntegrity, defaultChildIntegrity)
+	proposals := make([]ike.Proposal, 0, len(keyLens)*len(integrity))
+	for _, keyLen := range keyLens {
+		for _, integ := range integrity {
+			proposals = append(proposals, ike.Proposal{
+				ProtocolID: proposalProtocolESP,
+				SPI:        uint32Bytes(espSPI),
+				Transforms: []ike.Transform{
+					aesCBCTransform(keyLen),
+					{TransformType: transformTypeINTEG, ID: integ},
+					{TransformType: transformTypeESN, ID: 0},
+				},
+			})
+		}
+	}
+	return proposals
+}
+
+func aesCBCTransform(keyLen uint16) ike.Transform {
+	return ike.Transform{
+		TransformType: transformTypeENCR,
+		ID:            transformENCRAESCBC,
+		Attributes:    []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, keyLen)},
+	}
+}
+
+func uint16ValuesOrDefault(values, defaults []uint16) []uint16 {
+	if len(values) == 0 {
+		return defaults
+	}
+	return values
+}
+
+func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, remote *net.UDPAddr) []ike.Payload {
+	proposals := ikeSAProposals(cfg, crypto.dhGroup)
 	natSourceHash := natDetectionHash(crypto.initiatorSPI, crypto.responderSPI, local)
 	natDestHash := natDetectionHash(crypto.initiatorSPI, crypto.responderSPI, remote)
 	return []ike.Payload{
@@ -620,15 +682,8 @@ func defaultIKESAInitPayloads(crypto *ikeCrypto, local, remote *net.UDPAddr) []i
 	}
 }
 
-func defaultIKEAuthInitPayloads(identity string, espSPI uint32) ([]ike.Payload, error) {
-	childSA := &ike.SecurityAssociationPayload{Proposals: []ike.Proposal{
-		{ProtocolID: proposalProtocolESP, SPI: uint32Bytes(espSPI), Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypeESN, ID: 0}}},
-		{ProtocolID: proposalProtocolESP, SPI: uint32Bytes(espSPI), Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACMD596}, {TransformType: transformTypeESN, ID: 0}}},
-		{ProtocolID: proposalProtocolESP, SPI: uint32Bytes(espSPI), Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypeESN, ID: 0}}},
-		{ProtocolID: proposalProtocolESP, SPI: uint32Bytes(espSPI), Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA196}, {TransformType: transformTypeESN, ID: 0}}},
-		{ProtocolID: proposalProtocolESP, SPI: uint32Bytes(espSPI), Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 128)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypeESN, ID: 0}}},
-		{ProtocolID: proposalProtocolESP, SPI: uint32Bytes(espSPI), Transforms: []ike.Transform{{TransformType: transformTypeENCR, ID: transformENCRAESCBC, Attributes: []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, 256)}}, {TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256}, {TransformType: transformTypeESN, ID: 0}}},
-	}}
+func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI uint32) ([]ike.Payload, error) {
+	childSA := &ike.SecurityAssociationPayload{Proposals: childSAProposals(cfg, espSPI)}
 	config := &ike.ConfigPayload{ConfigType: configTypeRequest, Attributes: []ike.Attribute{
 		ike.NewTLVAttribute(configAttrInternalIPv4Address, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv4DNS, nil),

@@ -36,8 +36,9 @@ type SecureTCPConfig struct {
 type SecureUDPConfig = SecureTCPConfig
 
 type Config struct {
-	Transport string
-	Logger    *slog.Logger
+	Transport         string
+	Logger            *slog.Logger
+	TransactionTimers TransactionTimers
 }
 
 type Request struct {
@@ -123,6 +124,11 @@ func (cfg Config) Normalized() (Config, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	timers, err := cfg.TransactionTimers.Normalized()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TransactionTimers = timers
 	return cfg, nil
 }
 

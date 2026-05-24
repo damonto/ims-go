@@ -2,6 +2,8 @@ package tunnel
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -41,6 +43,7 @@ type akaAuthFlow struct {
 
 	identityRounds  int
 	lastIdentityReq byte
+	identityPackets [][]byte
 
 	currentAuthKey []byte
 	currentEncrKey []byte
@@ -91,16 +94,37 @@ func normalizeAKAIdentity(identity, realm string) string {
 	return identity + "@" + realm
 }
 
-func initialAKAIdentity(card Card) (string, string, usim.AKAIdentityState) {
-	realm := fmt.Sprintf("nai.epc.mnc%s.mcc%s.3gppnetwork.org", card.MNC(), card.MCC())
+func normalizedPLMNDigits(card Card) (string, string, error) {
+	mcc := strings.TrimSpace(card.MCC())
+	if len(mcc) != 3 {
+		return "", "", fmt.Errorf("mcc %q must be 3 digits", mcc)
+	}
+
+	mnc := strings.TrimSpace(card.MNC())
+	switch len(mnc) {
+	case 2:
+		mnc = "0" + mnc
+	case 3:
+	default:
+		return "", "", fmt.Errorf("mnc %q must be 2 or 3 digits", mnc)
+	}
+	return mcc, mnc, nil
+}
+
+func initialAKAIdentity(card Card) (string, string, usim.AKAIdentityState, error) {
+	mcc, mnc, err := normalizedPLMNDigits(card)
+	if err != nil {
+		return "", "", usim.AKAIdentityState{}, err
+	}
+	realm := fmt.Sprintf("nai.epc.mnc%s.mcc%s.3gppnetwork.org", mnc, mcc)
 	state := loadAKAIdentityState(card)
 	if state.ReauthIdentity != "" && len(state.MK) != 0 && len(state.KAut) != 0 && len(state.KEncr) != 0 {
-		return normalizeAKAIdentity(state.ReauthIdentity, realm), realm, state
+		return normalizeAKAIdentity(state.ReauthIdentity, realm), realm, state, nil
 	}
 	if state.Pseudonym != "" {
-		return normalizeAKAIdentity(state.Pseudonym, realm), realm, state
+		return normalizeAKAIdentity(state.Pseudonym, realm), realm, state, nil
 	}
-	return fmt.Sprintf("0%s@%s", card.IMSI(), realm), realm, state
+	return fmt.Sprintf("0%s@%s", card.IMSI(), realm), realm, state, nil
 }
 
 func identityRequestType(attrs []eapaka.AKAAttribute) (byte, error) {
@@ -167,6 +191,48 @@ func (f *akaAuthFlow) validateIdentityRequest(requestType byte) error {
 func (f *akaAuthFlow) recordIdentityRequest(requestType byte) {
 	f.identityRounds++
 	f.lastIdentityReq = requestType
+}
+
+func (f *akaAuthFlow) recordIdentityExchange(request, response []byte) {
+	f.identityPackets = append(f.identityPackets, append([]byte(nil), request...), append([]byte(nil), response...))
+}
+
+func checkcodeValue(attrs []eapaka.AKAAttribute) ([]byte, bool, error) {
+	attr := eapaka.FindAttribute(attrs, akaAttrCheckcode)
+	if attr == nil {
+		return nil, false, nil
+	}
+	if len(attr.Value) != 2 && len(attr.Value) != 22 {
+		return nil, true, fmt.Errorf("invalid checkcode length %d", len(attr.Value))
+	}
+	if len(attr.Value) == 2 {
+		return nil, true, nil
+	}
+	return attr.Value[2:], true, nil
+}
+
+func (f *akaAuthFlow) verifyCheckcode(attrs []eapaka.AKAAttribute) error {
+	got, ok, err := checkcodeValue(attrs)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if len(got) == 0 {
+		if len(f.identityPackets) == 0 {
+			return nil
+		}
+		return errors.New("empty checkcode after aka identity exchange")
+	}
+	sum := sha1.New()
+	for _, packet := range f.identityPackets {
+		_, _ = sum.Write(packet)
+	}
+	if !hmac.Equal(got, sum.Sum(nil)) {
+		return errors.New("checkcode mismatch")
+	}
+	return nil
 }
 
 func (f *akaAuthFlow) clientErrorResponse(identifier byte, action string, cause error) (akaResponse, error) {
@@ -297,7 +363,7 @@ func (f *akaAuthFlow) handleRequest(serverPayloads []ike.Payload, eapData []byte
 func (f *akaAuthFlow) buildResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	switch message.Subtype {
 	case akaSubtypeIdentity:
-		return f.buildIdentityResponse(message)
+		return f.buildIdentityResponse(message, eapData)
 	case akaSubtypeChallenge:
 		return f.buildChallengeResponse(message, eapData)
 	case akaSubtypeReauthentication:
@@ -309,7 +375,7 @@ func (f *akaAuthFlow) buildResponse(message eapaka.AKAMessage, eapData []byte) (
 	}
 }
 
-func (f *akaAuthFlow) buildIdentityResponse(message eapaka.AKAMessage) (akaResponse, error) {
+func (f *akaAuthFlow) buildIdentityResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	requestType, err := identityRequestType(message.Attributes)
 	if err != nil {
 		return f.clientErrorResponse(message.Identifier, "selecting aka identity", err)
@@ -327,6 +393,7 @@ func (f *akaAuthFlow) buildIdentityResponse(message eapaka.AKAMessage) (akaRespo
 	}
 	f.eapIdentity = identityResponse
 	f.recordIdentityRequest(requestType)
+	f.recordIdentityExchange(eapData, data)
 	return akaResponse{data: data}, nil
 }
 
@@ -369,6 +436,9 @@ func (f *akaAuthFlow) buildChallengeResponse(message eapaka.AKAMessage, eapData 
 	}
 	if err := eapaka.VerifyMessageMAC(eapData, f.crypto.eap.AUT, nil); err != nil {
 		return f.clientErrorResponse(message.Identifier, "verifying aka challenge mac", err)
+	}
+	if err := f.verifyCheckcode(message.Attributes); err != nil {
+		return f.clientErrorResponse(message.Identifier, "verifying aka checkcode", err)
 	}
 	nested, err := f.challengeAttributes(message)
 	if err != nil {
@@ -419,6 +489,9 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 	}
 	if err := eapaka.VerifyMessageMAC(eapData, f.currentState.KAut, nil); err != nil {
 		return f.clientErrorResponse(message.Identifier, "verifying reauth mac", err)
+	}
+	if err := f.verifyCheckcode(message.Attributes); err != nil {
+		return f.clientErrorResponse(message.Identifier, "verifying reauth checkcode", err)
 	}
 	reauth, err := eapaka.DecodeReauthentication(eapData, f.currentState.KEncr)
 	if err != nil {
