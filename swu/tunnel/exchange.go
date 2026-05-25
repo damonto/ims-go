@@ -58,17 +58,12 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 		if err == nil {
 			return response, peer, nil
 		}
-		if !errors.Is(err, errIKETimeout) {
+		if !errors.Is(err, handshake.ErrIKETimeout) {
 			return nil, nil, err
 		}
 	}
 	return nil, nil, fmt.Errorf("connecting swu session: waiting message %d: timeout", messageID)
 }
-
-var (
-	errIKETimeout = handshake.ErrIKETimeout
-	ErrIKETimeout = handshake.ErrIKETimeout
-)
 
 const (
 	informationalRetransmitAttempts = 8
@@ -119,11 +114,11 @@ func (s *Session) readIKEMessage(ctx context.Context, expected ikeResponseMatch,
 			return nil, nil, err
 		}
 		if ikeReadTimedOut(deadline) {
-			return nil, nil, errIKETimeout
+			return nil, nil, handshake.ErrIKETimeout
 		}
 		packet, udpAddr, err := s.readIKECandidate(deadline, buf)
 		if err != nil {
-			if errors.Is(err, errIKETimeout) {
+			if errors.Is(err, handshake.ErrIKETimeout) {
 				continue
 			}
 			return nil, nil, err
@@ -154,7 +149,7 @@ func (s *Session) readIKECandidate(deadline time.Time, buf []byte) ([]byte, *net
 	n, addr, err := s.conn.ReadFrom(buf)
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return nil, nil, errIKETimeout
+			return nil, nil, handshake.ErrIKETimeout
 		}
 		return nil, nil, fmt.Errorf("connecting swu session: reading ike response: %w", err)
 	}
