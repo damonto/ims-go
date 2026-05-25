@@ -66,16 +66,16 @@ func TestUSSDXMLRoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body, err := (ussdXMLBody{Message: tt.msg}).MarshalText()
+			body, err := (xmlBody{Message: tt.msg}).MarshalText()
 			if err != nil {
 				t.Fatalf("MarshalText() error = %v", err)
 			}
-			got, err := decodeUSSDXML(body)
+			got, err := decodeXML(body)
 			if err != nil {
-				t.Fatalf("decodeUSSDXML() error = %v", err)
+				t.Fatalf("decodeXML() error = %v", err)
 			}
 			if got != tt.want {
-				t.Fatalf("decodeUSSDXML() = %+v, want %+v", got, tt.want)
+				t.Fatalf("decodeXML() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -122,9 +122,9 @@ func TestUSSDXMLValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := decodeUSSDXML([]byte(tt.body))
+			_, err := decodeXML([]byte(tt.body))
 			if gotErr := err != nil; gotErr != tt.wantErr {
-				t.Fatalf("decodeUSSDXML() error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("decodeXML() error = %v, wantErr %t", err, tt.wantErr)
 			}
 		})
 	}
@@ -142,7 +142,7 @@ func TestMarshalUSSDXMLRejectsInvalidLanguage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := (ussdXMLBody{Message: tt.msg}).MarshalText()
+			_, err := (xmlBody{Message: tt.msg}).MarshalText()
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Fatalf("MarshalText() error = %v, wantErr %t", err, tt.wantErr)
 			}
@@ -151,7 +151,7 @@ func TestMarshalUSSDXMLRejectsInvalidLanguage(t *testing.T) {
 }
 
 func TestMultipartBodyRoundTrip(t *testing.T) {
-	payload, err := (ussdXMLBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
+	payload, err := (xmlBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText() error = %v", err)
 	}
@@ -159,19 +159,19 @@ func TestMultipartBodyRoundTrip(t *testing.T) {
 		Boundary: "outer",
 		Parts: []multipartBodyPart{
 			{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")},
-			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+			{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
 		},
 	}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	msg := sip.Message{Headers: sip.Headers{{Name: "Content-Type", Value: "multipart/mixed; boundary=outer"}}, Body: body}
-	got, err := decodeUSSDPayload(msg)
+	got, err := decodePayload(msg)
 	if err != nil {
-		t.Fatalf("decodeUSSDPayload() error = %v", err)
+		t.Fatalf("decodePayload() error = %v", err)
 	}
 	if got.Text != "Balance" || got.Language != "en" {
-		t.Fatalf("decodeUSSDPayload() = %+v", got)
+		t.Fatalf("decodePayload() = %+v", got)
 	}
 }
 
@@ -197,69 +197,69 @@ func TestValidateSDPBodyRequiresOneZeroPortMedia(t *testing.T) {
 }
 
 func TestValidateInboundUSSDInfoRequiresSingleUSSDXMLBody(t *testing.T) {
-	payload, err := (ussdXMLBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
+	payload, err := (xmlBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText() error = %v", err)
 	}
 	multipartPayload, err := (multipartBody{
 		Boundary: "info",
 		Parts: []multipartBodyPart{
-			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+			{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
 		},
 	}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	tests := []struct {
-		name        string
-		contentType string
-		body        []byte
-		wantErr     bool
+		name              string
+		headerContentType string
+		body              []byte
+		wantErr           bool
 	}{
-		{name: "single ussd xml", contentType: ussdContentType, body: payload},
-		{name: "multipart rejected", contentType: "multipart/mixed; boundary=info", body: multipartPayload, wantErr: true},
+		{name: "single ussd xml", headerContentType: xmlContentType, body: payload},
+		{name: "multipart rejected", headerContentType: "multipart/mixed; boundary=info", body: multipartPayload, wantErr: true},
 		{name: "missing content type", body: payload, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := sip.NewRequest("INFO", "sip:ussias@example.com")
-			msg.Headers.Add("Info-Package", ussdInfoPackage)
+			msg.Headers.Add("Info-Package", infoPackage)
 			msg.Headers.Add("Content-Disposition", "Info-Package")
-			if tt.contentType != "" {
-				msg.Headers.Add("Content-Type", tt.contentType)
+			if tt.headerContentType != "" {
+				msg.Headers.Add("Content-Type", tt.headerContentType)
 			}
 			msg.Body = tt.body
-			_, err := validateInboundUSSDInfo(msg, false)
+			_, err := validateInboundInfo(msg, false)
 			if gotErr := err != nil; gotErr != tt.wantErr {
-				t.Fatalf("validateInboundUSSDInfo() error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("validateInboundInfo() error = %v, wantErr %t", err, tt.wantErr)
 			}
 		})
 	}
 }
 
 func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
-	payload, err := (ussdXMLBody{Message: Message{Text: "Done", Language: "en"}}).MarshalText()
+	payload, err := (xmlBody{Message: Message{Text: "Done", Language: "en"}}).MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText() error = %v", err)
 	}
 	multipartPayload, err := (multipartBody{
 		Boundary: "bye",
 		Parts: []multipartBodyPart{
-			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+			{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
 		},
 	}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	tests := []struct {
-		name        string
-		contentType string
-		body        []byte
-		wantStatus  int
-		wantClosed  bool
+		name              string
+		headerContentType string
+		body              []byte
+		wantStatus        int
+		wantClosed        bool
 	}{
-		{name: "single ussd xml", contentType: ussdContentType, body: payload, wantStatus: 200, wantClosed: true},
-		{name: "multipart rejected", contentType: "multipart/mixed; boundary=bye", body: multipartPayload, wantStatus: 415},
+		{name: "single ussd xml", headerContentType: xmlContentType, body: payload, wantStatus: 200, wantClosed: true},
+		{name: "multipart rejected", headerContentType: "multipart/mixed; boundary=bye", body: multipartPayload, wantStatus: 415},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -280,7 +280,7 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 				remoteCSeqs: make(map[string]struct{}),
 			}
 			bye := newDialogRequest("BYE", "sip:user@example.com", "<sip:network@example.com>;tag=remote", "<sip:user@example.com>;tag=local", "bye-call", "2 BYE")
-			bye.Headers.Add("Content-Type", tt.contentType)
+			bye.Headers.Add("Content-Type", tt.headerContentType)
 			bye.Body = tt.body
 			if err := us.handleBye(context.Background(), session.Request{Message: bye, Transport: transport}); err != nil {
 				t.Fatalf("handleBye() error = %v", err)
@@ -357,7 +357,7 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
 				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
 				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
-				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Recv-Info", Value: infoPackage},
 				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
 				sip.Header{Name: "Content-Type", Value: "application/sdp"},
 			))
@@ -386,9 +386,9 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	if last.Method() != "INFO" {
 		t.Fatalf("last.Method() = %q, want INFO", last.Method())
 	}
-	payload, err := decodeUSSDPayload(last)
+	payload, err := decodePayload(last)
 	if err != nil {
-		t.Fatalf("decodeUSSDPayload() error = %v", err)
+		t.Fatalf("decodePayload() error = %v", err)
 	}
 	if payload.Request {
 		t.Fatalf("payload.Request = %t, want false", payload.Request)
@@ -412,7 +412,7 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
 				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
 				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
-				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Recv-Info", Value: infoPackage},
 				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
 				sip.Header{Name: "Content-Type", Value: "application/sdp"},
 			))
@@ -427,9 +427,9 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 	}
 
 	msg := newDialogRequest("INFO", us.targetURI, us.remoteTo, "<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>;tag="+us.localTag, us.callID, "2 INFO")
-	msg.Headers.Add("Info-Package", ussdInfoPackage)
+	msg.Headers.Add("Info-Package", infoPackage)
 	msg.Headers.Add("Content-Disposition", "info-package")
-	msg.Headers.Add("Content-Type", ussdContentType)
+	msg.Headers.Add("Content-Type", xmlContentType)
 	msg.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
 
 	key, ok := sess.LookupDialogKey(msg)
@@ -499,8 +499,8 @@ func TestLookupIncomingInviteSessionMatchesServerTransaction(t *testing.T) {
 	orig.Headers = sip.UpsertHeader(orig.Headers, "CSeq", "1 INVITE")
 	orig.Headers = sip.UpsertHeader(orig.Headers, "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1")
 
-	us := svc.newIncomingUSSDSession(orig, Message{Text: "Enter PIN", Language: "en", Request: true})
-	us.inviteOK = svc.buildIncomingUSSDInviteOK(orig, us.localURI, us.localTag)
+	us := svc.newIncomingSession(orig, Message{Text: "Enter PIN", Language: "en", Request: true})
+	us.inviteOK = svc.buildIncomingInviteOK(orig, us.localURI, us.localTag)
 	if err := svc.storeSession(us); err != nil {
 		t.Fatalf("storeSession() error = %v", err)
 	}
@@ -566,8 +566,8 @@ func TestLookupIncomingInviteSessionMatchesLegacyServerTransaction(t *testing.T)
 	orig.Headers = sip.UpsertHeader(orig.Headers, "CSeq", "7 INVITE")
 	orig.Headers = sip.UpsertHeader(orig.Headers, "Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=legacy-1")
 
-	us := svc.newIncomingUSSDSession(orig, Message{Text: "Enter PIN", Language: "en", Request: true})
-	us.inviteOK = svc.buildIncomingUSSDInviteOK(orig, us.localURI, us.localTag)
+	us := svc.newIncomingSession(orig, Message{Text: "Enter PIN", Language: "en", Request: true})
+	us.inviteOK = svc.buildIncomingInviteOK(orig, us.localURI, us.localTag)
 	if err := svc.storeSession(us); err != nil {
 		t.Fatalf("storeSession() error = %v", err)
 	}
@@ -636,14 +636,14 @@ func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
 			if got := req.Header("From"); !strings.Contains(got, "<sip:alice@example.com>;") {
 				t.Fatalf("From = %q, want default public identity", got)
 			}
-			payload, hasSDP, err := decodeUSSDInvitePayload(req)
+			payload, hasSDP, err := decodeInvitePayload(req)
 			if err != nil {
-				t.Fatalf("decodeUSSDInvitePayload() error = %v", err)
+				t.Fatalf("decodeInvitePayload() error = %v", err)
 			}
 			if !hasSDP {
-				t.Fatal("decodeUSSDInvitePayload() missing SDP")
+				t.Fatal("decodeInvitePayload() missing SDP")
 			}
-			if payload.Text != "*100#" || payload.Language != defaultUSSDLang {
+			if payload.Text != "*100#" || payload.Language != defaultLang {
 				t.Fatalf("payload = %+v", payload)
 			}
 			if payload.Request {
@@ -654,7 +654,7 @@ func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
 				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
 				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
 				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
-				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Recv-Info", Value: infoPackage},
 				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
 				sip.Header{Name: "Content-Type", Value: "application/sdp"},
 			))
@@ -685,7 +685,7 @@ func TestStartUSSDSessionINFOGate(t *testing.T) {
 				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
 				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
 				sip.Header{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
-				sip.Header{Name: "Recv-Info", Value: ussdInfoPackage},
+				sip.Header{Name: "Recv-Info", Value: infoPackage},
 				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
 				sip.Header{Name: "Content-Type", Value: "application/sdp"},
 			))
@@ -706,9 +706,9 @@ func TestStartUSSDSessionINFOGate(t *testing.T) {
 	}
 
 	info := newDialogRequest("INFO", us.targetURI, us.remoteTo, "<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>;tag="+us.localTag, us.callID, "2 INFO")
-	info.Headers.Add("Info-Package", ussdInfoPackage)
+	info.Headers.Add("Info-Package", infoPackage)
 	info.Headers.Add("Content-Disposition", "info-package")
-	info.Headers.Add("Content-Type", ussdContentType)
+	info.Headers.Add("Content-Type", xmlContentType)
 	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
 	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
 	if err != nil {
@@ -957,9 +957,9 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 		if got := info.Header("From"); got != "<sip:alias@example.com>;tag="+us.localTag {
 			t.Fatalf("From = %q, want <sip:alias@example.com>;tag=%s", got, us.localTag)
 		}
-		payload, err := decodeUSSDPayload(info)
+		payload, err := decodePayload(info)
 		if err != nil {
-			t.Fatalf("decodeUSSDPayload() error = %v", err)
+			t.Fatalf("decodePayload() error = %v", err)
 		}
 		if payload.Text != "1" || !payload.Request {
 			t.Fatalf("payload = %+v", payload)
@@ -978,9 +978,9 @@ func TestUnknownDialogGets481(t *testing.T) {
 	}
 
 	info := newDialogRequest("INFO", "sip:uss@example.com", "<sip:a@example.com>;tag=a", "<sip:b@example.com>;tag=b", "missing-call", "1 INFO")
-	info.Headers.Add("Info-Package", ussdInfoPackage)
+	info.Headers.Add("Info-Package", infoPackage)
 	info.Headers.Add("Content-Disposition", "info-package")
-	info.Headers.Add("Content-Type", ussdContentType)
+	info.Headers.Add("Content-Type", xmlContentType)
 	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>1</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
 
 	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
@@ -1070,7 +1070,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 
 func buildNetworkUSSDInvite(t *testing.T) sip.Message {
 	t.Helper()
-	payload, err := (ussdXMLBody{Message: Message{Text: "Enter PIN", Language: "en", Request: true}}).MarshalText()
+	payload, err := (xmlBody{Message: Message{Text: "Enter PIN", Language: "en", Request: true}}).MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText() error = %v", err)
 	}
@@ -1078,7 +1078,7 @@ func buildNetworkUSSDInvite(t *testing.T) sip.Message {
 		Boundary: "invite",
 		Parts: []multipartBodyPart{
 			{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")},
-			{Header: textproto.MIMEHeader{"Content-Type": {ussdContentType}}, Body: payload},
+			{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
 		},
 	}).MarshalBinary()
 	if err != nil {
@@ -1092,7 +1092,7 @@ func buildNetworkUSSDInvite(t *testing.T) sip.Message {
 		{Name: "Call-ID", Value: "call-1"},
 		{Name: "Session-ID", Value: "session-1"},
 		{Name: "CSeq", Value: "1 INVITE"},
-		{Name: "Recv-Info", Value: ussdInfoPackage},
+		{Name: "Recv-Info", Value: infoPackage},
 		{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
 		{Name: "Content-Type", Value: "multipart/mixed; boundary=invite"},
 	}

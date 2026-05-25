@@ -13,13 +13,13 @@ import (
 )
 
 var (
-	_ encoding.TextMarshaler     = ussdXMLBody{}
-	_ encoding.TextUnmarshaler   = (*ussdXMLBody)(nil)
+	_ encoding.TextMarshaler     = xmlBody{}
+	_ encoding.TextUnmarshaler   = (*xmlBody)(nil)
 	_ encoding.BinaryMarshaler   = multipartBody{}
 	_ encoding.BinaryUnmarshaler = (*multipartBody)(nil)
 )
 
-type ussdXMLBody struct {
+type xmlBody struct {
 	Message USSDMessage
 }
 
@@ -28,21 +28,21 @@ type multipartBody struct {
 	Parts    []multipartBodyPart
 }
 
-func (b ussdXMLBody) MarshalText() ([]byte, error) {
+func (b xmlBody) MarshalText() ([]byte, error) {
 	language := strings.TrimSpace(b.Message.Language)
-	if err := validateUSSDLanguage(language); err != nil {
+	if err := validateLanguage(language); err != nil {
 		return nil, err
 	}
-	payload := ussdXML{
+	payload := xmlPayload{
 		Language:  language,
 		String:    b.Message.Text,
-		ErrorCode: normalizeUSSDErrorCode(b.Message.ErrorCode),
+		ErrorCode: normalizeErrorCode(b.Message.ErrorCode),
 	}
 	if b.Message.ErrorCode == 0 {
 		payload.ErrorCode = 0
 	}
 	if b.Message.Request || b.Message.Notify {
-		payload.AnyExt = &ussdAnyExt{}
+		payload.AnyExt = &anyExt{}
 		if b.Message.Request {
 			payload.AnyExt.Request = &struct{}{}
 		}
@@ -57,21 +57,21 @@ func (b ussdXMLBody) MarshalText() ([]byte, error) {
 	return append([]byte(xml.Header), body...), nil
 }
 
-func (b *ussdXMLBody) UnmarshalText(text []byte) error {
-	if err := validateUSSDXMLShape(text); err != nil {
+func (b *xmlBody) UnmarshalText(text []byte) error {
+	if err := validateXMLShape(text); err != nil {
 		return err
 	}
-	var payload ussdXML
+	var payload xmlPayload
 	if err := xml.Unmarshal(text, &payload); err != nil {
 		return fmt.Errorf("parsing USSD XML: %w", err)
 	}
-	if err := validateUSSDLanguage(payload.Language); err != nil {
+	if err := validateLanguage(payload.Language); err != nil {
 		return err
 	}
 	msg := USSDMessage{
 		Text:      strings.TrimSpace(payload.String),
 		Language:  strings.TrimSpace(payload.Language),
-		ErrorCode: normalizeUSSDErrorCode(payload.ErrorCode),
+		ErrorCode: normalizeErrorCode(payload.ErrorCode),
 	}
 	if payload.ErrorCode == 0 {
 		msg.ErrorCode = 0
@@ -84,7 +84,7 @@ func (b *ussdXMLBody) UnmarshalText(text []byte) error {
 	return nil
 }
 
-func validateUSSDXMLShape(text []byte) error {
+func validateXMLShape(text []byte) error {
 	decoder := xml.NewDecoder(bytes.NewReader(text))
 	depth := 0
 	rootSeen := false
@@ -131,7 +131,7 @@ func validateUSSDXMLShape(text []byte) error {
 	return nil
 }
 
-func validateUSSDLanguage(language string) error {
+func validateLanguage(language string) error {
 	language = strings.TrimSpace(language)
 	if language == "" {
 		return nil
@@ -214,11 +214,11 @@ func (b multipartBody) part(mediaType string) (multipartBodyPart, bool) {
 }
 
 func (b multipartBody) ussdPayload() (USSDMessage, bool, error) {
-	part, ok := b.part(ussdContentType)
+	part, ok := b.part(xmlContentType)
 	if !ok {
 		return USSDMessage{}, false, nil
 	}
-	var payload ussdXMLBody
+	var payload xmlBody
 	if err := payload.UnmarshalText(part.Body); err != nil {
 		return USSDMessage{}, false, err
 	}

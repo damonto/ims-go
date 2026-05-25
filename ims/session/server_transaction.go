@@ -200,7 +200,7 @@ func (tx *serverTransaction) retransmit(ctx context.Context) error {
 	if resp.StartLine == "" {
 		return nil
 	}
-	return tx.session.writeResponsePacket(ctx, transport, req, resp.Bytes())
+	return tx.session.writeResponse(ctx, transport, req, resp)
 }
 
 func (tx *serverTransaction) handleCancel(ctx context.Context) error {
@@ -215,7 +215,7 @@ func (tx *serverTransaction) handleCancel(ctx context.Context) error {
 	}
 	resp := sip.NewResponse(487, "Request Terminated")
 	resp.Headers = sip.ResponseHeaders(req, 487)
-	if err := tx.session.writeResponsePacket(ctx, transport, req, resp.Bytes()); err != nil {
+	if err := tx.session.writeResponse(ctx, transport, req, resp); err != nil {
 		return err
 	}
 	tx.recordResponse(resp)

@@ -330,9 +330,9 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 }
 
 func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
-	oldTimeout := currentSMSSubmitReportTimeout()
-	setSMSSubmitReportTimeout(20 * time.Millisecond)
-	defer setSMSSubmitReportTimeout(oldTimeout)
+	oldTimeout := currentSubmitReportTimeout()
+	setSubmitReportTimeout(20 * time.Millisecond)
+	defer setSubmitReportTimeout(oldTimeout)
 
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)

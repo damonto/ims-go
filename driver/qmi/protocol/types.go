@@ -1,4 +1,4 @@
-package core
+package protocol
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 )
 
 type Request struct {
-	Service       Service
+	Service       ServiceType
 	ClientID      uint8
 	TransactionID uint16
 	MessageID     MessageID
@@ -15,7 +15,7 @@ type Request struct {
 }
 
 type Response struct {
-	Service       Service
+	Service       ServiceType
 	ClientID      uint8
 	TransactionID uint16
 	MessageID     MessageID

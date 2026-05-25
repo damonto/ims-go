@@ -56,6 +56,100 @@ func TestRequestAPDU(t *testing.T) {
 	}
 }
 
+func TestRequestMarshalBinaryRoundTrip(t *testing.T) {
+	le := byte(0x10)
+	tests := []struct {
+		name string
+		req  Request
+	}{
+		{
+			name: "header only",
+			req:  Request{CLA: 0x00, INS: 0xA4, P1: 0x00, P2: 0x04},
+		},
+		{
+			name: "with data",
+			req:  Request{CLA: 0x00, INS: 0xA4, P1: 0x00, P2: 0x04, Data: []byte{0x3F, 0x00}},
+		},
+		{
+			name: "with le",
+			req:  Request{CLA: 0x00, INS: 0xB0, P1: 0x00, P2: 0x20, Le: &le},
+		},
+		{
+			name: "with data and le",
+			req:  Request{CLA: 0x00, INS: 0xA4, P1: 0x00, P2: 0x04, Data: []byte{0x3F, 0x00}, Le: &le},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.req.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+
+			var got Request
+			if err := got.UnmarshalBinary(data); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			roundTrip, err := got.MarshalBinary()
+			if err != nil {
+				t.Fatalf("round-trip MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(roundTrip, data) {
+				t.Fatalf("round trip = % X, want % X", roundTrip, data)
+			}
+		})
+	}
+}
+
+func TestRequestUnmarshalBinaryErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "short header", data: []byte{0x00, 0xA4, 0x00}},
+		{name: "truncated data", data: []byte{0x00, 0xA4, 0x00, 0x04, 0x02, 0x3F}},
+		{name: "trailing bytes", data: []byte{0x00, 0xA4, 0x00, 0x04, 0x02, 0x3F, 0x00, 0x10, 0x20}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got Request
+			if err := got.UnmarshalBinary(tt.data); err == nil {
+				t.Fatal("UnmarshalBinary() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestResponseMarshalBinaryRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		res  Response
+	}{
+		{name: "success", res: Response{0xDE, 0xAD, 0x90, 0x00}},
+		{name: "status only", res: Response{0x90, 0x00}},
+		{name: "short", res: Response{0x90}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.res.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+
+			var got Response
+			if err := got.UnmarshalBinary(data); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.res) {
+				t.Fatalf("UnmarshalBinary() = % X, want % X", []byte(got), []byte(tt.res))
+			}
+		})
+	}
+}
+
 func TestResponseAccessors(t *testing.T) {
 	tests := []struct {
 		name     string

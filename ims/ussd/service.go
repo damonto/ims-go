@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	ussdInfoPackage          = "g.3gpp.ussd"
-	ussdContentType          = "application/vnd.3gpp.ussd+xml"
-	ussdMultipartType        = "multipart/mixed"
-	defaultUSSDLang          = "en"
-	queuedUSSDRequestTimeout = 30 * time.Second
+	infoPackage                 = "g.3gpp.ussd"
+	xmlContentType              = "application/vnd.3gpp.ussd+xml"
+	mixedMultipartType          = "multipart/mixed"
+	defaultLang                 = "en"
+	defaultQueuedRequestTimeout = 30 * time.Second
 )
 
 type Config struct {
@@ -79,14 +79,14 @@ type Session struct {
 	inviteSeq        int64
 	language         string
 	networkInitiated bool
-	responseKind     ussdDialogKind
+	responseKind     dialogKind
 	inviteOK         sip.Message
 	ackCh            chan struct{}
 	acked            bool
 	awaitingInfo     bool
 	events           chan Message
 	remoteCSeqs      map[string]struct{}
-	pendingInitial   *queuedUSSDRequest
+	pendingInitial   *queuedRequest
 	deliveringInvite bool
 
 	mu     sync.Mutex
@@ -95,23 +95,23 @@ type Session struct {
 
 type USSDSession = Session
 
-type ussdDialogKind uint8
+type dialogKind uint8
 
 const (
-	ussdDialogKindNone ussdDialogKind = iota
-	ussdDialogKindRequest
-	ussdDialogKindNotify
+	dialogKindNone dialogKind = iota
+	dialogKindRequest
+	dialogKindNotify
 )
 
-type ussdXML struct {
-	XMLName   xml.Name    `xml:"ussd-data"`
-	Language  string      `xml:"language,omitempty"`
-	String    string      `xml:"ussd-string,omitempty"`
-	ErrorCode int         `xml:"error-code,omitempty"`
-	AnyExt    *ussdAnyExt `xml:"anyExt,omitempty"`
+type xmlPayload struct {
+	XMLName   xml.Name `xml:"ussd-data"`
+	Language  string   `xml:"language,omitempty"`
+	String    string   `xml:"ussd-string,omitempty"`
+	ErrorCode int      `xml:"error-code,omitempty"`
+	AnyExt    *anyExt  `xml:"anyExt,omitempty"`
 }
 
-type ussdAnyExt struct {
+type anyExt struct {
 	Request *struct{} `xml:"UnstructuredSS-Request,omitempty"`
 	Notify  *struct{} `xml:"UnstructuredSS-Notify,omitempty"`
 }
@@ -121,14 +121,14 @@ type multipartBodyPart struct {
 	Body   []byte
 }
 
-type queuedUSSDRequest struct {
+type queuedRequest struct {
 	msg     sip.Message
 	action  string
 	final   bool
 	timeout time.Duration
 }
 
-type ussdStart struct {
+type startRequest struct {
 	code      string
 	target    string
 	callID    string
@@ -168,7 +168,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 
 func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 	ctx = normalizeContext(ctx)
-	start, invite, err := s.newUSSDStart(code)
+	start, invite, err := s.newStart(code)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,7 @@ func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 	} else if status != 200 {
 		return nil, fmt.Errorf("starting USSD: unexpected status %d", status)
 	}
-	return s.startUSSDSession(ctx, start, invite, resp)
+	return s.startSession(ctx, start, invite, resp)
 }
 
 func (s *Service) CloseContext(ctx context.Context) error {
@@ -224,10 +224,10 @@ func (s *Service) CloseContext(ctx context.Context) error {
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
 	switch strings.ToUpper(req.Message.Method()) {
 	case "INVITE":
-		if !looksLikeUSSDInvite(req.Message) {
+		if !looksLikeInvite(req.Message) {
 			return false, nil
 		}
-		return true, s.handleIncomingUSSDInvite(ctx, req)
+		return true, s.handleIncomingInvite(ctx, req)
 	case "ACK":
 		ussdSession := s.lookupSessionForMessage(req.Message)
 		if ussdSession == nil {
@@ -239,7 +239,7 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 		if ussdSession != nil {
 			return true, ussdSession.handleRequest(ctx, req)
 		}
-		if looksLikeUSSDDialogMessage(req.Message) {
+		if looksLikeDialogMessage(req.Message) {
 			return true, s.sess.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
 		}
 		return false, nil
@@ -255,30 +255,30 @@ func (s *Service) HandleError(err error) {
 	s.logger.Debug("session error", "err", err)
 }
 
-func (s *Service) newUSSDStart(code string) (ussdStart, sip.Message, error) {
+func (s *Service) newStart(code string) (startRequest, sip.Message, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return ussdStart{}, sip.Message{}, errors.New("starting USSD: code is empty")
+		return startRequest{}, sip.Message{}, errors.New("starting USSD: code is empty")
 	}
-	start := ussdStart{
+	start := startRequest{
 		code:      code,
 		callID:    sip.RandomAlphaNum(24),
 		sessionID: sip.RandomHex(32),
 		localTag:  sip.RandomAlphaNum(10),
 		branch:    sip.RandomAlphaNum(15),
 		inviteSeq: atomic.AddInt64(&s.cseq, 1),
-		language:  defaultValue(s.cfg.Language, defaultUSSDLang),
+		language:  defaultValue(s.cfg.Language, defaultLang),
 	}
 	start.target = s.ussdTargetURI(start.code)
-	boundary, body, err := s.buildUSSDInviteBody(start.code, start.language)
+	boundary, body, err := s.buildInviteBody(start.code, start.language)
 	if err != nil {
-		return ussdStart{}, sip.Message{}, err
+		return startRequest{}, sip.Message{}, err
 	}
-	return start, s.buildUSSDInvite(start, boundary, body), nil
+	return start, s.buildInvite(start, boundary, body), nil
 }
 
-func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, error) {
-	payload, err := (ussdXMLBody{Message: Message{Text: code, Language: language}}).MarshalText()
+func (s *Service) buildInviteBody(code, language string) (string, []byte, error) {
+	payload, err := (xmlBody{Message: Message{Text: code, Language: language}}).MarshalText()
 	if err != nil {
 		return "", nil, fmt.Errorf("starting USSD: encoding XML payload: %w", err)
 	}
@@ -290,7 +290,7 @@ func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, er
 		},
 		{
 			Header: textproto.MIMEHeader{
-				"Content-Type":        {ussdContentType},
+				"Content-Type":        {xmlContentType},
 				"Content-Disposition": {"render;handling=optional"},
 			},
 			Body: payload,
@@ -302,7 +302,7 @@ func (s *Service) buildUSSDInviteBody(code, language string) (string, []byte, er
 	return boundary, body, nil
 }
 
-func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte) sip.Message {
+func (s *Service) buildInvite(start startRequest, boundary string, body []byte) sip.Message {
 	state := s.reg.State()
 	senderIdentity := ussdPreferredIdentity(state)
 	msg := sip.NewRequest("INVITE", start.target)
@@ -316,15 +316,15 @@ func (s *Service) buildUSSDInvite(start ussdStart, boundary string, body []byte)
 	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
 	msg.Headers.Add("Contact", contactValue(state))
 	msg.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
-	msg.Headers.Add("Recv-Info", ussdInfoPackage)
+	msg.Headers.Add("Recv-Info", infoPackage)
 	s.reg.RequestPolicy().Apply(&msg)
-	msg.Headers.Add("Content-Type", fmt.Sprintf("%s; boundary=%s", ussdMultipartType, boundary))
+	msg.Headers.Add("Content-Type", fmt.Sprintf("%s; boundary=%s", mixedMultipartType, boundary))
 	msg.Body = body
 	return msg
 }
 
-func (s *Service) startUSSDSession(ctx context.Context, start ussdStart, invite, resp sip.Message) (*Session, error) {
-	if err := validateUSSDInviteOK(resp); err != nil {
+func (s *Service) startSession(ctx context.Context, start startRequest, invite, resp sip.Message) (*Session, error) {
+	if err := validateInviteOK(resp); err != nil {
 		return nil, fmt.Errorf("starting USSD: validating 200 OK: %w", err)
 	}
 	ussdSession := &Session{
@@ -341,7 +341,7 @@ func (s *Service) startUSSDSession(ctx context.Context, start ussdStart, invite,
 		language:     start.language,
 		events:       make(chan Message, 16),
 		remoteCSeqs:  make(map[string]struct{}),
-		responseKind: ussdDialogKindRequest,
+		responseKind: dialogKindRequest,
 	}
 	if err := s.storeSession(ussdSession); err != nil {
 		return nil, err
@@ -364,19 +364,19 @@ func (s *Service) cancelInvite(parent context.Context, invite sip.Message) {
 	_ = s.sess.Send(ctx, buildCancel(invite))
 }
 
-func (s *Service) handleIncomingUSSDInvite(ctx context.Context, req session.Request) error {
-	if handled, err := s.handleExistingUSSDInvite(ctx, req); handled || err != nil {
+func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request) error {
+	if handled, err := s.handleExistingInvite(ctx, req); handled || err != nil {
 		return err
 	}
-	payload, err := validateIncomingUSSDInvite(req.Message)
+	payload, err := validateIncomingInvite(req.Message)
 	if err != nil {
 		return s.sess.WriteStatus(ctx, req, 488, "Not Acceptable Here")
 	}
-	ussdSession := s.newIncomingUSSDSession(req.Message, payload)
+	ussdSession := s.newIncomingSession(req.Message, payload)
 	if err := s.sess.WriteStatus(ctx, req, 100, "Trying"); err != nil {
 		return fmt.Errorf("handling USSD INVITE: sending 100 Trying: %w", err)
 	}
-	ussdSession.inviteOK = s.buildIncomingUSSDInviteOK(req.Message, ussdSession.localURI, ussdSession.localTag)
+	ussdSession.inviteOK = s.buildIncomingInviteOK(req.Message, ussdSession.localURI, ussdSession.localTag)
 	if err := s.storeSession(ussdSession); err != nil {
 		return err
 	}
@@ -394,7 +394,7 @@ func (s *Service) handleIncomingUSSDInvite(ctx context.Context, req session.Requ
 	return nil
 }
 
-func (s *Service) handleExistingUSSDInvite(ctx context.Context, req session.Request) (bool, error) {
+func (s *Service) handleExistingInvite(ctx context.Context, req session.Request) (bool, error) {
 	ussdSession := s.lookupIncomingInviteSession(req.Message)
 	if ussdSession == nil {
 		return false, nil
@@ -405,7 +405,7 @@ func (s *Service) handleExistingUSSDInvite(ctx context.Context, req session.Requ
 	return true, s.sess.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
 }
 
-func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Session {
+func (s *Service) newIncomingSession(msg sip.Message, payload Message) *Session {
 	state := s.reg.State()
 	localTag := sip.RandomAlphaNum(10)
 	remoteTo := msg.Header("From")
@@ -425,7 +425,7 @@ func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Sess
 		targetURI:        targetURI,
 		routeSet:         append([]string(nil), msg.HeadersByName("Record-Route")...),
 		inviteSeq:        sip.CSeqNumber(msg.Header("CSeq")),
-		language:         defaultValue(payload.Language, defaultValue(s.cfg.Language, defaultUSSDLang)),
+		language:         defaultValue(payload.Language, defaultValue(s.cfg.Language, defaultLang)),
 		networkInitiated: true,
 		responseKind:     kindFromPayload(payload),
 		ackCh:            make(chan struct{}),
@@ -434,12 +434,12 @@ func (s *Service) newIncomingUSSDSession(msg sip.Message, payload Message) *Sess
 	}
 }
 
-func (s *Service) buildIncomingUSSDInviteOK(msg sip.Message, localURI, localTag string) sip.Message {
+func (s *Service) buildIncomingInviteOK(msg sip.Message, localURI, localTag string) sip.Message {
 	ok := sip.NewResponse(200, "OK")
 	ok.Headers = sip.ResponseHeaders(msg, 200)
 	ok.Headers = sip.UpsertHeader(ok.Headers, "To", sip.WithTag(msg.Header("To"), localURI, localTag))
 	ok.Headers.Add("Contact", contactValue(s.reg.State()))
-	ok.Headers.Add("Recv-Info", ussdInfoPackage)
+	ok.Headers.Add("Recv-Info", infoPackage)
 	ok.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
 	ok.Headers.Add("Content-Type", "application/sdp")
 	ok.Body = []byte(s.ussdSDP())
@@ -564,9 +564,9 @@ func (s *Session) Reply(ctx context.Context, text string) error {
 		return fmt.Errorf("replying USSD: encoding XML payload: %w", err)
 	}
 	msg := s.buildDialogRequest("INFO", payload)
-	msg.Headers.Add("Info-Package", ussdInfoPackage)
+	msg.Headers.Add("Info-Package", infoPackage)
 	msg.Headers.Add("Content-Disposition", "info-package")
-	msg.Headers.Add("Content-Type", ussdContentType)
+	msg.Headers.Add("Content-Type", xmlContentType)
 	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
 		return err
 	}
@@ -577,14 +577,14 @@ func (s *Session) ReplyError(ctx context.Context, errorCode int) error {
 	if err := s.ensureActive("replying USSD"); err != nil {
 		return err
 	}
-	payload, err := (ussdXMLBody{Message: Message{Language: s.currentLanguage(), ErrorCode: normalizeUSSDErrorCode(errorCode)}}).MarshalText()
+	payload, err := (xmlBody{Message: Message{Language: s.currentLanguage(), ErrorCode: normalizeErrorCode(errorCode)}}).MarshalText()
 	if err != nil {
 		return fmt.Errorf("replying USSD: encoding error payload: %w", err)
 	}
 	msg := s.buildDialogRequest("INFO", payload)
-	msg.Headers.Add("Info-Package", ussdInfoPackage)
+	msg.Headers.Add("Info-Package", infoPackage)
 	msg.Headers.Add("Content-Disposition", "info-package")
-	msg.Headers.Add("Content-Type", ussdContentType)
+	msg.Headers.Add("Content-Type", xmlContentType)
 	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
 		return err
 	}
@@ -605,7 +605,7 @@ func (s *Session) End(ctx context.Context, text string) error {
 	}
 	msg := s.buildDialogRequest("BYE", payload)
 	if len(payload) > 0 {
-		msg.Headers.Add("Content-Type", ussdContentType)
+		msg.Headers.Add("Content-Type", xmlContentType)
 	}
 	if queued, err := s.queueInitialRequest(ctx, msg, "ending USSD", true); queued || err != nil {
 		return err
@@ -621,12 +621,12 @@ func (s *Session) EndError(ctx context.Context, errorCode int) error {
 	if err := s.ensureActive("ending USSD"); err != nil {
 		return err
 	}
-	payload, err := (ussdXMLBody{Message: Message{Language: s.currentLanguage(), ErrorCode: normalizeUSSDErrorCode(errorCode), Final: true}}).MarshalText()
+	payload, err := (xmlBody{Message: Message{Language: s.currentLanguage(), ErrorCode: normalizeErrorCode(errorCode), Final: true}}).MarshalText()
 	if err != nil {
 		return fmt.Errorf("ending USSD: encoding error payload: %w", err)
 	}
 	msg := s.buildDialogRequest("BYE", payload)
-	msg.Headers.Add("Content-Type", ussdContentType)
+	msg.Headers.Add("Content-Type", xmlContentType)
 	if queued, err := s.queueInitialRequest(ctx, msg, "ending USSD", true); queued || err != nil {
 		return err
 	}
@@ -648,7 +648,7 @@ func (s *Session) endDirect(ctx context.Context, text string) error {
 	}
 	msg := s.buildDialogRequest("BYE", payload)
 	if len(payload) > 0 {
-		msg.Headers.Add("Content-Type", ussdContentType)
+		msg.Headers.Add("Content-Type", xmlContentType)
 	}
 	resp, err := s.service.sess.Exchange(ctx, msg)
 	if err != nil {
@@ -663,16 +663,16 @@ func (s *Session) endDirect(ctx context.Context, text string) error {
 func (s *Session) marshalDialogPayload(msg Message) ([]byte, error) {
 	if s.networkInitiated {
 		switch s.dialogKind() {
-		case ussdDialogKindRequest:
+		case dialogKindRequest:
 			msg.Request = true
-		case ussdDialogKindNotify:
+		case dialogKindNotify:
 			msg.Notify = true
 		}
 	}
-	return (ussdXMLBody{Message: msg}).MarshalText()
+	return (xmlBody{Message: msg}).MarshalText()
 }
 
-func (s *Session) dialogKind() ussdDialogKind {
+func (s *Session) dialogKind() dialogKind {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.responseKind
@@ -814,7 +814,7 @@ func (s *Session) handleACK() {
 }
 
 func (s *Session) handleInfo(ctx context.Context, req session.Request) error {
-	payload, err := validateInboundUSSDInfo(req.Message, s.networkInitiated)
+	payload, err := validateInboundInfo(req.Message, s.networkInitiated)
 	if err != nil {
 		return s.service.sess.WriteStatus(ctx, req, 415, "Unsupported Media Type")
 	}
@@ -837,7 +837,7 @@ func (s *Session) handleBye(ctx context.Context, req session.Request) error {
 	var payload Message
 	hasPayload := len(req.Message.Body) > 0 || strings.TrimSpace(req.Message.Header("Content-Type")) != ""
 	if hasPayload {
-		decoded, err := decodeSingleUSSDPayload("parsing USSD BYE", req.Message)
+		decoded, err := decodeSinglePayload("parsing USSD BYE", req.Message)
 		if err != nil {
 			return s.service.sess.WriteStatus(ctx, req, 415, "Unsupported Media Type")
 		}
@@ -883,7 +883,7 @@ func (s *Session) isDuplicateRemote(msg sip.Message) bool {
 	return false
 }
 
-func (s *Session) markACK() *queuedUSSDRequest {
+func (s *Session) markACK() *queuedRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.acked {
@@ -900,7 +900,7 @@ func (s *Session) markACK() *queuedUSSDRequest {
 
 func (s *Session) setDialogKind(payload Message) {
 	kind := kindFromPayload(payload)
-	if kind == ussdDialogKindNone {
+	if kind == dialogKindNone {
 		return
 	}
 	s.mu.Lock()
@@ -975,7 +975,7 @@ func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, acti
 	if !s.deliveringInvite {
 		return false, nil
 	}
-	s.pendingInitial = &queuedUSSDRequest{
+	s.pendingInitial = &queuedRequest{
 		msg:     msg,
 		action:  action,
 		final:   final,
@@ -1040,11 +1040,11 @@ func incomingInviteKey(msg sip.Message) string {
 	return requestURI + "|" + toTag + "|" + fromTag + "|" + callID + "|" + cseq + "|" + via
 }
 
-func validateUSSDInviteOK(msg sip.Message) error {
-	if !sip.TokenListContains(msg.Header("Recv-Info"), ussdInfoPackage) {
-		return fmt.Errorf("missing Recv-Info %q", ussdInfoPackage)
+func validateInviteOK(msg sip.Message) error {
+	if !sip.TokenListContains(msg.Header("Recv-Info"), infoPackage) {
+		return fmt.Errorf("missing Recv-Info %q", infoPackage)
 	}
-	if !acceptsUSSDMedia(msg.Header("Accept")) {
+	if !acceptsMedia(msg.Header("Accept")) {
 		return errors.New("missing required Accept media types")
 	}
 	if err := validateMessageSDP(msg); err != nil {
@@ -1053,14 +1053,14 @@ func validateUSSDInviteOK(msg sip.Message) error {
 	return nil
 }
 
-func validateIncomingUSSDInvite(msg sip.Message) (Message, error) {
-	if !sip.TokenListContains(msg.Header("Recv-Info"), ussdInfoPackage) {
-		return Message{}, fmt.Errorf("missing Recv-Info %q", ussdInfoPackage)
+func validateIncomingInvite(msg sip.Message) (Message, error) {
+	if !sip.TokenListContains(msg.Header("Recv-Info"), infoPackage) {
+		return Message{}, fmt.Errorf("missing Recv-Info %q", infoPackage)
 	}
-	if !acceptsUSSDMedia(msg.Header("Accept")) {
+	if !acceptsMedia(msg.Header("Accept")) {
 		return Message{}, errors.New("missing required Accept media types")
 	}
-	payload, hasSDP, err := decodeUSSDInvitePayload(msg)
+	payload, hasSDP, err := decodeInvitePayload(msg)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1073,14 +1073,14 @@ func validateIncomingUSSDInvite(msg sip.Message) (Message, error) {
 	return payload, nil
 }
 
-func validateInboundUSSDInfo(msg sip.Message, requireRequestMarker bool) (Message, error) {
-	if !sip.TokenListContains(msg.Header("Info-Package"), ussdInfoPackage) {
-		return Message{}, fmt.Errorf("missing Info-Package %q", ussdInfoPackage)
+func validateInboundInfo(msg sip.Message, requireRequestMarker bool) (Message, error) {
+	if !sip.TokenListContains(msg.Header("Info-Package"), infoPackage) {
+		return Message{}, fmt.Errorf("missing Info-Package %q", infoPackage)
 	}
 	if !strings.EqualFold(contentDispositionType(msg.Header("Content-Disposition")), "info-package") {
 		return Message{}, errors.New("missing Content-Disposition info-package")
 	}
-	payload, err := decodeSingleUSSDPayload("parsing USSD INFO", msg)
+	payload, err := decodeSinglePayload("parsing USSD INFO", msg)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1090,12 +1090,12 @@ func validateInboundUSSDInfo(msg sip.Message, requireRequestMarker bool) (Messag
 	return payload, nil
 }
 
-func splitContentTypeHeader(action, contentType string) (string, map[string]string, error) {
-	contentType = strings.TrimSpace(contentType)
-	if contentType == "" {
+func splitContentTypeHeader(action, rawContentType string) (string, map[string]string, error) {
+	rawContentType = strings.TrimSpace(rawContentType)
+	if rawContentType == "" {
 		return "", nil, fmt.Errorf("%s: content type is empty", action)
 	}
-	mediaType, params, err := mime.ParseMediaType(contentType)
+	mediaType, params, err := mime.ParseMediaType(rawContentType)
 	if err != nil {
 		return "", nil, fmt.Errorf("%s: content type: %w", action, err)
 	}
@@ -1114,13 +1114,13 @@ func readMultipartMessageBody(action string, params map[string]string, data []by
 	return body, nil
 }
 
-func decodeMultipartUSSDPayload(action string, body multipartBody) (Message, error) {
+func decodeMultipartPayload(action string, body multipartBody) (Message, error) {
 	payload, ok, err := body.ussdPayload()
 	if err != nil {
 		return Message{}, err
 	}
 	if !ok {
-		return Message{}, fmt.Errorf("%s: %s part not found", action, ussdContentType)
+		return Message{}, fmt.Errorf("%s: %s part not found", action, xmlContentType)
 	}
 	return payload, nil
 }
@@ -1144,19 +1144,19 @@ func validateMultipartMessageSDP(action string, body multipartBody) error {
 	return validateSDPBody(part.Body)
 }
 
-func decodeUSSDInvitePayload(msg sip.Message) (Message, bool, error) {
+func decodeInvitePayload(msg sip.Message) (Message, bool, error) {
 	mediaType, params, err := splitContentTypeHeader("parsing USSD INVITE", msg.Header("Content-Type"))
 	if err != nil {
 		return Message{}, false, err
 	}
-	if mediaType != ussdMultipartType {
+	if mediaType != mixedMultipartType {
 		return Message{}, false, fmt.Errorf("parsing USSD INVITE: unsupported content type %q", mediaType)
 	}
 	body, err := readMultipartMessageBody("parsing USSD INVITE", params, msg.Body)
 	if err != nil {
 		return Message{}, false, err
 	}
-	payload, err := decodeMultipartUSSDPayload("parsing USSD INVITE", body)
+	payload, err := decodeMultipartPayload("parsing USSD INVITE", body)
 	if err != nil {
 		return Message{}, false, err
 	}
@@ -1175,7 +1175,7 @@ func validateMessageSDP(msg sip.Message) error {
 	switch mediaType {
 	case "application/sdp":
 		return validateSDPBody(msg.Body)
-	case ussdMultipartType:
+	case mixedMultipartType:
 		body, err := readMultipartMessageBody("validating SDP", params, msg.Body)
 		if err != nil {
 			return err
@@ -1213,52 +1213,52 @@ func validateSDPBody(body []byte) error {
 	}
 }
 
-func decodeUSSDPayload(msg sip.Message) (Message, error) {
-	contentType := strings.TrimSpace(msg.Header("Content-Type"))
-	if contentType == "" {
+func decodePayload(msg sip.Message) (Message, error) {
+	rawContentType := strings.TrimSpace(msg.Header("Content-Type"))
+	if rawContentType == "" {
 		if len(msg.Body) == 0 {
 			return Message{}, nil
 		}
 		return Message{}, errors.New("parsing USSD payload: content type is empty")
 	}
-	mediaType, params, err := splitContentTypeHeader("parsing USSD payload", contentType)
+	mediaType, params, err := splitContentTypeHeader("parsing USSD payload", rawContentType)
 	if err != nil {
 		return Message{}, err
 	}
 	switch mediaType {
-	case ussdContentType:
-		return decodeUSSDXML(msg.Body)
-	case ussdMultipartType:
+	case xmlContentType:
+		return decodeXML(msg.Body)
+	case mixedMultipartType:
 		body, err := readMultipartMessageBody("parsing USSD payload", params, msg.Body)
 		if err != nil {
 			return Message{}, err
 		}
-		return decodeMultipartUSSDPayload("parsing USSD payload", body)
+		return decodeMultipartPayload("parsing USSD payload", body)
 	default:
 		return Message{}, fmt.Errorf("parsing USSD payload: unsupported content type %q", mediaType)
 	}
 }
 
-func decodeSingleUSSDPayload(action string, msg sip.Message) (Message, error) {
+func decodeSinglePayload(action string, msg sip.Message) (Message, error) {
 	mediaType, _, err := splitContentTypeHeader(action, msg.Header("Content-Type"))
 	if err != nil {
 		return Message{}, err
 	}
-	if mediaType != ussdContentType {
+	if mediaType != xmlContentType {
 		return Message{}, fmt.Errorf("%s: unsupported content type %q", action, mediaType)
 	}
-	return decodeUSSDXML(msg.Body)
+	return decodeXML(msg.Body)
 }
 
-func decodeUSSDXML(data []byte) (Message, error) {
-	var payload ussdXMLBody
+func decodeXML(data []byte) (Message, error) {
+	var payload xmlBody
 	if err := payload.UnmarshalText(data); err != nil {
 		return Message{}, err
 	}
 	return payload.Message, nil
 }
 
-func normalizeUSSDErrorCode(code int) int {
+func normalizeErrorCode(code int) int {
 	switch code {
 	case 0, 1, 2, 3:
 		return code
@@ -1290,24 +1290,24 @@ func contentDispositionType(value string) string {
 	return strings.TrimSpace(parts[0])
 }
 
-func acceptsUSSDMedia(value string) bool {
+func acceptsMedia(value string) bool {
 	lower := strings.ToLower(value)
-	return strings.Contains(lower, ussdContentType) && strings.Contains(lower, "application/sdp") && strings.Contains(lower, ussdMultipartType)
+	return strings.Contains(lower, xmlContentType) && strings.Contains(lower, "application/sdp") && strings.Contains(lower, mixedMultipartType)
 }
 
-func looksLikeUSSDInvite(msg sip.Message) bool {
+func looksLikeInvite(msg sip.Message) bool {
 	if !strings.EqualFold(msg.Method(), "INVITE") {
 		return false
 	}
-	return sip.TokenListContains(msg.Header("Recv-Info"), ussdInfoPackage) || acceptsUSSDMedia(msg.Header("Accept"))
+	return sip.TokenListContains(msg.Header("Recv-Info"), infoPackage) || acceptsMedia(msg.Header("Accept"))
 }
 
-func looksLikeUSSDDialogMessage(msg sip.Message) bool {
+func looksLikeDialogMessage(msg sip.Message) bool {
 	if strings.EqualFold(msg.Method(), "INFO") {
-		return sip.TokenListContains(msg.Header("Info-Package"), ussdInfoPackage) || strings.Contains(strings.ToLower(msg.Header("Content-Type")), ussdContentType)
+		return sip.TokenListContains(msg.Header("Info-Package"), infoPackage) || strings.Contains(strings.ToLower(msg.Header("Content-Type")), xmlContentType)
 	}
 	if strings.EqualFold(msg.Method(), "BYE") {
-		return strings.Contains(strings.ToLower(msg.Header("Content-Type")), ussdContentType)
+		return strings.Contains(strings.ToLower(msg.Header("Content-Type")), xmlContentType)
 	}
 	return false
 }
@@ -1323,14 +1323,14 @@ func reverseValues(values []string) []string {
 	return out
 }
 
-func kindFromPayload(payload Message) ussdDialogKind {
+func kindFromPayload(payload Message) dialogKind {
 	if payload.Request {
-		return ussdDialogKindRequest
+		return dialogKindRequest
 	}
 	if payload.Notify {
-		return ussdDialogKindNotify
+		return dialogKindNotify
 	}
-	return ussdDialogKindNone
+	return dialogKindNone
 }
 
 func nonEmpty(values ...string) string {
@@ -1394,7 +1394,7 @@ func normalizeContext(ctx context.Context) context.Context {
 func queuedRequestTimeout(ctx context.Context) (time.Duration, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return queuedUSSDRequestTimeout, nil
+		return defaultQueuedRequestTimeout, nil
 	}
 	timeout := time.Until(deadline)
 	if timeout <= 0 {

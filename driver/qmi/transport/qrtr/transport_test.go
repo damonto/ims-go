@@ -4,17 +4,17 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/damonto/ims-client/driver/qmi/core"
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 )
 
 func TestMarshalRequest(t *testing.T) {
-	req := core.Request{
+	req := protocol.Request{
 		TransactionID: 3,
-		MessageID:     core.MessageReadTransparent,
-		TLVs: core.TLVs{
-			core.TLVBytes(0x01, []byte{byte(core.SessionCardSlot1), 0x00}),
-			core.TLVBytes(0x02, []byte{0x07, 0x6F, 0x00}),
-			core.TLVBytes(0x03, []byte{0x00, 0x00, 0x09, 0x00}),
+		MessageID:     protocol.MessageReadTransparent,
+		TLVs: protocol.TLVs{
+			tlv(0x01, []byte{0x06, 0x00}),
+			tlv(0x02, []byte{0x07, 0x6F, 0x00}),
+			tlv(0x03, []byte{0x00, 0x00, 0x09, 0x00}),
 		},
 	}
 	want := []byte{
@@ -39,10 +39,14 @@ func TestParseResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseResponse() error = %v", err)
 	}
-	if resp.TransactionID != 3 || resp.MessageID != core.MessageReadTransparent {
+	if resp.TransactionID != 3 || resp.MessageID != protocol.MessageReadTransparent {
 		t.Fatalf("ParseResponse() = %+v", resp)
 	}
-	if err := core.WithCardResult(resp); err != nil {
-		t.Fatalf("WithCardResult() error = %v", err)
+	if err := resp.TLVs.Error(); err != nil {
+		t.Fatalf("Result error = %v", err)
 	}
+}
+
+func tlv(typ byte, value []byte) protocol.TLV {
+	return protocol.TLV{Type: typ, Len: uint16(len(value)), Value: value}
 }

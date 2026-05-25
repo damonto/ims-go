@@ -1,58 +1,88 @@
 package qmi
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 
-	"github.com/damonto/ims-client/driver/qmi/core"
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 )
 
-func ParseResponse(data []byte) (core.Response, error) {
-	if len(data) < 11 {
-		return core.Response{}, errors.New("parsing QMI response: packet is too short")
+type response struct {
+	QMUXHeader
+	TransactionID uint16
+	MessageID     protocol.MessageID
+	MessageType   protocol.MessageType
+	MessageLength uint16
+	TLVs          protocol.TLVs
+}
+
+func ParseResponse(data []byte) (protocol.Response, error) {
+	var wire response
+	if err := wire.UnmarshalBinary(data); err != nil {
+		return protocol.Response{}, err
 	}
-	if data[0] != core.QMUXIfType {
-		return core.Response{}, fmt.Errorf("parsing QMI response: unexpected interface type 0x%02X", data[0])
+	return protocol.Response{
+		Service:       wire.ServiceType,
+		ClientID:      wire.ClientID,
+		TransactionID: wire.TransactionID,
+		MessageID:     wire.MessageID,
+		TLVs:          wire.TLVs,
+	}, nil
+}
+
+func (r *response) UnmarshalBinary(data []byte) error {
+	if len(data) < 12 {
+		return fmt.Errorf("parsing QMI response: data too short: got %d bytes", len(data))
 	}
 
-	resp := core.Response{
-		Service:  core.Service(data[4]),
-		ClientID: data[5],
+	reader := bytes.NewReader(data)
+	if err := binary.Read(reader, binary.LittleEndian, &r.QMUXHeader); err != nil {
+		return fmt.Errorf("parsing QMI response: read QMUX header: %w", err)
+	}
+	if r.QMUXHeader.IfType != protocol.QMUXIfType {
+		return fmt.Errorf("parsing QMI response: unexpected QMUX marker 0x%02X", r.QMUXHeader.IfType)
+	}
+	if got, want := len(data), int(r.QMUXHeader.Length)+1; got != want {
+		return fmt.Errorf("parsing QMI response: QMUX length mismatch: got %d bytes, header declares %d", got, want)
 	}
 
-	offset := 6
-	offset++
-	if resp.Service == core.ServiceControl {
-		resp.TransactionID = uint16(data[offset])
-		offset++
-	} else {
-		if len(data) < offset+2 {
-			return core.Response{}, errors.New("parsing QMI response: transaction ID is truncated")
+	if r.QMUXHeader.ServiceType == protocol.ServiceControl {
+		var header Header[uint8]
+		if err := binary.Read(reader, binary.LittleEndian, &header); err != nil {
+			return fmt.Errorf("parsing QMI response: read control QMI header: %w", err)
 		}
-		resp.TransactionID = binary.LittleEndian.Uint16(data[offset : offset+2])
-		offset += 2
+		r.MessageType = header.MessageType
+		r.TransactionID = uint16(header.TransactionID)
+		r.MessageID = header.MessageID
+		r.MessageLength = header.MessageLength
+	} else {
+		var header Header[uint16]
+		if err := binary.Read(reader, binary.LittleEndian, &header); err != nil {
+			return fmt.Errorf("parsing QMI response: read service QMI header: %w", err)
+		}
+		r.MessageType = header.MessageType
+		r.TransactionID = header.TransactionID
+		r.MessageID = header.MessageID
+		r.MessageLength = header.MessageLength
 	}
 
-	if len(data) < offset+4 {
-		return core.Response{}, errors.New("parsing QMI response: header is truncated")
+	if r.MessageType != protocol.MessageTypeResponse {
+		return fmt.Errorf("parsing QMI response: unexpected message type 0x%02X", r.MessageType)
 	}
-	resp.MessageID = core.MessageID(binary.LittleEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-
-	messageLength := int(binary.LittleEndian.Uint16(data[offset : offset+2]))
-	offset += 2
-	if len(data) < offset+messageLength {
-		return core.Response{}, errors.New("parsing QMI response: TLVs are truncated")
+	if got, want := reader.Len(), int(r.MessageLength); got != want {
+		return fmt.Errorf("parsing QMI response: QMI TLV length mismatch: got %d bytes, header declares %d", got, want)
 	}
-
-	tlvs, err := core.ParseTLVs(data[offset : offset+messageLength])
-	if err != nil {
-		return core.Response{}, err
+	if r.MessageLength > 0 {
+		tlvs, err := protocol.ParseTLVs(data[len(data)-int(r.MessageLength):])
+		if err != nil {
+			return err
+		}
+		r.TLVs = tlvs
 	}
-	resp.TLVs = tlvs
-	return resp, nil
+	return nil
 }
 
 func ReadFrame(r io.Reader) ([]byte, error) {

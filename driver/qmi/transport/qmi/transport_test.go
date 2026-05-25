@@ -4,26 +4,26 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/damonto/ims-client/driver/qmi/core"
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 )
 
 func TestMarshalRequest(t *testing.T) {
 	tests := []struct {
 		name string
-		req  core.Request
+		req  protocol.Request
 		want []byte
 	}{
 		{
 			name: "read transparent request",
-			req: core.Request{
-				Service:       core.ServiceUIM,
+			req: protocol.Request{
+				Service:       protocol.ServiceUIM,
 				ClientID:      7,
 				TransactionID: 3,
-				MessageID:     core.MessageReadTransparent,
-				TLVs: core.TLVs{
-					core.TLVBytes(0x01, []byte{byte(core.SessionCardSlot1), 0x00}),
-					core.TLVBytes(0x02, []byte{0x07, 0x6F, 0x00}),
-					core.TLVBytes(0x03, []byte{0x00, 0x00, 0x09, 0x00}),
+				MessageID:     protocol.MessageReadTransparent,
+				TLVs: protocol.TLVs{
+					tlv(0x01, []byte{0x06, 0x00}),
+					tlv(0x02, []byte{0x07, 0x6F, 0x00}),
+					tlv(0x03, []byte{0x00, 0x00, 0x09, 0x00}),
 				},
 			},
 			want: []byte{
@@ -36,14 +36,14 @@ func TestMarshalRequest(t *testing.T) {
 		},
 		{
 			name: "authenticate request",
-			req: core.Request{
-				Service:       core.ServiceUIM,
+			req: protocol.Request{
+				Service:       protocol.ServiceUIM,
 				ClientID:      7,
 				TransactionID: 4,
-				MessageID:     core.MessageAuthenticate,
-				TLVs: core.TLVs{
-					core.TLVBytes(0x01, []byte{byte(core.SessionPrimaryGWProvisioning), 0x00}),
-					core.TLVBytes(0x02, []byte{0x03, 0x04, 0x00, 0x10, 0x01, 0x10, 0x02}),
+				MessageID:     protocol.MessageAuthenticate,
+				TLVs: protocol.TLVs{
+					tlv(0x01, []byte{0x00, 0x00}),
+					tlv(0x02, []byte{0x03, 0x04, 0x00, 0x10, 0x01, 0x10, 0x02}),
 				},
 			},
 			want: []byte{
@@ -76,13 +76,14 @@ func TestParseResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseResponse() error = %v", err)
 	}
-	if resp.Service != core.ServiceUIM || resp.ClientID != 7 || resp.TransactionID != 3 || resp.MessageID != core.MessageReadTransparent {
+	if resp.Service != protocol.ServiceUIM || resp.ClientID != 7 || resp.TransactionID != 3 || resp.MessageID != protocol.MessageReadTransparent {
 		t.Fatalf("ParseResponse() = %+v", resp)
 	}
-	if err := core.MustResultOK(resp); err != nil {
-		t.Fatalf("MustResultOK() error = %v", err)
+	if err := resp.TLVs.Error(); err != nil {
+		t.Fatalf("Result error = %v", err)
 	}
-	if err := resp.TLVs.CardError(); err != nil {
-		t.Fatalf("CardError() error = %v", err)
-	}
+}
+
+func tlv(typ byte, value []byte) protocol.TLV {
+	return protocol.TLV{Type: typ, Len: uint16(len(value)), Value: value}
 }

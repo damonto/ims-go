@@ -24,6 +24,11 @@ type Message struct {
 	Body      []byte
 }
 
+var (
+	_ io.WriterTo   = Message{}
+	_ io.ReaderFrom = (*Message)(nil)
+)
+
 func NewRequest(method, uri string) Message {
 	return Message{StartLine: fmt.Sprintf("%s %s SIP/2.0", method, uri)}
 }

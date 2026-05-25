@@ -1,4 +1,4 @@
-package core
+package uim
 
 import (
 	"bytes"
@@ -273,7 +273,7 @@ func newUSIMISIMTransport() *simTransport {
 }
 
 func decodeSessionTLV(tlvs TLVs) (Session, []byte) {
-	value, _ := tlvs.Find(0x01)
+	value, _ := tlvValue(tlvs, 0x01)
 	if len(value) < 2 {
 		return 0, nil
 	}
@@ -281,7 +281,7 @@ func decodeSessionTLV(tlvs TLVs) (Session, []byte) {
 }
 
 func decodeFileTLV(tlvs TLVs) []byte {
-	value, _ := tlvs.Find(0x02)
+	value, _ := tlvValue(tlvs, 0x02)
 	if len(value) < 3 {
 		return nil
 	}
@@ -296,7 +296,7 @@ func decodeFileTLV(tlvs TLVs) []byte {
 }
 
 func decodeRecordTLV(tlvs TLVs) uint16 {
-	value, _ := tlvs.Find(0x03)
+	value, _ := tlvValue(tlvs, 0x03)
 	if len(value) < 2 {
 		return 0
 	}

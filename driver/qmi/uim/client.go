@@ -1,4 +1,4 @@
-package core
+package uim
 
 import (
 	"context"
@@ -179,7 +179,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 		return nil, err
 	}
 
-	value, ok := response.TLVs.Find(0x11)
+	value, ok := tlvValue(response.TLVs, 0x11)
 	if !ok {
 		return nil, errors.New("reading transparent file: read result TLV missing")
 	}
@@ -211,7 +211,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 		return nil, err
 	}
 
-	value, ok := response.TLVs.Find(0x11)
+	value, ok := tlvValue(response.TLVs, 0x11)
 	if !ok {
 		return nil, errors.New("reading record file: read result TLV missing")
 	}
@@ -224,7 +224,7 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 		return nil, err
 	}
 
-	value, ok := response.TLVs.Find(0x11)
+	value, ok := tlvValue(response.TLVs, 0x11)
 	if !ok {
 		return nil, errors.New("authenticating USIM: authenticate result TLV missing")
 	}
@@ -405,7 +405,7 @@ func (r *Reader) allocateClientID(ctx context.Context) error {
 		return err
 	}
 
-	value, ok := resp.TLVs.Find(0x01)
+	value, ok := tlvValue(resp.TLVs, 0x01)
 	if !ok || len(value) < 2 {
 		return errors.New("allocating QMI client ID: allocated client TLV missing")
 	}
@@ -546,7 +546,7 @@ func (r *Reader) request(
 }
 
 func decodeReaderFileAttributes(resp Response) (usimreader.FileAttributes, error) {
-	value, ok := resp.TLVs.Find(0x11)
+	value, ok := tlvValue(resp.TLVs, 0x11)
 	if !ok {
 		return usimreader.FileAttributes{}, errors.New("reading file attributes: attributes TLV missing")
 	}

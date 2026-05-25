@@ -3,6 +3,7 @@ package apdu
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"slices"
 	"strings"
 )
 
@@ -39,3 +40,12 @@ func (r Response) SW2() byte {
 func (r Response) OK() bool       { return r.SW() == 0x9000 }
 func (r Response) HasMore() bool  { return r.SW1() == 0x61 }
 func (r Response) String() string { return strings.ToUpper(hex.EncodeToString(r)) }
+
+func (r Response) MarshalBinary() ([]byte, error) {
+	return slices.Clone(r), nil
+}
+
+func (r *Response) UnmarshalBinary(data []byte) error {
+	*r = slices.Clone(data)
+	return nil
+}

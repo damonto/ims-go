@@ -3,7 +3,9 @@ package apdu
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -17,9 +19,56 @@ type Request struct {
 }
 
 func (r Request) APDU() []byte {
-	var apdu bytes.Buffer
-	_, _ = r.WriteTo(&apdu)
-	return apdu.Bytes()
+	data, _ := r.MarshalBinary()
+	return data
+}
+
+func (r Request) MarshalBinary() ([]byte, error) {
+	var buf bytes.Buffer
+	if _, err := r.WriteTo(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (r *Request) UnmarshalBinary(data []byte) error {
+	if len(data) < 4 {
+		return fmt.Errorf("unmarshaling APDU request: data too short: got %d bytes", len(data))
+	}
+
+	r.CLA = data[0]
+	r.INS = data[1]
+	r.P1 = data[2]
+	r.P2 = data[3]
+	r.Data = nil
+	r.Le = nil
+
+	rest := data[4:]
+	switch len(rest) {
+	case 0:
+		return nil
+	case 1:
+		le := rest[0]
+		r.Le = &le
+		return nil
+	}
+
+	length := int(rest[0])
+	if len(rest) < 1+length {
+		return fmt.Errorf("unmarshaling APDU request: data truncated: need %d bytes, got %d", 1+length, len(rest))
+	}
+	r.Data = slices.Clone(rest[1 : 1+length])
+
+	switch len(rest) {
+	case 1 + length:
+		return nil
+	case 2 + length:
+		le := rest[1+length]
+		r.Le = &le
+		return nil
+	default:
+		return fmt.Errorf("unmarshaling APDU request: trailing %d bytes", len(rest)-(1+length))
+	}
 }
 
 func (r Request) WriteTo(w io.Writer) (n int64, err error) {

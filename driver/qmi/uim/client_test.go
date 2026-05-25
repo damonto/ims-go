@@ -1,4 +1,4 @@
-package core
+package uim
 
 import (
 	"bytes"
@@ -368,7 +368,7 @@ func TestReaderCloseIsIdempotent(t *testing.T) {
 
 func assertTLV(t *testing.T, tlvs TLVs, typ byte, want []byte) {
 	t.Helper()
-	got, ok := tlvs.Find(typ)
+	got, ok := tlvValue(tlvs, typ)
 	if !ok {
 		t.Fatalf("TLV 0x%02X is missing", typ)
 	}

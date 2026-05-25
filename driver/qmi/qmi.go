@@ -5,8 +5,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/damonto/ims-client/driver/qmi/core"
 	qmitransport "github.com/damonto/ims-client/driver/qmi/transport/qmi"
+	"github.com/damonto/ims-client/driver/qmi/uim"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 )
 
@@ -18,5 +18,5 @@ func Open(ctx context.Context, device string, slot int) (usimreader.Reader, erro
 	if err != nil {
 		return nil, err
 	}
-	return core.Open(ctx, transport, uint8(slot), device)
+	return uim.Open(ctx, transport, uint8(slot), device)
 }

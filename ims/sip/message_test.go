@@ -74,6 +74,10 @@ func TestParseMessageErrors(t *testing.T) {
 			name: "invalid header",
 			data: "SIP/2.0 200 OK\r\nVia SIP/2.0/UDP 127.0.0.1:5060\r\nContent-Length: 0\r\n\r\n",
 		},
+		{
+			name: "lf line endings",
+			data: "SIP/2.0 200 OK\nVia: SIP/2.0/UDP 127.0.0.1:5060\nContent-Length: 0\n\n",
+		},
 	}
 
 	for _, tt := range tests {

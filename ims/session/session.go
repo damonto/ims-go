@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -239,7 +240,7 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 	if err := s.ensureOpen("writing response"); err != nil {
 		return err
 	}
-	if err := s.writeResponsePacket(ctx, req.Transport, req.Message, resp.Bytes()); err != nil {
+	if err := s.writeResponse(ctx, req.Transport, req.Message, resp); err != nil {
 		return err
 	}
 	s.recordServerTransactionResponse(req, resp)
@@ -411,8 +412,12 @@ func (s *Session) primaryTransport() Transport {
 }
 
 func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip.Message) error {
-	s.logger.Debug("sip message", "direction", "send", "start_line", req.StartLine, "sip_message", string(req.Bytes()))
-	if err := s.writePacket(ctx, transport, req.Bytes()); err != nil {
+	packet, err := messagePacket(req)
+	if err != nil {
+		return fmt.Errorf("encoding %s request: %w", req.Method(), err)
+	}
+	s.logger.Debug("sip message", "direction", "send", "start_line", req.StartLine, "sip_message", string(packet))
+	if err := s.writePacket(ctx, transport, packet); err != nil {
 		return fmt.Errorf("sending %s: %w", req.Method(), err)
 	}
 	return nil
@@ -505,8 +510,20 @@ func (s *Session) writePacketTo(ctx context.Context, transport Transport, data [
 	return writer.WritePacketTo(ctx, data, addr)
 }
 
-func (s *Session) writeResponsePacket(ctx context.Context, transport Transport, req sip.Message, data []byte) error {
+func (s *Session) writeResponse(ctx context.Context, transport Transport, req sip.Message, resp sip.Message) error {
+	data, err := messagePacket(resp)
+	if err != nil {
+		return fmt.Errorf("encoding %d response: %w", resp.StatusCode(), err)
+	}
 	return s.writePacketTo(ctx, transport, data, responseDestination(transport.RemoteAddr(), req.Header("Via")))
+}
+
+func messagePacket(msg sip.Message) ([]byte, error) {
+	var buf bytes.Buffer
+	if _, err := msg.WriteTo(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func responseDestination(remote net.Addr, via string) net.Addr {

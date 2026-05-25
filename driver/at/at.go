@@ -3,11 +3,9 @@ package at
 import (
 	"bufio"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -17,21 +15,14 @@ import (
 
 const defaultBaudRate = 115200
 
+var errReadTimeout = errors.New("read timeout")
+
 type Reader struct {
 	port   io.ReadWriteCloser
 	reader *bufio.Reader
 
 	mu     sync.Mutex
 	closed bool
-}
-
-type csimCommand struct {
-	Payload string
-}
-
-type csimResponse struct {
-	Payload string
-	raw     []byte
 }
 
 func New(device string, baudRate int) (usimreader.Reader, error) {
@@ -62,11 +53,11 @@ func Open(device string, baudRate int) (usimreader.Reader, error) {
 	return New(device, baudRate)
 }
 
-func newCSIMCommand(req []byte) (csimCommand, error) {
+func newCSIMCommand(req []byte) (CSIMCommand, error) {
 	if req == nil {
-		return csimCommand{}, errors.New("building AT+CSIM command: request is nil")
+		return nil, errors.New("building AT+CSIM command: request is nil")
 	}
-	return csimCommand{Payload: strings.ToUpper(hex.EncodeToString(req))}, nil
+	return CSIMCommand(req), nil
 }
 
 func baudRateOrDefault(baudRate int) int {
@@ -78,66 +69,6 @@ func baudRateOrDefault(baudRate int) int {
 
 func defaultInitCommands() []string {
 	return []string{"AT", "ATE0", "AT+CMEE=2"}
-}
-
-func (c csimCommand) MarshalText() ([]byte, error) {
-	if _, err := hex.DecodeString(c.Payload); err != nil {
-		return nil, fmt.Errorf("marshaling AT+CSIM command payload: %w", err)
-	}
-	return []byte(fmt.Sprintf("AT+CSIM=%d,%q", len(c.Payload), c.Payload)), nil
-}
-
-func (c *csimResponse) UnmarshalText(text []byte) error {
-	line := strings.TrimSpace(string(text))
-	if idx := strings.LastIndexAny(line, "\r\n"); idx >= 0 {
-		line = strings.TrimSpace(line[idx+1:])
-	}
-	if line == "" {
-		return errors.New("unmarshaling +CSIM response: empty payload")
-	}
-
-	lastIdx := strings.LastIndex(line, ",")
-	if lastIdx == -1 {
-		return errors.New("unmarshaling +CSIM response: missing payload separator")
-	}
-
-	payloadText := strings.TrimSpace(line[lastIdx+1:])
-	if len(payloadText) < 2 || payloadText[0] != '"' || payloadText[len(payloadText)-1] != '"' {
-		return errors.New("unmarshaling +CSIM response: payload is not quoted")
-	}
-	payload := payloadText[1 : len(payloadText)-1]
-
-	if colon := strings.LastIndex(line[:lastIdx], ":"); colon >= 0 {
-		declaredText := strings.TrimSpace(line[colon+1 : lastIdx])
-		declaredLen, err := strconv.Atoi(declaredText)
-		if err != nil {
-			return fmt.Errorf("unmarshaling +CSIM length: %w", err)
-		}
-		if declaredLen != len(payload) {
-			return fmt.Errorf("unmarshaling +CSIM response: declared length %d does not match payload length %d", declaredLen, len(payload))
-		}
-	}
-
-	raw, err := hex.DecodeString(payload)
-	if err != nil {
-		return fmt.Errorf("decoding +CSIM payload: %w", err)
-	}
-
-	c.Payload = payload
-	c.raw = raw
-	return nil
-}
-
-func (c csimResponse) MarshalBinary() ([]byte, error) {
-	if c.raw != nil {
-		return append([]byte(nil), c.raw...), nil
-	}
-
-	raw, err := hex.DecodeString(c.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("decoding +CSIM payload: %w", err)
-	}
-	return raw, nil
 }
 
 func (d *Reader) Transmit(ctx context.Context, req []byte) ([]byte, error) {
@@ -156,16 +87,14 @@ func (d *Reader) Transmit(ctx context.Context, req []byte) ([]byte, error) {
 		return nil, fmt.Errorf("transmitting APDU %X: %w", req, err)
 	}
 
-	var response csimResponse
+	var response CSIMResponse
 	if err := response.UnmarshalText([]byte(text)); err != nil {
 		return nil, fmt.Errorf("transmitting APDU %X: %w", req, err)
 	}
-
-	raw, err := response.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("transmitting APDU %X: %w", req, err)
+	if len(response) < 2 {
+		return nil, fmt.Errorf("transmitting APDU %X: invalid response status word", req)
 	}
-	return raw, nil
+	return append([]byte(nil), response...), nil
 }
 
 func (d *Reader) run(ctx context.Context, command string) (string, error) {
@@ -180,7 +109,7 @@ func (d *Reader) run(ctx context.Context, command string) (string, error) {
 	if d.closed {
 		return "", errors.New("using serial reader: reader is closed")
 	}
-	if _, err := d.port.Write([]byte(command + "\r\n")); err != nil {
+	if err := writeFull(d.port, []byte(command+"\r\n")); err != nil {
 		return "", fmt.Errorf("writing AT command %q: %w", command, err)
 	}
 
@@ -215,6 +144,20 @@ func (d *Reader) run(ctx context.Context, command string) (string, error) {
 			builder.WriteString(line)
 		}
 	}
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
 
 func (d *Reader) Close() error {

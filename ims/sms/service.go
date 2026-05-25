@@ -41,19 +41,19 @@ type Service struct {
 	cleanupCancel context.CancelFunc
 	cleanupWG     sync.WaitGroup
 
-	mu           sync.Mutex
-	cseq         int64
-	rpRef        uint32
-	smsRefs      map[byte]struct{}
-	smsPending   map[string]smsPendingEntry
-	smsSubmitted map[string]smsSubmittedEntry
-	recentSMS    map[string]time.Time
-	concatSMS    map[string]concatSMSState
-	moActive     bool
-	moSending    bool
-	moPending    int
-	mtActive     bool
-	closed       bool
+	mu        sync.Mutex
+	cseq      int64
+	rpRef     uint32
+	rpRefs    map[byte]struct{}
+	pending   map[string]pendingEntry
+	submitted map[string]submittedEntry
+	recent    map[string]time.Time
+	concat    map[string]concatState
+	moActive  bool
+	moSending bool
+	moPending int
+	mtActive  bool
+	closed    bool
 }
 
 type SubmissionSegment struct {
@@ -65,7 +65,7 @@ type SubmissionSegment struct {
 	SubmittedAt time.Time
 }
 
-type outboundSMSSegment struct {
+type outboundSegment struct {
 	index            int
 	count            int
 	to               string
@@ -81,29 +81,29 @@ type outboundSMSSegment struct {
 	reportCh         <-chan rpMessage
 }
 
-type smsPendingEntry struct {
+type pendingEntry struct {
 	rpRef     byte
 	reportCh  chan rpMessage
-	segment   outboundSMSSegment
-	response  smsSubmitResponse
+	segment   outboundSegment
+	response  submitResponse
 	expiresAt time.Time
 	async     bool
 }
 
-type smsSubmittedEntry struct {
+type submittedEntry struct {
 	rpRef     byte
 	expiresAt time.Time
-	segment   outboundSMSSegment
-	response  smsSubmitResponse
+	segment   outboundSegment
+	response  submitResponse
 	completed bool
 }
 
-type smsSubmitResponse struct {
+type submitResponse struct {
 	statusCode   int
 	reasonPhrase string
 }
 
-type concatSMSState struct {
+type concatState struct {
 	total     int
 	parts     map[int]string
 	updatedAt time.Time
@@ -119,15 +119,15 @@ type serviceCentreProvider interface {
 }
 
 const (
-	concatSMSRetention       = 10 * time.Minute
-	smsSubmitRetention       = 5 * time.Minute
-	smsDeliveryReportTimeout = 30 * time.Second
+	concatRetention       = 10 * time.Minute
+	submitRetention       = 5 * time.Minute
+	deliveryReportTimeout = 30 * time.Second
 )
 
-var smsSubmitReportTimeoutNanos atomic.Int64
+var submitReportTimeoutNanos atomic.Int64
 
 func init() {
-	setSMSSubmitReportTimeout(defaultSubmitReportTimeout)
+	setSubmitReportTimeout(defaultSubmitReportTimeout)
 }
 
 const defaultSubmitReportTimeout = 130 * time.Second
@@ -142,7 +142,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, errors.New("creating sms service: submit report timeout must be >= 0")
 	}
 	if cfg.SubmitReportTimeout == 0 {
-		cfg.SubmitReportTimeout = currentSMSSubmitReportTimeout()
+		cfg.SubmitReportTimeout = currentSubmitReportTimeout()
 	}
 	return cfg, nil
 }
@@ -170,11 +170,11 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 		logger:        slog.Default().With("component", "ims-sms"),
 		cleanupCtx:    cleanupCtx,
 		cleanupCancel: cleanupCancel,
-		smsRefs:       make(map[byte]struct{}),
-		smsPending:    make(map[string]smsPendingEntry),
-		smsSubmitted:  make(map[string]smsSubmittedEntry),
-		recentSMS:     make(map[string]time.Time),
-		concatSMS:     make(map[string]concatSMSState),
+		rpRefs:        make(map[byte]struct{}),
+		pending:       make(map[string]pendingEntry),
+		submitted:     make(map[string]submittedEntry),
+		recent:        make(map[string]time.Time),
+		concat:        make(map[string]concatState),
 	}
 	attachment, err := sess.Attach(s)
 	if err != nil {
@@ -182,7 +182,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 	}
 	s.attachment = attachment
 	s.cleanupWG.Go(func() {
-		s.runSMSSubmitCleanup()
+		s.runSubmitCleanup()
 	})
 	return s, nil
 }
@@ -204,11 +204,11 @@ func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegmen
 	}
 	submissions := make([]SubmissionSegment, 0, len(parts))
 	for i, part := range parts {
-		segment, err := s.newOutboundSMSSegment(to, sc, part, i, len(parts))
+		segment, err := s.newOutboundSegment(to, sc, part, i, len(parts))
 		if err != nil {
 			return nil, err
 		}
-		if err := s.sendSMSSegment(ctx, segment); err != nil {
+		if err := s.sendSegment(ctx, segment); err != nil {
 			return nil, err
 		}
 		submissions = append(submissions, SubmissionSegment{
@@ -255,27 +255,27 @@ func (s *Service) HandleError(err error) {
 	s.emitAsyncError(err)
 }
 
-func currentSMSSubmitReportTimeout() time.Duration {
-	return time.Duration(smsSubmitReportTimeoutNanos.Load())
+func currentSubmitReportTimeout() time.Duration {
+	return time.Duration(submitReportTimeoutNanos.Load())
 }
 
-func setSMSSubmitReportTimeout(timeout time.Duration) {
-	smsSubmitReportTimeoutNanos.Store(int64(timeout))
+func setSubmitReportTimeout(timeout time.Duration) {
+	submitReportTimeoutNanos.Store(int64(timeout))
 }
 
-func newConcatSMSState(total int) concatSMSState {
-	return concatSMSState{total: total, parts: make(map[int]string, max(total, 0))}
+func newConcatState(total int) concatState {
+	return concatState{total: total, parts: make(map[int]string, max(total, 0))}
 }
 
-func (state concatSMSState) expired(now time.Time) bool {
-	return now.Sub(state.updatedAt) > concatSMSRetention
+func (state concatState) expired(now time.Time) bool {
+	return now.Sub(state.updatedAt) > concatRetention
 }
 
-func (state *concatSMSState) reset(total int) {
-	*state = newConcatSMSState(total)
+func (state *concatState) reset(total int) {
+	*state = newConcatState(total)
 }
 
-func (state *concatSMSState) addPart(sequence int, text string, now time.Time) {
+func (state *concatState) addPart(sequence int, text string, now time.Time) {
 	if state.parts == nil {
 		state.parts = make(map[int]string, max(state.total, 0))
 	}
@@ -283,7 +283,7 @@ func (state *concatSMSState) addPart(sequence int, text string, now time.Time) {
 	state.updatedAt = now
 }
 
-func (state concatSMSState) joinedText() (string, bool) {
+func (state concatState) joinedText() (string, bool) {
 	if state.total <= 0 || len(state.parts) < state.total {
 		return "", false
 	}
@@ -298,23 +298,23 @@ func (state concatSMSState) joinedText() (string, bool) {
 	return strings.Join(parts, ""), true
 }
 
-func (s *Service) reserveSMSReference() (byte, error) {
+func (s *Service) reserveReference() (byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for range 256 {
 		ref := byte(atomic.AddUint32(&s.rpRef, 1))
-		if _, exists := s.smsRefs[ref]; exists {
+		if _, exists := s.rpRefs[ref]; exists {
 			continue
 		}
-		s.smsRefs[ref] = struct{}{}
+		s.rpRefs[ref] = struct{}{}
 		return ref, nil
 	}
 	return 0, errors.New("sending SMS: no free RP reference")
 }
 
-func (s *Service) releaseSMSReference(ref byte) {
+func (s *Service) releaseReference(ref byte) {
 	s.mu.Lock()
-	delete(s.smsRefs, ref)
+	delete(s.rpRefs, ref)
 	s.mu.Unlock()
 }
 
@@ -369,56 +369,56 @@ func (s *Service) endMTTransfer() {
 	s.mu.Unlock()
 }
 
-func (s *Service) registerSMSPending(callID string, rpRef byte) (<-chan rpMessage, error) {
+func (s *Service) registerPending(callID string, rpRef byte) (<-chan rpMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if callID == "" {
 		return nil, errors.New("sending SMS: call id is empty")
 	}
-	if _, exists := s.smsPending[callID]; exists {
+	if _, exists := s.pending[callID]; exists {
 		return nil, fmt.Errorf("sending SMS: duplicate Call-ID %q", callID)
 	}
 	ch := make(chan rpMessage, 1)
-	s.smsPending[callID] = smsPendingEntry{rpRef: rpRef, reportCh: ch}
+	s.pending[callID] = pendingEntry{rpRef: rpRef, reportCh: ch}
 	return ch, nil
 }
 
-func (s *Service) removeSMSPending(callID string) {
+func (s *Service) removePending(callID string) {
 	s.mu.Lock()
-	delete(s.smsPending, callID)
+	delete(s.pending, callID)
 	s.mu.Unlock()
 }
 
-func (s *Service) markSMSSubmitted(segment outboundSMSSegment, response smsSubmitResponse, now time.Time) {
+func (s *Service) markSubmitted(segment outboundSegment, response submitResponse, now time.Time) {
 	if segment.callID == "" {
 		return
 	}
 	s.mu.Lock()
-	s.smsSubmitted[segment.callID] = smsSubmittedEntry{
+	s.submitted[segment.callID] = submittedEntry{
 		rpRef:     segment.rpRef,
-		expiresAt: now.Add(smsSubmitRetention),
+		expiresAt: now.Add(submitRetention),
 		segment:   segment,
 		response:  response,
 	}
 	s.mu.Unlock()
 }
 
-func (s *Service) completeSMSSubmitted(callID string) {
+func (s *Service) completeSubmitted(callID string) {
 	if callID == "" {
 		return
 	}
 	s.mu.Lock()
-	entry, ok := s.smsSubmitted[callID]
+	entry, ok := s.submitted[callID]
 	if ok {
-		entry.segment = outboundSMSSegment{}
-		entry.response = smsSubmitResponse{}
+		entry.segment = outboundSegment{}
+		entry.response = submitResponse{}
 		entry.completed = true
-		s.smsSubmitted[callID] = entry
+		s.submitted[callID] = entry
 	}
 	s.mu.Unlock()
 }
 
-func (s *Service) smsSubmitSweepInterval() time.Duration {
+func (s *Service) submitSweepInterval() time.Duration {
 	interval := s.cfg.SubmitReportTimeout / 4
 	if interval < 10*time.Millisecond {
 		return 10 * time.Millisecond
@@ -429,55 +429,55 @@ func (s *Service) smsSubmitSweepInterval() time.Duration {
 	return interval
 }
 
-func (s *Service) runSMSSubmitCleanup() {
-	timer := time.NewTimer(s.smsSubmitSweepInterval())
+func (s *Service) runSubmitCleanup() {
+	timer := time.NewTimer(s.submitSweepInterval())
 	defer timer.Stop()
 	for {
 		select {
 		case <-s.cleanupCtx.Done():
 			return
 		case <-timer.C:
-			s.expireSMSSubmitState(time.Now())
-			timer.Reset(s.smsSubmitSweepInterval())
+			s.expireSubmitState(time.Now())
+			timer.Reset(s.submitSweepInterval())
 		}
 	}
 }
 
-func (s *Service) expireSMSSubmitState(now time.Time) {
-	var expired []smsPendingEntry
+func (s *Service) expireSubmitState(now time.Time) {
+	var expired []pendingEntry
 	s.mu.Lock()
-	s.evictExpiredConcatSMS(now)
-	for callID, entry := range s.smsSubmitted {
+	s.evictExpiredConcat(now)
+	for callID, entry := range s.submitted {
 		if !entry.expiresAt.After(now) {
-			delete(s.smsSubmitted, callID)
+			delete(s.submitted, callID)
 		}
 	}
-	for callID, entry := range s.smsPending {
+	for callID, entry := range s.pending {
 		if !entry.async || entry.expiresAt.IsZero() || entry.expiresAt.After(now) {
 			continue
 		}
-		delete(s.smsPending, callID)
+		delete(s.pending, callID)
 		expired = append(expired, entry)
 	}
 	s.mu.Unlock()
 	for _, entry := range expired {
-		if err := s.handleExpiredSMSSegment(entry); err != nil {
+		if err := s.handleExpiredSegment(entry); err != nil {
 			s.emitAsyncError(err)
 		}
 	}
 }
 
-func smsSubmitResponseFromMessage(resp sip.Message) smsSubmitResponse {
+func submitResponseFromMessage(resp sip.Message) submitResponse {
 	statusCode := resp.StatusCode()
-	return smsSubmitResponse{
+	return submitResponse{
 		statusCode:   statusCode,
 		reasonPhrase: strings.TrimSpace(strings.TrimPrefix(resp.StartLine, fmt.Sprintf("SIP/2.0 %d", statusCode))),
 	}
 }
 
-func (s *Service) activateSMSPendingAsync(segment outboundSMSSegment, response smsSubmitResponse, now time.Time) (rpMessage, bool) {
+func (s *Service) activatePendingAsync(segment outboundSegment, response submitResponse, now time.Time) (rpMessage, bool) {
 	s.mu.Lock()
-	entry, ok := s.smsPending[segment.callID]
+	entry, ok := s.pending[segment.callID]
 	if !ok {
 		s.mu.Unlock()
 		return rpMessage{}, false
@@ -486,10 +486,10 @@ func (s *Service) activateSMSPendingAsync(segment outboundSMSSegment, response s
 	entry.response = response
 	entry.expiresAt = now.Add(s.cfg.SubmitReportTimeout)
 	entry.async = true
-	s.smsPending[segment.callID] = entry
+	s.pending[segment.callID] = entry
 	select {
 	case report := <-entry.reportCh:
-		delete(s.smsPending, segment.callID)
+		delete(s.pending, segment.callID)
 		s.mu.Unlock()
 		return report, true
 	default:
@@ -499,7 +499,7 @@ func (s *Service) activateSMSPendingAsync(segment outboundSMSSegment, response s
 	}
 }
 
-func (s *Service) completeSMSPending(ctx context.Context, msg sip.Message, report rpMessage) bool {
+func (s *Service) completePending(ctx context.Context, msg sip.Message, report rpMessage) bool {
 	callID := strings.TrimSpace(msg.Header("In-Reply-To"))
 	if callID == "" {
 		s.logger.Debug("submit report missing In-Reply-To", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference)
@@ -507,20 +507,20 @@ func (s *Service) completeSMSPending(ctx context.Context, msg sip.Message, repor
 	}
 	now := time.Now()
 	s.mu.Lock()
-	entry, ok := s.smsPending[callID]
+	entry, ok := s.pending[callID]
 	if ok {
 		if entry.rpRef != report.Reference {
 			s.mu.Unlock()
-			s.handleUnexpectedSMSSubmitReference(ctx, msg, report, entry.rpRef)
+			s.handleUnexpectedSubmitReference(ctx, msg, report, entry.rpRef)
 			return true
 		}
 		if entry.async {
-			delete(s.smsPending, callID)
+			delete(s.pending, callID)
 			s.mu.Unlock()
-			s.completeSMSSubmitted(callID)
-			s.releaseSMSReference(entry.rpRef)
+			s.completeSubmitted(callID)
+			s.releaseReference(entry.rpRef)
 			s.completeMOPending()
-			if err := s.handleAsyncSMSSegmentReport(entry.segment, entry.response, report); err != nil {
+			if err := s.handleAsyncSegmentReport(entry.segment, entry.response, report); err != nil {
 				s.logger.Warn("submit report", "to", entry.segment.to, "smsc", entry.segment.smscAddress, "call_id", entry.segment.msg.Header("Call-ID"), "cseq", entry.segment.msg.Header("CSeq"), "rp_ref", entry.segment.rpRef, "err", err)
 				s.emitAsyncError(err)
 			}
@@ -533,23 +533,23 @@ func (s *Service) completeSMSPending(ctx context.Context, msg sip.Message, repor
 		s.mu.Unlock()
 		return true
 	}
-	submitted, ok := s.smsSubmitted[callID]
+	submitted, ok := s.submitted[callID]
 	if ok && !submitted.expiresAt.After(now) {
-		delete(s.smsSubmitted, callID)
+		delete(s.submitted, callID)
 		ok = false
 	}
 	s.mu.Unlock()
 	if ok {
 		if submitted.rpRef != report.Reference {
-			s.handleUnexpectedSMSSubmitReference(ctx, msg, report, submitted.rpRef)
+			s.handleUnexpectedSubmitReference(ctx, msg, report, submitted.rpRef)
 			return true
 		}
 		if submitted.completed {
 			return true
 		}
-		s.completeSMSSubmitted(callID)
-		s.releaseSMSReference(submitted.rpRef)
-		if err := s.handleAsyncSMSSegmentReport(submitted.segment, submitted.response, report); err != nil {
+		s.completeSubmitted(callID)
+		s.releaseReference(submitted.rpRef)
+		if err := s.handleAsyncSegmentReport(submitted.segment, submitted.response, report); err != nil {
 			s.logger.Warn("submit report", "to", submitted.segment.to, "smsc", submitted.segment.smscAddress, "call_id", submitted.segment.msg.Header("Call-ID"), "cseq", submitted.segment.msg.Header("CSeq"), "rp_ref", submitted.segment.rpRef, "err", err)
 			s.emitAsyncError(err)
 		}
@@ -559,34 +559,34 @@ func (s *Service) completeSMSPending(ctx context.Context, msg sip.Message, repor
 	return false
 }
 
-func (s *Service) handleUnexpectedSMSSubmitReference(ctx context.Context, msg sip.Message, report rpMessage, expected byte) {
+func (s *Service) handleUnexpectedSubmitReference(ctx context.Context, msg sip.Message, report rpMessage, expected byte) {
 	s.logger.Debug("submit report reference mismatch", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", msg.Header("In-Reply-To"), "rp_ref", report.Reference, "expected_rp_ref", expected)
 	if report.Type == rpAckNetworkToMS {
-		_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidShortMessageTransferReference))
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidShortMessageTransferReference))
 	}
 }
 
-func (s *Service) knowsSMSSubmit(callID string, now time.Time) bool {
+func (s *Service) knowsSubmit(callID string, now time.Time) bool {
 	if callID == "" {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.smsPending[callID]; ok {
+	if _, ok := s.pending[callID]; ok {
 		return true
 	}
-	submitted, ok := s.smsSubmitted[callID]
+	submitted, ok := s.submitted[callID]
 	if !ok {
 		return false
 	}
 	if !submitted.expiresAt.After(now) {
-		delete(s.smsSubmitted, callID)
+		delete(s.submitted, callID)
 		return false
 	}
 	return true
 }
 
-func malformedNetworkSMSSubmitReport(body []byte) (rpMessage, bool) {
+func malformedNetworkSubmitReport(body []byte) (rpMessage, bool) {
 	if len(body) < 2 {
 		return rpMessage{}, false
 	}
@@ -661,33 +661,33 @@ func smsServiceCentreAddress(value string) string {
 	return value
 }
 
-func (s *Service) newOutboundSMSSegment(to string, sc serviceCentre, part smsUserDataPart, index, count int) (outboundSMSSegment, error) {
-	rpRef, err := s.reserveSMSReference()
+func (s *Service) newOutboundSegment(to string, sc serviceCentre, part smsUserDataPart, index, count int) (outboundSegment, error) {
+	rpRef, err := s.reserveReference()
 	if err != nil {
-		return outboundSMSSegment{}, err
+		return outboundSegment{}, err
 	}
-	return s.buildOutboundSMSSegment(to, sc, part, index, count, rpRef, rpRef, 0, false)
+	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, rpRef, 0, false)
 }
 
-func (s *Service) buildOutboundSMSSegment(to string, sc serviceCentre, part smsUserDataPart, index, count int, rpRef, tpRef byte, retryCount int, rejectDuplicates bool) (outboundSMSSegment, error) {
+func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part smsUserDataPart, index, count int, rpRef, tpRef byte, retryCount int, rejectDuplicates bool) (outboundSegment, error) {
 	tpdu, err := newSMSSubmitTPDU(tpRef, to, part, rejectDuplicates).MarshalBinary()
 	if err != nil {
-		s.releaseSMSReference(rpRef)
-		return outboundSMSSegment{}, fmt.Errorf("sending SMS: %w", err)
+		s.releaseReference(rpRef)
+		return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
 	}
 	rpdu, err := newRPDataMessage(rpRef, sc.address, tpdu).MarshalBinary()
 	if err != nil {
-		s.releaseSMSReference(rpRef)
-		return outboundSMSSegment{}, fmt.Errorf("sending SMS: %w", err)
+		s.releaseReference(rpRef)
+		return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
 	}
 	msg := s.buildMessage(sc.target, rpdu, "")
 	callID := msg.Header("Call-ID")
-	reportCh, err := s.registerSMSPending(callID, rpRef)
+	reportCh, err := s.registerPending(callID, rpRef)
 	if err != nil {
-		s.releaseSMSReference(rpRef)
-		return outboundSMSSegment{}, err
+		s.releaseReference(rpRef)
+		return outboundSegment{}, err
 	}
-	return outboundSMSSegment{
+	return outboundSegment{
 		index:            index,
 		count:            count,
 		to:               to,
@@ -704,40 +704,40 @@ func (s *Service) buildOutboundSMSSegment(to string, sc serviceCentre, part smsU
 	}, nil
 }
 
-func (s *Service) sendSMSSegment(ctx context.Context, segment outboundSMSSegment) error {
+func (s *Service) sendSegment(ctx context.Context, segment outboundSegment) error {
 	resp, err := s.sess.Exchange(ctx, segment.msg)
 	if err != nil {
-		s.removeSMSPending(segment.callID)
-		s.releaseSMSReference(segment.rpRef)
+		s.removePending(segment.callID)
+		s.releaseReference(segment.rpRef)
 		return err
 	}
 	if status := resp.StatusCode(); status != 200 && status != 202 {
-		s.removeSMSPending(segment.callID)
-		s.releaseSMSReference(segment.rpRef)
+		s.removePending(segment.callID)
+		s.releaseReference(segment.rpRef)
 		return fmt.Errorf("sending SMS: unexpected status %d (%s)", status, strings.TrimSpace(resp.StartLine))
 	}
-	return s.trackSMSSegmentReport(ctx, segment, smsSubmitResponseFromMessage(resp))
+	return s.trackSegmentReport(ctx, segment, submitResponseFromMessage(resp))
 }
 
-func (s *Service) trackSMSSegmentReport(ctx context.Context, segment outboundSMSSegment, response smsSubmitResponse) error {
-	s.markSMSSubmitted(segment, response, time.Now())
+func (s *Service) trackSegmentReport(ctx context.Context, segment outboundSegment, response submitResponse) error {
+	s.markSubmitted(segment, response, time.Now())
 	select {
 	case report := <-segment.reportCh:
-		s.removeSMSPending(segment.callID)
-		s.releaseSMSReference(segment.rpRef)
-		s.completeSMSSubmitted(segment.callID)
-		return s.finishSMSSegmentReportWithContext(ctx, segment, response, report)
+		s.removePending(segment.callID)
+		s.releaseReference(segment.rpRef)
+		s.completeSubmitted(segment.callID)
+		return s.finishSegmentReportWithContext(ctx, segment, response, report)
 	default:
 	}
-	if report, ok := s.activateSMSPendingAsync(segment, response, time.Now()); ok {
-		s.completeSMSSubmitted(segment.callID)
-		s.releaseSMSReference(segment.rpRef)
-		return s.finishSMSSegmentReportWithContext(ctx, segment, response, report)
+	if report, ok := s.activatePendingAsync(segment, response, time.Now()); ok {
+		s.completeSubmitted(segment.callID)
+		s.releaseReference(segment.rpRef)
+		return s.finishSegmentReportWithContext(ctx, segment, response, report)
 	}
 	return nil
 }
 
-func (s *Service) handleSMSSegmentReport(segment outboundSMSSegment, response smsSubmitResponse, report rpMessage) error {
+func (s *Service) handleSegmentReport(segment outboundSegment, response submitResponse, report rpMessage) error {
 	if report.Reference != segment.rpRef {
 		return fmt.Errorf("sending SMS segment %d/%d: unexpected rp reference %d", segment.index+1, segment.count, report.Reference)
 	}
@@ -752,18 +752,18 @@ func (s *Service) handleSMSSegmentReport(segment outboundSMSSegment, response sm
 	}
 }
 
-func (s *Service) finishSMSSegmentReportWithContext(_ context.Context, segment outboundSMSSegment, response smsSubmitResponse, report rpMessage) error {
-	return s.handleSMSSegmentReport(segment, response, report)
+func (s *Service) finishSegmentReportWithContext(_ context.Context, segment outboundSegment, response submitResponse, report rpMessage) error {
+	return s.handleSegmentReport(segment, response, report)
 }
 
-func (s *Service) handleAsyncSMSSegmentReport(segment outboundSMSSegment, response smsSubmitResponse, report rpMessage) error {
-	return s.handleSMSSegmentReport(segment, response, report)
+func (s *Service) handleAsyncSegmentReport(segment outboundSegment, response submitResponse, report rpMessage) error {
+	return s.handleSegmentReport(segment, response, report)
 }
 
-func (s *Service) handleExpiredSMSSegment(entry smsPendingEntry) error {
+func (s *Service) handleExpiredSegment(entry pendingEntry) error {
 	segment := entry.segment
-	s.completeSMSSubmitted(segment.callID)
-	s.releaseSMSReference(segment.rpRef)
+	s.completeSubmitted(segment.callID)
+	s.releaseReference(segment.rpRef)
 	s.completeMOPending()
 	return fmt.Errorf("sending SMS segment %d/%d: submit report not received", segment.index+1, segment.count)
 }
@@ -772,9 +772,9 @@ func (s *Service) handleMessageRequest(ctx context.Context, req session.Request)
 	msg := req.Message
 	var rp rpMessage
 	if err := rp.UnmarshalBinary(msg.Body); err != nil {
-		if report, ok := malformedNetworkSMSSubmitReport(msg.Body); ok {
+		if report, ok := malformedNetworkSubmitReport(msg.Body); ok {
 			callID := strings.TrimSpace(msg.Header("In-Reply-To"))
-			if !s.knowsSMSSubmit(callID, time.Now()) {
+			if !s.knowsSubmit(callID, time.Now()) {
 				s.logger.Debug("submit report not matched", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", callID, "rp_ref", report.Reference, "err", err)
 				return s.writeMessageStatus(ctx, req, 488, "Not Acceptable Here")
 			}
@@ -784,10 +784,10 @@ func (s *Service) handleMessageRequest(ctx context.Context, req session.Request)
 			switch report.Type {
 			case rpAckNetworkToMS:
 				s.logger.Debug("submit report invalid mandatory information", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", callID, "rp_ref", report.Reference, "err", err)
-				_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidMandatoryInformation))
+				_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidMandatoryInformation))
 			case rpErrorNetworkToMS:
 				s.logger.Debug("submit report protocol error", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", callID, "rp_ref", report.Reference, "cause", rpCauseProtocolErrorUnspecified, "err", err)
-				s.completeSMSPending(ctx, msg, report)
+				s.completePending(ctx, msg, report)
 			}
 			return nil
 		}
@@ -796,17 +796,17 @@ func (s *Service) handleMessageRequest(ctx context.Context, req session.Request)
 		}
 		if len(msg.Body) >= 2 && msg.Body[0] == rpDataNetworkToMS {
 			if s.beginMTTransfer() {
-				_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseInvalidMandatoryInformation))
+				_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseInvalidMandatoryInformation))
 				s.endMTTransfer()
 			} else {
-				_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseMessageNotCompatibleWithState))
+				_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseMessageNotCompatibleWithState))
 			}
 		}
 		s.logger.Debug("ignoring malformed sms message", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
 		return nil
 	}
-	if isSMSReport(rp) {
-		if s.completeSMSPending(ctx, msg, rp) {
+	if isSubmitReport(rp) {
+		if s.completePending(ctx, msg, rp) {
 			return s.writeMessageStatus(ctx, req, 200, "OK")
 		}
 		return s.writeMessageStatus(ctx, req, 488, "Not Acceptable Here")
@@ -823,18 +823,18 @@ func (s *Service) writeMessageStatus(ctx context.Context, req session.Request, c
 
 func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMessage) error {
 	if rp.Type != rpDataNetworkToMS {
-		_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageTypeNotImplemented))
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageTypeNotImplemented))
 		return nil
 	}
 	if !s.beginMTTransfer() {
-		_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageNotCompatibleWithState))
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageNotCompatibleWithState))
 		return nil
 	}
 	defer s.endMTTransfer()
 
 	mti, err := smsTPDUMessageType(rp.TPDU)
 	if err != nil {
-		_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 		return nil
 	}
 	switch mti {
@@ -842,44 +842,44 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 		var tpdu smsDeliverTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
 			s.logger.Debug("rejecting inbound sms deliver", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-			_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 			return nil
 		}
-		s.deliverIncomingSMS(msg, rp, tpdu)
-		if ok := s.sendInboundSMSDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
+		s.deliverIncoming(msg, rp, tpdu)
+		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
 			return nil
 		}
 	case tpduMTISMSStatusReport:
 		var tpdu smsStatusReportTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
 			s.logger.Debug("rejecting inbound sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-			_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 			return nil
 		}
-		s.deliverIncomingSMSStatusReport(msg, rp, tpdu.Message)
-		if ok := s.sendInboundSMSDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
+		s.deliverIncomingStatusReport(msg, rp, tpdu.Message)
+		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
 			return nil
 		}
 	default:
-		_ = s.sendInboundSMSDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 	}
 	return nil
 }
 
-func isSMSReport(rp rpMessage) bool {
+func isSubmitReport(rp rpMessage) bool {
 	return rp.Type == rpAckNetworkToMS || rp.Type == rpErrorNetworkToMS
 }
 
-func (s *Service) sendInboundSMSDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage) bool {
+func (s *Service) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage) bool {
 	ctx = normalizeContext(ctx)
-	if !s.markSMSDeliveryReportSent(msg) {
+	if !s.markDeliveryReportSent(msg) {
 		return true
 	}
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		s.clearSMSDeliveryReportSent(msg)
+		s.clearDeliveryReportSent(msg)
 		return false
 	}
 	s.cleanupWG.Add(1)
@@ -887,10 +887,10 @@ func (s *Service) sendInboundSMSDeliveryReport(ctx context.Context, msg sip.Mess
 
 	go func() {
 		defer s.cleanupWG.Done()
-		reportCtx, cancel := context.WithTimeout(s.cleanupCtx, smsDeliveryReportTimeout)
+		reportCtx, cancel := context.WithTimeout(s.cleanupCtx, deliveryReportTimeout)
 		defer cancel()
-		if err := s.sendSMSDeliveryReport(reportCtx, msg, report); err != nil {
-			s.clearSMSDeliveryReportSent(msg)
+		if err := s.sendDeliveryReport(reportCtx, msg, report); err != nil {
+			s.clearDeliveryReportSent(msg)
 			if ctx.Err() == nil && s.cleanupCtx.Err() == nil {
 				s.logger.Warn("sending inbound sms delivery report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
 			}
@@ -899,8 +899,8 @@ func (s *Service) sendInboundSMSDeliveryReport(ctx context.Context, msg sip.Mess
 	return true
 }
 
-func (s *Service) sendSMSDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage) error {
-	target := s.smsReportTarget(msg)
+func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage) error {
+	target := s.reportTarget(msg)
 	if target == "" {
 		return errors.New("delivery report target is empty")
 	}
@@ -919,40 +919,40 @@ func (s *Service) sendSMSDeliveryReport(ctx context.Context, msg sip.Message, re
 	return nil
 }
 
-func (s *Service) deliverIncomingSMS(msg sip.Message, rp rpMessage, tpdu smsDeliverTPDU) {
+func (s *Service) deliverIncoming(msg sip.Message, rp rpMessage, tpdu smsDeliverTPDU) {
 	incoming := tpdu.Message
 	incoming.CallID = strings.TrimSpace(msg.Header("Call-ID"))
-	incoming.To = incomingSMSRecipient(msg)
+	incoming.To = incomingRecipient(msg)
 	incoming.ServiceCenter = rp.Originator
 	if tpdu.Concat != nil {
-		s.deliverConcatSMS(incoming, *tpdu.Concat)
+		s.deliverConcat(incoming, *tpdu.Concat)
 		return
 	}
-	s.deliverSingleSMS(msg, incoming)
+	s.deliverSingle(msg, incoming)
 }
 
-func (s *Service) deliverIncomingSMSStatusReport(msg sip.Message, rp rpMessage, report StatusReport) {
+func (s *Service) deliverIncomingStatusReport(msg sip.Message, rp rpMessage, report StatusReport) {
 	if s.cfg.OnStatusReport == nil {
 		return
 	}
 	report.ServiceCenter = rp.Originator
-	if s.markSMSSeen(msg) {
+	if s.markSeen(msg) {
 		s.cfg.OnStatusReport(report)
 		return
 	}
 	s.logger.Debug("suppressing duplicate sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "message_reference", report.MessageReference, "status", report.Status)
 }
 
-func incomingSMSRecipient(msg sip.Message) string {
+func incomingRecipient(msg sip.Message) string {
 	for _, candidate := range []string{msg.Header("To"), sip.RequestURI(msg)} {
-		if target := smsEnvelopeAddress(candidate); target != "" {
+		if target := envelopeAddress(candidate); target != "" {
 			return target
 		}
 	}
 	return ""
 }
 
-func smsEnvelopeAddress(value string) string {
+func envelopeAddress(value string) string {
 	uri := sip.AddressURI(value)
 	if uri == "" {
 		return ""
@@ -967,24 +967,24 @@ func smsEnvelopeAddress(value string) string {
 	}
 }
 
-func (s *Service) deliverConcatSMS(msg Incoming, concat smsConcatInfo) {
+func (s *Service) deliverConcat(msg Incoming, concat smsConcatInfo) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
-	incoming, complete, concatKey := s.appendConcatSMS(msg, concat)
+	incoming, complete, concatKey := s.appendConcat(msg, concat)
 	if !complete {
 		return
 	}
-	if s.markConcatSMSSeen(concatKey) {
+	if s.markConcatSeen(concatKey) {
 		s.cfg.OnIncoming(incoming)
 	}
 }
 
-func (s *Service) deliverSingleSMS(msg sip.Message, incoming Incoming) {
+func (s *Service) deliverSingle(msg sip.Message, incoming Incoming) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
-	if s.markSMSSeen(msg) {
+	if s.markSeen(msg) {
 		s.cfg.OnIncoming(incoming)
 		return
 	}
@@ -997,7 +997,7 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip
 		target = s.mustResolveServiceCentreTarget()
 	}
 	callID, _, tag, branch := sip.NewTransaction()
-	senderIdentity := smsPreferredIdentity(state)
+	senderIdentity := preferredIdentity(state)
 	msg := sip.NewRequest("MESSAGE", target)
 	msg.Headers.Add("Call-ID", callID)
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, tag))
@@ -1017,7 +1017,7 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip
 	return msg
 }
 
-func smsPreferredIdentity(state registration.State) string {
+func preferredIdentity(state registration.State) string {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(state.TelPublicID)), "tel:") {
 		return state.TelPublicID
 	}
@@ -1032,7 +1032,7 @@ func (s *Service) mustResolveServiceCentreTarget() string {
 	return sc.target
 }
 
-func (s *Service) smsReportTarget(msg sip.Message) string {
+func (s *Service) reportTarget(msg sip.Message) string {
 	for _, candidate := range []string{
 		sip.AddressURI(msg.Header("P-Asserted-Identity")),
 		sip.AddressURI(msg.Header("From")),
@@ -1080,94 +1080,94 @@ func viaMessageTarget(msg sip.Message) string {
 	return "sip:" + sentBy
 }
 
-func (s *Service) markRecentSMSKey(key string, ttl time.Duration) bool {
+func (s *Service) markRecentKey(key string, ttl time.Duration) bool {
 	if key == "" {
 		return true
 	}
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for seenKey, seenAt := range s.recentSMS {
+	for seenKey, seenAt := range s.recent {
 		if now.Sub(seenAt) > ttl {
-			delete(s.recentSMS, seenKey)
+			delete(s.recent, seenKey)
 		}
 	}
-	if seenAt, exists := s.recentSMS[key]; exists && now.Sub(seenAt) <= ttl {
+	if seenAt, exists := s.recent[key]; exists && now.Sub(seenAt) <= ttl {
 		return false
 	}
-	s.recentSMS[key] = now
+	s.recent[key] = now
 	return true
 }
 
-func (s *Service) clearRecentSMSKey(key string) {
+func (s *Service) clearRecentKey(key string) {
 	if key == "" {
 		return
 	}
 	s.mu.Lock()
-	delete(s.recentSMS, key)
+	delete(s.recent, key)
 	s.mu.Unlock()
 }
 
-func (s *Service) markConcatSMSSeen(key string) bool {
-	return s.markRecentSMSKey("concat|"+key, concatSMSRetention)
+func (s *Service) markConcatSeen(key string) bool {
+	return s.markRecentKey("concat|"+key, concatRetention)
 }
 
-func (s *Service) concatSMSKey(msg Incoming, concat smsConcatInfo) string {
+func (s *Service) concatKey(msg Incoming, concat smsConcatInfo) string {
 	return fmt.Sprintf("%t|%d|%s|%s", concat.SixteenBit, concat.Reference, msg.From, msg.ServiceCenter)
 }
 
-func (s *Service) evictExpiredConcatSMS(now time.Time) {
-	for cacheKey, state := range s.concatSMS {
+func (s *Service) evictExpiredConcat(now time.Time) {
+	for cacheKey, state := range s.concat {
 		if state.expired(now) {
-			delete(s.concatSMS, cacheKey)
+			delete(s.concat, cacheKey)
 		}
 	}
 }
 
-func (s *Service) appendConcatSMS(msg Incoming, concat smsConcatInfo) (Incoming, bool, string) {
-	key := s.concatSMSKey(msg, concat)
+func (s *Service) appendConcat(msg Incoming, concat smsConcatInfo) (Incoming, bool, string) {
+	key := s.concatKey(msg, concat)
 	now := time.Now()
 	s.mu.Lock()
-	s.evictExpiredConcatSMS(now)
-	state := s.concatSMS[key]
+	s.evictExpiredConcat(now)
+	state := s.concat[key]
 	if state.parts == nil || state.total != int(concat.Total) {
 		state.reset(int(concat.Total))
 	}
 	state.addPart(int(concat.Sequence), msg.Text, now)
 	text, ok := state.joinedText()
 	if !ok {
-		s.concatSMS[key] = state
+		s.concat[key] = state
 		s.mu.Unlock()
 		return Incoming{}, false, key
 	}
-	delete(s.concatSMS, key)
+	delete(s.concat, key)
 	s.mu.Unlock()
 	msg.Text = text
 	return msg, true, key
 }
 
-func (s *Service) markSMSSeen(msg sip.Message) bool {
+func (s *Service) markSeen(msg sip.Message) bool {
 	key, ok := smsSeenKey(msg)
 	if !ok {
 		return true
 	}
-	return s.markRecentSMSKey("sip|"+key, 2*time.Minute)
+	return s.markRecentKey("sip|"+key, 2*time.Minute)
 }
 
-func (s *Service) markSMSDeliveryReportSent(msg sip.Message) bool {
+func (s *Service) markDeliveryReportSent(msg sip.Message) bool {
 	key, ok := smsSeenKey(msg)
 	if !ok {
 		return true
 	}
-	return s.markRecentSMSKey("report|"+key, 2*time.Minute)
+	return s.markRecentKey("report|"+key, 2*time.Minute)
 }
 
-func (s *Service) clearSMSDeliveryReportSent(msg sip.Message) {
+func (s *Service) clearDeliveryReportSent(msg sip.Message) {
 	key, ok := smsSeenKey(msg)
 	if !ok {
 		return
 	}
-	s.clearRecentSMSKey("report|" + key)
+	s.clearRecentKey("report|" + key)
 }
 
 func smsSeenKey(msg sip.Message) (string, bool) {
