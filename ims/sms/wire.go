@@ -31,21 +31,21 @@ const (
 )
 
 const (
-	tpduMTISMSDeliver      = 0x00
-	tpduMTISMSStatusReport = 0x02
-	tpduMTIReserved        = 0x03
+	tpduMTIDeliver      = 0x00
+	tpduMTIStatusReport = 0x02
+	tpduMTIReserved     = 0x03
 )
 
 const (
-	smsSingleGSM7Limit = 160
-	smsConcatGSM7Limit = 153
-	smsSingleUCS2Units = 70
-	smsConcatUCS2Units = 67
-	smsConcatIEI8Bit   = 0x00
-	smsConcatIEI16Bit  = 0x08
+	singleGSM7Limit = 160
+	concatGSM7Limit = 153
+	singleUCS2Units = 70
+	concatUCS2Units = 67
+	concatIEI8Bit   = 0x00
+	concatIEI16Bit  = 0x08
 )
 
-type IncomingSMS struct {
+type Incoming struct {
 	CallID        string
 	From          string
 	To            string
@@ -53,9 +53,9 @@ type IncomingSMS struct {
 	Text          string
 }
 
-type Incoming = IncomingSMS
+type IncomingSMS = Incoming
 
-type SMSStatusReport struct {
+type StatusReport struct {
 	ServiceCenter         string
 	Recipient             string
 	MessageReference      byte
@@ -73,7 +73,7 @@ type SMSStatusReport struct {
 	UserData              []byte
 }
 
-type StatusReport = SMSStatusReport
+type SMSStatusReport = StatusReport
 
 type rpMessage struct {
 	Type        byte
@@ -150,15 +150,16 @@ func rpCauseText(cause byte) string {
 	}
 }
 
-type smsConcatInfo struct {
+type concatInfo struct {
 	Reference  uint16
 	Total      byte
 	Sequence   byte
 	SixteenBit bool
 }
 
-type smsUserDataPart struct {
+type userDataPart struct {
 	udhi     bool
+	pid      byte
 	dcs      byte
 	udl      int
 	userData []byte
@@ -215,18 +216,18 @@ func (u *UCS2) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-func encodeSMSSubmit(reference byte, to, text string) ([]byte, error) {
-	parts, err := buildSMSUserDataParts(text)
+func encodeSubmit(reference byte, to, text string) ([]byte, error) {
+	parts, err := buildUserDataParts(text)
 	if err != nil {
 		return nil, err
 	}
 	if len(parts) != 1 {
 		return nil, fmt.Errorf("encoding SMS-SUBMIT: message requires %d segments", len(parts))
 	}
-	return newSMSSubmitTPDU(reference, to, parts[0], false).MarshalBinary()
+	return newSubmitTPDU(reference, to, parts[0], false).MarshalBinary()
 }
 
-func buildSMSUserDataParts(text string) ([]smsUserDataPart, error) {
+func buildUserDataParts(text string) ([]userDataPart, error) {
 	gsm7, err := NewGSM7(text)
 	if err == nil {
 		return buildGSM7UserDataParts(gsm7)
@@ -238,74 +239,74 @@ func buildSMSUserDataParts(text string) ([]smsUserDataPart, error) {
 	return parts, nil
 }
 
-func buildGSM7UserDataParts(gsm7 GSM7) ([]smsUserDataPart, error) {
-	if gsm7.SeptetCount() <= smsSingleGSM7Limit {
-		return []smsUserDataPart{{dcs: 0x00, udl: gsm7.SeptetCount(), userData: gsm7.Packed()}}, nil
+func buildGSM7UserDataParts(gsm7 GSM7) ([]userDataPart, error) {
+	if gsm7.SeptetCount() <= singleGSM7Limit {
+		return []userDataPart{{dcs: 0x00, udl: gsm7.SeptetCount(), userData: gsm7.Packed()}}, nil
 	}
-	chunks := splitGSM7Septets(gsm7.septets, smsConcatGSM7Limit)
+	chunks := splitGSM7Septets(gsm7.septets, concatGSM7Limit)
 	if len(chunks) > 255 {
 		return nil, fmt.Errorf("encoding SMS-SUBMIT: %d GSM7 segments exceed 255-part limit", len(chunks))
 	}
 	ref := byte(sip.RandomUint32())
-	parts := make([]smsUserDataPart, 0, len(chunks))
+	parts := make([]userDataPart, 0, len(chunks))
 	for i, chunk := range chunks {
 		header := buildConcatUDH8(ref, byte(len(chunks)), byte(i+1))
 		packed, headerSeptets := packSeptetsWithHeader(header, chunk)
-		parts = append(parts, smsUserDataPart{udhi: true, dcs: 0x00, udl: headerSeptets + len(chunk), userData: packed})
+		parts = append(parts, userDataPart{udhi: true, dcs: 0x00, udl: headerSeptets + len(chunk), userData: packed})
 	}
 	return parts, nil
 }
 
-func buildUCS2UserDataParts(text UCS2) []smsUserDataPart {
+func buildUCS2UserDataParts(text UCS2) []userDataPart {
 	words := utf16.Encode([]rune(string(text)))
-	if len(words) <= smsSingleUCS2Units {
+	if len(words) <= singleUCS2Units {
 		userData := encodeUCS2Words(words)
-		return []smsUserDataPart{{dcs: 0x08, udl: len(userData), userData: userData}}
+		return []userDataPart{{dcs: 0x08, udl: len(userData), userData: userData}}
 	}
-	chunks := splitUCS2Words(words, smsConcatUCS2Units)
+	chunks := splitUCS2Words(words, concatUCS2Units)
 	if len(chunks) > 255 {
 		return nil
 	}
 	ref := byte(sip.RandomUint32())
-	parts := make([]smsUserDataPart, 0, len(chunks))
+	parts := make([]userDataPart, 0, len(chunks))
 	for i, chunk := range chunks {
 		header := buildConcatUDH8(ref, byte(len(chunks)), byte(i+1))
 		userData := append(header, encodeUCS2Words(chunk)...)
-		parts = append(parts, smsUserDataPart{udhi: true, dcs: 0x08, udl: len(userData), userData: userData})
+		parts = append(parts, userDataPart{udhi: true, dcs: 0x08, udl: len(userData), userData: userData})
 	}
 	return parts
 }
 
-func (p smsUserDataPart) marshalDeliver(from string) []byte {
-	payload, _ := newSMSDeliverTPDU(from, p).MarshalBinary()
+func (p userDataPart) marshalDeliver(from string) []byte {
+	payload, _ := newDeliverTPDU(from, p).MarshalBinary()
 	return payload
 }
 
-func decodeSMSDeliver(data []byte) (IncomingSMS, error) {
-	var deliver smsDeliverTPDU
+func decodeDeliver(data []byte) (Incoming, error) {
+	var deliver deliverTPDU
 	if err := deliver.UnmarshalBinary(data); err != nil {
-		return IncomingSMS{}, err
+		return Incoming{}, err
 	}
 	return deliver.Message, nil
 }
 
-func decodeSMSStatusReport(data []byte) (SMSStatusReport, error) {
-	var report smsStatusReportTPDU
+func decodeStatusReport(data []byte) (StatusReport, error) {
+	var report statusReportTPDU
 	if err := report.UnmarshalBinary(data); err != nil {
-		return SMSStatusReport{}, err
+		return StatusReport{}, err
 	}
 	return report.Message, nil
 }
 
-func buildSMSDeliver(from, text string) ([]byte, error) {
-	parts, err := buildSMSUserDataParts(text)
+func buildDeliver(from, text string) ([]byte, error) {
+	parts, err := buildUserDataParts(text)
 	if err != nil {
 		return nil, err
 	}
 	if len(parts) != 1 {
 		return nil, fmt.Errorf("building SMS-DELIVER: message requires %d segments", len(parts))
 	}
-	return newSMSDeliverTPDU(from, parts[0]).MarshalBinary()
+	return newDeliverTPDU(from, parts[0]).MarshalBinary()
 }
 
 func decodeRPUserData(data []byte) ([]byte, error) {
@@ -325,14 +326,14 @@ func decodeRPUserData(data []byte) ([]byte, error) {
 	return append([]byte(nil), data[2:2+length]...), nil
 }
 
-func smsTPDUMessageType(data []byte) (byte, error) {
+func tpduMessageType(data []byte) (byte, error) {
 	if len(data) == 0 {
 		return 0, errors.New("decoding SMS-TPDU: packet too short")
 	}
 	return data[0] & 0x03, nil
 }
 
-func decodeSMSDecimalByte(b byte) int {
+func decodeDecimalByte(b byte) int {
 	tens := int(b & 0x0F)
 	ones := int((b >> 4) & 0x0F)
 	if tens > 9 {
@@ -344,40 +345,40 @@ func decodeSMSDecimalByte(b byte) int {
 	return tens*10 + ones
 }
 
-func decodeSMSTimestamp(data []byte) (time.Time, error) {
+func decodeTimestamp(data []byte) (time.Time, error) {
 	if len(data) < 7 {
 		return time.Time{}, errors.New("decoding SMS timestamp: packet too short")
 	}
-	year := decodeSMSDecimalByte(data[0])
+	year := decodeDecimalByte(data[0])
 	if year >= 70 {
 		year += 1900
 	} else {
 		year += 2000
 	}
-	month := decodeSMSDecimalByte(data[1])
+	month := decodeDecimalByte(data[1])
 	if month < 1 || month > 12 {
 		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid month %d", month)
 	}
-	day := decodeSMSDecimalByte(data[2])
+	day := decodeDecimalByte(data[2])
 	if day < 1 || day > 31 {
 		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid day %d", day)
 	}
-	hour := decodeSMSDecimalByte(data[3])
+	hour := decodeDecimalByte(data[3])
 	if hour > 23 {
 		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid hour %d", hour)
 	}
-	minute := decodeSMSDecimalByte(data[4])
+	minute := decodeDecimalByte(data[4])
 	if minute > 59 {
 		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid minute %d", minute)
 	}
-	second := decodeSMSDecimalByte(data[5])
+	second := decodeDecimalByte(data[5])
 	if second > 59 {
 		return time.Time{}, fmt.Errorf("decoding SMS timestamp: invalid second %d", second)
 	}
 
 	zone := data[6]
 	negative := zone&0x08 != 0
-	quarters := decodeSMSDecimalByte(zone & 0xF7)
+	quarters := decodeDecimalByte(zone & 0xF7)
 	offset := quarters * 15 * 60
 	if negative {
 		offset = -offset
@@ -390,7 +391,7 @@ func decodeSMSTimestamp(data []byte) (time.Time, error) {
 	return ts, nil
 }
 
-func encodeSMSTimestamp(ts time.Time) []byte {
+func encodeTimestamp(ts time.Time) []byte {
 	_, offset := ts.Zone()
 	negative := offset < 0
 	if negative {
@@ -504,10 +505,10 @@ func encodeUserData(text string) ([]byte, byte, byte, error) {
 }
 
 func buildConcatUDH8(reference, total, sequence byte) []byte {
-	return []byte{0x05, smsConcatIEI8Bit, 0x03, reference, total, sequence}
+	return []byte{0x05, concatIEI8Bit, 0x03, reference, total, sequence}
 }
 
-func decodeSMSUserDataHeader(payload []byte) (int, *smsConcatInfo, error) {
+func decodeUserDataHeader(payload []byte) (int, *concatInfo, error) {
 	if len(payload) == 0 {
 		return 0, nil, errors.New("decoding SMS UDH: missing UDHL")
 	}
@@ -515,14 +516,14 @@ func decodeSMSUserDataHeader(payload []byte) (int, *smsConcatInfo, error) {
 	if len(payload) < headerLen {
 		return 0, nil, errors.New("decoding SMS UDH: truncated header")
 	}
-	concat, err := decodeSMSConcatInfo(payload[:headerLen])
+	concat, err := decodeConcatInfo(payload[:headerLen])
 	if err != nil {
 		return 0, nil, err
 	}
 	return headerLen, concat, nil
 }
 
-func decodeSMSConcatInfo(header []byte) (*smsConcatInfo, error) {
+func decodeConcatInfo(header []byte) (*concatInfo, error) {
 	if len(header) == 0 {
 		return nil, nil
 	}
@@ -543,22 +544,22 @@ func decodeSMSConcatInfo(header []byte) (*smsConcatInfo, error) {
 		data := header[idx : idx+length]
 		idx += length
 		switch iei {
-		case smsConcatIEI8Bit:
+		case concatIEI8Bit:
 			if length != 3 {
 				continue
 			}
 			if data[1] == 0 || data[2] == 0 || data[2] > data[1] {
 				continue
 			}
-			return &smsConcatInfo{Reference: uint16(data[0]), Total: data[1], Sequence: data[2]}, nil
-		case smsConcatIEI16Bit:
+			return &concatInfo{Reference: uint16(data[0]), Total: data[1], Sequence: data[2]}, nil
+		case concatIEI16Bit:
 			if length != 4 {
 				continue
 			}
 			if data[2] == 0 || data[3] == 0 || data[3] > data[2] {
 				continue
 			}
-			return &smsConcatInfo{Reference: binary.BigEndian.Uint16(data[:2]), Total: data[2], Sequence: data[3], SixteenBit: true}, nil
+			return &concatInfo{Reference: binary.BigEndian.Uint16(data[:2]), Total: data[2], Sequence: data[3], SixteenBit: true}, nil
 		}
 	}
 	return nil, nil

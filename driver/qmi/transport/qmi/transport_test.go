@@ -65,22 +65,54 @@ func TestMarshalRequest(t *testing.T) {
 }
 
 func TestParseResponse(t *testing.T) {
-	frame := []byte{
-		0x01, 0x18, 0x00, 0x80, 0x0B, 0x07,
-		0x02, 0x03, 0x00, 0x20, 0x00, 0x0C, 0x00,
-		0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x10, 0x02, 0x00, 0x90, 0x00,
+	tests := []struct {
+		name    string
+		frame   []byte
+		service protocol.ServiceType
+		client  uint8
+		txn     uint16
+		message protocol.MessageID
+	}{
+		{
+			name: "service response",
+			frame: []byte{
+				0x01, 0x18, 0x00, 0x80, 0x0B, 0x07,
+				0x02, 0x03, 0x00, 0x20, 0x00, 0x0C, 0x00,
+				0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x10, 0x02, 0x00, 0x90, 0x00,
+			},
+			service: protocol.ServiceUIM,
+			client:  7,
+			txn:     3,
+			message: protocol.MessageReadTransparent,
+		},
+		{
+			name: "control response",
+			frame: []byte{
+				0x01, 0x12, 0x00, 0x80, 0x00, 0x00,
+				0x01, 0x01, 0x00, 0xFF, 0x07, 0x00,
+				0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+			},
+			service: protocol.ServiceControl,
+			client:  0,
+			txn:     1,
+			message: protocol.QMICtlInternalProxyOpen,
+		},
 	}
 
-	resp, err := ParseResponse(frame)
-	if err != nil {
-		t.Fatalf("ParseResponse() error = %v", err)
-	}
-	if resp.Service != protocol.ServiceUIM || resp.ClientID != 7 || resp.TransactionID != 3 || resp.MessageID != protocol.MessageReadTransparent {
-		t.Fatalf("ParseResponse() = %+v", resp)
-	}
-	if err := resp.TLVs.Error(); err != nil {
-		t.Fatalf("Result error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := ParseResponse(tt.frame)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if resp.Service != tt.service || resp.ClientID != tt.client || resp.TransactionID != tt.txn || resp.MessageID != tt.message {
+				t.Fatalf("ParseResponse() = %+v", resp)
+			}
+			if err := resp.TLVs.Error(); err != nil {
+				t.Fatalf("Result error = %v", err)
+			}
+		})
 	}
 }
 

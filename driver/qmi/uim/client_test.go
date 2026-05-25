@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 	"github.com/damonto/ims-client/usim/simfile"
 )
@@ -21,12 +22,12 @@ type fakeTransport struct {
 }
 
 type transportCall struct {
-	check func(Request)
-	resp  Response
+	check func(protocol.Request)
+	resp  protocol.Response
 	err   error
 }
 
-func (t *fakeTransport) Do(_ context.Context, req Request) (Response, error) {
+func (t *fakeTransport) Do(_ context.Context, req protocol.Request) (protocol.Response, error) {
 	t.t.Helper()
 	if t.idx >= len(t.calls) {
 		t.t.Fatalf("Do() got unexpected request: %+v", req)
@@ -38,7 +39,7 @@ func (t *fakeTransport) Do(_ context.Context, req Request) (Response, error) {
 		call.check(req)
 	}
 	if call.err != nil {
-		return Response{}, call.err
+		return protocol.Response{}, call.err
 	}
 	return call.resp, nil
 }
@@ -55,68 +56,68 @@ func TestReaderUIMMessages(t *testing.T) {
 			t: t,
 			calls: []transportCall{
 				{
-					check: func(req Request) {
-						if req.MessageID != MessageGetFileAttrs {
-							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageGetFileAttrs)
+					check: func(req protocol.Request) {
+						if req.MessageID != protocol.QMIUIMGetFileAttributes {
+							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, protocol.QMIUIMGetFileAttributes)
 						}
 						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x00})
 						assertTLV(t, req.TLVs, 0x02, []byte{0xE2, 0x2F, 0x02, 0x00, 0x3F})
 					},
-					resp: successResponse(MessageGetFileAttrs,
-						TLVBytes(0x10, []byte{0x90, 0x00}),
-						TLVBytes(0x11, encodeFileAttributes(10, 0x2FE2, 0, 0, 0, []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x21, 0x80, 0x02, 0x00, 0x0A})),
+					resp: successResponse(protocol.QMIUIMGetFileAttributes,
+						tlvBytes(0x10, []byte{0x90, 0x00}),
+						tlvBytes(0x11, encodeFileAttributes(10, 0x2FE2, 0, 0, 0, []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x21, 0x80, 0x02, 0x00, 0x0A})),
 					),
 				},
 				{
-					check: func(req Request) {
-						if req.MessageID != MessageReadTransparent {
-							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageReadTransparent)
+					check: func(req protocol.Request) {
+						if req.MessageID != protocol.QMIUIMReadTransparent {
+							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, protocol.QMIUIMReadTransparent)
 						}
 						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x00})
 						assertTLV(t, req.TLVs, 0x02, []byte{0x07, 0x6F, 0x04, 0x00, 0x3F, 0xFF, 0x7F})
 						assertTLV(t, req.TLVs, 0x03, []byte{0x00, 0x00, 0x09, 0x00})
 					},
-					resp: successResponse(MessageReadTransparent,
-						TLVBytes(0x10, []byte{0x90, 0x00}),
-						TLVBytes(0x11, encodeLengthPrefixed([]byte{0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98})),
+					resp: successResponse(protocol.QMIUIMReadTransparent,
+						tlvBytes(0x10, []byte{0x90, 0x00}),
+						tlvBytes(0x11, encodeLengthPrefixed([]byte{0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98})),
 					),
 				},
 				{
-					check: func(req Request) {
-						if req.MessageID != MessageReadRecord {
-							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageReadRecord)
+					check: func(req protocol.Request) {
+						if req.MessageID != protocol.QMIUIMReadRecord {
+							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, protocol.QMIUIMReadRecord)
 						}
 						assertTLV(t, req.TLVs, 0x01, append([]byte{byte(SessionCardSlot1), byte(len(isimAID))}, isimAID...))
 					},
-					resp: errorResponse(MessageReadRecord, ErrorInvalidSessionType),
+					resp: errorResponse(protocol.QMIUIMReadRecord, protocol.QMIErrorInvalidSessionType),
 				},
 				{
-					check: func(req Request) {
+					check: func(req protocol.Request) {
 						assertTLV(t, req.TLVs, 0x01, append([]byte{byte(SessionNonProvisioningSlot1), byte(len(isimAID))}, isimAID...))
 						assertTLV(t, req.TLVs, 0x02, []byte{0x04, 0x6F, 0x00})
 						assertTLV(t, req.TLVs, 0x03, []byte{0x01, 0x00, 0x20, 0x00})
 					},
-					resp: successResponse(MessageReadRecord,
-						TLVBytes(0x10, []byte{0x90, 0x00}),
-						TLVBytes(0x11, encodeLengthPrefixed(tlvTextRecord("sip:alice@ims.example.com", 32))),
+					resp: successResponse(protocol.QMIUIMReadRecord,
+						tlvBytes(0x10, []byte{0x90, 0x00}),
+						tlvBytes(0x11, encodeLengthPrefixed(tlvTextRecord("sip:alice@ims.example.com", 32))),
 					),
 				},
 				{
-					check: func(req Request) {
-						if req.MessageID != MessageAuthenticate {
-							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, MessageAuthenticate)
+					check: func(req protocol.Request) {
+						if req.MessageID != protocol.QMIUIMAuthenticate {
+							t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, protocol.QMIUIMAuthenticate)
 						}
 						assertTLV(t, req.TLVs, 0x01, []byte{byte(SessionPrimaryGWProvisioning), 0x00})
 						assertTLV(t, req.TLVs, 0x02, []byte{
-							Authenticate3GContext,
+							authenticate3GContext,
 							0x22, 0x00,
 							0x10, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
 							0x10, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
 						})
 					},
-					resp: successResponse(MessageAuthenticate,
-						TLVBytes(0x10, []byte{0x90, 0x00}),
-						TLVBytes(0x11, encodeLengthPrefixed([]byte{0xDC, 0x00})),
+					resp: successResponse(protocol.QMIUIMAuthenticate,
+						tlvBytes(0x10, []byte{0x90, 0x00}),
+						tlvBytes(0x11, encodeLengthPrefixed([]byte{0xDC, 0x00})),
 					),
 				},
 			},
@@ -165,6 +166,176 @@ func TestReaderUIMMessages(t *testing.T) {
 	}
 	if !bytes.Equal(auth, []byte{0xDC, 0x00}) {
 		t.Fatalf("Authenticate3G() = %X, want DC00", auth)
+	}
+}
+
+func TestReaderSMSPPDownloadUsesCATEnvelope(t *testing.T) {
+	reader := &Reader{
+		Transport: &fakeTransport{
+			t: t,
+			calls: []transportCall{
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceControl || req.MessageID != protocol.QMICtlCmdGetVersionInfo {
+							t.Fatalf("request = service %#x message 0x%04X, want service version info", req.Service, req.MessageID)
+						}
+					},
+					resp: successResponse(protocol.QMICtlCmdGetVersionInfo, tlvBytes(0x01, encodeServiceVersions(
+						serviceVersion{Service: protocol.QMIServiceCAT2, Major: 2, Minor: 24},
+					))),
+				},
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceControl || req.MessageID != protocol.QMICtlCmdAllocateClientID {
+							t.Fatalf("request = service %#x message 0x%04X, want CAT2 client allocation", req.Service, req.MessageID)
+						}
+						assertTLV(t, req.TLVs, 0x01, []byte{byte(protocol.QMIServiceCAT2)})
+					},
+					resp: successResponse(protocol.QMICtlCmdAllocateClientID, tlvBytes(0x01, []byte{byte(protocol.QMIServiceCAT2), 9})),
+				},
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceCAT2 || req.ClientID != 9 || req.MessageID != protocol.QMICATSendEnvelope {
+							t.Fatalf("request = service %#x client %d message 0x%04X, want CAT2 envelope", req.Service, req.ClientID, req.MessageID)
+						}
+						assertTLV(t, req.TLVs, 0x01, []byte{
+							0x09, 0x00,
+							0x10, 0x00,
+							0xD1, 0x0E,
+							0x82, 0x02, 0x83, 0x81,
+							0x86, 0x03, 0x91, 0x21, 0x43,
+							0x8B, 0x03, 0x00, 0x7F, 0xF6,
+						})
+						assertTLV(t, req.TLVs, 0x10, []byte{0x01})
+					},
+					resp: successResponse(protocol.QMICATSendEnvelope, tlvBytes(0x10, []byte{0x90, 0x00, 0x00})),
+				},
+			},
+		},
+		Slot:     1,
+		ClientID: 7,
+	}
+
+	got, err := reader.SMSPPDownload(context.Background(), usimreader.SMSPPDownloadRequest{
+		ServiceCenterAddress: "+1234",
+		TPDU:                 []byte{0x00, 0x7F, 0xF6},
+	})
+	if err != nil {
+		t.Fatalf("SMSPPDownload() error = %v", err)
+	}
+	if got.SW1 != 0x90 || got.SW2 != 0x00 {
+		t.Fatalf("SMSPPDownload() status = %02X%02X, want 9000", got.SW1, got.SW2)
+	}
+}
+
+func TestReaderSMSPPDownloadUsesCATWhenOnlyCATIsExposed(t *testing.T) {
+	reader := &Reader{
+		Transport: &fakeTransport{
+			t: t,
+			calls: []transportCall{
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceControl || req.MessageID != protocol.QMICtlCmdGetVersionInfo {
+							t.Fatalf("request = service %#x message 0x%04X, want service version info", req.Service, req.MessageID)
+						}
+					},
+					resp: successResponse(protocol.QMICtlCmdGetVersionInfo, tlvBytes(0x01, encodeServiceVersions(
+						serviceVersion{Service: protocol.QMIServiceCAT, Major: 1, Minor: 0},
+					))),
+				},
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceControl || req.MessageID != protocol.QMICtlCmdAllocateClientID {
+							t.Fatalf("request = service %#x message 0x%04X, want CAT client allocation", req.Service, req.MessageID)
+						}
+						assertTLV(t, req.TLVs, 0x01, []byte{byte(protocol.QMIServiceCAT)})
+					},
+					resp: successResponse(protocol.QMICtlCmdAllocateClientID, tlvBytes(0x01, []byte{byte(protocol.QMIServiceCAT), 10})),
+				},
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceCAT || req.ClientID != 10 || req.MessageID != protocol.QMICATSendEnvelope {
+							t.Fatalf("request = service %#x client %d message 0x%04X, want CAT envelope", req.Service, req.ClientID, req.MessageID)
+						}
+						assertTLV(t, req.TLVs, 0x01, []byte{
+							0x09, 0x00,
+							0x10, 0x00,
+							0xD1, 0x0E,
+							0x82, 0x02, 0x83, 0x81,
+							0x86, 0x03, 0x91, 0x21, 0x43,
+							0x8B, 0x03, 0x00, 0x7F, 0xF6,
+						})
+						if _, ok := tlvValue(req.TLVs, 0x10); ok {
+							t.Fatal("CAT envelope request includes slot TLV 0x10, want CAT1 request without slot")
+						}
+					},
+					resp: successResponse(protocol.QMICATSendEnvelope, tlvBytes(0x10, []byte{0x90, 0x00, 0x00})),
+				},
+			},
+		},
+		Slot:     1,
+		ClientID: 7,
+	}
+
+	got, err := reader.SMSPPDownload(context.Background(), usimreader.SMSPPDownloadRequest{
+		ServiceCenterAddress: "+1234",
+		TPDU:                 []byte{0x00, 0x7F, 0xF6},
+	})
+	if err != nil {
+		t.Fatalf("SMSPPDownload() error = %v", err)
+	}
+	if got.SW1 != 0x90 || got.SW2 != 0x00 {
+		t.Fatalf("SMSPPDownload() status = %02X%02X, want 9000", got.SW1, got.SW2)
+	}
+	if reader.CATService != protocol.QMIServiceCAT || reader.CATClientID != 10 {
+		t.Fatalf("CAT client = service %#x client %d, want CAT client 10", reader.CATService, reader.CATClientID)
+	}
+}
+
+func TestReaderSMSPPDownloadDoesNotFallbackAfterCAT2EnvelopeError(t *testing.T) {
+	reader := &Reader{
+		Transport: &fakeTransport{
+			t: t,
+			calls: []transportCall{
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceControl || req.MessageID != protocol.QMICtlCmdGetVersionInfo {
+							t.Fatalf("request = service %#x message 0x%04X, want service version info", req.Service, req.MessageID)
+						}
+					},
+					resp: successResponse(protocol.QMICtlCmdGetVersionInfo, tlvBytes(0x01, encodeServiceVersions(
+						serviceVersion{Service: protocol.QMIServiceCAT2, Major: 2, Minor: 24},
+						serviceVersion{Service: protocol.QMIServiceCAT, Major: 1, Minor: 0},
+					))),
+				},
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceControl || req.MessageID != protocol.QMICtlCmdAllocateClientID {
+							t.Fatalf("request = service %#x message 0x%04X, want CAT2 client allocation", req.Service, req.MessageID)
+						}
+						assertTLV(t, req.TLVs, 0x01, []byte{byte(protocol.QMIServiceCAT2)})
+					},
+					resp: successResponse(protocol.QMICtlCmdAllocateClientID, tlvBytes(0x01, []byte{byte(protocol.QMIServiceCAT2), 9})),
+				},
+				{
+					check: func(req protocol.Request) {
+						if req.Service != protocol.QMIServiceCAT2 || req.ClientID != 9 || req.MessageID != protocol.QMICATSendEnvelope {
+							t.Fatalf("request = service %#x client %d message 0x%04X, want CAT2 envelope", req.Service, req.ClientID, req.MessageID)
+						}
+					},
+					resp: errorResponse(protocol.QMICATSendEnvelope, protocol.QMIErrorInvalidOperation),
+				},
+			},
+		},
+		Slot:     1,
+		ClientID: 7,
+	}
+
+	if _, err := reader.SMSPPDownload(context.Background(), usimreader.SMSPPDownloadRequest{
+		ServiceCenterAddress: "+1234",
+		TPDU:                 []byte{0x00, 0x7F, 0xF6},
+	}); err == nil || !strings.Contains(err.Error(), "Invalid operation") {
+		t.Fatalf("SMSPPDownload() error = %v, want Invalid operation", err)
 	}
 }
 
@@ -247,7 +418,7 @@ func TestEnsureSlotActivated(t *testing.T) {
 			slot: 2,
 			ctx:  context.Background,
 			calls: []transportCall{
-				{resp: successResponse(MessageGetSlotStatus, TLVBytes(0x10, encodeSlotStatus(2)))},
+				{resp: successResponse(protocol.QMIUIMGetSlotStatus, tlvBytes(0x10, encodeSlotStatus(2)))},
 			},
 		},
 		{
@@ -255,16 +426,16 @@ func TestEnsureSlotActivated(t *testing.T) {
 			slot: 2,
 			ctx:  context.Background,
 			calls: []transportCall{
-				{resp: successResponse(MessageGetSlotStatus, TLVBytes(0x10, encodeSlotStatus(1)))},
+				{resp: successResponse(protocol.QMIUIMGetSlotStatus, tlvBytes(0x10, encodeSlotStatus(1)))},
 				{
-					check: func(req Request) {
+					check: func(req protocol.Request) {
 						assertTLV(t, req.TLVs, 0x01, []byte{0x01})
 						assertTLV(t, req.TLVs, 0x02, []byte{0x02, 0x00, 0x00, 0x00})
 					},
-					resp: successResponse(MessageSwitchSlot),
+					resp: successResponse(protocol.QMIUIMSwitchSlot),
 				},
-				{resp: successResponse(MessageGetCardStatus, TLVBytes(0x10, encodeCardStatus(false)))},
-				{resp: successResponse(MessageGetCardStatus, TLVBytes(0x10, encodeCardStatus(true)))},
+				{resp: successResponse(protocol.QMIUIMGetCardStatus, tlvBytes(0x10, encodeCardStatus(false)))},
+				{resp: successResponse(protocol.QMIUIMGetCardStatus, tlvBytes(0x10, encodeCardStatus(true)))},
 			},
 		},
 		{
@@ -272,7 +443,7 @@ func TestEnsureSlotActivated(t *testing.T) {
 			slot: 1,
 			ctx:  context.Background,
 			calls: []transportCall{
-				{resp: errorResponse(MessageGetSlotStatus, ErrorNotSupported)},
+				{resp: errorResponse(protocol.QMIUIMGetSlotStatus, protocol.QMIErrorNotSupported)},
 			},
 		},
 		{
@@ -284,9 +455,9 @@ func TestEnsureSlotActivated(t *testing.T) {
 				return ctx
 			},
 			calls: []transportCall{
-				{resp: successResponse(MessageGetSlotStatus, TLVBytes(0x10, encodeSlotStatus(1)))},
-				{resp: successResponse(MessageSwitchSlot)},
-				{resp: successResponse(MessageGetCardStatus, TLVBytes(0x10, encodeCardStatus(false)))},
+				{resp: successResponse(protocol.QMIUIMGetSlotStatus, tlvBytes(0x10, encodeSlotStatus(1)))},
+				{resp: successResponse(protocol.QMIUIMSwitchSlot)},
+				{resp: successResponse(protocol.QMIUIMGetCardStatus, tlvBytes(0x10, encodeCardStatus(false)))},
 			},
 			wantErr: "waiting for card readiness",
 		},
@@ -318,23 +489,23 @@ func TestReaderCloseIsIdempotent(t *testing.T) {
 		t: t,
 		calls: []transportCall{
 			{
-				check: func(req Request) {
-					if req.Service != ServiceControl {
-						t.Fatalf("Service = %v, want %v", req.Service, ServiceControl)
+				check: func(req protocol.Request) {
+					if req.Service != protocol.QMIServiceControl {
+						t.Fatalf("Service = %v, want %v", req.Service, protocol.QMIServiceControl)
 					}
 					if req.ClientID != 0 {
 						t.Fatalf("ClientID = %d, want 0", req.ClientID)
 					}
-					if req.MessageID != MessageReleaseClientID {
-						t.Fatalf("MessageID = 0x%04X, want 0x%04X", req.MessageID, MessageReleaseClientID)
+					if req.MessageID != protocol.QMICtlCmdReleaseClientID {
+						t.Fatalf("protocol.MessageID = 0x%04X, want 0x%04X", req.MessageID, protocol.QMICtlCmdReleaseClientID)
 					}
-					assertTLV(t, req.TLVs, 0x01, []byte{byte(ServiceUIM), 0x07})
+					assertTLV(t, req.TLVs, 0x01, []byte{byte(protocol.QMIServiceUIM), 0x07})
 				},
-				resp: Response{
-					Service:   ServiceControl,
-					MessageID: MessageReleaseClientID,
-					TLVs: TLVs{
-						TLVBytes(TLVResult, []byte{0x00, 0x00, 0x00, 0x00}),
+				resp: protocol.Response{
+					Service:   protocol.QMIServiceControl,
+					MessageID: protocol.QMICtlCmdReleaseClientID,
+					TLVs: protocol.TLVs{
+						tlvBytes(qmiTLVResult, []byte{0x00, 0x00, 0x00, 0x00}),
 					},
 				},
 			},
@@ -366,7 +537,7 @@ func TestReaderCloseIsIdempotent(t *testing.T) {
 	}
 }
 
-func assertTLV(t *testing.T, tlvs TLVs, typ byte, want []byte) {
+func assertTLV(t *testing.T, tlvs protocol.TLVs, typ byte, want []byte) {
 	t.Helper()
 	got, ok := tlvValue(tlvs, typ)
 	if !ok {
@@ -377,30 +548,40 @@ func assertTLV(t *testing.T, tlvs TLVs, typ byte, want []byte) {
 	}
 }
 
-func successResponse(id MessageID, tlvs ...TLV) Response {
-	return Response{
-		Service:   ServiceUIM,
+func successResponse(id protocol.MessageID, tlvs ...protocol.TLV) protocol.Response {
+	return protocol.Response{
+		Service:   protocol.QMIServiceUIM,
 		ClientID:  7,
 		MessageID: id,
-		TLVs: append(TLVs{
-			TLVBytes(TLVResult, []byte{0x00, 0x00, 0x00, 0x00}),
+		TLVs: append(protocol.TLVs{
+			tlvBytes(qmiTLVResult, []byte{0x00, 0x00, 0x00, 0x00}),
 		}, tlvs...),
 	}
 }
 
-func errorResponse(id MessageID, err Error) Response {
-	return Response{
-		Service:   ServiceUIM,
+func errorResponse(id protocol.MessageID, err protocol.QMIError) protocol.Response {
+	return protocol.Response{
+		Service:   protocol.QMIServiceUIM,
 		ClientID:  7,
 		MessageID: id,
-		TLVs: TLVs{
-			TLVBytes(TLVResult, []byte{0x01, 0x00, byte(err), byte(uint16(err) >> 8)}),
+		TLVs: protocol.TLVs{
+			tlvBytes(qmiTLVResult, []byte{0x01, 0x00, byte(err), byte(uint16(err) >> 8)}),
 		},
 	}
 }
 
 func encodeLengthPrefixed(data []byte) []byte {
 	return append(binary.LittleEndian.AppendUint16(nil, uint16(len(data))), data...)
+}
+
+func encodeServiceVersions(versions ...serviceVersion) []byte {
+	out := []byte{byte(len(versions))}
+	for _, version := range versions {
+		out = append(out, byte(version.Service))
+		out = binary.LittleEndian.AppendUint16(out, version.Major)
+		out = binary.LittleEndian.AppendUint16(out, version.Minor)
+	}
+	return out
 }
 
 func encodeFileAttributes(fileSize, fileID uint16, fileType byte, recordSize, recordCount uint16, raw []byte) []byte {

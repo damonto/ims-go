@@ -110,6 +110,29 @@ func TestReaderAuthenticate3GUsesExpectedAPDU(t *testing.T) {
 	}
 }
 
+func TestReaderSMSPPDownloadUsesEnvelopeAPDU(t *testing.T) {
+	reader := New(&apduScriptTransmitter{
+		t: t,
+		steps: []apduScriptStep{
+			{
+				wantAPDU: "80C2000010D10E8202838186039121438B03007FF600",
+				resp:     []byte{0x91, 0x08},
+			},
+		},
+	})
+
+	got, err := reader.SMSPPDownload(context.Background(), usimreader.SMSPPDownloadRequest{
+		ServiceCenterAddress: "+1234",
+		TPDU:                 []byte{0x00, 0x7F, 0xF6},
+	})
+	if err != nil {
+		t.Fatalf("SMSPPDownload() error = %v", err)
+	}
+	if got.SW1 != 0x91 || got.SW2 != 0x08 {
+		t.Fatalf("SMSPPDownload() status = %02X%02X, want 9108", got.SW1, got.SW2)
+	}
+}
+
 func TestReaderAuthenticate3GSelectsApplicationWhenAIDProvided(t *testing.T) {
 	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 	rand := []byte{0x01, 0x02, 0x03, 0x04}

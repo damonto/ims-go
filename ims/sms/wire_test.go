@@ -20,12 +20,12 @@ func TestEncodeDecodeSMS(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tpdu, err := encodeSMSSubmit(7, "+12345", tt.text)
+			tpdu, err := encodeSubmit(7, "+12345", tt.text)
 			if err != nil {
-				t.Fatalf("encodeSMSSubmit() error = %v", err)
+				t.Fatalf("encodeSubmit() error = %v", err)
 			}
 			if len(tpdu) == 0 {
-				t.Fatal("encodeSMSSubmit() returned empty TPDU")
+				t.Fatal("encodeSubmit() returned empty TPDU")
 			}
 
 			encoded, _, udl, err := encodeUserData(tt.text)
@@ -39,12 +39,12 @@ func TestEncodeDecodeSMS(t *testing.T) {
 			deliver = append(deliver, udl)
 			deliver = append(deliver, encoded...)
 
-			msg, err := decodeSMSDeliver(deliver)
+			msg, err := decodeDeliver(deliver)
 			if err != nil {
-				t.Fatalf("decodeSMSDeliver() error = %v", err)
+				t.Fatalf("decodeDeliver() error = %v", err)
 			}
 			if msg.Text != tt.text {
-				t.Fatalf("decodeSMSDeliver() text = %q, want %q", msg.Text, tt.text)
+				t.Fatalf("decodeDeliver() text = %q, want %q", msg.Text, tt.text)
 			}
 		})
 	}
@@ -265,9 +265,9 @@ func TestEncodeDecodeMultipartSMS(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parts, err := buildSMSUserDataParts(tt.text)
+			parts, err := buildUserDataParts(tt.text)
 			if err != nil {
-				t.Fatalf("buildSMSUserDataParts() error = %v", err)
+				t.Fatalf("buildUserDataParts() error = %v", err)
 			}
 			if len(parts) < 2 {
 				t.Fatalf("len(parts) = %d, want >= 2", len(parts))
@@ -276,7 +276,7 @@ func TestEncodeDecodeMultipartSMS(t *testing.T) {
 			var reference uint16
 			var sixteenBit bool
 			for i, part := range parts {
-				var deliver smsDeliverTPDU
+				var deliver deliverTPDU
 				if err := deliver.UnmarshalBinary(part.marshalDeliver("+12345")); err != nil {
 					t.Fatalf("UnmarshalBinary(part %d) error = %v", i, err)
 				}
@@ -300,10 +300,10 @@ func TestEncodeDecodeMultipartSMS(t *testing.T) {
 
 func TestDecodeMultipartSMS16BitReference(t *testing.T) {
 	text := strings.Repeat("你", 66)
-	header := []byte{0x06, smsConcatIEI16Bit, 0x04, 0x12, 0x34, 0x02, 0x01}
+	header := []byte{0x06, concatIEI16Bit, 0x04, 0x12, 0x34, 0x02, 0x01}
 	userData := append(header, encodeUCS2(text)...)
-	part := smsUserDataPart{udhi: true, dcs: 0x08, udl: len(userData), userData: userData}
-	var deliver smsDeliverTPDU
+	part := userDataPart{udhi: true, dcs: 0x08, udl: len(userData), userData: userData}
+	var deliver deliverTPDU
 	if err := deliver.UnmarshalBinary(part.marshalDeliver("+12345")); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -354,17 +354,17 @@ func TestRPMessageMarshalBinaryRoundTrip(t *testing.T) {
 }
 
 func TestSMSSubmitTPDUMarshalBinary(t *testing.T) {
-	parts, err := buildSMSUserDataParts("hello")
+	parts, err := buildUserDataParts("hello")
 	if err != nil {
-		t.Fatalf("buildSMSUserDataParts() error = %v", err)
+		t.Fatalf("buildUserDataParts() error = %v", err)
 	}
 	tests := []struct {
 		name string
-		tpdu smsSubmitTPDU
+		tpdu submitTPDU
 	}{
 		{
 			name: "single-part gsm7",
-			tpdu: newSMSSubmitTPDU(7, "+12345", parts[0], false),
+			tpdu: newSubmitTPDU(7, "+12345", parts[0], false),
 		},
 	}
 	for _, tt := range tests {
@@ -390,15 +390,15 @@ func TestSMSDeliverTPDURoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parts, err := buildSMSUserDataParts(tt.text)
+			parts, err := buildUserDataParts(tt.text)
 			if err != nil {
-				t.Fatalf("buildSMSUserDataParts() error = %v", err)
+				t.Fatalf("buildUserDataParts() error = %v", err)
 			}
-			data, err := newSMSDeliverTPDU("+12345", parts[0]).MarshalBinary()
+			data, err := newDeliverTPDU("+12345", parts[0]).MarshalBinary()
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			var deliver smsDeliverTPDU
+			var deliver deliverTPDU
 			if err := deliver.UnmarshalBinary(data); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -415,7 +415,7 @@ func TestSMSDeliverTPDURoundTrip(t *testing.T) {
 func TestSMSStatusReportTPDURoundTrip(t *testing.T) {
 	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
 	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
-	want := SMSStatusReport{
+	want := StatusReport{
 		Recipient:         "+12345",
 		MessageReference:  7,
 		Status:            0x00,
@@ -423,14 +423,14 @@ func TestSMSStatusReportTPDURoundTrip(t *testing.T) {
 		DischargeTime:     dischargeTime,
 	}
 
-	data, err := (smsStatusReportTPDU{Message: want}).MarshalBinary()
+	data, err := (statusReportTPDU{Message: want}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	got, err := decodeSMSStatusReport(data)
+	got, err := decodeStatusReport(data)
 	if err != nil {
-		t.Fatalf("decodeSMSStatusReport() error = %v", err)
+		t.Fatalf("decodeStatusReport() error = %v", err)
 	}
 	if got.Recipient != want.Recipient {
 		t.Fatalf("Recipient = %q, want %q", got.Recipient, want.Recipient)
@@ -455,14 +455,14 @@ func TestSMSStatusReportTPDUParsesExtendedFields(t *testing.T) {
 
 	raw := []byte{0x6E, 0x07}
 	raw = append(raw, encodeTPAddress("+12345")...)
-	raw = append(raw, encodeSMSTimestamp(serviceCenterTime)...)
-	raw = append(raw, encodeSMSTimestamp(dischargeTime)...)
+	raw = append(raw, encodeTimestamp(serviceCenterTime)...)
+	raw = append(raw, encodeTimestamp(dischargeTime)...)
 	raw = append(raw, 0x20)
 	raw = append(raw, 0x87, 0x00, 0x7F, 0xF6, 0x03, 0xAA, 0xBB, 0xCC)
 
-	got, err := decodeSMSStatusReport(raw)
+	got, err := decodeStatusReport(raw)
 	if err != nil {
-		t.Fatalf("decodeSMSStatusReport() error = %v", err)
+		t.Fatalf("decodeStatusReport() error = %v", err)
 	}
 	if got.Recipient != "+12345" {
 		t.Fatalf("Recipient = %q, want %q", got.Recipient, "+12345")
@@ -500,19 +500,19 @@ func TestDecodeSMSStatusReportNormalizesNonIntegerTimestampDigits(t *testing.T) 
 	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
 	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
 
-	raw := []byte{byte(tpduMTISMSStatusReport), 0x07}
+	raw := []byte{byte(tpduMTIStatusReport), 0x07}
 	raw = append(raw, encodeTPAddress("+12345")...)
-	raw = append(raw, encodeSMSTimestamp(serviceCenterTime)...)
-	raw = append(raw, encodeSMSTimestamp(dischargeTime)...)
+	raw = append(raw, encodeTimestamp(serviceCenterTime)...)
+	raw = append(raw, encodeTimestamp(dischargeTime)...)
 	raw = append(raw, 0x00)
 
 	addrLen := len(encodeTPAddress("+12345"))
 	sctsOffset := 2 + addrLen
 	raw[sctsOffset+1] = 0x3A
 
-	got, err := decodeSMSStatusReport(raw)
+	got, err := decodeStatusReport(raw)
 	if err != nil {
-		t.Fatalf("decodeSMSStatusReport() error = %v", err)
+		t.Fatalf("decodeStatusReport() error = %v", err)
 	}
 	if got.ServiceCenterTime.Format(time.RFC3339) != serviceCenterTime.Format(time.RFC3339) {
 		t.Fatalf("ServiceCenterTime = %q, want %q", got.ServiceCenterTime.Format(time.RFC3339), serviceCenterTime.Format(time.RFC3339))

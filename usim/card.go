@@ -44,6 +44,9 @@ type Card struct {
 	akaState        AKAIdentityState
 }
 
+type SMSPPDownloadRequest = usimreader.SMSPPDownloadRequest
+type SMSPPDownloadResponse = usimreader.SMSPPDownloadResponse
+
 func (u *Card) ICCID() string                              { return u.iccid }
 func (u *Card) IMSI() string                               { return u.imsi }
 func (u *Card) MCC() string                                { return u.mcc }
@@ -104,6 +107,14 @@ func (u *Card) AKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
 		AUTS:   result.AUTS,
 		Reject: result.Reject,
 	}, nil
+}
+
+func (u *Card) SMSPPDownload(ctx context.Context, req SMSPPDownloadRequest) (SMSPPDownloadResponse, error) {
+	resp, err := u.tx.SMSPPDownload(ctx, req)
+	if err != nil {
+		return SMSPPDownloadResponse{}, fmt.Errorf("running SMS-PP data download: %w", err)
+	}
+	return resp, nil
 }
 
 func (u *Card) load(ctx context.Context) error {

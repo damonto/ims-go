@@ -18,6 +18,7 @@ type fakeReader struct {
 	readTransparent   func(context.Context, usimreader.TransparentRead) ([]byte, error)
 	readRecord        func(context.Context, usimreader.RecordRead) ([]byte, error)
 	authenticate3G    func(context.Context, usimreader.AuthenticateRequest) ([]byte, error)
+	smsPPDownload     func(context.Context, usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error)
 }
 
 func (r *fakeReader) ListApplications(ctx context.Context) ([]usimreader.Application, error) {
@@ -53,6 +54,13 @@ func (r *fakeReader) Authenticate3G(ctx context.Context, req usimreader.Authenti
 		return nil, errors.New("Authenticate3G was not expected")
 	}
 	return r.authenticate3G(ctx, req)
+}
+
+func (r *fakeReader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
+	if r.smsPPDownload == nil {
+		return usimreader.SMSPPDownloadResponse{}, errors.New("SMSPPDownload was not expected")
+	}
+	return r.smsPPDownload(ctx, req)
 }
 
 func (r *fakeReader) Close() error { return nil }

@@ -7,24 +7,24 @@ import (
 )
 
 var (
-	_ encoding.BinaryMarshaler   = smsSubmitTPDU{}
-	_ encoding.BinaryMarshaler   = smsDeliverTPDU{}
-	_ encoding.BinaryUnmarshaler = (*smsDeliverTPDU)(nil)
-	_ encoding.BinaryMarshaler   = smsStatusReportTPDU{}
-	_ encoding.BinaryUnmarshaler = (*smsStatusReportTPDU)(nil)
+	_ encoding.BinaryMarshaler   = submitTPDU{}
+	_ encoding.BinaryMarshaler   = deliverTPDU{}
+	_ encoding.BinaryUnmarshaler = (*deliverTPDU)(nil)
+	_ encoding.BinaryMarshaler   = statusReportTPDU{}
+	_ encoding.BinaryUnmarshaler = (*statusReportTPDU)(nil)
 	_ encoding.BinaryMarshaler   = rpMessage{}
 	_ encoding.BinaryUnmarshaler = (*rpMessage)(nil)
 )
 
-type smsSubmitTPDU struct {
+type submitTPDU struct {
 	Reference        byte
 	Destination      string
-	Part             smsUserDataPart
+	Part             userDataPart
 	RejectDuplicates bool
 }
 
-func newSMSSubmitTPDU(reference byte, destination string, part smsUserDataPart, rejectDuplicates bool) smsSubmitTPDU {
-	return smsSubmitTPDU{
+func newSubmitTPDU(reference byte, destination string, part userDataPart, rejectDuplicates bool) submitTPDU {
+	return submitTPDU{
 		Reference:        reference,
 		Destination:      destination,
 		Part:             part,
@@ -32,7 +32,7 @@ func newSMSSubmitTPDU(reference byte, destination string, part smsUserDataPart, 
 	}
 }
 
-func (tp smsSubmitTPDU) MarshalBinary() ([]byte, error) {
+func (tp submitTPDU) MarshalBinary() ([]byte, error) {
 	firstOctet := byte(0x01)
 	if tp.RejectDuplicates {
 		firstOctet |= 0x04
@@ -44,29 +44,29 @@ func (tp smsSubmitTPDU) MarshalBinary() ([]byte, error) {
 	payload = append(payload, firstOctet)
 	payload = append(payload, tp.Reference)
 	payload = append(payload, encodeTPAddress(tp.Destination)...)
-	payload = append(payload, 0x00)
+	payload = append(payload, tp.Part.pid)
 	payload = append(payload, tp.Part.dcs)
 	payload = append(payload, byte(tp.Part.udl))
 	payload = append(payload, tp.Part.userData...)
 	return payload, nil
 }
 
-type smsDeliverTPDU struct {
+type deliverTPDU struct {
 	From    string
-	Part    smsUserDataPart
-	Message IncomingSMS
-	Concat  *smsConcatInfo
+	Part    userDataPart
+	Message Incoming
+	Concat  *concatInfo
 }
 
-type smsStatusReportTPDU struct {
-	Message SMSStatusReport
+type statusReportTPDU struct {
+	Message StatusReport
 }
 
-func newSMSDeliverTPDU(from string, part smsUserDataPart) smsDeliverTPDU {
-	return smsDeliverTPDU{From: from, Part: part}
+func newDeliverTPDU(from string, part userDataPart) deliverTPDU {
+	return deliverTPDU{From: from, Part: part}
 }
 
-func (tp smsDeliverTPDU) MarshalBinary() ([]byte, error) {
+func (tp deliverTPDU) MarshalBinary() ([]byte, error) {
 	firstOctet := byte(0x00)
 	if tp.Part.udhi {
 		firstOctet |= 0x40
@@ -74,71 +74,72 @@ func (tp smsDeliverTPDU) MarshalBinary() ([]byte, error) {
 	payload := make([]byte, 0, 32+len(tp.Part.userData))
 	payload = append(payload, firstOctet)
 	payload = append(payload, encodeTPAddress(tp.From)...)
-	payload = append(payload, 0x00, tp.Part.dcs)
+	payload = append(payload, tp.Part.pid, tp.Part.dcs)
 	payload = append(payload, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 	payload = append(payload, byte(tp.Part.udl))
 	payload = append(payload, tp.Part.userData...)
 	return payload, nil
 }
 
-type smsDeliverFields struct {
+type deliverFields struct {
 	from string
-	part smsUserDataPart
+	part userDataPart
 }
 
-type smsUserDataEncoding byte
+type userDataEncoding byte
 
 const (
-	smsUserDataEncodingGSM7 smsUserDataEncoding = iota
-	smsUserDataEncoding8Bit
-	smsUserDataEncodingUCS2
+	userDataEncodingGSM7 userDataEncoding = iota
+	userDataEncoding8Bit
+	userDataEncodingUCS2
 )
 
-func smsUserDataEncodingFromAlphabetBits(bits, dcs byte) (smsUserDataEncoding, error) {
+func userDataEncodingFromAlphabetBits(bits, dcs byte) (userDataEncoding, error) {
 	switch bits {
 	case 0x00:
-		return smsUserDataEncodingGSM7, nil
+		return userDataEncodingGSM7, nil
 	case 0x01:
-		return smsUserDataEncoding8Bit, nil
+		return userDataEncoding8Bit, nil
 	case 0x02:
-		return smsUserDataEncodingUCS2, nil
+		return userDataEncodingUCS2, nil
 	default:
 		return 0, fmt.Errorf("decoding SMS DCS: reserved alphabet bits in dcs 0x%02X", dcs)
 	}
 }
 
-func smsUserDataEncodingFromDCS(dcs byte) (smsUserDataEncoding, error) {
+func userDataEncodingFromDCS(dcs byte) (userDataEncoding, error) {
 	switch {
 	case dcs&0xC0 == 0x00:
 		if dcs&0x20 != 0 {
 			return 0, fmt.Errorf("decoding SMS DCS: compressed dcs 0x%02X is unsupported", dcs)
 		}
-		return smsUserDataEncodingFromAlphabetBits((dcs>>2)&0x03, dcs)
+		return userDataEncodingFromAlphabetBits((dcs>>2)&0x03, dcs)
 	case dcs&0xF0 == 0xF0:
-		return smsUserDataEncodingFromAlphabetBits((dcs>>2)&0x03, dcs)
+		return userDataEncodingFromAlphabetBits((dcs>>2)&0x03, dcs)
 	default:
 		return 0, fmt.Errorf("decoding SMS DCS: unsupported dcs 0x%02X", dcs)
 	}
 }
 
-func decodeSMSDeliverFields(data []byte) (smsDeliverFields, error) {
-	mti, err := smsTPDUMessageType(data)
+func decodeDeliverFields(data []byte) (deliverFields, error) {
+	mti, err := tpduMessageType(data)
 	if err != nil {
-		return smsDeliverFields{}, errors.New("decoding SMS-DELIVER: packet too short")
+		return deliverFields{}, errors.New("decoding SMS-DELIVER: packet too short")
 	}
-	if mti != tpduMTISMSDeliver && mti != tpduMTIReserved {
-		return smsDeliverFields{}, fmt.Errorf("decoding SMS-DELIVER: unexpected tp-mti 0x%02X", mti)
+	if mti != tpduMTIDeliver && mti != tpduMTIReserved {
+		return deliverFields{}, fmt.Errorf("decoding SMS-DELIVER: unexpected tp-mti 0x%02X", mti)
 	}
-	part := smsUserDataPart{udhi: (data[0]>>6)&0x01 == 1}
+	part := userDataPart{udhi: (data[0]>>6)&0x01 == 1}
 	idx := 1
 	from, n, err := decodeTPAddress(data[idx:])
 	if err != nil {
-		return smsDeliverFields{}, err
+		return deliverFields{}, err
 	}
 	idx += n
 	if len(data[idx:]) < 10 {
-		return smsDeliverFields{}, errors.New("decoding SMS-DELIVER: truncated mandatory fields")
+		return deliverFields{}, errors.New("decoding SMS-DELIVER: truncated mandatory fields")
 	}
+	part.pid = data[idx]
 	idx++
 	part.dcs = data[idx]
 	idx++
@@ -146,10 +147,10 @@ func decodeSMSDeliverFields(data []byte) (smsDeliverFields, error) {
 	part.udl = int(data[idx])
 	idx++
 	part.userData = append([]byte(nil), data[idx:]...)
-	return smsDeliverFields{from: from, part: part}, nil
+	return deliverFields{from: from, part: part}, nil
 }
 
-func decodeSMSDeliverGSM7(part smsUserDataPart) (string, *smsConcatInfo, error) {
+func decodeDeliverGSM7(part userDataPart) (string, *concatInfo, error) {
 	octets := gsm7OctetCount(part.udl)
 	if len(part.userData) < octets {
 		return "", nil, errors.New("decoding SMS-DELIVER: truncated GSM7 payload")
@@ -162,7 +163,7 @@ func decodeSMSDeliverGSM7(part smsUserDataPart) (string, *smsConcatInfo, error) 
 		}
 		return text, nil, nil
 	}
-	headerLen, concat, err := decodeSMSUserDataHeader(payload)
+	headerLen, concat, err := decodeUserDataHeader(payload)
 	if err != nil {
 		return "", nil, err
 	}
@@ -177,7 +178,7 @@ func decodeSMSDeliverGSM7(part smsUserDataPart) (string, *smsConcatInfo, error) 
 	return text, concat, nil
 }
 
-func decodeSMSDeliverUCS2(part smsUserDataPart) (string, *smsConcatInfo, error) {
+func decodeDeliverUCS2(part userDataPart) (string, *concatInfo, error) {
 	if len(part.userData) < part.udl {
 		return "", nil, errors.New("decoding SMS-DELIVER: truncated UCS2 payload")
 	}
@@ -185,7 +186,7 @@ func decodeSMSDeliverUCS2(part smsUserDataPart) (string, *smsConcatInfo, error) 
 	if !part.udhi {
 		return decodeUCS2(payload), nil, nil
 	}
-	headerLen, concat, err := decodeSMSUserDataHeader(payload)
+	headerLen, concat, err := decodeUserDataHeader(payload)
 	if err != nil {
 		return "", nil, err
 	}
@@ -195,40 +196,58 @@ func decodeSMSDeliverUCS2(part smsUserDataPart) (string, *smsConcatInfo, error) 
 	return decodeUCS2(payload[headerLen:]), concat, nil
 }
 
-func decodeSMSDeliverUserData(part smsUserDataPart) (string, *smsConcatInfo, error) {
-	encoding, err := smsUserDataEncodingFromDCS(part.dcs)
+func decodeDeliverUserData(part userDataPart) (string, *concatInfo, error) {
+	encoding, err := userDataEncodingFromDCS(part.dcs)
 	if err != nil {
 		return "", nil, fmt.Errorf("decoding SMS-DELIVER: %w", err)
 	}
 	switch encoding {
-	case smsUserDataEncodingGSM7:
-		return decodeSMSDeliverGSM7(part)
-	case smsUserDataEncodingUCS2:
-		return decodeSMSDeliverUCS2(part)
+	case userDataEncodingGSM7:
+		return decodeDeliverGSM7(part)
+	case userDataEncodingUCS2:
+		return decodeDeliverUCS2(part)
 	default:
 		return "", nil, fmt.Errorf("decoding SMS-DELIVER: 8-bit dcs 0x%02X is unsupported", part.dcs)
 	}
 }
 
-func (tp *smsDeliverTPDU) UnmarshalBinary(data []byte) error {
-	fields, err := decodeSMSDeliverFields(data)
+func isPPDataDownload(part userDataPart) bool {
+	return part.pid == 0x7F && dcsMessageClass(part.dcs) == 2
+}
+
+func dcsMessageClass(dcs byte) int {
+	switch {
+	case dcs&0xC0 == 0x00:
+		if dcs&0x10 == 0 {
+			return -1
+		}
+		return int(dcs & 0x03)
+	case dcs&0xF0 == 0xF0:
+		return int(dcs & 0x03)
+	default:
+		return -1
+	}
+}
+
+func (tp *deliverTPDU) UnmarshalBinary(data []byte) error {
+	fields, err := decodeDeliverFields(data)
 	if err != nil {
 		return err
 	}
-	text, concat, err := decodeSMSDeliverUserData(fields.part)
+	text, concat, err := decodeDeliverUserData(fields.part)
 	if err != nil {
 		return err
 	}
-	*tp = smsDeliverTPDU{
+	*tp = deliverTPDU{
 		From:    fields.from,
 		Part:    fields.part,
-		Message: IncomingSMS{From: fields.from, Text: text},
+		Message: Incoming{From: fields.from, Text: text},
 		Concat:  concat,
 	}
 	return nil
 }
 
-func (tp smsStatusReportTPDU) MarshalBinary() ([]byte, error) {
+func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	msg := tp.Message
 	if len(msg.UserData) > 0 && !msg.HasDataCodingScheme {
 		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD requires TP-DCS")
@@ -237,7 +256,7 @@ func (tp smsStatusReportTPDU) MarshalBinary() ([]byte, error) {
 		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD with GSM7 DCS is unsupported")
 	}
 	payload := make([]byte, 0, 32)
-	firstOctet := byte(tpduMTISMSStatusReport)
+	firstOctet := byte(tpduMTIStatusReport)
 	if !msg.MoreMessagesWaiting {
 		firstOctet |= 0x04
 	}
@@ -253,8 +272,8 @@ func (tp smsStatusReportTPDU) MarshalBinary() ([]byte, error) {
 	payload = append(payload, firstOctet)
 	payload = append(payload, msg.MessageReference)
 	payload = append(payload, encodeTPAddress(msg.Recipient)...)
-	payload = append(payload, encodeSMSTimestamp(msg.ServiceCenterTime)...)
-	payload = append(payload, encodeSMSTimestamp(msg.DischargeTime)...)
+	payload = append(payload, encodeTimestamp(msg.ServiceCenterTime)...)
+	payload = append(payload, encodeTimestamp(msg.DischargeTime)...)
 	payload = append(payload, msg.Status)
 	var pi byte
 	if msg.HasProtocolIdentifier {
@@ -284,12 +303,12 @@ func (tp smsStatusReportTPDU) MarshalBinary() ([]byte, error) {
 	return payload, nil
 }
 
-func (tp *smsStatusReportTPDU) UnmarshalBinary(data []byte) error {
-	mti, err := smsTPDUMessageType(data)
+func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {
+	mti, err := tpduMessageType(data)
 	if err != nil {
 		return errors.New("decoding SMS-STATUS-REPORT: packet too short")
 	}
-	if mti != tpduMTISMSStatusReport {
+	if mti != tpduMTIStatusReport {
 		return fmt.Errorf("decoding SMS-STATUS-REPORT: unexpected tp-mti 0x%02X", mti)
 	}
 	if len(data) < 2 {
@@ -297,7 +316,7 @@ func (tp *smsStatusReportTPDU) UnmarshalBinary(data []byte) error {
 	}
 	idx := 1
 	firstOctet := data[0]
-	report := SMSStatusReport{
+	report := StatusReport{
 		MessageReference:    data[idx],
 		MoreMessagesWaiting: firstOctet&0x04 == 0,
 		LoopPrevention:      firstOctet&0x08 != 0,
@@ -314,12 +333,12 @@ func (tp *smsStatusReportTPDU) UnmarshalBinary(data []byte) error {
 	if len(data[idx:]) < 15 {
 		return errors.New("decoding SMS-STATUS-REPORT: truncated mandatory fields")
 	}
-	report.ServiceCenterTime, err = decodeSMSTimestamp(data[idx : idx+7])
+	report.ServiceCenterTime, err = decodeTimestamp(data[idx : idx+7])
 	if err != nil {
 		return err
 	}
 	idx += 7
-	report.DischargeTime, err = decodeSMSTimestamp(data[idx : idx+7])
+	report.DischargeTime, err = decodeTimestamp(data[idx : idx+7])
 	if err != nil {
 		return err
 	}
@@ -366,7 +385,7 @@ func (tp *smsStatusReportTPDU) UnmarshalBinary(data []byte) error {
 			userDataLength := int(data[idx])
 			idx++
 			octets := userDataLength
-			if encoding, err := smsUserDataEncodingFromDCS(dcs); err == nil && encoding == smsUserDataEncodingGSM7 {
+			if encoding, err := userDataEncodingFromDCS(dcs); err == nil && encoding == userDataEncodingGSM7 {
 				octets = gsm7OctetCount(userDataLength)
 			}
 			if len(data[idx:]) < octets {
@@ -389,8 +408,11 @@ func newRPAckMessage(reference byte) rpMessage {
 	return rpMessage{Type: rpAckMSToNetwork, Reference: reference}
 }
 
-func newRPAckDeliverReportMessage(reference byte) rpMessage {
-	return rpMessage{Type: rpAckMSToNetwork, Reference: reference, UserData: []byte{0x00, 0x00}}
+func newRPAckDeliverReportMessage(reference byte, userData []byte) rpMessage {
+	if len(userData) == 0 {
+		userData = []byte{0x00, 0x00}
+	}
+	return rpMessage{Type: rpAckMSToNetwork, Reference: reference, UserData: append([]byte(nil), userData...)}
 }
 
 func newRPErrorMessage(reference, cause byte) rpMessage {

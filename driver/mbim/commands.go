@@ -484,6 +484,39 @@ func (r *AuthAKAResponse) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+type STKEnvelopeRequest struct {
+	TransactionID uint32
+	Data          []byte
+	Response      *STKEnvelopeResponse
+}
+
+func (r *STKEnvelopeRequest) Request() *Request {
+	data := binary.LittleEndian.AppendUint32(nil, uint32(len(r.Data)))
+	data = append(data, r.Data...)
+
+	r.Response = new(STKEnvelopeResponse)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceSTK,
+			CIDSTKEnvelope,
+			CommandTypeSet,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+type STKEnvelopeResponse struct{}
+
+func (r *STKEnvelopeResponse) UnmarshalBinary(data []byte) error {
+	if len(data) != 0 {
+		return fmt.Errorf("parsing MBIM STK envelope response: length %d, want 0", len(data))
+	}
+	return nil
+}
+
 func command(serviceID [16]byte, commandID, commandType uint32, data []byte) *Command {
 	return &Command{
 		FragmentTotal:   1,

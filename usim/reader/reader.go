@@ -38,6 +38,17 @@ type AuthenticateRequest struct {
 	AUTN []byte
 }
 
+type SMSPPDownloadRequest struct {
+	ServiceCenterAddress string
+	TPDU                 []byte
+}
+
+type SMSPPDownloadResponse struct {
+	SW1  byte
+	SW2  byte
+	Data []byte
+}
+
 type Transmitter interface {
 	Transmit(ctx context.Context, req []byte) ([]byte, error)
 	Close() error
@@ -49,5 +60,6 @@ type Reader interface {
 	ReadTransparent(ctx context.Context, req TransparentRead) ([]byte, error)
 	ReadRecord(ctx context.Context, req RecordRead) ([]byte, error)
 	Authenticate3G(ctx context.Context, req AuthenticateRequest) ([]byte, error)
+	SMSPPDownload(ctx context.Context, req SMSPPDownloadRequest) (SMSPPDownloadResponse, error)
 	Close() error
 }

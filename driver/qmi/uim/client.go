@@ -2,7 +2,6 @@ package uim
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 	"github.com/damonto/ims-client/usim/command"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 	"github.com/damonto/ims-client/usim/simfile"
@@ -32,12 +32,14 @@ var (
 )
 
 type Reader struct {
-	Transport Transport
-	Slot      uint8
-	ClientID  uint8
-	txn       atomic.Uint32
-	closeOnce sync.Once
-	closeErr  error
+	Transport   protocol.Transport
+	Slot        uint8
+	ClientID    uint8
+	CATClientID uint8
+	CATService  protocol.ServiceType
+	txn         atomic.Uint32
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 type sessionRequest struct {
@@ -45,7 +47,7 @@ type sessionRequest struct {
 	aid     []byte
 }
 
-func Open(ctx context.Context, transport Transport, slot uint8, device string) (*Reader, error) {
+func Open(ctx context.Context, transport protocol.Transport, slot uint8, device string) (*Reader, error) {
 	device = strings.TrimSpace(device)
 	if slot < 1 || slot > 5 {
 		return nil, fmt.Errorf("opening QMI reader: slot %d is out of range", slot)
@@ -92,8 +94,13 @@ func (r *Reader) Close() error {
 		ctx := context.Background()
 
 		var releaseErr error
+		if r.CATClientID != 0 {
+			releaseErr = r.releaseServiceClientID(ctx, r.CATService, r.CATClientID)
+			r.CATClientID = 0
+			r.CATService = 0
+		}
 		if r.ClientID != 0 {
-			releaseErr = r.releaseClientID(ctx)
+			releaseErr = errors.Join(releaseErr, r.releaseClientID(ctx))
 			r.ClientID = 0
 		}
 
@@ -146,7 +153,7 @@ func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application
 
 func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	path := r.requestFilePath(file)
-	response, err := r.withFileSession(ctx, file, func(ctx context.Context, session sessionRequest) (Response, error) {
+	response, err := r.withFileSession(ctx, file, func(ctx context.Context, session sessionRequest) (protocol.Response, error) {
 		return r.getFileAttributesResponse(ctx, session, path)
 	})
 	if err != nil {
@@ -172,7 +179,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 		length = attrs.FileSize - req.Offset
 	}
 
-	response, err := r.withFileSession(ctx, req.File, func(ctx context.Context, session sessionRequest) (Response, error) {
+	response, err := r.withFileSession(ctx, req.File, func(ctx context.Context, session sessionRequest) (protocol.Response, error) {
 		return r.readTransparentResponse(ctx, session, path, req.Offset, length)
 	})
 	if err != nil {
@@ -183,7 +190,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 	if !ok {
 		return nil, errors.New("reading transparent file: read result TLV missing")
 	}
-	return DecodeLengthPrefixedBytes(value)
+	return decodeLengthPrefixedBytes(value)
 }
 
 func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]byte, error) {
@@ -204,7 +211,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 		length = attrs.RecordSize
 	}
 
-	response, err := r.withFileSession(ctx, req.File, func(ctx context.Context, session sessionRequest) (Response, error) {
+	response, err := r.withFileSession(ctx, req.File, func(ctx context.Context, session sessionRequest) (protocol.Response, error) {
 		return r.readRecordResponse(ctx, session, path, req.Record, length)
 	})
 	if err != nil {
@@ -215,7 +222,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 	if !ok {
 		return nil, errors.New("reading record file: read result TLV missing")
 	}
-	return DecodeLengthPrefixedBytes(value)
+	return decodeLengthPrefixedBytes(value)
 }
 
 func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
@@ -228,17 +235,17 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 	if !ok {
 		return nil, errors.New("authenticating USIM: authenticate result TLV missing")
 	}
-	return DecodeLengthPrefixedBytes(value)
+	return decodeLengthPrefixedBytes(value)
 }
 
 func (r *Reader) withFileSession(
 	ctx context.Context,
 	file usimreader.FileRef,
-	fn func(context.Context, sessionRequest) (Response, error),
-) (Response, error) {
+	fn func(context.Context, sessionRequest) (protocol.Response, error),
+) (protocol.Response, error) {
 	sessions, err := r.sessionsForFile(file)
 	if err != nil {
-		return Response{}, err
+		return protocol.Response{}, err
 	}
 
 	var lastErr error
@@ -249,12 +256,12 @@ func (r *Reader) withFileSession(
 		}
 
 		lastErr = err
-		if i == 0 && len(sessions) > 1 && RetryableSessionError(err) {
+		if i == 0 && len(sessions) > 1 && retryableSessionError(err) {
 			continue
 		}
 		break
 	}
-	return Response{}, lastErr
+	return protocol.Response{}, lastErr
 }
 
 func (r *Reader) sessionsForFile(file usimreader.FileRef) ([]sessionRequest, error) {
@@ -263,11 +270,11 @@ func (r *Reader) sessionsForFile(file usimreader.FileRef) ([]sessionRequest, err
 	}
 
 	if hasPrefix(file.AID, isimAIDPrefix) {
-		cardSession, err := CardSessionForSlot(r.Slot)
+		cardSession, err := cardSessionForSlot(r.Slot)
 		if err != nil {
 			return nil, err
 		}
-		nonProvisioningSession, err := NonProvisioningSessionForSlot(r.Slot)
+		nonProvisioningSession, err := nonProvisioningSessionForSlot(r.Slot)
 		if err != nil {
 			return nil, err
 		}
@@ -283,339 +290,14 @@ func (r *Reader) sessionsForFile(file usimreader.FileRef) ([]sessionRequest, err
 func (r *Reader) requestFilePath(file usimreader.FileRef) []byte {
 	if len(file.AID) != 0 {
 		if hasPrefix(file.AID, usimAIDPrefix) {
-			return Buffer(masterFilePath, currentADFPath, file.Path)
+			return joinBytes(masterFilePath, currentADFPath, file.Path)
 		}
 		return slices.Clone(file.Path)
 	}
 	if hasPrefix(file.Path, masterFilePath) {
 		return slices.Clone(file.Path)
 	}
-	return Buffer(masterFilePath, file.Path)
-}
-
-func (r *Reader) ensureSlotActivated(ctx context.Context) error {
-	activeSlot, err := r.currentActivatedSlot(ctx)
-	if err != nil {
-		if errors.Is(err, ErrorNotSupported) {
-			return nil
-		}
-		return fmt.Errorf("activating slot %d: %w", r.Slot, err)
-	}
-	if activeSlot == r.Slot {
-		return nil
-	}
-	if err := r.switchSlot(ctx, r.Slot); err != nil {
-		return fmt.Errorf("activating slot %d: %w", r.Slot, err)
-	}
-	if err := r.waitForSlotReady(ctx); err != nil {
-		return fmt.Errorf("activating slot %d: %w", r.Slot, err)
-	}
-	return nil
-}
-
-func (r *Reader) currentActivatedSlot(ctx context.Context) (uint8, error) {
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageGetSlotStatus, nil, slotStatusTimeout)
-	if err != nil {
-		return 0, err
-	}
-	if err := MustResultOK(resp); err != nil {
-		return 0, err
-	}
-
-	status, err := DecodeSlotStatus(resp)
-	if err != nil {
-		return 0, err
-	}
-	return status.ActiveSlot, nil
-}
-
-func (r *Reader) switchSlot(ctx context.Context, slot uint8) error {
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageSwitchSlot, TLVs{
-		TLVUint8(0x01, 1),
-		TLVUint32(0x02, uint32(slot)),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	return MustResultOK(resp)
-}
-
-func (r *Reader) waitForSlotReady(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, slotReadyTimeout)
-	defer cancel()
-
-	for {
-		status, err := r.getCardStatus(ctx)
-		if err == nil && status.Ready() {
-			return nil
-		}
-		if ctx.Err() != nil {
-			if err != nil {
-				return fmt.Errorf("waiting for card readiness: %w", err)
-			}
-			return errors.New("waiting for card readiness: timeout")
-		}
-
-		timer := time.NewTimer(slotPollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			if err != nil {
-				return fmt.Errorf("waiting for card readiness: %w", err)
-			}
-			return errors.New("waiting for card readiness: timeout")
-		case <-timer.C:
-		}
-	}
-}
-
-func (r *Reader) getCardStatus(ctx context.Context) (CardStatus, error) {
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageGetCardStatus, nil, DefaultRequestTimeout)
-	if err != nil {
-		return CardStatus{}, err
-	}
-	if err := MustResultOK(resp); err != nil {
-		return CardStatus{}, err
-	}
-	return DecodeCardStatus(resp)
-}
-
-func (r *Reader) openProxy(ctx context.Context, device string) error {
-	if strings.TrimSpace(device) == "" {
-		return errors.New("opening QMI reader: device is empty")
-	}
-
-	resp, err := r.request(ctx, ServiceControl, 0, MessageProxyOpen, TLVs{
-		TLVBytes(0x01, []byte(device)),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	return MustResultOK(resp)
-}
-
-func (r *Reader) allocateClientID(ctx context.Context) error {
-	resp, err := r.request(ctx, ServiceControl, 0, MessageAllocateClientID, TLVs{
-		TLVUint8(0x01, byte(ServiceUIM)),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	if err := MustResultOK(resp); err != nil {
-		return err
-	}
-
-	value, ok := tlvValue(resp.TLVs, 0x01)
-	if !ok || len(value) < 2 {
-		return errors.New("allocating QMI client ID: allocated client TLV missing")
-	}
-	r.ClientID = value[1]
-	return nil
-}
-
-func (r *Reader) releaseClientID(ctx context.Context) error {
-	resp, err := r.request(ctx, ServiceControl, 0, MessageReleaseClientID, TLVs{
-		TLVBytes(0x01, []byte{byte(ServiceUIM), r.ClientID}),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	return MustResultOK(resp)
-}
-
-func (r *Reader) readTransparentResponse(
-	ctx context.Context,
-	session sessionRequest,
-	path []byte,
-	offset uint16,
-	length uint16,
-) (Response, error) {
-	fileValue, err := PutFileValue(path)
-	if err != nil {
-		return Response{}, err
-	}
-
-	info := Buffer(
-		binary.LittleEndian.AppendUint16(nil, offset),
-		binary.LittleEndian.AppendUint16(nil, length),
-	)
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageReadTransparent, TLVs{
-		TLVBytes(0x01, PutSessionValue(session.session, session.aid)),
-		TLVBytes(0x02, fileValue),
-		TLVBytes(0x03, info),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return Response{}, err
-	}
-	if err := WithCardResult(resp); err != nil {
-		return Response{}, err
-	}
-	return resp, nil
-}
-
-func (r *Reader) readRecordResponse(
-	ctx context.Context,
-	session sessionRequest,
-	path []byte,
-	record uint16,
-	length uint16,
-) (Response, error) {
-	fileValue, err := PutFileValue(path)
-	if err != nil {
-		return Response{}, err
-	}
-
-	recordValue := Buffer(
-		binary.LittleEndian.AppendUint16(nil, record),
-		binary.LittleEndian.AppendUint16(nil, length),
-	)
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageReadRecord, TLVs{
-		TLVBytes(0x01, PutSessionValue(session.session, session.aid)),
-		TLVBytes(0x02, fileValue),
-		TLVBytes(0x03, recordValue),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return Response{}, err
-	}
-	if err := WithCardResult(resp); err != nil {
-		return Response{}, err
-	}
-	return resp, nil
-}
-
-func (r *Reader) getFileAttributesResponse(
-	ctx context.Context,
-	session sessionRequest,
-	path []byte,
-) (Response, error) {
-	fileValue, err := PutFileValue(path)
-	if err != nil {
-		return Response{}, err
-	}
-
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageGetFileAttrs, TLVs{
-		TLVBytes(0x01, PutSessionValue(session.session, session.aid)),
-		TLVBytes(0x02, fileValue),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return Response{}, err
-	}
-	if err := WithCardResult(resp); err != nil {
-		return Response{}, err
-	}
-	return resp, nil
-}
-
-func (r *Reader) authenticateResponse(
-	ctx context.Context,
-	session sessionRequest,
-	data []byte,
-) (Response, error) {
-	value := append([]byte{Authenticate3GContext}, binary.LittleEndian.AppendUint16(nil, uint16(len(data)))...)
-	value = append(value, data...)
-
-	resp, err := r.request(ctx, ServiceUIM, r.ClientID, MessageAuthenticate, TLVs{
-		TLVBytes(0x01, PutSessionValue(session.session, session.aid)),
-		TLVBytes(0x02, value),
-	}, DefaultRequestTimeout)
-	if err != nil {
-		return Response{}, err
-	}
-	if err := WithCardResult(resp); err != nil {
-		return Response{}, err
-	}
-	return resp, nil
-}
-
-func (r *Reader) request(
-	ctx context.Context,
-	service Service,
-	clientID uint8,
-	id MessageID,
-	tlvs TLVs,
-	timeout time.Duration,
-) (Response, error) {
-	return r.Transport.Do(ctx, Request{
-		Service:       service,
-		ClientID:      clientID,
-		TransactionID: uint16(r.txn.Add(1)),
-		MessageID:     id,
-		Timeout:       timeout,
-		TLVs:          tlvs,
-	})
-}
-
-func decodeReaderFileAttributes(resp Response) (usimreader.FileAttributes, error) {
-	value, ok := tlvValue(resp.TLVs, 0x11)
-	if !ok {
-		return usimreader.FileAttributes{}, errors.New("reading file attributes: attributes TLV missing")
-	}
-
-	attrs, err := DecodeFileAttributes(value)
-	if err != nil {
-		return usimreader.FileAttributes{}, err
-	}
-
-	result := usimreader.FileAttributes{
-		FileSize:    attrs.FileSize,
-		RecordSize:  attrs.RecordSize,
-		RecordCount: attrs.RecordCount,
-		FileType:    fileTypeToSIMFileType(attrs.FileType),
-	}
-	if len(attrs.Raw) == 0 {
-		result.FileStructure = fileTypeToSIMFileStructure(attrs.FileType)
-		return result, nil
-	}
-
-	var fci simfile.FCI
-	if err := fci.UnmarshalBinary(attrs.Raw); err != nil {
-		result.FileStructure = fileTypeToSIMFileStructure(attrs.FileType)
-		return result, nil
-	}
-
-	result.FileStructure = fci.FileStructure
-	result.FileType = fci.FileType
-	if result.FileSize == 0 {
-		result.FileSize = fci.FileSize
-	}
-	if result.RecordSize == 0 {
-		result.RecordSize = fci.RecordSize
-	}
-	if result.RecordCount == 0 {
-		result.RecordCount = uint16(fci.RecordCount)
-	}
-	return result, nil
-}
-
-func packAuthenticateRequest(req usimreader.AuthenticateRequest) []byte {
-	data := make([]byte, 0, len(req.Rand)+len(req.AUTN)+2)
-	data = append(data, byte(len(req.Rand)))
-	data = append(data, req.Rand...)
-	data = append(data, byte(len(req.AUTN)))
-	data = append(data, req.AUTN...)
-	return data
-}
-
-func fileTypeToSIMFileStructure(fileType byte) byte {
-	switch fileType {
-	case 0:
-		return simfile.StructureTransparent
-	case 2:
-		return simfile.StructureLinearFixed
-	default:
-		return 0
-	}
-}
-
-func fileTypeToSIMFileType(fileType byte) byte {
-	switch fileType {
-	case 0, 1, 2:
-		return 0x21
-	case 3, 4:
-		return 0x38
-	default:
-		return fileType
-	}
+	return joinBytes(masterFilePath, file.Path)
 }
 
 func hasPrefix(value, prefix []byte) bool {

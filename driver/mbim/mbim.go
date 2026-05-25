@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	usimcommand "github.com/damonto/ims-client/usim/command"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 	"github.com/damonto/ims-client/usim/simfile"
 )
@@ -31,14 +32,6 @@ type Reader struct {
 }
 
 func Open(ctx context.Context, device string, slot int) (usimreader.Reader, error) {
-	return New(ctx, device, slot)
-}
-
-func New(ctx context.Context, device string, slot int) (usimreader.Reader, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	device = strings.TrimSpace(device)
 	if device == "" {
 		return nil, errors.New("opening MBIM reader: device is empty")
@@ -46,7 +39,6 @@ func New(ctx context.Context, device string, slot int) (usimreader.Reader, error
 	if slot < 1 {
 		return nil, fmt.Errorf("opening MBIM reader: slot %d is out of range", slot)
 	}
-
 	conn, err := openProxyConnection()
 	if err != nil {
 		return nil, err
@@ -64,10 +56,6 @@ func New(ctx context.Context, device string, slot int) (usimreader.Reader, error
 }
 
 func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -94,9 +82,6 @@ func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application
 }
 
 func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(file.Path) == 0 {
 		return usimreader.FileAttributes{}, errors.New("reading MBIM file attributes: path is empty")
 	}
@@ -111,7 +96,7 @@ func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef)
 	request := FileStatusRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(file.AID),
-		FilePath:      mbimFilePath(file),
+		FilePath:      filePath(file),
 	}
 	if err := request.Request().Transmit(ctx, r.conn); err != nil {
 		return usimreader.FileAttributes{}, fmt.Errorf("reading MBIM file attributes %X: %w", file.Path, err)
@@ -123,9 +108,6 @@ func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef)
 }
 
 func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.TransparentRead) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(req.File.Path) == 0 {
 		return nil, errors.New("reading MBIM transparent file: path is empty")
 	}
@@ -158,7 +140,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 	request := ReadBinaryRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(req.File.AID),
-		FilePath:      mbimFilePath(req.File),
+		FilePath:      filePath(req.File),
 		Offset:        uint32(req.Offset),
 		Size:          uint32(length),
 	}
@@ -172,9 +154,6 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 }
 
 func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(req.File.Path) == 0 {
 		return nil, errors.New("reading MBIM record file: path is empty")
 	}
@@ -202,7 +181,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 	request := ReadRecordRequest{
 		TransactionID: r.nextTransactionID(),
 		ApplicationID: slices.Clone(req.File.AID),
-		FilePath:      mbimFilePath(req.File),
+		FilePath:      filePath(req.File),
 		Record:        uint32(req.Record),
 	}
 	if err := request.Request().Transmit(ctx, r.conn); err != nil {
@@ -241,6 +220,32 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 		return nil, fmt.Errorf("authenticating MBIM AKA: %w", err)
 	}
 	return akaPayload(request.Response), nil
+}
+
+func (r *Reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
+	envelope, err := usimcommand.SMSPPDownload{
+		ServiceCenterAddress: req.ServiceCenterAddress,
+		TPDU:                 slices.Clone(req.TPDU),
+	}.Envelope()
+	if err != nil {
+		return usimreader.SMSPPDownloadResponse{}, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return usimreader.SMSPPDownloadResponse{}, errors.New("running MBIM SMS-PP data download: reader is closed")
+	}
+
+	request := STKEnvelopeRequest{
+		TransactionID: r.nextTransactionID(),
+		Data:          envelope,
+	}
+	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+		return usimreader.SMSPPDownloadResponse{}, fmt.Errorf("running MBIM SMS-PP data download: %w", err)
+	}
+	return usimreader.SMSPPDownloadResponse{SW1: 0x90, SW2: 0x00}, nil
 }
 
 func (r *Reader) Close() error {
@@ -368,7 +373,7 @@ func (r *Reader) nextTransactionID() uint32 {
 	return r.txn.Add(1)
 }
 
-func mbimFilePath(file usimreader.FileRef) []byte {
+func filePath(file usimreader.FileRef) []byte {
 	if len(file.AID) != 0 || hasPrefix(file.Path, masterFilePath) {
 		return slices.Clone(file.Path)
 	}
@@ -377,8 +382,8 @@ func mbimFilePath(file usimreader.FileRef) []byte {
 
 func fileStatusAttributes(status *FileStatusResponse) usimreader.FileAttributes {
 	attrs := usimreader.FileAttributes{
-		FileStructure: mbimFileStructure(status.FileStructure),
-		FileType:      mbimFileType(status.FileType),
+		FileStructure: fileStructure(status.FileStructure),
+		FileType:      fileType(status.FileType),
 		RecordSize:    uint16(status.FileItemSize),
 		RecordCount:   uint16(status.FileItemCount),
 	}
@@ -390,7 +395,7 @@ func fileStatusAttributes(status *FileStatusResponse) usimreader.FileAttributes 
 	return attrs
 }
 
-func mbimFileStructure(structure uint32) byte {
+func fileStructure(structure uint32) byte {
 	switch structure {
 	case UiccFileStructureTransparent:
 		return simfile.StructureTransparent
@@ -401,7 +406,7 @@ func mbimFileStructure(structure uint32) byte {
 	}
 }
 
-func mbimFileType(fileType uint32) byte {
+func fileType(fileType uint32) byte {
 	switch fileType {
 	case UiccFileTypeWorkingEF, UiccFileTypeInternalEF:
 		return 0x21

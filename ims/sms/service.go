@@ -71,7 +71,7 @@ type outboundSegment struct {
 	to               string
 	smscAddress      string
 	target           string
-	part             smsUserDataPart
+	part             userDataPart
 	rpRef            byte
 	tpRef            byte
 	retryCount       int
@@ -116,6 +116,10 @@ type serviceCentre struct {
 
 type serviceCentreProvider interface {
 	ServiceCentre() usim.ServiceCentre
+}
+
+type ppDownloader interface {
+	SMSPPDownload(context.Context, usim.SMSPPDownloadRequest) (usim.SMSPPDownloadResponse, error)
 }
 
 const (
@@ -198,7 +202,7 @@ func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegmen
 	if err != nil {
 		return nil, err
 	}
-	parts, err := buildSMSUserDataParts(text)
+	parts, err := buildUserDataParts(text)
 	if err != nil {
 		return nil, err
 	}
@@ -617,8 +621,8 @@ func (s *Service) resolveServiceCentre() (serviceCentre, error) {
 		address: cardCentre.Address,
 	}
 	if cfgValue != "" {
-		sc.target = smsServiceCentreTarget(cfgValue)
-		if address := smsServiceCentreAddress(cfgValue); address != "" {
+		sc.target = serviceCentreTarget(cfgValue)
+		if address := serviceCentreAddress(cfgValue); address != "" {
 			sc.address = address
 		}
 	}
@@ -634,7 +638,7 @@ func (s *Service) resolveServiceCentre() (serviceCentre, error) {
 	return sc, nil
 }
 
-func smsServiceCentreTarget(value string) string {
+func serviceCentreTarget(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
@@ -646,7 +650,7 @@ func smsServiceCentreTarget(value string) string {
 	return "tel:" + value
 }
 
-func smsServiceCentreAddress(value string) string {
+func serviceCentreAddress(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
@@ -661,7 +665,7 @@ func smsServiceCentreAddress(value string) string {
 	return value
 }
 
-func (s *Service) newOutboundSegment(to string, sc serviceCentre, part smsUserDataPart, index, count int) (outboundSegment, error) {
+func (s *Service) newOutboundSegment(to string, sc serviceCentre, part userDataPart, index, count int) (outboundSegment, error) {
 	rpRef, err := s.reserveReference()
 	if err != nil {
 		return outboundSegment{}, err
@@ -669,8 +673,8 @@ func (s *Service) newOutboundSegment(to string, sc serviceCentre, part smsUserDa
 	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, rpRef, 0, false)
 }
 
-func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part smsUserDataPart, index, count int, rpRef, tpRef byte, retryCount int, rejectDuplicates bool) (outboundSegment, error) {
-	tpdu, err := newSMSSubmitTPDU(tpRef, to, part, rejectDuplicates).MarshalBinary()
+func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part userDataPart, index, count int, rpRef, tpRef byte, retryCount int, rejectDuplicates bool) (outboundSegment, error) {
+	tpdu, err := newSubmitTPDU(tpRef, to, part, rejectDuplicates).MarshalBinary()
 	if err != nil {
 		s.releaseReference(rpRef)
 		return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
@@ -832,38 +836,70 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 	}
 	defer s.endMTTransfer()
 
-	mti, err := smsTPDUMessageType(rp.TPDU)
+	mti, err := tpduMessageType(rp.TPDU)
 	if err != nil {
 		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 		return nil
 	}
 	switch mti {
-	case tpduMTISMSDeliver, tpduMTIReserved:
-		var tpdu smsDeliverTPDU
+	case tpduMTIDeliver, tpduMTIReserved:
+		fields, err := decodeDeliverFields(rp.TPDU)
+		if err != nil {
+			s.logger.Debug("rejecting inbound sms deliver", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
+			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
+			return nil
+		}
+		if isPPDataDownload(fields.part) {
+			s.handlePPDataDownload(ctx, msg, rp)
+			return nil
+		}
+
+		var tpdu deliverTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
 			s.logger.Debug("rejecting inbound sms deliver", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
 			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 			return nil
 		}
 		s.deliverIncoming(msg, rp, tpdu)
-		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
+		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil)); !ok {
 			return nil
 		}
-	case tpduMTISMSStatusReport:
-		var tpdu smsStatusReportTPDU
+	case tpduMTIStatusReport:
+		var tpdu statusReportTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
 			s.logger.Debug("rejecting inbound sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
 			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 			return nil
 		}
 		s.deliverIncomingStatusReport(msg, rp, tpdu.Message)
-		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference)); !ok {
+		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil)); !ok {
 			return nil
 		}
 	default:
 		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation))
 	}
 	return nil
+}
+
+func (s *Service) handlePPDataDownload(ctx context.Context, msg sip.Message, rp rpMessage) {
+	downloader, ok := s.card.(ppDownloader)
+	if !ok {
+		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", "card does not support SMS-PP download")
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseProtocolErrorUnspecified))
+		return
+	}
+
+	resp, err := downloader.SMSPPDownload(ctx, usim.SMSPPDownloadRequest{
+		ServiceCenterAddress: rp.Originator,
+		TPDU:                 rp.TPDU,
+	})
+	if err != nil {
+		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseProtocolErrorUnspecified))
+		return
+	}
+	s.logger.Debug("sms-pp data download delivered", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "sw1", resp.SW1, "sw2", resp.SW2, "response_len", len(resp.Data))
+	_ = s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, resp.Data))
 }
 
 func isSubmitReport(rp rpMessage) bool {
@@ -919,7 +955,7 @@ func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, repor
 	return nil
 }
 
-func (s *Service) deliverIncoming(msg sip.Message, rp rpMessage, tpdu smsDeliverTPDU) {
+func (s *Service) deliverIncoming(msg sip.Message, rp rpMessage, tpdu deliverTPDU) {
 	incoming := tpdu.Message
 	incoming.CallID = strings.TrimSpace(msg.Header("Call-ID"))
 	incoming.To = incomingRecipient(msg)
@@ -967,7 +1003,7 @@ func envelopeAddress(value string) string {
 	}
 }
 
-func (s *Service) deliverConcat(msg Incoming, concat smsConcatInfo) {
+func (s *Service) deliverConcat(msg Incoming, concat concatInfo) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
@@ -1112,7 +1148,7 @@ func (s *Service) markConcatSeen(key string) bool {
 	return s.markRecentKey("concat|"+key, concatRetention)
 }
 
-func (s *Service) concatKey(msg Incoming, concat smsConcatInfo) string {
+func (s *Service) concatKey(msg Incoming, concat concatInfo) string {
 	return fmt.Sprintf("%t|%d|%s|%s", concat.SixteenBit, concat.Reference, msg.From, msg.ServiceCenter)
 }
 
@@ -1124,7 +1160,7 @@ func (s *Service) evictExpiredConcat(now time.Time) {
 	}
 }
 
-func (s *Service) appendConcat(msg Incoming, concat smsConcatInfo) (Incoming, bool, string) {
+func (s *Service) appendConcat(msg Incoming, concat concatInfo) (Incoming, bool, string) {
 	key := s.concatKey(msg, concat)
 	now := time.Now()
 	s.mu.Lock()
@@ -1147,7 +1183,7 @@ func (s *Service) appendConcat(msg Incoming, concat smsConcatInfo) (Incoming, bo
 }
 
 func (s *Service) markSeen(msg sip.Message) bool {
-	key, ok := smsSeenKey(msg)
+	key, ok := seenKey(msg)
 	if !ok {
 		return true
 	}
@@ -1155,7 +1191,7 @@ func (s *Service) markSeen(msg sip.Message) bool {
 }
 
 func (s *Service) markDeliveryReportSent(msg sip.Message) bool {
-	key, ok := smsSeenKey(msg)
+	key, ok := seenKey(msg)
 	if !ok {
 		return true
 	}
@@ -1163,14 +1199,14 @@ func (s *Service) markDeliveryReportSent(msg sip.Message) bool {
 }
 
 func (s *Service) clearDeliveryReportSent(msg sip.Message) {
-	key, ok := smsSeenKey(msg)
+	key, ok := seenKey(msg)
 	if !ok {
 		return
 	}
 	s.clearRecentKey("report|" + key)
 }
 
-func smsSeenKey(msg sip.Message) (string, bool) {
+func seenKey(msg sip.Message) (string, bool) {
 	callID := strings.TrimSpace(msg.Header("Call-ID"))
 	cseq := strings.TrimSpace(msg.Header("CSeq"))
 	if callID == "" || cseq == "" {

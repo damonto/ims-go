@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 	"github.com/damonto/ims-client/usim"
 )
 
@@ -23,53 +24,53 @@ type simFile struct {
 	rows  map[uint16][]byte
 }
 
-func (t *simTransport) Do(_ context.Context, req Request) (Response, error) {
+func (t *simTransport) Do(_ context.Context, req protocol.Request) (protocol.Response, error) {
 	switch req.MessageID {
-	case MessageGetFileAttrs:
+	case protocol.QMIUIMGetFileAttributes:
 		session, aid := decodeSessionTLV(req.TLVs)
 		path := decodeFileTLV(req.TLVs)
 		file, ok := t.files[simFileKey(session, aid, path)]
 		if !ok {
-			return errorResponse(MessageGetFileAttrs, ErrorSIMFileNotFound), nil
+			return errorResponse(protocol.QMIUIMGetFileAttributes, protocol.QMIErrorSimFileNotFound), nil
 		}
-		return successResponse(MessageGetFileAttrs,
-			TLVBytes(0x10, []byte{0x90, 0x00}),
-			TLVBytes(0x11, encodeFileAttributes(file.attrs.FileSize, file.attrs.FileID, file.attrs.FileType, file.attrs.RecordSize, file.attrs.RecordCount, file.attrs.Raw)),
+		return successResponse(protocol.QMIUIMGetFileAttributes,
+			tlvBytes(0x10, []byte{0x90, 0x00}),
+			tlvBytes(0x11, encodeFileAttributes(file.attrs.FileSize, file.attrs.FileID, file.attrs.FileType, file.attrs.RecordSize, file.attrs.RecordCount, file.attrs.Raw)),
 		), nil
-	case MessageReadTransparent:
+	case protocol.QMIUIMReadTransparent:
 		session, aid := decodeSessionTLV(req.TLVs)
 		path := decodeFileTLV(req.TLVs)
 		file, ok := t.files[simFileKey(session, aid, path)]
 		if !ok || len(file.data) == 0 {
-			return errorResponse(MessageReadTransparent, ErrorSIMFileNotFound), nil
+			return errorResponse(protocol.QMIUIMReadTransparent, protocol.QMIErrorSimFileNotFound), nil
 		}
-		return successResponse(MessageReadTransparent,
-			TLVBytes(0x10, []byte{0x90, 0x00}),
-			TLVBytes(0x11, encodeLengthPrefixed(file.data)),
+		return successResponse(protocol.QMIUIMReadTransparent,
+			tlvBytes(0x10, []byte{0x90, 0x00}),
+			tlvBytes(0x11, encodeLengthPrefixed(file.data)),
 		), nil
-	case MessageReadRecord:
+	case protocol.QMIUIMReadRecord:
 		session, aid := decodeSessionTLV(req.TLVs)
 		path := decodeFileTLV(req.TLVs)
 		record := decodeRecordTLV(req.TLVs)
 		file, ok := t.files[simFileKey(session, aid, path)]
 		if !ok {
-			return errorResponse(MessageReadRecord, ErrorSIMFileNotFound), nil
+			return errorResponse(protocol.QMIUIMReadRecord, protocol.QMIErrorSimFileNotFound), nil
 		}
 		row, ok := file.rows[record]
 		if !ok {
-			return errorResponse(MessageReadRecord, ErrorSIMFileNotFound), nil
+			return errorResponse(protocol.QMIUIMReadRecord, protocol.QMIErrorSimFileNotFound), nil
 		}
-		return successResponse(MessageReadRecord,
-			TLVBytes(0x10, []byte{0x90, 0x00}),
-			TLVBytes(0x11, encodeLengthPrefixed(row)),
+		return successResponse(protocol.QMIUIMReadRecord,
+			tlvBytes(0x10, []byte{0x90, 0x00}),
+			tlvBytes(0x11, encodeLengthPrefixed(row)),
 		), nil
-	case MessageAuthenticate:
-		return successResponse(MessageAuthenticate,
-			TLVBytes(0x10, []byte{0x90, 0x00}),
-			TLVBytes(0x11, encodeLengthPrefixed(t.auth)),
+	case protocol.QMIUIMAuthenticate:
+		return successResponse(protocol.QMIUIMAuthenticate,
+			tlvBytes(0x10, []byte{0x90, 0x00}),
+			tlvBytes(0x11, encodeLengthPrefixed(t.auth)),
 		), nil
 	default:
-		return Response{}, fmt.Errorf("unexpected message 0x%04X", req.MessageID)
+		return protocol.Response{}, fmt.Errorf("unexpected message 0x%04X", req.MessageID)
 	}
 }
 
@@ -272,7 +273,7 @@ func newUSIMISIMTransport() *simTransport {
 	return &simTransport{files: files, auth: []byte{0xDC, 0x00}}
 }
 
-func decodeSessionTLV(tlvs TLVs) (Session, []byte) {
+func decodeSessionTLV(tlvs protocol.TLVs) (Session, []byte) {
 	value, _ := tlvValue(tlvs, 0x01)
 	if len(value) < 2 {
 		return 0, nil
@@ -280,7 +281,7 @@ func decodeSessionTLV(tlvs TLVs) (Session, []byte) {
 	return Session(value[0]), bytes.Clone(value[2:])
 }
 
-func decodeFileTLV(tlvs TLVs) []byte {
+func decodeFileTLV(tlvs protocol.TLVs) []byte {
 	value, _ := tlvValue(tlvs, 0x02)
 	if len(value) < 3 {
 		return nil
@@ -295,7 +296,7 @@ func decodeFileTLV(tlvs TLVs) []byte {
 	return binary.BigEndian.AppendUint16(path, fileID)
 }
 
-func decodeRecordTLV(tlvs TLVs) uint16 {
+func decodeRecordTLV(tlvs protocol.TLVs) uint16 {
 	value, _ := tlvValue(tlvs, 0x03)
 	if len(value) < 2 {
 		return 0

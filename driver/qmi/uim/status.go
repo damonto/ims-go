@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"slices"
+
+	"github.com/damonto/ims-client/driver/qmi/protocol"
 )
 
 type FileAttributes struct {
@@ -36,7 +38,7 @@ type Application struct {
 	State byte
 }
 
-func DecodeSlotStatus(resp Response) (SlotStatus, error) {
+func decodeSlotStatus(resp protocol.Response) (SlotStatus, error) {
 	value, ok := tlvValue(resp.TLVs, 0x10)
 	if !ok {
 		return SlotStatus{}, errors.New("reading slot status: status TLV missing")
@@ -71,7 +73,7 @@ func DecodeSlotStatus(resp Response) (SlotStatus, error) {
 	return status, nil
 }
 
-func DecodeCardStatus(resp Response) (CardStatus, error) {
+func decodeCardStatus(resp protocol.Response) (CardStatus, error) {
 	value, ok := tlvValue(resp.TLVs, 0x10)
 	if !ok {
 		return CardStatus{}, errors.New("reading card status: status TLV missing")
@@ -150,7 +152,7 @@ func (s CardStatus) Ready() bool {
 	return false
 }
 
-func DecodeFileAttributes(data []byte) (FileAttributes, error) {
+func decodeFileAttributes(data []byte) (FileAttributes, error) {
 	if len(data) < 9 {
 		return FileAttributes{}, errors.New("reading file attributes: attributes payload is truncated")
 	}
@@ -174,7 +176,7 @@ func DecodeFileAttributes(data []byte) (FileAttributes, error) {
 	return attrs, nil
 }
 
-func CardSessionForSlot(slot uint8) (Session, error) {
+func cardSessionForSlot(slot uint8) (Session, error) {
 	switch slot {
 	case 1:
 		return SessionCardSlot1, nil
@@ -191,7 +193,7 @@ func CardSessionForSlot(slot uint8) (Session, error) {
 	}
 }
 
-func NonProvisioningSessionForSlot(slot uint8) (Session, error) {
+func nonProvisioningSessionForSlot(slot uint8) (Session, error) {
 	switch slot {
 	case 1:
 		return SessionNonProvisioningSlot1, nil

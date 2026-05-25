@@ -69,7 +69,11 @@ func (r *response) UnmarshalBinary(data []byte) error {
 		r.MessageLength = header.MessageLength
 	}
 
-	if r.MessageType != protocol.MessageTypeResponse {
+	wantMessageType := protocol.MessageTypeResponse
+	if r.QMUXHeader.ServiceType == protocol.ServiceControl {
+		wantMessageType = 0x01
+	}
+	if r.MessageType != wantMessageType {
 		return fmt.Errorf("parsing QMI response: unexpected message type 0x%02X", r.MessageType)
 	}
 	if got, want := reader.Len(), int(r.MessageLength); got != want {

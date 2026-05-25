@@ -52,6 +52,29 @@ func TestRequestMarshalBinary(t *testing.T) {
 	}
 }
 
+func TestSTKEnvelopeRequest(t *testing.T) {
+	req := (&STKEnvelopeRequest{
+		TransactionID: 7,
+		Data:          []byte{0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6},
+	}).Request()
+
+	cmd, ok := req.Command.(*Command)
+	if !ok {
+		t.Fatalf("Command type = %T, want *Command", req.Command)
+	}
+	if cmd.ServiceID != ServiceSTK {
+		t.Fatalf("ServiceID = % X, want STK", cmd.ServiceID)
+	}
+	if cmd.CommandID != CIDSTKEnvelope || cmd.CommandType != CommandTypeSet {
+		t.Fatalf("command = cid %d type %d, want STK envelope set", cmd.CommandID, cmd.CommandType)
+	}
+
+	want := []byte{0x0B, 0x00, 0x00, 0x00, 0xD1, 0x09, 0x82, 0x02, 0x83, 0x81, 0x8B, 0x03, 0x00, 0x7F, 0xF6}
+	if !bytes.Equal(cmd.Data, want) {
+		t.Fatalf("Data = % X, want % X", cmd.Data, want)
+	}
+}
+
 func TestDeviceSlotMappingsResponseUnmarshalBinary(t *testing.T) {
 	tests := []struct {
 		name    string

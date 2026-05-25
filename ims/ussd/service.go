@@ -304,7 +304,7 @@ func (s *Service) buildInviteBody(code, language string) (string, []byte, error)
 
 func (s *Service) buildInvite(start startRequest, boundary string, body []byte) sip.Message {
 	state := s.reg.State()
-	senderIdentity := ussdPreferredIdentity(state)
+	senderIdentity := preferredIdentity(state)
 	msg := sip.NewRequest("INVITE", start.target)
 	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, state.MessagePort, start.branch))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, start.localTag))
@@ -331,7 +331,7 @@ func (s *Service) startSession(ctx context.Context, start startRequest, invite, 
 		service:      s,
 		callID:       start.callID,
 		sessionID:    start.sessionID,
-		localURI:     nonEmpty(sip.AddressURI(invite.Header("From")), ussdPreferredIdentity(s.reg.State())),
+		localURI:     nonEmpty(sip.AddressURI(invite.Header("From")), preferredIdentity(s.reg.State())),
 		localTag:     start.localTag,
 		remoteTag:    sip.HeaderTag(resp.Header("To")),
 		remoteTo:     nonEmpty(resp.Header("To"), invite.Header("To")),
@@ -418,7 +418,7 @@ func (s *Service) newIncomingSession(msg sip.Message, payload Message) *Session 
 		incomingInviteID: incomingInviteKey(msg),
 		callID:           msg.Header("Call-ID"),
 		sessionID:        nonEmpty(msg.Header("Session-ID"), sip.RandomHex(32)),
-		localURI:         nonEmpty(sip.AddressURI(msg.Header("To")), ussdPreferredIdentity(state)),
+		localURI:         nonEmpty(sip.AddressURI(msg.Header("To")), preferredIdentity(state)),
 		localTag:         localTag,
 		remoteTag:        sip.HeaderTag(remoteTo),
 		remoteTo:         remoteTo,
@@ -988,7 +988,7 @@ func (s *Session) localDialogURI() string {
 	if uri := strings.TrimSpace(s.localURI); uri != "" {
 		return uri
 	}
-	return ussdPreferredIdentity(s.service.reg.State())
+	return preferredIdentity(s.service.reg.State())
 }
 
 func (s *Session) sessionKey() string {
@@ -1377,7 +1377,7 @@ func sipContactURI(host string, port int) string {
 	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func ussdPreferredIdentity(state registration.State) string {
+func preferredIdentity(state registration.State) string {
 	if identity := strings.TrimSpace(state.DefaultPublicID); identity != "" {
 		return identity
 	}

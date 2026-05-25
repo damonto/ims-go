@@ -135,6 +135,25 @@ func (r *reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 	return slices.Clone(raw.Data()), nil
 }
 
+func (r *reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
+	apduRequest, err := command.SMSPPDownload{
+		ServiceCenterAddress: req.ServiceCenterAddress,
+		TPDU:                 slices.Clone(req.TPDU),
+	}.APDU()
+	if err != nil {
+		return usimreader.SMSPPDownloadResponse{}, err
+	}
+	raw, err := r.transmitEnvelope(ctx, apduRequest)
+	if err != nil {
+		return usimreader.SMSPPDownloadResponse{}, err
+	}
+	return usimreader.SMSPPDownloadResponse{
+		SW1:  raw.SW1(),
+		SW2:  raw.SW2(),
+		Data: slices.Clone(raw.Data()),
+	}, nil
+}
+
 func (r *reader) Close() error {
 	if r.tx == nil {
 		return nil
@@ -284,6 +303,46 @@ func (r *reader) transmit(ctx context.Context, req []byte) (apdu.Response, error
 	}
 
 	if !resp.OK() {
+		return nil, apdu.StatusError{SW: resp.SW()}
+	}
+	return append(data, byte(resp.SW()>>8), byte(resp.SW())), nil
+}
+
+func (r *reader) transmitEnvelope(ctx context.Context, req []byte) (apdu.Response, error) {
+	if r.tx == nil {
+		return nil, errors.New("transmitting APDU: transmitter is nil")
+	}
+
+	raw, err := r.tx.Transmit(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	resp := apdu.Response(raw)
+	if len(resp) < 2 {
+		return nil, apdu.ErrMalformedResponse
+	}
+
+	data := append([]byte(nil), resp.Data()...)
+	for resp.HasMore() {
+		length := resp.SW2()
+		follow, err := r.tx.Transmit(ctx, apdu.Request{
+			CLA: 0x00,
+			INS: 0xC0,
+			P1:  0x00,
+			P2:  0x00,
+			Le:  &length,
+		}.APDU())
+		if err != nil {
+			return nil, fmt.Errorf("reading response body: %w", err)
+		}
+		resp = apdu.Response(follow)
+		if len(resp) < 2 {
+			return nil, apdu.ErrMalformedResponse
+		}
+		data = append(data, resp.Data()...)
+	}
+
+	if resp.SW1() != 0x90 && resp.SW1() != 0x91 {
 		return nil, apdu.StatusError{SW: resp.SW()}
 	}
 	return append(data, byte(resp.SW()>>8), byte(resp.SW())), nil
