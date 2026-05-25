@@ -1,6 +1,7 @@
 package mbim
 
 import (
+	"encoding"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -221,6 +222,8 @@ type UICCApplication struct {
 	Label string
 }
 
+var _ encoding.BinaryUnmarshaler = (*UICCApplication)(nil)
+
 type ApplicationListResponse struct {
 	Version                uint32
 	ActiveApplicationIndex uint32
@@ -246,8 +249,8 @@ func (r *ApplicationListResponse) UnmarshalBinary(data []byte) error {
 		if offset > uint32(len(data)) || size > uint32(len(data))-offset {
 			return errors.New("parsing MBIM application list: application entry is truncated")
 		}
-		app, err := parseUICCApplication(data, data[offset:offset+size])
-		if err != nil {
+		var app UICCApplication
+		if err := app.UnmarshalBinary(data[offset : offset+size]); err != nil {
 			return fmt.Errorf("parsing MBIM application list entry %d: %w", i, err)
 		}
 		r.Applications = append(r.Applications, app)
@@ -255,28 +258,29 @@ func (r *ApplicationListResponse) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-func parseUICCApplication(base, data []byte) (UICCApplication, error) {
+func (a *UICCApplication) UnmarshalBinary(data []byte) error {
 	if len(data) < 32 {
-		return UICCApplication{}, errors.New("application entry is truncated")
+		return errors.New("application entry is truncated")
 	}
 
 	aid, err := byteArrayRef(data, data, 4)
 	if err != nil {
-		return UICCApplication{}, fmt.Errorf("application ID: %w", err)
+		return fmt.Errorf("application ID: %w", err)
 	}
 	label, err := stringRef(data, data, 12)
 	if err != nil {
-		return UICCApplication{}, fmt.Errorf("application name: %w", err)
+		return fmt.Errorf("application name: %w", err)
 	}
 	if _, err := byteArrayRef(data, data, 24); err != nil {
-		return UICCApplication{}, fmt.Errorf("PIN key references: %w", err)
+		return fmt.Errorf("PIN key references: %w", err)
 	}
 
-	return UICCApplication{
+	*a = UICCApplication{
 		Type:  binary.LittleEndian.Uint32(data[:4]),
 		AID:   aid,
 		Label: label,
-	}, nil
+	}
+	return nil
 }
 
 type FileStatusRequest struct {
