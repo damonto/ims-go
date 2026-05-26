@@ -445,6 +445,7 @@ func (s *Service) currentRegisterContactURI() string {
 }
 
 func (s *Service) CloseContext(ctx context.Context) error {
+	defer s.setRegistered(false)
 	return s.Deregister(ctx)
 }
 

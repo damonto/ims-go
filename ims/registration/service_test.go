@@ -3,6 +3,7 @@ package registration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -30,6 +31,12 @@ type stubTransport struct {
 }
 
 type stubCard struct{}
+
+type failAfterFirstAKACard struct {
+	stubCard
+	mu    sync.Mutex
+	calls int
+}
 
 type identityStubCard struct {
 	stubCard
@@ -83,6 +90,17 @@ func (stubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, err
 		CK:  []byte("client-test-ck"),
 		IK:  []byte("client-test-ik"),
 	}, nil
+}
+
+func (c *failAfterFirstAKACard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	c.mu.Lock()
+	c.calls++
+	calls := c.calls
+	c.mu.Unlock()
+	if calls > 1 {
+		return usim.AKAResult{}, errors.New("authentication rejected")
+	}
+	return c.stubCard.AKA(ctx, rand, autn)
 }
 
 func (twoDigitMNCStubCard) IMSI() string { return "204020123456789" }
@@ -817,6 +835,61 @@ func TestDeregisterAfterRunExitFallsBackToSynchronousExchange(t *testing.T) {
 	}
 	if svc.State().Registered {
 		t.Fatal("Registered = true, want false")
+	}
+}
+
+func TestCloseContextAttemptsDeregister(t *testing.T) {
+	transport := newUDPTransport(5062, 5060)
+	svc := newTestService(t, Config{}, transport, stubCard{})
+	registerService(t, svc, transport)
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		switch countWrites(transport) {
+		case 3:
+			if got := req.Header("Expires"); got != "0" {
+				t.Fatalf("Expires = %q, want 0", got)
+			}
+			if got := req.Header("Contact"); got != "*" {
+				t.Fatalf("Contact = %q, want *", got)
+			}
+			transport.queue(newResponse(req, 401, "Unauthorized", sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`}))
+		case 4:
+			transport.queue(newResponse(req, 200, "OK"))
+		default:
+			t.Fatalf("unexpected write count %d", countWrites(transport))
+		}
+	}
+
+	if err := svc.CloseContext(context.Background()); err != nil {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+	if svc.State().Registered {
+		t.Fatal("Registered = true, want false")
+	}
+	if got := countWrites(transport); got != 4 {
+		t.Fatalf("write count = %d, want 4", got)
+	}
+}
+
+func TestCloseContextReturnsDeregisterAuthenticationErrorAndClearsState(t *testing.T) {
+	transport := newUDPTransport(5062, 5060)
+	svc := newTestService(t, Config{}, transport, &failAfterFirstAKACard{})
+	registerService(t, svc, transport)
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		t.Fatalf("unexpected %s during CloseContext", req.StartLine)
+	}
+
+	if err := svc.CloseContext(context.Background()); err == nil {
+		t.Fatal("CloseContext() error = nil, want non-nil")
+	}
+	if svc.State().Registered {
+		t.Fatal("Registered = true, want false")
+	}
+	if got := countWrites(transport); got != 2 {
+		t.Fatalf("write count = %d, want 2", got)
 	}
 }
 
