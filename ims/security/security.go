@@ -109,7 +109,7 @@ func BuildAKAAuthorization(ctx context.Context, card AKAProvider, id Identity, c
 	if len(nonceBytes) < 32 {
 		return AKAResult{}, errors.New("decoding auth nonce: expected at least 32 bytes")
 	}
-	aka, err := card.AKA(ctx, nonceBytes[:16], nonceBytes[16:32])
+	aka, err := authenticateDigestAKA(ctx, card, nonceBytes)
 	if err != nil {
 		return AKAResult{}, fmt.Errorf("calculating AKA response: %w", err)
 	}
@@ -142,6 +142,18 @@ func BuildAKAAuthorization(ctx context.Context, card AKAProvider, id Identity, c
 		EncryptionKey: append([]byte(nil), aka.CK...),
 		IntegrityKey:  append([]byte(nil), aka.IK...),
 	}, nil
+}
+
+func authenticateDigestAKA(ctx context.Context, card AKAProvider, nonce []byte) (usim.AKAResult, error) {
+	aka, err := card.AKA(ctx, nonce[:16], nonce[16:32])
+	if err == nil {
+		return aka, nil
+	}
+	reversed, reverseErr := card.AKA(ctx, nonce[16:32], nonce[:16])
+	if reverseErr == nil {
+		return reversed, nil
+	}
+	return usim.AKAResult{}, err
 }
 
 func (p Param) MarshalText() ([]byte, error) {

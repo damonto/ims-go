@@ -34,6 +34,8 @@ type wfcProfile struct {
 	IKERetransmitDelays      []wfcDuration `json:"ikeRetransmitDelays"`
 	IMSTransport             string        `json:"imsTransport"`
 	IMSHomeDomain            string        `json:"imsHomeDomain"`
+	IMSPrivateIdentity       string        `json:"imsPrivateIdentity"`
+	IMSPublicIdentity        string        `json:"imsPublicIdentity"`
 	IMSPhoneContextDomain    string        `json:"imsPhoneContextDomain"`
 	IMSAccessNetworkInfo     string        `json:"imsAccessNetworkInfo"`
 	IMSUserAgent             string        `json:"imsUserAgent"`
@@ -171,7 +173,7 @@ func normalizeGID1(gid1 string) string {
 	return strings.ToUpper(gid1)
 }
 
-func (cfg Config) withWFCProfile(profile wfcProfile) Config {
+func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 	if cfg.EPDG == "" {
 		cfg.EPDG = firstNonEmpty(profile.EPDG, profile.EPDGAddresses...)
 	}
@@ -225,6 +227,12 @@ func (cfg Config) withWFCProfile(profile wfcProfile) Config {
 	if strings.TrimSpace(cfg.IMS.HomeDomain) == "" {
 		cfg.IMS.HomeDomain = profile.IMSHomeDomain
 	}
+	if strings.TrimSpace(cfg.IMS.PrivateIdentity) == "" {
+		cfg.IMS.PrivateIdentity = renderWFCIdentity(profile.IMSPrivateIdentity, cfg, card)
+	}
+	if strings.TrimSpace(cfg.IMS.PublicIdentity) == "" {
+		cfg.IMS.PublicIdentity = renderWFCIdentity(profile.IMSPublicIdentity, cfg, card)
+	}
 	if strings.TrimSpace(cfg.IMS.PhoneContextDomain) == "" {
 		cfg.IMS.PhoneContextDomain = profile.IMSPhoneContextDomain
 	}
@@ -265,6 +273,20 @@ func (cfg Config) withWFCProfile(profile wfcProfile) Config {
 		cfg.IMS.SIPTimers.TJ = profile.IMSSIPTimerJ.Duration
 	}
 	return cfg
+}
+
+func renderWFCIdentity(template string, cfg Config, card Card) string {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"#IMSI#", strings.TrimSpace(card.IMSI()),
+		"#MCC#", strings.TrimSpace(card.MCC()),
+		"#MNC#", strings.TrimSpace(card.MNC()),
+		"#HOME_DOMAIN#", strings.TrimSpace(cfg.IMS.HomeDomain),
+	)
+	return replacer.Replace(template)
 }
 
 func firstNonEmpty(first string, rest ...string) string {

@@ -96,9 +96,10 @@ func (r *Reader) getFileAttributesResponse(
 func (r *Reader) authenticateResponse(
 	ctx context.Context,
 	session sessionRequest,
+	authContext byte,
 	data []byte,
 ) (protocol.Response, error) {
-	value := append([]byte{authenticate3GContext}, binary.LittleEndian.AppendUint16(nil, uint16(len(data)))...)
+	value := append([]byte{authContext}, binary.LittleEndian.AppendUint16(nil, uint16(len(data)))...)
 	value = append(value, data...)
 
 	resp, err := r.request(ctx, protocol.QMIServiceUIM, r.ClientID, protocol.QMIUIMAuthenticate, protocol.TLVs{

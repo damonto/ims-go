@@ -12371,7 +12371,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc030.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -12413,7 +12413,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -12453,7 +12455,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc150.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -12462,7 +12464,9 @@
     "imsSIPTimerD": "32s",
     "imsSIPTimerF": "32s",
     "imsSIPTimerH": "32s",
-    "imsSIPTimerJ": "32s"
+    "imsSIPTimerJ": "32s",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -12473,7 +12477,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc150.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -12483,7 +12487,9 @@
     "imsSIPTimerF": "32s",
     "imsSIPTimerH": "32s",
     "imsSIPTimerJ": "32s",
-    "gid1": "53FF"
+    "gid1": "53FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -12586,7 +12592,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc170.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -12628,7 +12634,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17560,7 +17568,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17602,7 +17610,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17613,7 +17623,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17656,7 +17666,9 @@
       -6,
       -1
     ],
-    "gid1": "20"
+    "gid1": "20",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17667,7 +17679,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17710,7 +17722,9 @@
       -6,
       -1
     ],
-    "gid1": "21"
+    "gid1": "21",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17721,7 +17735,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17764,7 +17778,9 @@
       -6,
       -1
     ],
-    "gid1": "22"
+    "gid1": "22",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17775,7 +17791,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17818,7 +17834,9 @@
       -6,
       -1
     ],
-    "gid1": "23"
+    "gid1": "23",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17829,7 +17847,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17872,7 +17890,9 @@
       -6,
       -1
     ],
-    "gid1": "24"
+    "gid1": "24",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17883,7 +17903,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17926,7 +17946,9 @@
       -6,
       -1
     ],
-    "gid1": "25"
+    "gid1": "25",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17937,7 +17959,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -17980,7 +18002,9 @@
       -6,
       -1
     ],
-    "gid1": "26"
+    "gid1": "26",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -17991,7 +18015,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18034,7 +18058,9 @@
       -6,
       -1
     ],
-    "gid1": "27"
+    "gid1": "27",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18045,7 +18071,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18088,7 +18114,9 @@
       -6,
       -1
     ],
-    "gid1": "28"
+    "gid1": "28",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18099,7 +18127,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18142,7 +18170,9 @@
       -6,
       -1
     ],
-    "gid1": "29"
+    "gid1": "29",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18153,7 +18183,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18196,7 +18226,9 @@
       -6,
       -1
     ],
-    "gid1": "2AC9"
+    "gid1": "2AC9",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18207,7 +18239,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18250,7 +18282,9 @@
       -6,
       -1
     ],
-    "gid1": "30"
+    "gid1": "30",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18261,7 +18295,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18304,7 +18338,9 @@
       -6,
       -1
     ],
-    "gid1": "4102"
+    "gid1": "4102",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18315,7 +18351,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18358,7 +18394,9 @@
       -6,
       -1
     ],
-    "gid1": "4201"
+    "gid1": "4201",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18369,7 +18407,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18412,7 +18450,9 @@
       -6,
       -1
     ],
-    "gid1": "44FF"
+    "gid1": "44FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18423,7 +18463,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18466,7 +18506,9 @@
       -6,
       -1
     ],
-    "gid1": "49FF"
+    "gid1": "49FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18477,7 +18519,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18520,7 +18562,9 @@
       -6,
       -1
     ],
-    "gid1": "52FF"
+    "gid1": "52FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18531,7 +18575,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18574,7 +18618,9 @@
       -6,
       -1
     ],
-    "gid1": "53FF"
+    "gid1": "53FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18585,7 +18631,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18628,7 +18674,9 @@
       -6,
       -1
     ],
-    "gid1": "62FF"
+    "gid1": "62FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18639,7 +18687,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18682,7 +18730,9 @@
       -6,
       -1
     ],
-    "gid1": "69FF"
+    "gid1": "69FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18693,7 +18743,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18736,7 +18786,9 @@
       -6,
       -1
     ],
-    "gid1": "DDFF"
+    "gid1": "DDFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18747,7 +18799,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc280.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -18790,7 +18842,9 @@
       -6,
       -1
     ],
-    "gid1": "DEFF"
+    "gid1": "DEFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -18978,7 +19032,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc380.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19020,7 +19074,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19031,7 +19087,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc380.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19074,7 +19130,9 @@
       -6,
       -1
     ],
-    "gid1": "39FF"
+    "gid1": "39FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19085,7 +19143,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19127,7 +19185,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19138,7 +19198,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19181,7 +19241,9 @@
       -6,
       -1
     ],
-    "gid1": "20"
+    "gid1": "20",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19192,7 +19254,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19235,7 +19297,9 @@
       -6,
       -1
     ],
-    "gid1": "21"
+    "gid1": "21",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19246,7 +19310,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19289,7 +19353,9 @@
       -6,
       -1
     ],
-    "gid1": "22"
+    "gid1": "22",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19300,7 +19366,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19343,7 +19409,9 @@
       -6,
       -1
     ],
-    "gid1": "23"
+    "gid1": "23",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19354,7 +19422,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19397,7 +19465,9 @@
       -6,
       -1
     ],
-    "gid1": "24"
+    "gid1": "24",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19408,7 +19478,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19451,7 +19521,9 @@
       -6,
       -1
     ],
-    "gid1": "25"
+    "gid1": "25",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19462,7 +19534,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19505,7 +19577,9 @@
       -6,
       -1
     ],
-    "gid1": "26"
+    "gid1": "26",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19516,7 +19590,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19559,7 +19633,9 @@
       -6,
       -1
     ],
-    "gid1": "27"
+    "gid1": "27",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19570,7 +19646,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19613,7 +19689,9 @@
       -6,
       -1
     ],
-    "gid1": "28"
+    "gid1": "28",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19624,7 +19702,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19667,7 +19745,9 @@
       -6,
       -1
     ],
-    "gid1": "29"
+    "gid1": "29",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19678,7 +19758,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19721,7 +19801,9 @@
       -6,
       -1
     ],
-    "gid1": "2AC9"
+    "gid1": "2AC9",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19732,7 +19814,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19775,7 +19857,9 @@
       -6,
       -1
     ],
-    "gid1": "30"
+    "gid1": "30",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19786,7 +19870,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19829,7 +19913,9 @@
       -6,
       -1
     ],
-    "gid1": "3430"
+    "gid1": "3430",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19840,7 +19926,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19883,7 +19969,9 @@
       -6,
       -1
     ],
-    "gid1": "3432"
+    "gid1": "3432",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19894,7 +19982,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19937,7 +20025,9 @@
       -6,
       -1
     ],
-    "gid1": "3434"
+    "gid1": "3434",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -19948,7 +20038,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -19991,7 +20081,9 @@
       -6,
       -1
     ],
-    "gid1": "3436"
+    "gid1": "3436",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20002,7 +20094,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20045,7 +20137,9 @@
       -6,
       -1
     ],
-    "gid1": "3438"
+    "gid1": "3438",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20056,7 +20150,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20099,7 +20193,9 @@
       -6,
       -1
     ],
-    "gid1": "3440"
+    "gid1": "3440",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20110,7 +20206,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20153,7 +20249,9 @@
       -6,
       -1
     ],
-    "gid1": "3442"
+    "gid1": "3442",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20164,7 +20262,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20207,7 +20305,9 @@
       -6,
       -1
     ],
-    "gid1": "3444"
+    "gid1": "3444",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20218,7 +20318,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20261,7 +20361,9 @@
       -6,
       -1
     ],
-    "gid1": "3446"
+    "gid1": "3446",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20272,7 +20374,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20315,7 +20417,9 @@
       -6,
       -1
     ],
-    "gid1": "3448"
+    "gid1": "3448",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20326,7 +20430,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20369,7 +20473,9 @@
       -6,
       -1
     ],
-    "gid1": "4102"
+    "gid1": "4102",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20380,7 +20486,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20423,7 +20529,9 @@
       -6,
       -1
     ],
-    "gid1": "4201"
+    "gid1": "4201",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20434,7 +20542,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20477,7 +20585,9 @@
       -6,
       -1
     ],
-    "gid1": "44FF"
+    "gid1": "44FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20488,7 +20598,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20531,7 +20641,9 @@
       -6,
       -1
     ],
-    "gid1": "49FF"
+    "gid1": "49FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20542,7 +20654,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20585,7 +20697,9 @@
       -6,
       -1
     ],
-    "gid1": "52FF"
+    "gid1": "52FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20596,7 +20710,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20639,7 +20753,9 @@
       -6,
       -1
     ],
-    "gid1": "53FF"
+    "gid1": "53FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20650,7 +20766,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20693,7 +20809,9 @@
       -6,
       -1
     ],
-    "gid1": "62FF"
+    "gid1": "62FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20704,7 +20822,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20747,7 +20865,9 @@
       -6,
       -1
     ],
-    "gid1": "69FF"
+    "gid1": "69FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20758,7 +20878,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20801,7 +20921,9 @@
       -6,
       -1
     ],
-    "gid1": "DDFF"
+    "gid1": "DDFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -20812,7 +20934,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc410.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -20855,7 +20977,9 @@
       -6,
       -1
     ],
-    "gid1": "DEFF"
+    "gid1": "DEFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -21043,7 +21167,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc560.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -21085,7 +21209,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22119,7 +22245,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22161,7 +22287,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22172,7 +22300,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22215,7 +22343,9 @@
       -6,
       -1
     ],
-    "gid1": "20"
+    "gid1": "20",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22226,7 +22356,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22269,7 +22399,9 @@
       -6,
       -1
     ],
-    "gid1": "21"
+    "gid1": "21",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22280,7 +22412,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22323,7 +22455,9 @@
       -6,
       -1
     ],
-    "gid1": "22"
+    "gid1": "22",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22334,7 +22468,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22377,7 +22511,9 @@
       -6,
       -1
     ],
-    "gid1": "23"
+    "gid1": "23",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22388,7 +22524,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22431,7 +22567,9 @@
       -6,
       -1
     ],
-    "gid1": "24"
+    "gid1": "24",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22442,7 +22580,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22485,7 +22623,9 @@
       -6,
       -1
     ],
-    "gid1": "25"
+    "gid1": "25",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22496,7 +22636,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22539,7 +22679,9 @@
       -6,
       -1
     ],
-    "gid1": "26"
+    "gid1": "26",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22550,7 +22692,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22593,7 +22735,9 @@
       -6,
       -1
     ],
-    "gid1": "27"
+    "gid1": "27",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22604,7 +22748,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22647,7 +22791,9 @@
       -6,
       -1
     ],
-    "gid1": "28"
+    "gid1": "28",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22658,7 +22804,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22701,7 +22847,9 @@
       -6,
       -1
     ],
-    "gid1": "29"
+    "gid1": "29",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22712,7 +22860,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22755,7 +22903,9 @@
       -6,
       -1
     ],
-    "gid1": "2AC9"
+    "gid1": "2AC9",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22766,7 +22916,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22809,7 +22959,9 @@
       -6,
       -1
     ],
-    "gid1": "30"
+    "gid1": "30",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22820,7 +22972,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22863,7 +23015,9 @@
       -6,
       -1
     ],
-    "gid1": "4102"
+    "gid1": "4102",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22874,7 +23028,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22917,7 +23071,9 @@
       -6,
       -1
     ],
-    "gid1": "4201"
+    "gid1": "4201",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22928,7 +23084,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -22971,7 +23127,9 @@
       -6,
       -1
     ],
-    "gid1": "44FF"
+    "gid1": "44FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -22982,7 +23140,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23025,7 +23183,9 @@
       -6,
       -1
     ],
-    "gid1": "52FF"
+    "gid1": "52FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -23036,7 +23196,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23079,7 +23239,9 @@
       -6,
       -1
     ],
-    "gid1": "53FF"
+    "gid1": "53FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -23090,7 +23252,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23133,7 +23295,9 @@
       -6,
       -1
     ],
-    "gid1": "62FF"
+    "gid1": "62FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -23144,7 +23308,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23187,7 +23351,9 @@
       -6,
       -1
     ],
-    "gid1": "69FF"
+    "gid1": "69FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -23198,7 +23364,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23241,7 +23407,9 @@
       -6,
       -1
     ],
-    "gid1": "DDFF"
+    "gid1": "DDFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -23252,7 +23420,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc950.mcc310.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23295,7 +23463,9 @@
       -6,
       -1
     ],
-    "gid1": "DEFF"
+    "gid1": "DEFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "310",
@@ -23318,7 +23488,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23360,7 +23530,9 @@
       -82,
       -6,
       -1
-    ]
+    ],
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23371,7 +23543,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23414,7 +23586,9 @@
       -6,
       -1
     ],
-    "gid1": "20"
+    "gid1": "20",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23425,7 +23599,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23468,7 +23642,9 @@
       -6,
       -1
     ],
-    "gid1": "21"
+    "gid1": "21",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23479,7 +23655,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23522,7 +23698,9 @@
       -6,
       -1
     ],
-    "gid1": "22"
+    "gid1": "22",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23533,7 +23711,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23576,7 +23754,9 @@
       -6,
       -1
     ],
-    "gid1": "23"
+    "gid1": "23",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23587,7 +23767,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23630,7 +23810,9 @@
       -6,
       -1
     ],
-    "gid1": "24"
+    "gid1": "24",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23641,7 +23823,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23684,7 +23866,9 @@
       -6,
       -1
     ],
-    "gid1": "25"
+    "gid1": "25",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23695,7 +23879,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23738,7 +23922,9 @@
       -6,
       -1
     ],
-    "gid1": "26"
+    "gid1": "26",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23749,7 +23935,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23792,7 +23978,9 @@
       -6,
       -1
     ],
-    "gid1": "27"
+    "gid1": "27",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23803,7 +23991,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23846,7 +24034,9 @@
       -6,
       -1
     ],
-    "gid1": "28"
+    "gid1": "28",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23857,7 +24047,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23900,7 +24090,9 @@
       -6,
       -1
     ],
-    "gid1": "29"
+    "gid1": "29",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23911,7 +24103,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -23954,7 +24146,9 @@
       -6,
       -1
     ],
-    "gid1": "2AC9"
+    "gid1": "2AC9",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -23965,7 +24159,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24008,7 +24202,9 @@
       -6,
       -1
     ],
-    "gid1": "30"
+    "gid1": "30",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24019,7 +24215,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24062,7 +24258,9 @@
       -6,
       -1
     ],
-    "gid1": "3430"
+    "gid1": "3430",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24073,7 +24271,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24116,7 +24314,9 @@
       -6,
       -1
     ],
-    "gid1": "3432"
+    "gid1": "3432",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24127,7 +24327,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24170,7 +24370,9 @@
       -6,
       -1
     ],
-    "gid1": "3434"
+    "gid1": "3434",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24181,7 +24383,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24224,7 +24426,9 @@
       -6,
       -1
     ],
-    "gid1": "3436"
+    "gid1": "3436",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24235,7 +24439,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24278,7 +24482,9 @@
       -6,
       -1
     ],
-    "gid1": "3438"
+    "gid1": "3438",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24289,7 +24495,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24332,7 +24538,9 @@
       -6,
       -1
     ],
-    "gid1": "3440"
+    "gid1": "3440",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24343,7 +24551,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24386,7 +24594,9 @@
       -6,
       -1
     ],
-    "gid1": "3442"
+    "gid1": "3442",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24397,7 +24607,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24440,7 +24650,9 @@
       -6,
       -1
     ],
-    "gid1": "3444"
+    "gid1": "3444",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24451,7 +24663,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24494,7 +24706,9 @@
       -6,
       -1
     ],
-    "gid1": "3446"
+    "gid1": "3446",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24505,7 +24719,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24548,7 +24762,9 @@
       -6,
       -1
     ],
-    "gid1": "3448"
+    "gid1": "3448",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24559,7 +24775,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24602,7 +24818,9 @@
       -6,
       -1
     ],
-    "gid1": "4102"
+    "gid1": "4102",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24613,7 +24831,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24656,7 +24874,9 @@
       -6,
       -1
     ],
-    "gid1": "4201"
+    "gid1": "4201",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24667,7 +24887,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24710,7 +24930,9 @@
       -6,
       -1
     ],
-    "gid1": "44FF"
+    "gid1": "44FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24721,7 +24943,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24764,7 +24986,9 @@
       -6,
       -1
     ],
-    "gid1": "52FF"
+    "gid1": "52FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24775,7 +24999,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24818,7 +25042,9 @@
       -6,
       -1
     ],
-    "gid1": "53FF"
+    "gid1": "53FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24829,7 +25055,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24872,7 +25098,9 @@
       -6,
       -1
     ],
-    "gid1": "62FF"
+    "gid1": "62FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24883,7 +25111,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24926,7 +25154,9 @@
       -6,
       -1
     ],
-    "gid1": "69FF"
+    "gid1": "69FF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24937,7 +25167,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -24980,7 +25210,9 @@
       -6,
       -1
     ],
-    "gid1": "DDFF"
+    "gid1": "DDFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -24991,7 +25223,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc180.mcc311.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -25034,7 +25266,9 @@
       -6,
       -1
     ],
-    "gid1": "DEFF"
+    "gid1": "DEFF",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "311",
@@ -27062,7 +27296,7 @@
     "localSIPPort": 5062,
     "sipPort": 5060,
     "imsTransport": "tcp",
-    "imsHomeDomain": "ims.mnc100.mcc313.3gppnetwork.org",
+    "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
     "dhGroups": [
       14
@@ -27071,7 +27305,9 @@
     "imsSIPTimerD": "32s",
     "imsSIPTimerF": "32s",
     "imsSIPTimerH": "32s",
-    "imsSIPTimerJ": "32s"
+    "imsSIPTimerJ": "32s",
+    "imsPrivateIdentity": "#IMSI#@private.att.net",
+    "imsPublicIdentity": "sip:#IMSI#@one.att.net"
   },
   {
     "mcc": "313",

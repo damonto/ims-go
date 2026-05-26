@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -34,43 +35,47 @@ import (
 const (
 	defaultAPDUTimeout    = 30 * time.Second
 	maxTCPAPDUFrameLength = 64 * 1024
+	wfcUserActionPoll     = 10 * time.Second
 )
 
 type options struct {
-	debug         bool
-	driverKind    string
-	listReaders   bool
-	readerName    string
-	device        string
-	ccidTCPListen string
-	apduTimeout   time.Duration
-	slot          int
-	imei          string
-	epdgAddr      string
-	transport     string
-	expires       time.Duration
-	privateID     string
-	publicID      string
-	homeDomain    string
-	phoneContext  string
-	userAgent     string
-	pani          string
-	wlanNodeID    string
-	sipPort       int
-	sipT1         time.Duration
-	sipT2         time.Duration
-	sipT4         time.Duration
-	sipTimerB     time.Duration
-	sipTimerD     time.Duration
-	sipTimerF     time.Duration
-	sipTimerH     time.Duration
-	sipTimerJ     time.Duration
-	smsTR1        time.Duration
-	nattKeepalive time.Duration
-	ikeRetransmit string
-	sendTo        string
-	sendText      string
-	ussdCode      string
+	debug          bool
+	driverKind     string
+	listReaders    bool
+	readerName     string
+	device         string
+	ccidTCPListen  string
+	apduTimeout    time.Duration
+	slot           int
+	imei           string
+	epdgAddr       string
+	transport      string
+	expires        time.Duration
+	privateID      string
+	publicID       string
+	homeDomain     string
+	phoneContext   string
+	userAgent      string
+	pani           string
+	wlanNodeID     string
+	terminalVendor string
+	terminalModel  string
+	terminalSW     string
+	sipPort        int
+	sipT1          time.Duration
+	sipT2          time.Duration
+	sipT4          time.Duration
+	sipTimerB      time.Duration
+	sipTimerD      time.Duration
+	sipTimerF      time.Duration
+	sipTimerH      time.Duration
+	sipTimerJ      time.Duration
+	smsTR1         time.Duration
+	nattKeepalive  time.Duration
+	ikeRetransmit  string
+	sendTo         string
+	sendText       string
+	ussdCode       string
 }
 
 func main() {
@@ -110,6 +115,9 @@ func parseFlags() options {
 	flag.StringVar(&opt.userAgent, "user-agent", "", "IMS User-Agent override")
 	flag.StringVar(&opt.pani, "pani", "", "P-Access-Network-Info override")
 	flag.StringVar(&opt.wlanNodeID, "wlan-node-id", "", "WLAN AP MAC for i-wlan-node-id")
+	flag.StringVar(&opt.terminalVendor, "terminal-vendor", "", "TS.43 terminal_vendor for Wi-Fi Calling entitlement")
+	flag.StringVar(&opt.terminalModel, "terminal-model", "", "TS.43 terminal_model for Wi-Fi Calling entitlement")
+	flag.StringVar(&opt.terminalSW, "terminal-sw-version", "", "TS.43 terminal_sw_version for Wi-Fi Calling entitlement")
 	flag.IntVar(&opt.sipPort, "sip-port", 0, "IMS SIP server port override, maps ims.sip_server_port_number_int")
 	flag.DurationVar(&opt.sipT1, "sip-timer-t1", 0, "SIP timer T1 override, for example 500ms or 2s")
 	flag.DurationVar(&opt.sipT2, "sip-timer-t2", 0, "SIP timer T2 override")
@@ -220,6 +228,11 @@ func run(opt options) error {
 			SIPTimers:              sipTimersFromOptions(opt),
 			SMSSubmitReportTimeout: opt.smsTR1,
 		},
+		WFCEntitlement: imsclient.WFCEntitlementConfig{
+			TerminalVendor:   opt.terminalVendor,
+			TerminalModel:    opt.terminalModel,
+			TerminalSoftware: opt.terminalSW,
+		},
 	}
 
 	client, err := imsclient.New(reader, cfg)
@@ -240,7 +253,7 @@ func run(opt options) error {
 	defer smsEvents.Close()
 	go logSMSEvents(smsEvents)
 
-	if err := client.Connect(ctx); err != nil {
+	if err := connectWithWFCUserActionPolling(ctx, client.Connect, wfcUserActionPoll); err != nil {
 		return fmt.Errorf("connecting client: %w", err)
 	}
 	slog.Info("registered to IMS")
@@ -266,6 +279,128 @@ func run(opt options) error {
 
 	<-ctx.Done()
 	return nil
+}
+
+func connectWithWFCUserActionPolling(ctx context.Context, connect func(context.Context) error, interval time.Duration) error {
+	if interval <= 0 {
+		interval = wfcUserActionPoll
+	}
+
+	var lastAction wfcUserAction
+	var logged bool
+	for {
+		err := connect(ctx)
+		if err == nil {
+			return nil
+		}
+
+		action, ok := wfcUserActionFromError(err)
+		if !ok {
+			return err
+		}
+		if !logged || action != lastAction {
+			logWFCUserAction(action)
+			lastAction = action
+			logged = true
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("waiting for wfc user action: %w", ctx.Err())
+		case <-timer.C:
+			slog.Info("polling wfc entitlement after user action", "interval", interval)
+		}
+	}
+}
+
+type wfcUserAction struct {
+	Source     string
+	Carrier    string
+	URL        string
+	Data       string
+	Title      string
+	ClientName string
+}
+
+func logWFCUserAction(action wfcUserAction) {
+	slog.Error(
+		"wfc entitlement requires user action",
+		"source", action.Source,
+		"carrier", action.Carrier,
+		"url", action.URL,
+		"data", action.Data,
+		"open_url", wfcUserActionURL(action.URL, action.Data),
+		"title", action.Title,
+		"client", action.ClientName,
+		"next", "complete the web flow; this process will keep polling",
+	)
+}
+
+func wfcUserActionURL(rawURL, rawData string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	rawData = strings.TrimSpace(rawData)
+	if rawURL == "" || rawData == "" {
+		return rawURL
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return appendRawQuery(rawURL, rawData)
+	}
+	data := strings.TrimLeft(rawData, "?&")
+	values, err := url.ParseQuery(data)
+	if err != nil {
+		return appendRawQuery(rawURL, data)
+	}
+	query := parsed.Query()
+	for key, items := range values {
+		for _, item := range items {
+			query.Add(key, item)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func appendRawQuery(rawURL, data string) string {
+	separator := "?"
+	if strings.Contains(rawURL, "?") {
+		separator = "&"
+	}
+	return rawURL + separator + data
+}
+
+func wfcUserActionFromError(err error) (wfcUserAction, bool) {
+	if !errors.Is(err, imsclient.ErrWFCEntitlementUserActionRequired) {
+		return wfcUserAction{}, false
+	}
+
+	var nsdsErr *imsclient.NSDSWFCEntitlementError
+	if errors.As(err, &nsdsErr) {
+		return wfcUserAction{
+			Source:     "nsds",
+			Carrier:    nsdsErr.Carrier,
+			URL:        nsdsErr.Websheet.URL,
+			Data:       nsdsErr.Websheet.Data,
+			Title:      nsdsErr.Websheet.Title,
+			ClientName: nsdsErr.Websheet.ClientName,
+		}, true
+	}
+
+	var ts43Err *imsclient.WFCEntitlementError
+	if errors.As(err, &ts43Err) {
+		return wfcUserAction{
+			Source:  "ts43",
+			Carrier: ts43Err.Config.CarrierName,
+			URL:     ts43Err.Status.ServiceFlowURL,
+			Data:    ts43Err.Status.ServiceFlowUserData,
+			Title:   "Wi-Fi Calling",
+		}, true
+	}
+
+	return wfcUserAction{Source: "unknown"}, true
 }
 
 func runUSSD(ctx context.Context, client *imsclient.Client, code string) error {

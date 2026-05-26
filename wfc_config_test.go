@@ -2,6 +2,7 @@ package imsclient
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "ikeRetransmitDelays": ["1s", "2s", "4s"],
     "imsTransport": "tcp",
     "imsHomeDomain": "ims.mnc024.mcc530.3gppnetwork.org",
+    "imsPrivateIdentity": "#IMSI#@private.example",
+    "imsPublicIdentity": "sip:#IMSI#@#HOME_DOMAIN#",
     "imsPhoneContextDomain": "ims.mnc024.mcc530.3gppnetwork.org",
     "imsAccessNetworkInfo": "IEEE-802.11;utran-cell-id-3gpp=00000000",
     "imsUserAgent": "PRD-IR92/15 #MANUFACTURE#/#MODEL#-#BUILD# device-type/#TYPE# mno-custom/#MCCMNC# imeisv/#IMEISV# op/#OPERATOR# sku/#HWSKU#",
@@ -146,6 +149,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Transport != "tcp" || got.IMS.HomeDomain != "ims.mnc024.mcc530.3gppnetwork.org" {
 					t.Fatalf("IMS transport/domain = %q/%q, want profile values", got.IMS.Transport, got.IMS.HomeDomain)
 				}
+				if got.IMS.PrivateIdentity != "530240123456789@private.example" || got.IMS.PublicIdentity != "sip:530240123456789@ims.mnc024.mcc530.3gppnetwork.org" {
+					t.Fatalf("IMS identities = %q/%q, want profile values", got.IMS.PrivateIdentity, got.IMS.PublicIdentity)
+				}
 				wantUserAgent := "PRD-IR92/15 Google/Pixel 3XL-SQ3A.220705.004 device-type/Smartphone mno-custom/53024 imeisv/3567890123456700 op/2degrees sku/Pixel 3XL"
 				if got.IMS.UserAgent != wantUserAgent || got.IMS.AccessNetworkInfo != "IEEE-802.11;utran-cell-id-3gpp=00000000" {
 					t.Fatalf("IMS user agent/access = %q/%q, want profile values", got.IMS.UserAgent, got.IMS.AccessNetworkInfo)
@@ -167,6 +173,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				IMS: IMSConfig{
 					Transport:       "udp",
 					HomeDomain:      "ims.example.com",
+					PrivateIdentity: "private@example.com",
+					PublicIdentity:  "sip:public@example.com",
 					UserAgent:       "explicit-agent",
 					RegisterExpires: 30 * time.Second,
 					SIPServerPort:   5090,
@@ -186,6 +194,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Transport != "udp" || got.IMS.HomeDomain != "ims.example.com" {
 					t.Fatalf("IMS transport/domain = %q/%q, want explicit values", got.IMS.Transport, got.IMS.HomeDomain)
 				}
+				if got.IMS.PrivateIdentity != "private@example.com" || got.IMS.PublicIdentity != "sip:public@example.com" {
+					t.Fatalf("IMS identities = %q/%q, want explicit values", got.IMS.PrivateIdentity, got.IMS.PublicIdentity)
+				}
 				if got.IMS.UserAgent != "explicit-agent" || got.IMS.RegisterExpires != 30*time.Second || got.IMS.SIPServerPort != 5090 {
 					t.Fatalf("IMS user agent/expires/port = %q/%v/%d, want explicit values", got.IMS.UserAgent, got.IMS.RegisterExpires, got.IMS.SIPServerPort)
 				}
@@ -195,7 +206,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.cfg.withWFCProfile(profile)
+			got := tt.cfg.withWFCProfile(profile, wfcTestCard{})
 			imsCfg, err := got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
@@ -360,6 +371,56 @@ func TestEmbeddedWFCConfigHonorEPDG(t *testing.T) {
 			}
 			if got.EPDG != tt.wantEPDG {
 				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
+			}
+		})
+	}
+}
+
+func TestEmbeddedWFCConfigATTUsesConfiguredIMSIdentities(t *testing.T) {
+	got, err := Config{IMEI: testIMEI}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
+	if err != nil {
+		t.Fatalf("normalized() error = %v", err)
+	}
+	if got.IMS.HomeDomain != "one.att.net" {
+		t.Fatalf("HomeDomain = %q, want one.att.net", got.IMS.HomeDomain)
+	}
+	if got.IMS.PrivateIdentity != "3102800123456789@private.att.net" {
+		t.Fatalf("PrivateIdentity = %q, want AT&T private identity", got.IMS.PrivateIdentity)
+	}
+	if got.IMS.PublicIdentity != "sip:3102800123456789@one.att.net" {
+		t.Fatalf("PublicIdentity = %q, want AT&T public identity", got.IMS.PublicIdentity)
+	}
+}
+
+func TestEmbeddedWFCConfigMatchesNSDSProfiles(t *testing.T) {
+	for _, profile := range nsdsWFCProfiles {
+		t.Run(profile.Carrier+" "+profile.MCC+profile.MNC, func(t *testing.T) {
+			card := plmnWFCCard{
+				mcc:       profile.MCC,
+				mnc:       profile.MNC,
+				mncLength: len(profile.MNC),
+			}
+			got, err := Config{IMEI: testIMEI}.normalized(card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+
+			if strings.Contains(profile.ServerURL, "mobile.att.net") {
+				wantIMSI := card.IMSI()
+				if got.IMS.HomeDomain != "one.att.net" {
+					t.Fatalf("HomeDomain = %q, want one.att.net", got.IMS.HomeDomain)
+				}
+				if got.IMS.PrivateIdentity != wantIMSI+"@private.att.net" {
+					t.Fatalf("PrivateIdentity = %q, want AT&T private identity", got.IMS.PrivateIdentity)
+				}
+				if got.IMS.PublicIdentity != "sip:"+wantIMSI+"@one.att.net" {
+					t.Fatalf("PublicIdentity = %q, want AT&T public identity", got.IMS.PublicIdentity)
+				}
+				return
+			}
+
+			if got.IMS.HomeDomain == "one.att.net" || strings.Contains(got.IMS.PrivateIdentity, "att.net") || strings.Contains(got.IMS.PublicIdentity, "att.net") {
+				t.Fatalf("IMS profile = %q/%q/%q, want non-AT&T values", got.IMS.HomeDomain, got.IMS.PrivateIdentity, got.IMS.PublicIdentity)
 			}
 		})
 	}

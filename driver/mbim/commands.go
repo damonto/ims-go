@@ -488,6 +488,140 @@ func (r *AuthAKAResponse) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+type OpenChannelRequest struct {
+	TransactionID uint32
+	ApplicationID []byte
+	SelectP2Arg   uint32
+	ChannelGroup  uint32
+	Response      *OpenChannelResponse
+}
+
+func (r *OpenChannelRequest) Request() *Request {
+	data := uiccRefHeader(16, r.ApplicationID)
+	data = binary.LittleEndian.AppendUint32(data, r.SelectP2Arg)
+	data = binary.LittleEndian.AppendUint32(data, r.ChannelGroup)
+	data = append(data, r.ApplicationID...)
+
+	r.Response = new(OpenChannelResponse)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceMsUiccLowLevelAccess,
+			CIDUiccOpenChannel,
+			CommandTypeSet,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+type OpenChannelResponse struct {
+	Status   uint32
+	Channel  uint32
+	Response []byte
+}
+
+func (r *OpenChannelResponse) UnmarshalBinary(data []byte) error {
+	if len(data) < 16 {
+		return errors.New("parsing MBIM open channel: payload is truncated")
+	}
+	r.Status = binary.LittleEndian.Uint32(data[:4])
+	r.Channel = binary.LittleEndian.Uint32(data[4:8])
+	value, err := uiccByteArrayRef(data, 8)
+	if err != nil {
+		return fmt.Errorf("parsing MBIM open channel response: %w", err)
+	}
+	r.Response = value
+	return nil
+}
+
+type CloseChannelRequest struct {
+	TransactionID uint32
+	Channel       uint32
+	ChannelGroup  uint32
+	Response      *CloseChannelResponse
+}
+
+func (r *CloseChannelRequest) Request() *Request {
+	data := binary.LittleEndian.AppendUint32(nil, r.Channel)
+	data = binary.LittleEndian.AppendUint32(data, r.ChannelGroup)
+
+	r.Response = new(CloseChannelResponse)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceMsUiccLowLevelAccess,
+			CIDUiccCloseChannel,
+			CommandTypeSet,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+type CloseChannelResponse struct {
+	Status uint32
+}
+
+func (r *CloseChannelResponse) UnmarshalBinary(data []byte) error {
+	if len(data) < 4 {
+		return errors.New("parsing MBIM close channel: payload is truncated")
+	}
+	r.Status = binary.LittleEndian.Uint32(data[:4])
+	return nil
+}
+
+type APDURequest struct {
+	TransactionID   uint32
+	Channel         uint32
+	SecureMessaging uint32
+	ClassByteType   uint32
+	Command         []byte
+	Response        *APDUResponse
+}
+
+func (r *APDURequest) Request() *Request {
+	data := binary.LittleEndian.AppendUint32(nil, r.Channel)
+	data = binary.LittleEndian.AppendUint32(data, r.SecureMessaging)
+	data = binary.LittleEndian.AppendUint32(data, r.ClassByteType)
+	data = binary.LittleEndian.AppendUint32(data, uint32(len(r.Command)))
+	data = binary.LittleEndian.AppendUint32(data, 20)
+	data = append(data, r.Command...)
+
+	r.Response = new(APDUResponse)
+	return &Request{
+		MessageType:   MessageTypeCommand,
+		TransactionID: r.TransactionID,
+		Command: command(
+			ServiceMsUiccLowLevelAccess,
+			CIDUiccAPDU,
+			CommandTypeSet,
+			data,
+		),
+		Response: r.Response,
+	}
+}
+
+type APDUResponse struct {
+	Status   uint32
+	Response []byte
+}
+
+func (r *APDUResponse) UnmarshalBinary(data []byte) error {
+	if len(data) < 12 {
+		return errors.New("parsing MBIM APDU: payload is truncated")
+	}
+	r.Status = binary.LittleEndian.Uint32(data[:4])
+	value, err := uiccByteArrayRef(data, 4)
+	if err != nil {
+		return fmt.Errorf("parsing MBIM APDU response: %w", err)
+	}
+	r.Response = value
+	return nil
+}
+
 type STKEnvelopeRequest struct {
 	TransactionID uint32
 	Data          []byte
@@ -530,6 +664,24 @@ func command(serviceID [16]byte, commandID, commandType uint32, data []byte) *Co
 		CommandType:     commandType,
 		Data:            slices.Clone(data),
 	}
+}
+
+func uiccRefHeader(offset int, value []byte) []byte {
+	data := binary.LittleEndian.AppendUint32(nil, uint32(len(value)))
+	data = binary.LittleEndian.AppendUint32(data, uint32(offset))
+	return data
+}
+
+func uiccByteArrayRef(data []byte, fieldOffset uint32) ([]byte, error) {
+	if fieldOffset > uint32(len(data)) || 8 > uint32(len(data))-fieldOffset {
+		return nil, errors.New("reference is truncated")
+	}
+	size := binary.LittleEndian.Uint32(data[fieldOffset : fieldOffset+4])
+	offset := binary.LittleEndian.Uint32(data[fieldOffset+4 : fieldOffset+8])
+	if offset > uint32(len(data)) || size > uint32(len(data))-offset {
+		return nil, errors.New("value is truncated")
+	}
+	return slices.Clone(data[offset : offset+size]), nil
 }
 
 func refHeader(baseOffset int, refs ...[]byte) []byte {

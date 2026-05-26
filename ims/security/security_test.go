@@ -3,6 +3,7 @@ package security
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/damonto/ims-client/usim"
@@ -11,6 +12,22 @@ import (
 type stubAKAProvider struct{}
 
 func (stubAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{
+		RES: []byte("password"),
+		CK:  []byte("client-test-ck"),
+		IK:  []byte("client-test-ik"),
+	}, nil
+}
+
+type orderAKAProvider struct {
+	firstRAND []byte
+	firstAUTN []byte
+}
+
+func (p orderAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	if bytes.Equal(rand, p.firstRAND) && bytes.Equal(autn, p.firstAUTN) {
+		return usim.AKAResult{}, errors.New("authentication rejected")
+	}
 	return usim.AKAResult{
 		RES: []byte("password"),
 		CK:  []byte("client-test-ck"),
@@ -254,5 +271,28 @@ func TestBuildAKAAuthorization(t *testing.T) {
 	}
 	if !bytes.Contains(text, []byte(`algorithm=AKAv1-MD5`)) {
 		t.Fatalf("MarshalText() = %q", text)
+	}
+}
+
+func TestBuildAKAAuthorizationRetriesReversedNonceOrder(t *testing.T) {
+	challenge := Challenge{
+		Realm: "one.att.net",
+		Nonce: "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",
+		QOP:   "auth",
+	}
+
+	got, err := BuildAKAAuthorization(context.Background(), orderAKAProvider{
+		firstRAND: bytes.Repeat([]byte{0x01}, 16),
+		firstAUTN: bytes.Repeat([]byte{0x02}, 16),
+	}, Identity{
+		PrivateIdentity: "310280123456789@private.att.net",
+		RegisterURI:     "sip:one.att.net",
+		Realm:           "one.att.net",
+	}, challenge, 1)
+	if err != nil {
+		t.Fatalf("BuildAKAAuthorization() error = %v", err)
+	}
+	if got.Authorization.Response == "" {
+		t.Fatal("Authorization.Response = empty, want non-empty")
 	}
 }

@@ -13,14 +13,17 @@ const (
 	qmiTLVResult     = 0x02
 	qmiTLVCardResult = 0x10
 
-	authenticate3GContext = 3
-	envelopeCommandSMSPP  = 9
+	authenticate3GContext     = 3
+	authenticateIMSAKAContext = 11
+	envelopeCommandSMSPP      = 9
 )
 
 func retryableSessionError(err error) bool {
 	return errors.Is(err, protocol.QMIErrorSessionInactive) ||
 		errors.Is(err, protocol.QMIErrorSessionInvalid) ||
-		errors.Is(err, protocol.QMIErrorInvalidSessionType)
+		errors.Is(err, protocol.QMIErrorInvalidSessionType) ||
+		errors.Is(err, protocol.QMIErrorAuthenticationFailed) ||
+		errors.Is(err, protocol.QMIErrorAccessDenied)
 }
 
 func tlvBytes(typ byte, value []byte) protocol.TLV {

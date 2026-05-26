@@ -40,7 +40,7 @@ func (cfg Config) normalized(card Card) (Config, error) {
 		return Config{}, err
 	}
 	if ok {
-		cfg = cfg.withWFCProfile(profile)
+		cfg = cfg.withWFCProfile(profile, card)
 	}
 	if cfg.EPDG == "" {
 		epdg, err := defaultEPDGAddress(card)

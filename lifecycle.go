@@ -280,6 +280,9 @@ func (c *Client) ensureReady(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("normalizing client config: %w", err)
 	}
+	if err := c.checkWFCEntitlement(ctx, &normalized, card); err != nil {
+		return err
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

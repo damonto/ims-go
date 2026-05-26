@@ -226,7 +226,14 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 }
 
 func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
-	response, err := r.authenticateResponse(ctx, sessionRequest{session: SessionPrimaryGWProvisioning}, packAuthenticateRequest(req))
+	sessions, err := r.sessionsForAID(req.AID)
+	if err != nil {
+		return nil, err
+	}
+	authContext := authenticateContextForAID(req.AID)
+	response, err := r.withSessions(ctx, sessions, func(ctx context.Context, session sessionRequest) (protocol.Response, error) {
+		return r.authenticateResponse(ctx, session, authContext, packAuthenticateRequest(req))
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -238,16 +245,18 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 	return decodeLengthPrefixedBytes(value)
 }
 
-func (r *Reader) withFileSession(
+func authenticateContextForAID(aid []byte) byte {
+	if hasPrefix(aid, isimAIDPrefix) {
+		return authenticateIMSAKAContext
+	}
+	return authenticate3GContext
+}
+
+func (r *Reader) withSessions(
 	ctx context.Context,
-	file usimreader.FileRef,
+	sessions []sessionRequest,
 	fn func(context.Context, sessionRequest) (protocol.Response, error),
 ) (protocol.Response, error) {
-	sessions, err := r.sessionsForFile(file)
-	if err != nil {
-		return protocol.Response{}, err
-	}
-
 	var lastErr error
 	for i, session := range sessions {
 		resp, err := fn(ctx, session)
@@ -262,6 +271,25 @@ func (r *Reader) withFileSession(
 		break
 	}
 	return protocol.Response{}, lastErr
+}
+
+func (r *Reader) withFileSession(
+	ctx context.Context,
+	file usimreader.FileRef,
+	fn func(context.Context, sessionRequest) (protocol.Response, error),
+) (protocol.Response, error) {
+	sessions, err := r.sessionsForFile(file)
+	if err != nil {
+		return protocol.Response{}, err
+	}
+	return r.withSessions(ctx, sessions, fn)
+}
+
+func (r *Reader) sessionsForAID(aid []byte) ([]sessionRequest, error) {
+	if len(aid) == 0 {
+		return []sessionRequest{{session: SessionPrimaryGWProvisioning}}, nil
+	}
+	return r.sessionsForFile(usimreader.FileRef{AID: aid})
 }
 
 func (r *Reader) sessionsForFile(file usimreader.FileRef) ([]sessionRequest, error) {

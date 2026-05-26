@@ -169,6 +169,87 @@ func TestReaderUIMMessages(t *testing.T) {
 	}
 }
 
+func TestReaderAuthenticate3GUsesISIMContext(t *testing.T) {
+	isimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
+	reader := &Reader{
+		Transport: &fakeTransport{
+			t: t,
+			calls: []transportCall{{
+				check: func(req protocol.Request) {
+					if req.MessageID != protocol.QMIUIMAuthenticate {
+						t.Fatalf("messageID = 0x%04X, want 0x%04X", req.MessageID, protocol.QMIUIMAuthenticate)
+					}
+					assertTLV(t, req.TLVs, 0x01, append([]byte{byte(SessionCardSlot1), byte(len(isimAID))}, isimAID...))
+					assertTLV(t, req.TLVs, 0x02, []byte{
+						authenticateIMSAKAContext,
+						0x22, 0x00,
+						0x10, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+						0x10, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+					})
+				},
+				resp: successResponse(protocol.QMIUIMAuthenticate,
+					tlvBytes(0x10, []byte{0x90, 0x00}),
+					tlvBytes(0x11, encodeLengthPrefixed([]byte{0xDC, 0x00})),
+				),
+			}},
+		},
+		Slot:     1,
+		ClientID: 7,
+	}
+
+	auth, err := reader.Authenticate3G(context.Background(), usimreader.AuthenticateRequest{
+		AID:  isimAID,
+		Rand: bytes.Repeat([]byte{0x01}, 16),
+		AUTN: bytes.Repeat([]byte{0x02}, 16),
+	})
+	if err != nil {
+		t.Fatalf("Authenticate3G() error = %v", err)
+	}
+	if !bytes.Equal(auth, []byte{0xDC, 0x00}) {
+		t.Fatalf("Authenticate3G() = %X, want DC00", auth)
+	}
+}
+
+func TestReaderAuthenticate3GRetriesISIMAccessDeniedSession(t *testing.T) {
+	isimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
+	reader := &Reader{
+		Transport: &fakeTransport{
+			t: t,
+			calls: []transportCall{
+				{
+					check: func(req protocol.Request) {
+						assertTLV(t, req.TLVs, 0x01, append([]byte{byte(SessionCardSlot1), byte(len(isimAID))}, isimAID...))
+					},
+					err: protocol.QMIErrorAccessDenied,
+				},
+				{
+					check: func(req protocol.Request) {
+						assertTLV(t, req.TLVs, 0x01, append([]byte{byte(SessionNonProvisioningSlot1), byte(len(isimAID))}, isimAID...))
+					},
+					resp: successResponse(protocol.QMIUIMAuthenticate,
+						tlvBytes(0x10, []byte{0x90, 0x00}),
+						tlvBytes(0x11, encodeLengthPrefixed([]byte{0xDB, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03})),
+					),
+				},
+			},
+		},
+		Slot:     1,
+		ClientID: 7,
+	}
+
+	got, err := reader.Authenticate3G(context.Background(), usimreader.AuthenticateRequest{
+		AID:  isimAID,
+		Rand: bytes.Repeat([]byte{0x01}, 16),
+		AUTN: bytes.Repeat([]byte{0x02}, 16),
+	})
+	if err != nil {
+		t.Fatalf("Authenticate3G() error = %v", err)
+	}
+	if !bytes.Equal(got, []byte{0xDB, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03}) {
+		t.Fatalf("Authenticate3G() = %X", got)
+	}
+}
+
 func TestReaderSMSPPDownloadUsesCATEnvelope(t *testing.T) {
 	reader := &Reader{
 		Transport: &fakeTransport{
@@ -390,18 +471,29 @@ func TestFileRequestStrategy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("sessionsForFile() error = %v", err)
 			}
-			if len(gotSessions) != len(tt.wantSessions) {
-				t.Fatalf("sessionsForFile() len = %d, want %d", len(gotSessions), len(tt.wantSessions))
+			assertSessions(t, "sessionsForFile", gotSessions, tt.wantSessions)
+
+			gotAuthSessions, err := reader.sessionsForAID(tt.file.AID)
+			if err != nil {
+				t.Fatalf("sessionsForAID() error = %v", err)
 			}
-			for i := range gotSessions {
-				if gotSessions[i].session != tt.wantSessions[i].session {
-					t.Fatalf("sessionsForFile()[%d].session = %d, want %d", i, gotSessions[i].session, tt.wantSessions[i].session)
-				}
-				if !bytes.Equal(gotSessions[i].aid, tt.wantSessions[i].aid) {
-					t.Fatalf("sessionsForFile()[%d].aid = % X, want % X", i, gotSessions[i].aid, tt.wantSessions[i].aid)
-				}
-			}
+			assertSessions(t, "sessionsForAID", gotAuthSessions, tt.wantSessions)
 		})
+	}
+}
+
+func assertSessions(t *testing.T, name string, got, want []sessionRequest) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s() len = %d, want %d", name, len(got), len(want))
+	}
+	for i := range got {
+		if got[i].session != want[i].session {
+			t.Fatalf("%s()[%d].session = %d, want %d", name, i, got[i].session, want[i].session)
+		}
+		if !bytes.Equal(got[i].aid, want[i].aid) {
+			t.Fatalf("%s()[%d].aid = % X, want % X", name, i, got[i].aid, want[i].aid)
+		}
 	}
 }
 

@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/damonto/ims-client"
+	"github.com/damonto/ts43-go/ts43"
 )
 
 func TestTCPAPDUFrameRoundTrip(t *testing.T) {
@@ -113,6 +116,170 @@ func TestTCPAPDUTransmitterTransmit(t *testing.T) {
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestWFCUserActionFromError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want wfcUserAction
+		ok   bool
+	}{
+		{
+			name: "nsds websheet",
+			err: &imsclient.NSDSWFCEntitlementError{
+				Err:     imsclient.ErrWFCEntitlementUserActionRequired,
+				Carrier: "AT&T",
+				Websheet: imsclient.WFCWebsheet{
+					URL:        "https://example.test/e911",
+					Data:       "token=abc",
+					Title:      "Wi-Fi Calling",
+					ClientName: "WiFiCallingWebViewController",
+				},
+			},
+			want: wfcUserAction{
+				Source:     "nsds",
+				Carrier:    "AT&T",
+				URL:        "https://example.test/e911",
+				Data:       "token=abc",
+				Title:      "Wi-Fi Calling",
+				ClientName: "WiFiCallingWebViewController",
+			},
+			ok: true,
+		},
+		{
+			name: "ts43 web flow",
+			err: &imsclient.WFCEntitlementError{
+				Err: imsclient.ErrWFCEntitlementUserActionRequired,
+				Config: ts43.WFCConfig{
+					CarrierName: "Carrier",
+				},
+				Status: ts43.WFCStatus{
+					ServiceFlowURL:      "https://example.test/flow",
+					ServiceFlowUserData: "session=1",
+				},
+			},
+			want: wfcUserAction{
+				Source:  "ts43",
+				Carrier: "Carrier",
+				URL:     "https://example.test/flow",
+				Data:    "session=1",
+				Title:   "Wi-Fi Calling",
+			},
+			ok: true,
+		},
+		{
+			name: "other error",
+			err:  errors.New("boom"),
+			ok:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := wfcUserActionFromError(tt.err)
+			if ok != tt.ok {
+				t.Fatalf("wfcUserActionFromError() ok = %v, want %v", ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("wfcUserActionFromError() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWFCUserActionURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		data string
+		want string
+	}{
+		{
+			name: "adds data as query",
+			url:  "https://example.test/e911",
+			data: "token=abc",
+			want: "https://example.test/e911?token=abc",
+		},
+		{
+			name: "preserves existing query",
+			url:  "https://example.test/e911?lang=en",
+			data: "token=abc&return=a%2Fb",
+			want: "https://example.test/e911?lang=en&return=a%2Fb&token=abc",
+		},
+		{
+			name: "trims leading query marker",
+			url:  "https://example.test/e911",
+			data: "?token=abc",
+			want: "https://example.test/e911?token=abc",
+		},
+		{
+			name: "empty data",
+			url:  "https://example.test/e911",
+			want: "https://example.test/e911",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wfcUserActionURL(tt.url, tt.data); got != tt.want {
+				t.Fatalf("wfcUserActionURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConnectWithWFCUserActionPolling(t *testing.T) {
+	tests := []struct {
+		name      string
+		errors    []error
+		wantCalls int
+		wantErr   string
+	}{
+		{
+			name: "polls after user action",
+			errors: []error{
+				&imsclient.NSDSWFCEntitlementError{Err: imsclient.ErrWFCEntitlementUserActionRequired},
+				nil,
+			},
+			wantCalls: 2,
+		},
+		{
+			name:      "returns non user action error",
+			errors:    []error{errors.New("boom")},
+			wantCalls: 1,
+			wantErr:   "boom",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			err := connectWithWFCUserActionPolling(context.Background(), func(context.Context) error {
+				if calls >= len(tt.errors) {
+					t.Fatalf("connect calls = %d, want at most %d", calls+1, len(tt.errors))
+				}
+				err := tt.errors[calls]
+				calls++
+				return err
+			}, time.Nanosecond)
+			if calls != tt.wantCalls {
+				t.Fatalf("connect calls = %d, want %d", calls, tt.wantCalls)
+			}
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("connectWithWFCUserActionPolling() error = nil")
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("connectWithWFCUserActionPolling() error = %q, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("connectWithWFCUserActionPolling() error = %v", err)
+			}
+		})
 	}
 }
 

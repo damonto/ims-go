@@ -191,6 +191,67 @@ func TestCardAKA(t *testing.T) {
 	}
 }
 
+func TestCardAKAFallsBackToISIM(t *testing.T) {
+	rand := bytes.Repeat([]byte{0x01}, 16)
+	autn := bytes.Repeat([]byte{0x02}, 16)
+	res := []byte{0x11, 0x22, 0x33, 0x44}
+	ck := bytes.Repeat([]byte{0xAA}, 16)
+	ik := bytes.Repeat([]byte{0xBB}, 16)
+	body := append(append(append(append([]byte{0xDB, byte(len(res))}, res...), byte(len(ck))), ck...), append([]byte{byte(len(ik))}, ik...)...)
+
+	card := &Card{
+		tx: &akaFallbackReader{
+			usimAID: []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02},
+			isimAID: []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04},
+			body:    body,
+		},
+		logger:  slog.Default(),
+		aid:     []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02},
+		isimAID: []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04},
+	}
+
+	got, err := card.AKA(context.Background(), rand, autn)
+	if err != nil {
+		t.Fatalf("AKA() error = %v", err)
+	}
+	if !bytes.Equal(got.RES, res) {
+		t.Fatalf("AKA().RES = %X, want %X", got.RES, res)
+	}
+}
+
+type akaFallbackReader struct {
+	usimAID []byte
+	isimAID []byte
+	body    []byte
+}
+
+func (r *akaFallbackReader) Close() error { return nil }
+func (r *akaFallbackReader) ListApplications(context.Context) ([]usimreader.Application, error) {
+	return nil, errors.New("unexpected list applications")
+}
+func (r *akaFallbackReader) GetFileAttributes(context.Context, usimreader.FileRef) (usimreader.FileAttributes, error) {
+	return usimreader.FileAttributes{}, errors.New("unexpected file attributes")
+}
+func (r *akaFallbackReader) ReadTransparent(context.Context, usimreader.TransparentRead) ([]byte, error) {
+	return nil, errors.New("unexpected transparent read")
+}
+func (r *akaFallbackReader) ReadRecord(context.Context, usimreader.RecordRead) ([]byte, error) {
+	return nil, errors.New("unexpected record read")
+}
+func (r *akaFallbackReader) Authenticate3G(_ context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
+	switch {
+	case bytes.Equal(req.AID, r.usimAID):
+		return nil, errors.New("authentication failed")
+	case bytes.Equal(req.AID, r.isimAID):
+		return r.body, nil
+	default:
+		return nil, errors.New("unexpected aid")
+	}
+}
+func (r *akaFallbackReader) SMSPPDownload(context.Context, usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
+	return usimreader.SMSPPDownloadResponse{}, errors.New("unexpected SMS-PP download")
+}
+
 func TestLoadISIMMandatoryFileErrors(t *testing.T) {
 	tests := []struct {
 		name        string

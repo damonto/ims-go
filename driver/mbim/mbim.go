@@ -2,6 +2,7 @@ package mbim
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/damonto/ims-client/usim/apdu"
 	usimcommand "github.com/damonto/ims-client/usim/command"
 	usimreader "github.com/damonto/ims-client/usim/reader"
 	"github.com/damonto/ims-client/usim/simfile"
@@ -211,6 +213,10 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 		return nil, errors.New("authenticating MBIM AKA: reader is closed")
 	}
 
+	if len(req.AID) != 0 {
+		return r.authenticate3GWithApplication(ctx, req)
+	}
+
 	request := AuthAKARequest{
 		TransactionID: r.nextTransactionID(),
 		Rand:          slices.Clone(req.Rand),
@@ -220,6 +226,65 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 		return nil, fmt.Errorf("authenticating MBIM AKA: %w", err)
 	}
 	return akaPayload(request.Response), nil
+}
+
+func (r *Reader) authenticate3GWithApplication(ctx context.Context, req usimreader.AuthenticateRequest) (payload []byte, err error) {
+	channel, err := r.openLogicalChannel(ctx, req.AID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, r.closeLogicalChannel(ctx, channel))
+	}()
+
+	return r.transmitAPDU(ctx, channel, usimcommand.Authenticate3G{
+		Rand: slices.Clone(req.Rand),
+		AUTN: slices.Clone(req.AUTN),
+	}.APDU())
+}
+
+func (r *Reader) openLogicalChannel(ctx context.Context, aid []byte) (uint32, error) {
+	request := OpenChannelRequest{
+		TransactionID: r.nextTransactionID(),
+		ApplicationID: slices.Clone(aid),
+		ChannelGroup:  uiccChannelGroupDefault,
+	}
+	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+		return 0, fmt.Errorf("opening MBIM UICC channel: %w", err)
+	}
+	if err := uiccStatusError("opening MBIM UICC channel", request.Response.Status); err != nil {
+		return 0, err
+	}
+	return request.Response.Channel, nil
+}
+
+func (r *Reader) transmitAPDU(ctx context.Context, channel uint32, command []byte) ([]byte, error) {
+	request := APDURequest{
+		TransactionID:   r.nextTransactionID(),
+		Channel:         channel,
+		SecureMessaging: uiccSecureMessagingNone,
+		ClassByteType:   uiccClassByteTypeInterIndustry,
+		Command:         slices.Clone(command),
+	}
+	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+		return nil, fmt.Errorf("authenticating MBIM UICC APDU: %w", err)
+	}
+	if err := uiccStatusError("authenticating MBIM UICC APDU", request.Response.Status); err != nil {
+		return nil, err
+	}
+	return slices.Clone(request.Response.Response), nil
+}
+
+func (r *Reader) closeLogicalChannel(ctx context.Context, channel uint32) error {
+	request := CloseChannelRequest{
+		TransactionID: r.nextTransactionID(),
+		Channel:       channel,
+		ChannelGroup:  uiccChannelGroupDefault,
+	}
+	if err := request.Request().Transmit(ctx, r.conn); err != nil {
+		return fmt.Errorf("closing MBIM UICC channel: %w", err)
+	}
+	return uiccStatusError("closing MBIM UICC channel", request.Response.Status)
 }
 
 func (r *Reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
@@ -371,6 +436,23 @@ func (r *Reader) waitForSlotReady(ctx context.Context) error {
 
 func (r *Reader) nextTransactionID() uint32 {
 	return r.txn.Add(1)
+}
+
+func uiccStatusError(action string, status uint32) error {
+	if uiccStatusOK(status) {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", action, apdu.StatusError{SW: uiccStatusCode(status)})
+}
+
+func uiccStatusOK(status uint32) bool {
+	return status == 0 || uiccStatusCode(status) == 0x9000
+}
+
+func uiccStatusCode(status uint32) uint16 {
+	var sw [2]byte
+	binary.LittleEndian.PutUint16(sw[:], uint16(status&0xffff))
+	return binary.BigEndian.Uint16(sw[:])
 }
 
 func filePath(file usimreader.FileRef) []byte {

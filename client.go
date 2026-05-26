@@ -23,6 +23,7 @@ type Config struct {
 	ReconnectDelay time.Duration
 	Tunnel         swutunnel.Config
 	IMS            IMSConfig
+	WFCEntitlement WFCEntitlementConfig
 }
 
 type IMSConfig struct {

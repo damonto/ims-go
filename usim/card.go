@@ -31,6 +31,7 @@ type Card struct {
 	logger *slog.Logger
 
 	aid             []byte
+	isimAID         []byte
 	iccid           string
 	imsi            string
 	mcc             string
@@ -88,8 +89,21 @@ func (u *Card) AKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
 		return AKAResult{}, errors.New("authenticating USIM: rand and autn must be 16 bytes")
 	}
 
+	result, err := u.authenticateAKA(ctx, u.aid, rand, autn)
+	if err == nil || len(u.isimAID) == 0 {
+		return result, err
+	}
+	result, isimErr := u.authenticateAKA(ctx, u.isimAID, rand, autn)
+	if isimErr == nil {
+		return result, nil
+	}
+	u.logger.Debug("ISIM AKA fallback failed", "err", isimErr)
+	return AKAResult{}, err
+}
+
+func (u *Card) authenticateAKA(ctx context.Context, aid, rand, autn []byte) (AKAResult, error) {
 	payload, err := u.tx.Authenticate3G(ctx, usimreader.AuthenticateRequest{
-		AID:  u.aid,
+		AID:  aid,
 		Rand: rand,
 		AUTN: autn,
 	})
@@ -200,6 +214,7 @@ func (u *Card) loadISIM(ctx context.Context) error {
 	isimApp := command.App{Reader: u.tx, AID: aid}
 
 	u.logger.Debug("found ISIM AID", "aid", fmt.Sprintf("%X", aid))
+	u.isimAID = aid
 	impi, err := isimApp.ReadTransparentText(ctx, fileEFIMPI, "reading EF_IMPI")
 	if err != nil {
 		return fmt.Errorf("reading EF_IMPI: %w", err)
