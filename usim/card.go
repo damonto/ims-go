@@ -169,11 +169,7 @@ func (u *Card) load(ctx context.Context) error {
 		u.logger.Debug("reading EFPSISMSC from USIM failed", "err", err)
 	}
 	if err := u.loadISIM(ctx); err != nil {
-		if errors.Is(err, errNoISIMAID) {
-			u.logger.Debug("skipping ISIM load", "err", err)
-		} else {
-			return fmt.Errorf("loading ISIM: %w", err)
-		}
+		u.logger.Debug("skipping ISIM load", "err", err)
 	}
 
 	u.logger.Debug(
@@ -208,9 +204,10 @@ func (u *Card) loadISIM(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading EF_IMPI: %w", err)
 	}
-	u.privateIdentity = impi
+	privateIdentity := impi
+	var homeDomain string
 	if domain, err := isimApp.ReadTransparentText(ctx, fileEFDomain, "reading EF_DOMAIN"); err == nil {
-		u.homeDomain = domain
+		homeDomain = domain
 	} else {
 		u.logger.Debug("reading EF_DOMAIN failed", "err", err)
 	}
@@ -218,17 +215,22 @@ func (u *Card) loadISIM(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading EF_IMPU: %w", err)
 	}
-	u.publicIdentity = impu
+	publicIdentity := impu
+	serviceCentre := u.serviceCentre
 	if psi, err := isimApp.ReadLinearFixedTextPathFirst(ctx, pathEFPSISMSC, "reading EFPSISMSC"); err == nil {
-		u.serviceCentre.PSI = psi
+		serviceCentre.PSI = psi
 	} else {
 		u.logger.Debug("reading EFPSISMSC from ISIM failed", "err", err)
 	}
-	if u.homeDomain == "" && strings.Contains(u.privateIdentity, "@") {
-		if _, domain, ok := strings.Cut(u.privateIdentity, "@"); ok {
-			u.homeDomain = domain
+	if homeDomain == "" && strings.Contains(privateIdentity, "@") {
+		if _, domain, ok := strings.Cut(privateIdentity, "@"); ok {
+			homeDomain = domain
 		}
 	}
+	u.privateIdentity = privateIdentity
+	u.publicIdentity = publicIdentity
+	u.homeDomain = homeDomain
+	u.serviceCentre = serviceCentre
 	return nil
 }
 

@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
@@ -66,18 +67,66 @@ func TestTunnelAddressesAcceptsIPv6Subnet(t *testing.T) {
 }
 
 func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
-	internal := net.IPv4(10, 1, 2, 3).To4()
-	pcscf := net.IPv4(10, 9, 8, 7).To4()
-	internalIPv4, _, pcscfIPv4, _ := tunnelAddresses([]ike.Attribute{
-		ike.NewTLVAttribute(configAttrInternalIPv4Address, internal),
-		ike.NewTLVAttribute(16384, pcscf),
-	}, 16384, 16386)
-	if !internalIPv4.Equal(internal) {
-		t.Fatalf("internalIPv4 = %s, want %s", internalIPv4, internal)
+	tests := []struct {
+		name          string
+		attrs         []ike.Attribute
+		ipv4Attr      uint16
+		ipv6Attr      uint16
+		wantInternal4 net.IP
+		wantInternal6 net.IP
+		wantPCSCF4    net.IP
+		wantPCSCF6    net.IP
+	}{
+		{
+			name:          "separate ipv4 attribute",
+			attrs:         []ike.Attribute{ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 1, 2, 3).To4()), ike.NewTLVAttribute(16384, net.IPv4(10, 9, 8, 7).To4())},
+			ipv4Attr:      16384,
+			ipv6Attr:      16386,
+			wantInternal4: net.IPv4(10, 1, 2, 3).To4(),
+			wantPCSCF4:    net.IPv4(10, 9, 8, 7).To4(),
+		},
+		{
+			name:          "shared attribute ipv6 value",
+			attrs:         []ike.Attribute{ike.NewTLVAttribute(configAttrInternalIPv6Address, net.ParseIP("2001:db8::1").To16()), ike.NewTLVAttribute(16384, net.ParseIP("2001:db8::100").To16())},
+			ipv4Attr:      16384,
+			ipv6Attr:      16384,
+			wantInternal6: net.ParseIP("2001:db8::1").To16(),
+			wantPCSCF6:    net.ParseIP("2001:db8::100").To16(),
+		},
+		{
+			name:          "shared attribute ipv4 value",
+			attrs:         []ike.Attribute{ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 1, 2, 3).To4()), ike.NewTLVAttribute(16384, net.IPv4(10, 9, 8, 7).To4())},
+			ipv4Attr:      16384,
+			ipv6Attr:      16384,
+			wantInternal4: net.IPv4(10, 1, 2, 3).To4(),
+			wantPCSCF4:    net.IPv4(10, 9, 8, 7).To4(),
+		},
 	}
-	if !pcscfIPv4.Equal(pcscf) {
-		t.Fatalf("pcscfIPv4 = %s, want %s", pcscfIPv4, pcscf)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 := tunnelAddresses(tt.attrs, tt.ipv4Attr, tt.ipv6Attr)
+			if !ipEqual(internalIPv4, tt.wantInternal4) {
+				t.Fatalf("internalIPv4 = %s, want %s", internalIPv4, tt.wantInternal4)
+			}
+			if !ipEqual(internalIPv6, tt.wantInternal6) {
+				t.Fatalf("internalIPv6 = %s, want %s", internalIPv6, tt.wantInternal6)
+			}
+			if !ipEqual(pcscfIPv4, tt.wantPCSCF4) {
+				t.Fatalf("pcscfIPv4 = %s, want %s", pcscfIPv4, tt.wantPCSCF4)
+			}
+			if !ipEqual(pcscfIPv6, tt.wantPCSCF6) {
+				t.Fatalf("pcscfIPv6 = %s, want %s", pcscfIPv6, tt.wantPCSCF6)
+			}
+		})
 	}
+}
+
+func ipEqual(got, want net.IP) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return got.Equal(want)
 }
 
 func TestDefaultIKEAuthInitPayloadsUsesConfiguredPCSCFAttributes(t *testing.T) {
@@ -101,6 +150,20 @@ func TestDefaultIKEAuthInitPayloadsUsesConfiguredPCSCFAttributes(t *testing.T) {
 	}
 	if !hasConfigAttribute(config.Attributes, 16384) || !hasConfigAttribute(config.Attributes, 16386) {
 		t.Fatalf("config attrs = %v, want P-CSCF attrs 16384 and 16386", config.Attributes)
+	}
+	if !hasConfigAttribute(config.Attributes, configAttrPCSCFIPv4Address) || !hasConfigAttribute(config.Attributes, configAttrPCSCFIPv6Address) {
+		t.Fatalf("config attrs = %v, want standard P-CSCF attrs", config.Attributes)
+	}
+}
+
+func TestPCSCFRequestAttributesDeduplicatesSharedCarrierAttribute(t *testing.T) {
+	got := pcscfRequestAttributes(handshake.Config{
+		PCSCFIPv4ConfigAttribute: 16384,
+		PCSCFIPv6ConfigAttribute: 16384,
+	})
+	want := []uint16{16384, configAttrPCSCFIPv4Address, configAttrPCSCFIPv6Address}
+	if !slices.Equal(got, want) {
+		t.Fatalf("pcscfRequestAttributes() = %v, want %v", got, want)
 	}
 }
 

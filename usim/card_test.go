@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/damonto/ims-client/usim/apdu"
 	"github.com/damonto/ims-client/usim/command"
+	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/ims-client/usim/simfile"
 )
 
 type scriptTransmitter struct {
@@ -22,6 +25,11 @@ type scriptStep struct {
 	resp     []byte
 }
 
+type loadReader struct {
+	impiErr error
+	impuErr error
+}
+
 func (s *scriptTransmitter) Close() error { return nil }
 
 func (s *scriptTransmitter) Transmit(_ context.Context, req []byte) ([]byte, error) {
@@ -31,6 +39,85 @@ func (s *scriptTransmitter) Transmit(_ context.Context, req []byte) ([]byte, err
 		return nil, apdu.StatusError{SW: 0x6F00}
 	}
 	return step.resp, nil
+}
+
+func (r *loadReader) Close() error { return nil }
+
+func (r *loadReader) ListApplications(context.Context) ([]usimreader.Application, error) {
+	return []usimreader.Application{
+		{AID: []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}, Label: "USIM"},
+		{AID: []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}, Label: "ISIM"},
+	}, nil
+}
+
+func (r *loadReader) GetFileAttributes(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+	switch stringsUpperHex(file.Path) {
+	case "2FE2":
+		return transparentFile(10), nil
+	case "6F07":
+		return transparentFile(9), nil
+	case "6FAD":
+		return transparentFile(4), nil
+	case "6F02":
+		return transparentFile(32), nil
+	case "6F04":
+		return linearFixedFile(32, 1), nil
+	case "6F3E", "6F42", "7F106FE5":
+		return usimreader.FileAttributes{}, errors.New("file not found")
+	default:
+		return usimreader.FileAttributes{}, errors.New("unexpected file")
+	}
+}
+
+func (r *loadReader) ReadTransparent(_ context.Context, req usimreader.TransparentRead) ([]byte, error) {
+	switch stringsUpperHex(req.File.Path) {
+	case "2FE2":
+		return []byte{0x98, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0}, nil
+	case "6F07":
+		return []byte{0x08, 0x09, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0x98}, nil
+	case "6FAD":
+		return []byte{0x00, 0x00, 0x00, 0x02}, nil
+	case "6F02":
+		if r.impiErr != nil {
+			return nil, r.impiErr
+		}
+		return tlvTextBinary("alice@ims.example.com", 32), nil
+	default:
+		return nil, errors.New("unexpected transparent read")
+	}
+}
+
+func (r *loadReader) ReadRecord(_ context.Context, req usimreader.RecordRead) ([]byte, error) {
+	if stringsUpperHex(req.File.Path) != "6F04" {
+		return nil, errors.New("unexpected record read")
+	}
+	if r.impuErr != nil {
+		return nil, r.impuErr
+	}
+	return tlvTextRecord("sip:alice@ims.example.com", 32), nil
+}
+
+func (r *loadReader) Authenticate3G(context.Context, usimreader.AuthenticateRequest) ([]byte, error) {
+	return nil, errors.New("unexpected authentication")
+}
+
+func (r *loadReader) SMSPPDownload(context.Context, usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
+	return usimreader.SMSPPDownloadResponse{}, errors.New("unexpected SMS-PP download")
+}
+
+func transparentFile(size uint16) usimreader.FileAttributes {
+	return usimreader.FileAttributes{
+		FileStructure: simfile.StructureTransparent,
+		FileSize:      size,
+	}
+}
+
+func linearFixedFile(recordSize, recordCount uint16) usimreader.FileAttributes {
+	return usimreader.FileAttributes{
+		FileStructure: simfile.StructureLinearFixed,
+		RecordSize:    recordSize,
+		RecordCount:   recordCount,
+	}
 }
 
 func TestCardAKA(t *testing.T) {
@@ -155,6 +242,47 @@ func TestLoadISIMMandatoryFileErrors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErrText) {
 				t.Fatalf("loadISIM() error = %v, want text %q", err, tt.wantErrText)
+			}
+		})
+	}
+}
+
+func TestLoadSkipsUnavailableISIM(t *testing.T) {
+	tests := []struct {
+		name    string
+		impiErr error
+		impuErr error
+	}{
+		{
+			name:    "IMPI read failure",
+			impiErr: errors.New("invalid argument"),
+		},
+		{
+			name:    "IMPU read failure after IMPI read",
+			impuErr: errors.New("invalid argument"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card, err := Load(context.Background(), &loadReader{
+				impiErr: tt.impiErr,
+				impuErr: tt.impuErr,
+			}, slog.Default())
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got := card.IMSI(); got != "001010123456789" {
+				t.Fatalf("IMSI() = %q, want %q", got, "001010123456789")
+			}
+			if got := card.PrivateIdentity(); got != "" {
+				t.Fatalf("PrivateIdentity() = %q, want empty", got)
+			}
+			if got := card.PublicIdentity(); got != "" {
+				t.Fatalf("PublicIdentity() = %q, want empty", got)
+			}
+			if got := card.HomeDomain(); got != "" {
+				t.Fatalf("HomeDomain() = %q, want empty", got)
 			}
 		})
 	}

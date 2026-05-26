@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/damonto/ims-client/swu/esp"
@@ -604,11 +605,20 @@ func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16)
 			if internalIPv6 == nil && len(attr.Value) >= net.IPv6len {
 				internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
-		case pcscfIPv4Attr:
+		}
+
+		matchesPCSCFIPv4 := attr.Type == pcscfIPv4Attr || attr.Type == configAttrPCSCFIPv4Address
+		matchesPCSCFIPv6 := attr.Type == pcscfIPv6Attr || attr.Type == configAttrPCSCFIPv6Address
+		switch {
+		case matchesPCSCFIPv4 && matchesPCSCFIPv6 && len(attr.Value) >= net.IPv6len:
+			if pcscfIPv6 == nil {
+				pcscfIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			}
+		case matchesPCSCFIPv4:
 			if pcscfIPv4 == nil && len(attr.Value) >= net.IPv4len {
 				pcscfIPv4 = append(net.IP(nil), attr.Value[:net.IPv4len]...)
 			}
-		case pcscfIPv6Attr:
+		case matchesPCSCFIPv6:
 			if pcscfIPv6 == nil && len(attr.Value) >= net.IPv6len {
 				pcscfIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
@@ -690,16 +700,16 @@ func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, re
 
 func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI uint32) ([]ike.Payload, error) {
 	childSA := &ike.SecurityAssociationPayload{Proposals: childSAProposals(cfg, espSPI)}
-	pcscfIPv4Attr, pcscfIPv6Attr := pcscfConfigAttributes(cfg)
 	config := &ike.ConfigPayload{ConfigType: configTypeRequest, Attributes: []ike.Attribute{
 		ike.NewTLVAttribute(configAttrInternalIPv4Address, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv4DNS, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv6Address, nil),
 		ike.NewTLVAttribute(configAttrInternalIPv6DNS, nil),
-		ike.NewTLVAttribute(pcscfIPv4Attr, nil),
-		ike.NewTLVAttribute(pcscfIPv6Attr, nil),
 		ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, nil),
 	}}
+	for _, attr := range pcscfRequestAttributes(cfg) {
+		config.Attributes = append(config.Attributes, ike.NewTLVAttribute(attr, nil))
+	}
 	selectors := ike.TrafficSelectorsAny()
 	return []ike.Payload{
 		&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(identity)},
@@ -722,6 +732,25 @@ func pcscfConfigAttributes(cfg handshake.Config) (uint16, uint16) {
 		pcscfIPv6Attr = configAttrPCSCFIPv6Address
 	}
 	return pcscfIPv4Attr, pcscfIPv6Attr
+}
+
+func pcscfRequestAttributes(cfg handshake.Config) []uint16 {
+	pcscfIPv4Attr, pcscfIPv6Attr := pcscfConfigAttributes(cfg)
+	candidates := []uint16{
+		pcscfIPv4Attr,
+		pcscfIPv6Attr,
+		configAttrPCSCFIPv4Address,
+		configAttrPCSCFIPv6Address,
+	}
+
+	attrs := make([]uint16, 0, len(candidates))
+	for _, candidate := range candidates {
+		if slices.Contains(attrs, candidate) {
+			continue
+		}
+		attrs = append(attrs, candidate)
+	}
+	return attrs
 }
 
 func resolveOuterLocalAddr(conn net.PacketConn, remote *net.UDPAddr) (*net.UDPAddr, error) {
