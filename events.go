@@ -86,11 +86,9 @@ func (b *broadcaster[T]) unsubscribe(id uint64) {
 	ch, ok := b.subs[id]
 	if ok {
 		delete(b.subs, id)
-	}
-	b.mu.Unlock()
-	if ok {
 		close(ch)
 	}
+	b.mu.Unlock()
 }
 
 func (b *broadcaster[T]) publish(value T, onDrop func()) {
@@ -100,20 +98,21 @@ func (b *broadcaster[T]) publish(value T, onDrop func()) {
 		return
 	}
 
-	targets := make([]chan T, 0, len(b.subs))
+	dropped := 0
 	for _, ch := range b.subs {
-		targets = append(targets, ch)
-	}
-	b.mu.Unlock()
-
-	for _, ch := range targets {
 		select {
 		case ch <- value:
 		default:
-			if onDrop != nil {
-				onDrop()
-			}
+			dropped++
 		}
+	}
+	b.mu.Unlock()
+
+	if onDrop == nil {
+		return
+	}
+	for range dropped {
+		onDrop()
 	}
 }
 
@@ -124,16 +123,11 @@ func (b *broadcaster[T]) close() {
 		return
 	}
 	b.closed = true
-	targets := make([]chan T, 0, len(b.subs))
 	for id, ch := range b.subs {
-		targets = append(targets, ch)
 		delete(b.subs, id)
-	}
-	b.mu.Unlock()
-
-	for _, ch := range targets {
 		close(ch)
 	}
+	b.mu.Unlock()
 }
 
 func (c *Client) Events() *Events {

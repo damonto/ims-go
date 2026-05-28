@@ -256,6 +256,53 @@ func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
 	}
 }
 
+func TestBroadcasterConcurrentPublishAndClose(t *testing.T) {
+	for range 100 {
+		b := newBroadcaster[int]()
+		subs := make([]broadcastSubscription[int], 64)
+		for i := range subs {
+			subs[i] = b.subscribe(1)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Go(func() {
+				<-start
+				for n := range 50 {
+					b.publish(n, nil)
+				}
+			})
+		}
+		for _, sub := range subs[:len(subs)/2] {
+			wg.Add(1)
+			go func(sub broadcastSubscription[int]) {
+				defer wg.Done()
+				<-start
+				sub.close()
+			}(sub)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			b.close()
+		}()
+
+		close(start)
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("waiting for concurrent broadcaster close")
+		}
+	}
+}
+
 func TestHandleUSSDEventFanOutUsesWrapper(t *testing.T) {
 	client := newStandaloneClient(t)
 
