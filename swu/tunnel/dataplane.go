@@ -8,8 +8,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-client/swu/esp"
-	"github.com/damonto/ims-client/swu/packet"
+	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/packet"
 )
 
 type innerWriteState struct {

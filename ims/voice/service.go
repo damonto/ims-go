@@ -1,22 +1,22 @@
-package call
+package voice
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"log/slog"
 	"strings"
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
 	if sess == nil {
-		return nil, errors.New("creating call service: session is nil")
+		return nil, errors.New("creating voice service: session is nil")
 	}
 	if reg == nil {
-		return nil, errors.New("creating call service: registration service is nil")
+		return nil, errors.New("creating voice service: registration service is nil")
 	}
 	normalized, err := cfg.Normalized()
 	if err != nil {
@@ -26,7 +26,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		cfg:       normalized,
 		sess:      sess,
 		reg:       reg,
-		logger:    slog.Default().With("component", "ims-call"),
+		logger:    slog.Default().With("component", "ims-voice"),
 		timers:    sess.TransactionTimers(),
 		nextPort:  normalized.LocalRTPPortMin,
 		calls:     make(map[string]*Call),
@@ -34,7 +34,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 	}
 	attachment, err := sess.Attach(svc)
 	if err != nil {
-		return nil, fmt.Errorf("creating call service: %w", err)
+		return nil, fmt.Errorf("creating voice service: %w", err)
 	}
 	svc.attachment = attachment
 	sess.SetResponseDecorator(svc.addAccessNetworkInfo)
@@ -60,7 +60,7 @@ func (s *Service) Close() error {
 		_ = s.attachment.Close()
 	}
 	for _, call := range calls {
-		call.finish(StateEnded, "")
+		call.finish(CallStateEnded, "")
 	}
 	return nil
 }

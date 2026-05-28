@@ -3,8 +3,8 @@ package registration
 import (
 	"strings"
 
-	"github.com/damonto/ims-client/ims/security"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/security"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type Flow struct {

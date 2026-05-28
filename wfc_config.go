@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	_ "embed"
@@ -8,59 +8,62 @@ import (
 	"strings"
 	"time"
 
-	imscall "github.com/damonto/ims-client/ims/call"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 )
 
 //go:embed wfc_config.json
 var embeddedWFCConfig []byte
 
 type wfcProfile struct {
-	MCC                      string           `json:"mcc"`
-	MNC                      string           `json:"mnc"`
-	GID1                     string           `json:"gid1"`
-	EPDG                     string           `json:"epdg"`
-	EPDGAddresses            []string         `json:"epdgAddresses"`
-	InitialPort              int              `json:"initialPort"`
-	NATTPort                 int              `json:"nattPort"`
-	LocalSIPPort             int              `json:"localSIPPort"`
-	SIPPort                  int              `json:"sipPort"`
-	DHGroups                 []uint16         `json:"dhGroups"`
-	IKEEncryptionKeyLens     []uint16         `json:"ikeEncryptionKeyLens"`
-	IKEIntegrity             []uint16         `json:"ikeIntegrity"`
-	IKEPRF                   []uint16         `json:"ikePRF"`
-	ChildEncryptionKeyLens   []uint16         `json:"childEncryptionKeyLens"`
-	ChildIntegrity           []uint16         `json:"childIntegrity"`
-	PCSCFIPv4ConfigAttribute uint16           `json:"pcscfIPv4ConfigAttribute"`
-	PCSCFIPv6ConfigAttribute uint16           `json:"pcscfIPv6ConfigAttribute"`
-	NATKeepaliveInterval     *wfcDuration     `json:"natKeepaliveInterval"`
-	IKERetransmitDelays      []wfcDuration    `json:"ikeRetransmitDelays"`
-	IMSTransport             string           `json:"imsTransport"`
-	IMSHomeDomain            string           `json:"imsHomeDomain"`
-	IMSPrivateIdentity       string           `json:"imsPrivateIdentity"`
-	IMSPublicIdentity        string           `json:"imsPublicIdentity"`
-	IMSPhoneContextDomain    string           `json:"imsPhoneContextDomain"`
-	IMSAccessNetworkInfo     string           `json:"imsAccessNetworkInfo"`
-	IMSUserAgent             string           `json:"imsUserAgent"`
-	IMSRegisterExpires       *wfcDuration     `json:"imsRegisterExpires"`
-	IMSSIPServerPort         int              `json:"imsSIPServerPort"`
-	IMSSIPTimerT1            *wfcDuration     `json:"imsSIPTimerT1"`
-	IMSSIPTimerT2            *wfcDuration     `json:"imsSIPTimerT2"`
-	IMSSIPTimerT4            *wfcDuration     `json:"imsSIPTimerT4"`
-	IMSSIPTimerB             *wfcDuration     `json:"imsSIPTimerB"`
-	IMSSIPTimerD             *wfcDuration     `json:"imsSIPTimerD"`
-	IMSSIPTimerF             *wfcDuration     `json:"imsSIPTimerF"`
-	IMSSIPTimerH             *wfcDuration     `json:"imsSIPTimerH"`
-	IMSSIPTimerJ             *wfcDuration     `json:"imsSIPTimerJ"`
-	IMSVoice                 *wfcVoiceProfile `json:"imsVoice"`
-	WFCSPN                   string           `json:"wfcSPN"`
+	MCC                        string           `json:"mcc"`
+	MNC                        string           `json:"mnc"`
+	GID1                       string           `json:"gid1"`
+	EPDG                       string           `json:"epdg"`
+	EPDGAddresses              []string         `json:"epdgAddresses"`
+	InitialPort                int              `json:"initialPort"`
+	NATTPort                   int              `json:"nattPort"`
+	LocalSIPPort               int              `json:"localSIPPort"`
+	SIPPort                    int              `json:"sipPort"`
+	DHGroups                   []uint16         `json:"dhGroups"`
+	IKEEncryptionKeyLens       []uint16         `json:"ikeEncryptionKeyLens"`
+	IKEIntegrity               []uint16         `json:"ikeIntegrity"`
+	IKEPRF                     []uint16         `json:"ikePRF"`
+	ChildEncryptionKeyLens     []uint16         `json:"childEncryptionKeyLens"`
+	ChildIntegrity             []uint16         `json:"childIntegrity"`
+	PCSCFIPv4ConfigAttribute   uint16           `json:"pcscfIPv4ConfigAttribute"`
+	PCSCFIPv6ConfigAttribute   uint16           `json:"pcscfIPv6ConfigAttribute"`
+	NATKeepaliveInterval       *wfcDuration     `json:"natKeepaliveInterval"`
+	IKERetransmitDelays        []wfcDuration    `json:"ikeRetransmitDelays"`
+	IMSTransport               string           `json:"imsTransport"`
+	IMSHomeDomain              string           `json:"imsHomeDomain"`
+	IMSPrivateIdentity         string           `json:"imsPrivateIdentity"`
+	IMSPublicIdentity          string           `json:"imsPublicIdentity"`
+	IMSPhoneContextDomain      string           `json:"imsPhoneContextDomain"`
+	IMSAccessNetworkInfo       string           `json:"imsAccessNetworkInfo"`
+	IMSUserAgent               string           `json:"imsUserAgent"`
+	IMSRegisterExpires         *wfcDuration     `json:"imsRegisterExpires"`
+	IMSGeolocationPIDFInvite   []int            `json:"imsGeolocationPIDFInSIPInviteSupport"`
+	IMSGeolocationPIDFRegister []int            `json:"imsGeolocationPIDFInSIPRegisterSupport"`
+	IMSUseTelURIForPIDFXML     *bool            `json:"imsUseTelURIForPIDFXML"`
+	IMSSIPServerPort           int              `json:"imsSIPServerPort"`
+	IMSSIPTimerT1              *wfcDuration     `json:"imsSIPTimerT1"`
+	IMSSIPTimerT2              *wfcDuration     `json:"imsSIPTimerT2"`
+	IMSSIPTimerT4              *wfcDuration     `json:"imsSIPTimerT4"`
+	IMSSIPTimerB               *wfcDuration     `json:"imsSIPTimerB"`
+	IMSSIPTimerD               *wfcDuration     `json:"imsSIPTimerD"`
+	IMSSIPTimerF               *wfcDuration     `json:"imsSIPTimerF"`
+	IMSSIPTimerH               *wfcDuration     `json:"imsSIPTimerH"`
+	IMSSIPTimerJ               *wfcDuration     `json:"imsSIPTimerJ"`
+	IMSVoice                   *wfcVoiceProfile `json:"imsVoice"`
+	WFCSPN                     string           `json:"wfcSPN"`
 }
 
 type wfcVoiceProfile struct {
 	RTPProfile                   string                              `json:"rtpProfile"`
 	PTime                        *wfcDuration                        `json:"ptime"`
 	MaxPTime                     *wfcDuration                        `json:"maxptime"`
-	IncludeGeolocationPIDF       *bool                               `json:"includeGeolocationPIDF"`
 	GeolocationCountry           string                              `json:"geolocationCountry"`
+	PIDFShortCodes               []string                            `json:"pidfShortCodes"`
 	QoSPreconditionsSupported    *bool                               `json:"qosPreconditionsSupported"`
 	ReliableProvisionalSupported *bool                               `json:"reliableProvisionalSupported"`
 	SessionTimer                 *bool                               `json:"sessionTimer"`
@@ -80,14 +83,14 @@ type wfcVoiceProfile struct {
 }
 
 type wfcVoiceCodecProfile struct {
-	Name         imscall.AudioCodec `json:"name"`
-	PayloadTypes []int              `json:"payloadTypes"`
-	ClockRate    int                `json:"clockRate"`
-	Channels     int                `json:"channels"`
-	ModeSet      string             `json:"modeSet"`
-	Bitrate      string             `json:"bitrate"`
-	Bandwidth    string             `json:"bandwidth"`
-	OctetAlign   bool               `json:"octetAlign"`
+	Name         imsvoice.AudioCodec `json:"name"`
+	PayloadTypes []int               `json:"payloadTypes"`
+	ClockRate    int                 `json:"clockRate"`
+	Channels     int                 `json:"channels"`
+	ModeSet      string              `json:"modeSet"`
+	Bitrate      string              `json:"bitrate"`
+	Bandwidth    string              `json:"bandwidth"`
+	OctetAlign   bool                `json:"octetAlign"`
 }
 
 type wfcEVSPayloadDescription struct {
@@ -289,6 +292,15 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 	if cfg.IMS.RegisterExpires == 0 && profile.IMSRegisterExpires != nil {
 		cfg.IMS.RegisterExpires = profile.IMSRegisterExpires.Duration
 	}
+	if len(cfg.IMS.Voice.GeolocationPIDFInvite) == 0 {
+		cfg.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)
+	}
+	if len(cfg.IMS.GeolocationPIDFRegister) == 0 {
+		cfg.IMS.GeolocationPIDFRegister = cloneInts(profile.IMSGeolocationPIDFRegister)
+	}
+	if !cfg.IMS.UseTelURIForPIDFXML && profile.IMSUseTelURIForPIDFXML != nil {
+		cfg.IMS.UseTelURIForPIDFXML = *profile.IMSUseTelURIForPIDFXML
+	}
 	if cfg.IMS.SIPServerPort == 0 {
 		cfg.IMS.SIPServerPort = firstNonZero(profile.IMSSIPServerPort, profile.SIPPort)
 	}
@@ -333,11 +345,11 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	if cfg.IMS.Voice.MaxPTime == 0 && profile.MaxPTime != nil {
 		cfg.IMS.Voice.MaxPTime = profile.MaxPTime.Duration
 	}
-	if !cfg.IMS.Voice.IncludeGeolocationPIDF && profile.IncludeGeolocationPIDF != nil {
-		cfg.IMS.Voice.IncludeGeolocationPIDF = *profile.IncludeGeolocationPIDF
-	}
 	if strings.TrimSpace(cfg.IMS.Voice.GeolocationCountry) == "" {
 		cfg.IMS.Voice.GeolocationCountry = profile.GeolocationCountry
+	}
+	if len(cfg.IMS.Voice.PIDFShortCodes) == 0 {
+		cfg.IMS.Voice.PIDFShortCodes = cloneStrings(profile.PIDFShortCodes)
 	}
 	if !cfg.IMS.Voice.ReliableProvisional && profile.ReliableProvisionalSupported != nil {
 		cfg.IMS.Voice.ReliableProvisional = *profile.ReliableProvisionalSupported
@@ -384,13 +396,13 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	return cfg
 }
 
-func wfcVoiceCodecs(profile *wfcVoiceProfile) []imscall.AudioCodecConfig {
+func wfcVoiceCodecs(profile *wfcVoiceProfile) []imsvoice.AudioCodecConfig {
 	if profile == nil || len(profile.Codecs) == 0 {
 		return nil
 	}
-	out := make([]imscall.AudioCodecConfig, 0, len(profile.Codecs))
+	out := make([]imsvoice.AudioCodecConfig, 0, len(profile.Codecs))
 	for _, codec := range profile.Codecs {
-		callCodec := imscall.AudioCodecConfig{
+		voiceCodec := imsvoice.AudioCodecConfig{
 			Name:         codec.Name,
 			PayloadTypes: append([]int(nil), codec.PayloadTypes...),
 			ClockRate:    codec.ClockRate,
@@ -400,15 +412,15 @@ func wfcVoiceCodecs(profile *wfcVoiceProfile) []imscall.AudioCodecConfig {
 			Bitrate:      codec.Bitrate,
 			Bandwidth:    codec.Bandwidth,
 		}
-		if strings.EqualFold(string(codec.Name), string(imscall.CodecEVS)) {
-			applyWFCVoiceEVSDescription(&callCodec, profile.EVSPayloadDescriptions)
+		if strings.EqualFold(string(codec.Name), string(imsvoice.CodecEVS)) {
+			applyWFCVoiceEVSDescription(&voiceCodec, profile.EVSPayloadDescriptions)
 		}
-		out = append(out, callCodec)
+		out = append(out, voiceCodec)
 	}
 	return out
 }
 
-func applyWFCVoiceEVSDescription(codec *imscall.AudioCodecConfig, descriptions map[string]wfcEVSPayloadDescription) {
+func applyWFCVoiceEVSDescription(codec *imsvoice.AudioCodecConfig, descriptions map[string]wfcEVSPayloadDescription) {
 	if len(codec.PayloadTypes) == 0 || len(descriptions) == 0 {
 		return
 	}
@@ -477,6 +489,20 @@ func cloneUint16s(values []uint16) []uint16 {
 		return nil
 	}
 	return append([]uint16(nil), values...)
+}
+
+func cloneInts(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]int(nil), values...)
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
 }
 
 func wfcDurations(values []wfcDuration) []time.Duration {

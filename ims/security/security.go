@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type Param struct {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/ims-client/swu/handshake"
-	"github.com/damonto/ims-client/swu/ike"
+	"github.com/damonto/vowifi-go/swu/handshake"
+	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 func TestNewConnectCryptoStateUses32ByteNonce(t *testing.T) {

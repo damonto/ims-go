@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
 	"time"
 )

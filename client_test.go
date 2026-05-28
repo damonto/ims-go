@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-client/ims/registration"
-	imssession "github.com/damonto/ims-client/ims/session"
-	imssip "github.com/damonto/ims-client/ims/sip"
-	imssms "github.com/damonto/ims-client/ims/sms"
-	imsussd "github.com/damonto/ims-client/ims/ussd"
-	"github.com/damonto/ims-client/usim"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/vowifi-go/ims/registration"
+	imssession "github.com/damonto/vowifi-go/ims/session"
+	imssip "github.com/damonto/vowifi-go/ims/sip"
+	imssms "github.com/damonto/vowifi-go/ims/sms"
+	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	"github.com/damonto/vowifi-go/usim"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type stubCard struct{}
@@ -191,7 +191,7 @@ func newReadyClient(t *testing.T, cfg Config) *Client {
 	}
 	client.card = stubCard{}
 	client.cfg = normalized
-	client.logger = normalized.Logger.With("component", "ims-client")
+	client.logger = normalized.Logger.With("component", "vowifi-go")
 	return client
 }
 

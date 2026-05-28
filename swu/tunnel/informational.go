@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-client/swu/ike"
+	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 const informationalResponseCacheWindow = 8

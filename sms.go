@@ -1,11 +1,11 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	imssms "github.com/damonto/ims-client/ims/sms"
+	imssms "github.com/damonto/vowifi-go/ims/sms"
 )
 
 func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, error) {

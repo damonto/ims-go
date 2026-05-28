@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
 )
 
 func TestMarshalRequest(t *testing.T) {

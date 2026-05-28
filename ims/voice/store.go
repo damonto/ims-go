@@ -1,9 +1,9 @@
-package call
+package voice
 
 import (
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"net"
 	"strings"
 )
@@ -122,9 +122,9 @@ func (s *Service) localIP() net.IP {
 	return ip
 }
 
-func (s *Service) emit(event Event) {
-	if s.cfg.OnEvent != nil {
-		s.cfg.OnEvent(event)
+func (s *Service) emit(event CallEvent) {
+	if s.cfg.OnCallEvent != nil {
+		s.cfg.OnCallEvent(event)
 	}
 }
 
@@ -136,5 +136,5 @@ func (s *Service) emitError(err error) {
 		s.cfg.OnError(err)
 		return
 	}
-	s.logger.Debug("call service error", "err", err)
+	s.logger.Debug("voice service error", "err", err)
 }

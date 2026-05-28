@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-client"
 	"github.com/damonto/ts43-go/ts43"
+	"github.com/damonto/vowifi-go"
 )
 
 func TestTCPAPDUFrameRoundTrip(t *testing.T) {
@@ -128,10 +128,10 @@ func TestWFCUserActionFromError(t *testing.T) {
 	}{
 		{
 			name: "nsds websheet",
-			err: &imsclient.NSDSWFCEntitlementError{
-				Err:     imsclient.ErrWFCEntitlementUserActionRequired,
+			err: &vowifi.NSDSWFCEntitlementError{
+				Err:     vowifi.ErrWFCEntitlementUserActionRequired,
 				Carrier: "AT&T",
-				Websheet: imsclient.WFCWebsheet{
+				Websheet: vowifi.WFCWebsheet{
 					URL:        "https://example.test/e911",
 					Data:       "token=abc",
 					Title:      "Wi-Fi Calling",
@@ -150,8 +150,8 @@ func TestWFCUserActionFromError(t *testing.T) {
 		},
 		{
 			name: "ts43 web flow",
-			err: &imsclient.WFCEntitlementError{
-				Err: imsclient.ErrWFCEntitlementUserActionRequired,
+			err: &vowifi.WFCEntitlementError{
+				Err: vowifi.ErrWFCEntitlementUserActionRequired,
 				Config: ts43.WFCConfig{
 					CarrierName: "Carrier",
 				},
@@ -240,7 +240,7 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 		{
 			name: "polls after user action",
 			errors: []error{
-				&imsclient.NSDSWFCEntitlementError{Err: imsclient.ErrWFCEntitlementUserActionRequired},
+				&vowifi.NSDSWFCEntitlementError{Err: vowifi.ErrWFCEntitlementUserActionRequired},
 				nil,
 			},
 			wantCalls: 2,

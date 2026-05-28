@@ -15,7 +15,7 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/damonto/ims-client/swu/ike"
+	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 var (

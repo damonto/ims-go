@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"bytes"
@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/ims-client/usim"
 	"github.com/damonto/ts43-go/sim"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

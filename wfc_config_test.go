@@ -1,14 +1,15 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	imscall "github.com/damonto/ims-client/ims/call"
-	swutunnel "github.com/damonto/ims-client/swu/tunnel"
-	"github.com/damonto/ims-client/usim"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type wfcTestCard struct{}
@@ -98,6 +99,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "imsUserAgent": "PRD-IR92/15 #MANUFACTURE#/#MODEL#-#BUILD# device-type/#TYPE# mno-custom/#MCCMNC# imeisv/#IMEISV# op/#OPERATOR# sku/#HWSKU#",
     "wfcSPN": "2degrees",
     "imsRegisterExpires": "7200s",
+    "imsGeolocationPIDFInSIPInviteSupport": [4, 2],
+    "imsGeolocationPIDFInSIPRegisterSupport": [4, 2],
+    "imsUseTelURIForPIDFXML": true,
     "imsSIPServerPort": 5080,
     "imsSIPTimerT1": "3s",
     "imsSIPTimerT2": "6s",
@@ -111,6 +115,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
       "rtpProfile": "RTP/AVP",
       "ptime": "20ms",
       "maxptime": "240ms",
+      "pidfShortCodes": ["211", "311"],
       "qosPreconditionsSupported": true,
       "reliableProvisionalSupported": true,
       "sessionTimer": true,
@@ -191,6 +196,15 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.SIPTimers.T1 != 3*time.Second || got.IMS.SIPTimers.TJ != 13*time.Second {
 					t.Fatalf("IMS SIP timers T1/TJ = %v/%v, want profile values", got.IMS.SIPTimers.T1, got.IMS.SIPTimers.TJ)
 				}
+				if !slices.Equal(got.IMS.GeolocationPIDFRegister, []int{4, 2}) || !slices.Equal(got.IMS.Voice.GeolocationPIDFInvite, []int{4, 2}) {
+					t.Fatalf("IMS PIDF config = register %v invite %v, want [4 2]", got.IMS.GeolocationPIDFRegister, got.IMS.Voice.GeolocationPIDFInvite)
+				}
+				if !got.IMS.UseTelURIForPIDFXML || !got.IMS.Voice.UseTelURIForPIDFXML {
+					t.Fatalf("IMS use tel URI for PIDF = %t/%t, want true", got.IMS.UseTelURIForPIDFXML, got.IMS.Voice.UseTelURIForPIDFXML)
+				}
+				if !slices.Equal(got.IMS.Voice.PIDFShortCodes, []string{"211", "311"}) {
+					t.Fatalf("IMS voice PIDF short codes = %v, want [211 311]", got.IMS.Voice.PIDFShortCodes)
+				}
 				if got.IMS.Voice.PTime != 20*time.Millisecond || got.IMS.Voice.MaxPTime != 240*time.Millisecond {
 					t.Fatalf("IMS voice ptime/maxptime = %v/%v, want profile values", got.IMS.Voice.PTime, got.IMS.Voice.MaxPTime)
 				}
@@ -207,7 +221,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 					t.Fatalf("IMS voice session timers = %v/%v, want profile values", got.IMS.Voice.SessionExpires, got.IMS.Voice.MinSessionExpires)
 				}
 				if got.IMS.Voice.MOCallRequestTimeout != 30*time.Second || got.IMS.Voice.RingbackTimeout != 180*time.Second || got.IMS.Voice.RingingTimeout != 45*time.Second {
-					t.Fatalf("IMS voice call timers = %v/%v/%v, want profile values", got.IMS.Voice.MOCallRequestTimeout, got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
+					t.Fatalf("IMS voice timers = %v/%v/%v, want profile values", got.IMS.Voice.MOCallRequestTimeout, got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
 				}
 				if got.IMS.Voice.AudioASBandwidthKbps != 49 {
 					t.Fatalf("IMS voice AudioASBandwidthKbps = %d, want 49", got.IMS.Voice.AudioASBandwidthKbps)
@@ -218,7 +232,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.LocalRTPPortMin != 41000 || got.IMS.Voice.LocalRTPPortMax != 41020 {
 					t.Fatalf("IMS voice ports = %d/%d, want profile values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
 				}
-				if len(got.IMS.Voice.Codecs) != 4 || got.IMS.Voice.Codecs[0].Name != imscall.CodecEVS || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 127 {
+				if len(got.IMS.Voice.Codecs) != 4 || got.IMS.Voice.Codecs[0].Name != imsvoice.CodecEVS || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 127 {
 					t.Fatalf("IMS voice codecs = %+v, want profile codecs", got.IMS.Voice.Codecs)
 				}
 				evs := got.IMS.Voice.Codecs[0]
@@ -241,11 +255,11 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 					UserAgent:       "explicit-agent",
 					RegisterExpires: 30 * time.Second,
 					SIPServerPort:   5090,
-					Voice: imscall.Config{
+					Voice: imsvoice.Config{
 						LocalRTPPortMin: 42000,
 						LocalRTPPortMax: 42010,
-						Codecs: []imscall.AudioCodecConfig{
-							{Name: imscall.CodecEVS, PayloadTypes: []int{110}, ClockRate: 16000},
+						Codecs: []imsvoice.AudioCodecConfig{
+							{Name: imsvoice.CodecEVS, PayloadTypes: []int{110}, ClockRate: 16000},
 						},
 					},
 				},
@@ -273,7 +287,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.LocalRTPPortMin != 42000 || got.IMS.Voice.LocalRTPPortMax != 42010 {
 					t.Fatalf("IMS voice ports = %d/%d, want explicit values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
 				}
-				if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imscall.CodecEVS {
+				if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imsvoice.CodecEVS {
 					t.Fatalf("IMS voice codecs = %+v, want explicit codecs", got.IMS.Voice.Codecs)
 				}
 			},
@@ -466,6 +480,15 @@ func TestEmbeddedWFCConfigATTUsesConfiguredIMSIdentities(t *testing.T) {
 	if got.IMS.PublicIdentity != "sip:3102800123456789@one.att.net" {
 		t.Fatalf("PublicIdentity = %q, want AT&T public identity", got.IMS.PublicIdentity)
 	}
+	if !slices.Equal(got.IMS.GeolocationPIDFRegister, []int{4, 2}) || !slices.Equal(got.IMS.Voice.GeolocationPIDFInvite, []int{4, 2}) {
+		t.Fatalf("PIDF config = register %v invite %v, want [4 2]", got.IMS.GeolocationPIDFRegister, got.IMS.Voice.GeolocationPIDFInvite)
+	}
+	if !got.IMS.UseTelURIForPIDFXML || !got.IMS.Voice.UseTelURIForPIDFXML {
+		t.Fatalf("UseTelURIForPIDFXML = %t/%t, want true", got.IMS.UseTelURIForPIDFXML, got.IMS.Voice.UseTelURIForPIDFXML)
+	}
+	if !slices.Equal(got.IMS.Voice.PIDFShortCodes, []string{"211", "311", "411", "511", "611", "711", "811"}) {
+		t.Fatalf("PIDFShortCodes = %v, want AT&T short codes", got.IMS.Voice.PIDFShortCodes)
+	}
 }
 
 func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
@@ -493,10 +516,10 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 	cfg := Config{
 		IMEI: testIMEI,
 		IMS: IMSConfig{
-			Voice: imscall.Config{
-				Codecs: []imscall.AudioCodecConfig{
-					{Name: imscall.CodecAMR, PayloadTypes: []int{102}, ClockRate: 8000},
-					{Name: imscall.CodecPCMU, PayloadTypes: []int{0}, ClockRate: 8000},
+			Voice: imsvoice.Config{
+				Codecs: []imsvoice.AudioCodecConfig{
+					{Name: imsvoice.CodecAMR, PayloadTypes: []int{102}, ClockRate: 8000},
+					{Name: imsvoice.CodecPCMU, PayloadTypes: []int{0}, ClockRate: 8000},
 				},
 			},
 		},
@@ -505,15 +528,15 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 	if len(got.IMS.Voice.Codecs) != 2 {
 		t.Fatalf("Voice codecs = %+v, want explicit codecs preserved", got.IMS.Voice.Codecs)
 	}
-	if got.IMS.Voice.Codecs[0].Name != imscall.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
+	if got.IMS.Voice.Codecs[0].Name != imsvoice.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
 		t.Fatalf("Voice speech codec = %+v, want explicit AMR payload 102", got.IMS.Voice.Codecs[0])
 	}
-	if got.IMS.Voice.Codecs[1].Name != imscall.CodecPCMU || got.IMS.Voice.Codecs[1].PayloadTypes[0] != 0 {
+	if got.IMS.Voice.Codecs[1].Name != imsvoice.CodecPCMU || got.IMS.Voice.Codecs[1].PayloadTypes[0] != 0 {
 		t.Fatalf("Voice PCMU codec = %+v, want explicit static payload 0", got.IMS.Voice.Codecs[1])
 	}
 
 	got = Config{IMEI: testIMEI}.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
-	if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imscall.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
+	if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imsvoice.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
 		t.Fatalf("Voice codecs = %+v, want profile JSON codecs without carrier fallback", got.IMS.Voice.Codecs)
 	}
 }
@@ -551,7 +574,7 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			codec := tt.codec
-			codec.Name = imscall.CodecEVS
+			codec.Name = imsvoice.CodecEVS
 			codec.PayloadTypes = []int{127}
 			codec.ClockRate = 16000
 			codecs := wfcVoiceCodecs(&wfcVoiceProfile{
@@ -594,13 +617,13 @@ func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
 		t.Fatalf("ring timers = %v/%v, want Pixel values", got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
 	}
 	want := []struct {
-		name    imscall.AudioCodec
+		name    imsvoice.AudioCodec
 		payload int
 	}{
-		{imscall.CodecAMRWB, 104},
-		{imscall.CodecAMR, 110},
-		{imscall.CodecEVS, 127},
-		{imscall.CodecTelephoneEvent, 97},
+		{imsvoice.CodecAMRWB, 104},
+		{imsvoice.CodecAMR, 110},
+		{imsvoice.CodecEVS, 127},
+		{imsvoice.CodecTelephoneEvent, 97},
 	}
 	if len(got.IMS.Voice.Codecs) != len(want) {
 		t.Fatalf("Voice codecs = %+v, want Pixel codec list", got.IMS.Voice.Codecs)

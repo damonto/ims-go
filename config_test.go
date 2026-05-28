@@ -1,11 +1,11 @@
-package imsclient
+package vowifi
 
 import (
 	"log/slog"
 	"testing"
 	"time"
 
-	imssession "github.com/damonto/ims-client/ims/session"
+	imssession "github.com/damonto/vowifi-go/ims/session"
 )
 
 func TestConfigNormalized(t *testing.T) {

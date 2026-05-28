@@ -2,7 +2,7 @@ package ussd
 
 import (
 	"fmt"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 func (s *Service) storeSession(ussdSession *Session) error {

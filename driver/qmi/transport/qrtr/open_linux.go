@@ -5,8 +5,8 @@ package qrtr
 import (
 	"fmt"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
-	qrtrsocket "github.com/damonto/ims-client/driver/qmi/qrtr"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
+	qrtrsocket "github.com/damonto/vowifi-go/driver/qmi/qrtr"
 )
 
 func Open() (protocol.Transport, error) {

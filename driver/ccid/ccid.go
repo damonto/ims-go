@@ -10,8 +10,8 @@ import (
 
 	"github.com/ElMostafaIdrassi/goscard"
 
-	"github.com/damonto/ims-client/usim"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/vowifi-go/usim"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 var ErrReaderNotFound = errors.New("reader not found")

@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-client/swu/esp"
+	"github.com/damonto/vowifi-go/swu/esp"
 )
 
 func (s *Session) commitConnect(state *connectState) {

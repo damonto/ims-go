@@ -1,10 +1,10 @@
-package call
+package voice
 
 import (
 	"context"
 	"fmt"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -53,8 +53,8 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		service:         s,
 		id:              callID,
 		sessionID:       nonEmpty(req.Message.Header("Session-ID"), sip.RandomHex(32)),
-		direction:       DirectionIncoming,
-		state:           StateRinging,
+		direction:       CallDirectionIncoming,
+		state:           CallStateRinging,
 		localURI:        nonEmpty(sip.AddressURI(req.Message.Header("To")), preferredIdentity(state)),
 		localTag:        localTag,
 		remoteURI:       nonEmpty(sip.AddressURI(req.Message.Header("From")), sip.AddressURI(req.Message.Header("Contact"))),
@@ -81,14 +81,14 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 	if delayedOffer && s.shouldSendReliableDelayedOffer(req.Message) {
 		offerBody, offerMedia, err := buildSDPOffer(s.cfg, localIP, localPort, MediaOffer{})
 		if err != nil {
-			call.finish(StateFailed, err.Error())
+			call.finish(CallStateFailed, err.Error())
 			return err
 		}
 		call.mu.Lock()
 		call.media = offerMedia
 		call.mu.Unlock()
 		if err := call.prepareMedia(ctx); err != nil {
-			call.finish(StateFailed, err.Error())
+			call.finish(CallStateFailed, err.Error())
 			return err
 		}
 		if err := s.writeProgress(ctx, req, call, offerBody, true); err != nil {
@@ -101,9 +101,9 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 				return fmt.Errorf("handling call INVITE: sending 183 Session Progress: %w", err)
 			}
 			if reliableProgress {
-				call.setState(StateRinging, "")
-				if s.cfg.OnIncoming != nil {
-					s.cfg.OnIncoming(Incoming{
+				call.setState(CallStateRinging, "")
+				if s.cfg.OnIncomingCall != nil {
+					s.cfg.OnIncomingCall(IncomingCall{
 						Call:       call,
 						From:       call.remoteURI,
 						FromURI:    call.remoteURI,
@@ -117,7 +117,7 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		}
 		if !delayedOffer {
 			if err := call.prepareMedia(ctx); err != nil {
-				call.finish(StateFailed, err.Error())
+				call.finish(CallStateFailed, err.Error())
 				return s.writeStatus(ctx, req, 488, "Not Acceptable Here")
 			}
 		}
@@ -126,13 +126,13 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		}
 		call.startRingingTimer()
 	}
-	call.setState(StateRinging, "")
-	if s.cfg.OnIncoming != nil {
+	call.setState(CallStateRinging, "")
+	if s.cfg.OnIncomingCall != nil {
 		var incomingOffer MediaOffer
 		if !delayedOffer {
 			incomingOffer = mediaOfferFromSDP(offer)
 		}
-		s.cfg.OnIncoming(Incoming{
+		s.cfg.OnIncomingCall(IncomingCall{
 			Call:       call,
 			From:       call.remoteURI,
 			FromURI:    call.remoteURI,
@@ -237,7 +237,7 @@ func (s *Service) writeRinging(ctx context.Context, req session.Request, call *C
 	s.addAccessNetworkInfo(&resp)
 	resp.Headers.Add("Contact", contactValue(s.reg.State()))
 	resp.Headers.Add("Allow", sip.DefaultClientAllow)
-	resp.Headers.Add("Accept", callAcceptHeader(s.cfg))
+	resp.Headers.Add("Accept", callAcceptHeader(false))
 	if call != nil && s.shouldSendReliable18x(req.Message) {
 		resp.Headers.Add("Require", "100rel")
 		resp.Headers.Add("RSeq", strconv.FormatInt(call.beginReliableProvisional(180, sip.CSeqNumber(req.Message.Header("CSeq")), "INVITE"), 10))
@@ -260,13 +260,13 @@ func (s *Service) writeProgress(ctx context.Context, req session.Request, call *
 	resp.Headers = sip.UpsertHeader(resp.Headers, "To", sip.WithTag(req.Message.Header("To"), call.localURI, call.localTag))
 	resp.Headers.Add("Contact", contactValue(s.reg.State()))
 	resp.Headers.Add("Allow", sip.DefaultClientAllow)
-	resp.Headers.Add("Accept", callAcceptHeader(s.cfg))
+	resp.Headers.Add("Accept", callAcceptHeader(false))
 	if reliable {
 		resp.Headers.Add("Require", "100rel")
 		resp.Headers.Add("RSeq", strconv.FormatInt(call.beginReliableProvisional(183, sip.CSeqNumber(req.Message.Header("CSeq")), "INVITE"), 10))
 	}
 	if len(body) != 0 {
-		if err := setInviteResponseBody(&resp, s.cfg, call.localURI, body); err != nil {
+		if err := setInviteResponseBody(&resp, s.cfg, call.localURI, false, body); err != nil {
 			return err
 		}
 	}

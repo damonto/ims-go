@@ -1,4 +1,4 @@
-package call
+package voice
 
 import (
 	"crypto/rand"
@@ -121,7 +121,7 @@ func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
 		cname = cname[:255]
 	}
 	if cname == "" {
-		cname = "ims-client"
+		cname = "vowifi-go"
 	}
 
 	rr := make([]byte, 8)

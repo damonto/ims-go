@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/damonto/ims-client/usim/apdu"
-	usimcommand "github.com/damonto/ims-client/usim/command"
-	usimreader "github.com/damonto/ims-client/usim/reader"
-	"github.com/damonto/ims-client/usim/simfile"
+	"github.com/damonto/vowifi-go/usim/apdu"
+	usimcommand "github.com/damonto/vowifi-go/usim/command"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
+	"github.com/damonto/vowifi-go/usim/simfile"
 )
 
 const (

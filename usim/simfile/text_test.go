@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/damonto/ims-client/usim/apdu"
+	"github.com/damonto/vowifi-go/usim/apdu"
 )
 
 func TestDecodeText(t *testing.T) {

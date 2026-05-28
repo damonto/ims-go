@@ -2,10 +2,10 @@ package sms
 
 import (
 	"context"
-	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/vowifi-go/usim"
 	"log/slog"
 	"sync"
 	"sync/atomic"

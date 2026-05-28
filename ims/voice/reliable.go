@@ -1,14 +1,13 @@
-package call
+package voice
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"strconv"
 	"strings"
-	"sync/atomic"
 )
 
 func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
@@ -30,15 +29,15 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		return c.service.writeStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
 	}
 
-	answeringDelayedOffer := delayedOffer && !prackAnsweredOffer && state == StateRinging && pending.status == 183
-	acknowledgingProvisionalAnswer := !delayedOffer && !provisionalAnswer && state == StateRinging && pending.status == 183
+	answeringDelayedOffer := delayedOffer && !prackAnsweredOffer && state == CallStateRinging && pending.status == 183
+	acknowledgingProvisionalAnswer := !delayedOffer && !provisionalAnswer && state == CallStateRinging && pending.status == 183
 	if answeringDelayedOffer {
 		body, ok := sdpBody(req.Message)
 		if !ok {
 			if err := c.service.writeStatus(ctx, req, 488, "Not Acceptable Here"); err != nil {
 				return err
 			}
-			c.finish(StateFailed, "missing PRACK SDP answer")
+			c.finish(CallStateFailed, "missing PRACK SDP answer")
 			return nil
 		}
 		answer, err := parseSDP(body)
@@ -46,7 +45,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			if writeErr := c.service.writeStatus(ctx, req, 488, "Not Acceptable Here"); writeErr != nil {
 				return writeErr
 			}
-			c.finish(StateFailed, err.Error())
+			c.finish(CallStateFailed, err.Error())
 			return nil
 		}
 		negotiated, ok := chooseCodec(answer, c.service.cfg.Codecs)
@@ -54,7 +53,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			if err := c.service.writeStatus(ctx, req, 488, "Not Acceptable Here"); err != nil {
 				return err
 			}
-			c.finish(StateFailed, "no compatible PRACK answer codec")
+			c.finish(CallStateFailed, "no compatible PRACK answer codec")
 			return nil
 		}
 		dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
@@ -64,7 +63,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		c.prackAnsweredOffer = true
 		c.mu.Unlock()
 		if err := c.openMedia(ctx); err != nil {
-			c.finish(StateFailed, err.Error())
+			c.finish(CallStateFailed, err.Error())
 			c.signalProvisionalReady()
 			return nil
 		}
@@ -80,7 +79,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		c.provisionalAnswer = true
 		c.mu.Unlock()
 		if err := c.prepareMedia(ctx); err != nil {
-			c.finish(StateFailed, err.Error())
+			c.finish(CallStateFailed, err.Error())
 			c.signalProvisionalReady()
 			if inviteReq != nil {
 				return c.service.writeStatus(ctx, *inviteReq, 488, "Not Acceptable Here")
@@ -143,8 +142,8 @@ func (c *Call) waitForReliableProvisionalAnswer(ctx context.Context) error {
 			c.mu.Unlock()
 			return errors.New("answering call: call is closed")
 		}
-		wait := c.direction == DirectionIncoming &&
-			c.state == StateRinging &&
+		wait := c.direction == CallDirectionIncoming &&
+			c.state == CallStateRinging &&
 			c.pendingReliable.status == 183 &&
 			((c.delayedOffer && !c.prackAnsweredOffer) || (!c.delayedOffer && !c.provisionalAnswer))
 		ch := c.provisionalReady
@@ -174,23 +173,18 @@ func (c *Call) signalProvisionalReady() {
 	}
 }
 
-func (c *Call) buildPRACKForResponseLocked(resp sip.Message) (sip.Message, error) {
+func (s dialogSnapshot) buildPRACKForResponse(resp sip.Message, cseq int64) (sip.Message, error) {
 	rseq, err := parseRSeq(resp.Header("RSeq"))
 	if err != nil {
 		return sip.Message{}, err
 	}
-	state := c.service.reg.State()
-	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), c.targetURI)
+	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), s.targetURI)
 	msg := sip.NewRequest("PRACK", targetURI)
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", c.localURI, c.localTag))
-	msg.Headers.Add("To", nonEmpty(resp.Header("To"), c.remoteTo))
-	msg.Headers.Add("Call-ID", c.id)
-	msg.Headers.Add("Session-ID", c.sessionID)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d PRACK", atomic.AddInt64(&c.service.cseq, 1)))
-	msg.Headers.Add("RAck", fmt.Sprintf("%d %d INVITE", rseq, c.inviteSeq))
-	msg.Headers.Add("Contact", contactValue(state))
-	c.service.reg.DialogRequestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
+	s.addDialogHeaders(&msg, "PRACK", cseq)
+	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
+	msg.Headers.Add("RAck", fmt.Sprintf("%d %d INVITE", rseq, s.inviteSeq))
+	msg.Headers.Add("Contact", s.contact)
+	s.requestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
 	return msg, nil
 }
 

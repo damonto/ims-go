@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type simTransport struct {

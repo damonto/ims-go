@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/damonto/ims-client/usim/apdu"
+	"github.com/damonto/vowifi-go/usim/apdu"
 )
 
 type Authenticate3G struct {

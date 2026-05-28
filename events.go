@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"fmt"

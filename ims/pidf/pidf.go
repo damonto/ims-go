@@ -1,12 +1,36 @@
-package call
+package pidf
 
 import (
 	"bytes"
 	"encoding/xml"
+	"slices"
 	"strings"
 )
 
-func buildPIDF(entity string, country string) []byte {
+const (
+	GeolocationPIDFNonEmergencyWiFi = 1
+	GeolocationPIDFEmergencyWiFi    = 2
+	GeolocationPIDFNonEmergencyCell = 3
+	GeolocationPIDFEmergencyCell    = 4
+)
+
+func NormalizeTypes(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if value < GeolocationPIDFNonEmergencyWiFi || value > GeolocationPIDFEmergencyCell {
+			continue
+		}
+		if !slices.Contains(out, value) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func Build(entity string, country string) []byte {
 	entity = strings.TrimSpace(entity)
 	country = strings.ToUpper(strings.TrimSpace(country))
 	if country == "" {

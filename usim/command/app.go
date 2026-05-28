@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	usimreader "github.com/damonto/ims-client/usim/reader"
-	"github.com/damonto/ims-client/usim/simfile"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
+	"github.com/damonto/vowifi-go/usim/simfile"
 )
 
 type FindAID struct {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/damonto/ims-client/usim"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/vowifi-go/usim"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 const defaultBaudRate = 115200

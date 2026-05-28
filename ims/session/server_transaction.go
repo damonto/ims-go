@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type serverTransaction struct {
@@ -184,12 +184,12 @@ func (tx *serverTransaction) recordResponse(resp sip.Message) {
 	if !final {
 		return
 	}
-	if reliable {
-		tx.terminate()
-		return
-	}
 	if tx.method == "INVITE" && tx.finalStatus >= 300 {
 		tx.scheduleTermination(tx.session.cfg.TransactionTimers.TH)
+		return
+	}
+	if reliable {
+		tx.terminate()
 		return
 	}
 	tx.scheduleTermination(tx.session.cfg.TransactionTimers.TJ)

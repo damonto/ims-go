@@ -21,15 +21,15 @@ import (
 
 	"github.com/ElMostafaIdrassi/goscard"
 
-	"github.com/damonto/ims-client"
-	"github.com/damonto/ims-client/driver/at"
-	"github.com/damonto/ims-client/driver/ccid"
-	"github.com/damonto/ims-client/driver/mbim"
-	"github.com/damonto/ims-client/driver/qmi"
-	imssession "github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/swu/tunnel"
-	"github.com/damonto/ims-client/usim"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/vowifi-go"
+	"github.com/damonto/vowifi-go/driver/at"
+	"github.com/damonto/vowifi-go/driver/ccid"
+	"github.com/damonto/vowifi-go/driver/mbim"
+	"github.com/damonto/vowifi-go/driver/qmi"
+	imssession "github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/vowifi-go/usim"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 const (
@@ -205,7 +205,7 @@ func run(opt options) error {
 		return err
 	}
 
-	cfg := &imsclient.Config{
+	cfg := &vowifi.Config{
 		IMEI:   opt.imei,
 		EPDG:   opt.epdgAddr,
 		Logger: slog.Default(),
@@ -214,7 +214,7 @@ func run(opt options) error {
 			NATKeepaliveInterval: opt.nattKeepalive,
 			IKERetransmitDelays:  ikeRetransmit,
 		},
-		IMS: imsclient.IMSConfig{
+		IMS: vowifi.IMSConfig{
 			Transport:              opt.transport,
 			PrivateIdentity:        opt.privateID,
 			PublicIdentity:         opt.publicID,
@@ -228,14 +228,14 @@ func run(opt options) error {
 			SIPTimers:              sipTimersFromOptions(opt),
 			SMSSubmitReportTimeout: opt.smsTR1,
 		},
-		WFCEntitlement: imsclient.WFCEntitlementConfig{
+		WFCEntitlement: vowifi.WFCEntitlementConfig{
 			TerminalVendor:   opt.terminalVendor,
 			TerminalModel:    opt.terminalModel,
 			TerminalSoftware: opt.terminalSW,
 		},
 	}
 
-	client, err := imsclient.New(reader, cfg)
+	client, err := vowifi.New(reader, cfg)
 	if err != nil {
 		return err
 	}
@@ -373,11 +373,11 @@ func appendRawQuery(rawURL, data string) string {
 }
 
 func wfcUserActionFromError(err error) (wfcUserAction, bool) {
-	if !errors.Is(err, imsclient.ErrWFCEntitlementUserActionRequired) {
+	if !errors.Is(err, vowifi.ErrWFCEntitlementUserActionRequired) {
 		return wfcUserAction{}, false
 	}
 
-	var nsdsErr *imsclient.NSDSWFCEntitlementError
+	var nsdsErr *vowifi.NSDSWFCEntitlementError
 	if errors.As(err, &nsdsErr) {
 		return wfcUserAction{
 			Source:     "nsds",
@@ -389,7 +389,7 @@ func wfcUserActionFromError(err error) (wfcUserAction, bool) {
 		}, true
 	}
 
-	var ts43Err *imsclient.WFCEntitlementError
+	var ts43Err *vowifi.WFCEntitlementError
 	if errors.As(err, &ts43Err) {
 		return wfcUserAction{
 			Source:  "ts43",
@@ -403,7 +403,7 @@ func wfcUserActionFromError(err error) (wfcUserAction, bool) {
 	return wfcUserAction{Source: "unknown"}, true
 }
 
-func runUSSD(ctx context.Context, client *imsclient.Client, code string) error {
+func runUSSD(ctx context.Context, client *vowifi.Client, code string) error {
 	session, err := client.USSD().Start()
 	if err != nil {
 		return fmt.Errorf("starting USSD: %w", err)
@@ -893,7 +893,7 @@ func (p *pcscAPDUTransmitter) Close() error {
 
 var _ usimreader.Transmitter = (*pcscAPDUTransmitter)(nil)
 
-func logClientEvents(events *imsclient.Events) {
+func logClientEvents(events *vowifi.Events) {
 	for {
 		select {
 		case state, ok := <-events.State:
@@ -910,7 +910,7 @@ func logClientEvents(events *imsclient.Events) {
 	}
 }
 
-func logSMSEvents(events *imsclient.SMSEvents) {
+func logSMSEvents(events *vowifi.SMSEvents) {
 	for {
 		select {
 		case sms, ok := <-events.Incoming:
@@ -927,7 +927,7 @@ func logSMSEvents(events *imsclient.SMSEvents) {
 	}
 }
 
-func logUSSDResult(result imsclient.USSDResult) {
+func logUSSDResult(result vowifi.USSDResult) {
 	if !result.HasMessage {
 		slog.Info("ussd session updated", "closed", result.Closed, "received_at", result.ReceivedAt.Format(time.RFC3339))
 		return

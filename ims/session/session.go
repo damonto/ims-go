@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type Transport interface {

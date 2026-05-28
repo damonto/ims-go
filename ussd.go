@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	imsussd "github.com/damonto/ims-client/ims/ussd"
+	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 )
 
 const ussdResultBufferSize = 16

@@ -3,9 +3,9 @@ package ussd
 import (
 	"context"
 	"encoding/xml"
-	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"log/slog"
 	"net/textproto"
 	"sync"

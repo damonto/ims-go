@@ -7,27 +7,32 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/damonto/ims-client/ims/security"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/ims/pidf"
+	"github.com/damonto/vowifi-go/ims/security"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type Config struct {
-	PrivateIdentity   string
-	PublicIdentity    string
-	HomeDomain        string
-	UserAgent         string
-	AccessNetworkInfo string
-	WLANNodeID        string
-	RegisterExpires   time.Duration
-	IMEI              string
+	PrivateIdentity         string
+	PublicIdentity          string
+	HomeDomain              string
+	UserAgent               string
+	AccessNetworkInfo       string
+	WLANNodeID              string
+	RegisterExpires         time.Duration
+	IMEI                    string
+	GeolocationPIDFRegister []int
+	GeolocationCountry      string
+	UseTelURIForPIDFXML     bool
 
 	DialSecureTCP   func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
 	DialSecureUDP   func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
@@ -49,25 +54,27 @@ type IdentityProvider interface {
 }
 
 type State struct {
-	Registered        bool
-	PublicIdentity    string
-	DefaultPublicID   string
-	PrivateIdentity   string
-	HomeDomain        string
-	RegisterURI       string
-	SIPPublicID       string
-	TelPublicID       string
-	Flow              Flow
-	ServiceRoutes     []string
-	SecurityClient    security.Param
-	SecurityVerify    *security.Param
-	RegisterExpires   time.Duration
-	ContactHost       string
-	RegisterPort      int
-	MessagePort       int
-	UserAgent         string
-	AccessNetworkInfo string
-	IMEI              string
+	Registered          bool
+	PublicIdentity      string
+	DefaultPublicID     string
+	PrivateIdentity     string
+	HomeDomain          string
+	RegisterURI         string
+	SIPPublicID         string
+	TelPublicID         string
+	Flow                Flow
+	ServiceRoutes       []string
+	SecurityClient      security.Param
+	SecurityVerify      *security.Param
+	RegisterExpires     time.Duration
+	ContactHost         string
+	RegisterPort        int
+	MessagePort         int
+	UserAgent           string
+	AccessNetworkInfo   string
+	IMEI                string
+	GeolocationCountry  string
+	UseTelURIForPIDFXML bool
 }
 
 type Service struct {
@@ -101,7 +108,10 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	if card == nil {
 		return nil, errors.New("creating registration service: card is nil")
 	}
-	cfg = normalizeConfig(cfg)
+	cfg, err := normalizeConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating registration service: %w", err)
+	}
 
 	identity, err := resolveIdentity(cfg, card)
 	if err != nil {
@@ -118,15 +128,17 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 		card:   card,
 		logger: slog.Default().With("component", "ims-registration"),
 		state: State{
-			PublicIdentity:    identity.publicIdentity,
-			DefaultPublicID:   identity.publicIdentity,
-			PrivateIdentity:   identity.privateIdentity,
-			HomeDomain:        identity.realm,
-			RegisterURI:       "sip:" + identity.realm,
-			RegisterExpires:   cfg.RegisterExpires,
-			UserAgent:         cfg.UserAgent,
-			AccessNetworkInfo: accessNetworkInfo(cfg),
-			IMEI:              cfg.IMEI,
+			PublicIdentity:      identity.publicIdentity,
+			DefaultPublicID:     identity.publicIdentity,
+			PrivateIdentity:     identity.privateIdentity,
+			HomeDomain:          identity.realm,
+			RegisterURI:         "sip:" + identity.realm,
+			RegisterExpires:     cfg.RegisterExpires,
+			UserAgent:           cfg.UserAgent,
+			AccessNetworkInfo:   accessNetworkInfo(cfg),
+			IMEI:                cfg.IMEI,
+			GeolocationCountry:  cfg.GeolocationCountry,
+			UseTelURIForPIDFXML: cfg.UseTelURIForPIDFXML,
 		},
 		flow: Flow{
 			ContactHost:    host,
@@ -913,7 +925,39 @@ func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAutho
 		UserAgent:         state.UserAgent,
 		AccessNetworkInfo: state.AccessNetworkInfo,
 	}.Apply(&msg)
+	if s.includePIDFForRegister() {
+		s.setRegisterPIDFBody(&msg, state)
+	}
 	return msg
+}
+
+func (s *Service) includePIDFForRegister() bool {
+	return slices.Contains(s.cfg.GeolocationPIDFRegister, pidf.GeolocationPIDFNonEmergencyWiFi)
+}
+
+func (s *Service) setRegisterPIDFBody(msg *sip.Message, state State) {
+	locationID := "pidf-" + sip.RandomAlphaNum(16)
+	msg.Headers.Add("Geolocation", "<cid:"+locationID+">")
+	msg.Headers.Add("Geolocation-Routing", "yes")
+	msg.Headers.Add("Content-Type", "application/pidf+xml")
+	msg.Headers.Add("Content-ID", "<"+locationID+">")
+	msg.Headers.Add("Content-Disposition", "render;handling=optional")
+	msg.Body = pidf.Build(registerPIDFEntityURI(state), state.GeolocationCountry)
+}
+
+func registerPIDFEntityURI(state State) string {
+	if state.UseTelURIForPIDFXML {
+		if uri := strings.TrimSpace(state.TelPublicID); uri != "" {
+			return uri
+		}
+	}
+	if uri := strings.TrimSpace(state.SIPPublicID); uri != "" {
+		return uri
+	}
+	if uri := strings.TrimSpace(state.DefaultPublicID); uri != "" {
+		return uri
+	}
+	return state.PublicIdentity
 }
 
 func (s *Service) buildSubscribe() sip.Message {
@@ -1042,7 +1086,7 @@ func resolveLocalAddr(addr net.Addr) (string, int, error) {
 	return sanitizeHost(host), port, nil
 }
 
-func normalizeConfig(cfg Config) Config {
+func normalizeConfig(cfg Config) (Config, error) {
 	cfg.PrivateIdentity = strings.TrimSpace(cfg.PrivateIdentity)
 	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
@@ -1050,13 +1094,21 @@ func normalizeConfig(cfg Config) Config {
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
+	cfg.GeolocationPIDFRegister = pidf.NormalizeTypes(cfg.GeolocationPIDFRegister)
+	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
+	if len(cfg.GeolocationPIDFRegister) > 0 && cfg.GeolocationCountry == "" {
+		cfg.GeolocationCountry = "US"
+	}
+	if cfg.GeolocationCountry != "" && len(cfg.GeolocationCountry) != 2 {
+		return Config{}, errors.New("normalizing registration config: geolocation country must be two letters")
+	}
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = defaultUserAgent
 	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
 	}
-	return cfg
+	return cfg, nil
 }
 
 func accessNetworkInfo(cfg Config) string {

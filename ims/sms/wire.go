@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 const (

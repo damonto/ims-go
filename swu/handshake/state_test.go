@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type stubCard struct{}

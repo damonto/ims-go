@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-client/swu/ike"
+	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 func TestRetransmitDelays(t *testing.T) {

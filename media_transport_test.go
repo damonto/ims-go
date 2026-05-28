@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"net"
 	"testing"
 
-	imscall "github.com/damonto/ims-client/ims/call"
-	"github.com/damonto/ims-client/swu/packet"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	"github.com/damonto/vowifi-go/swu/packet"
 )
 
 func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {
@@ -124,7 +124,7 @@ func TestTunnelMediaTransportNotifiesMediaPackets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			events := make(chan imscall.MediaPacket, 1)
+			events := make(chan imsvoice.MediaPacket, 1)
 			transport := &tunnelMediaTransport{
 				logger:   testMediaLogger(),
 				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
@@ -132,7 +132,7 @@ func TestTunnelMediaTransportNotifiesMediaPackets(t *testing.T) {
 				readCh:   make(chan tunnelMediaPacket, 1),
 				rtcpCh:   make(chan tunnelMediaPacket, 1),
 				done:     make(chan struct{}),
-				onPacket: func(packet imscall.MediaPacket) { events <- packet },
+				onPacket: func(packet imsvoice.MediaPacket) { events <- packet },
 			}
 			if !transport.HandleInnerPacket(packet.InnerPacket{
 				UDP: &packet.UDPSegment{
@@ -170,7 +170,7 @@ func TestTunnelMediaTransportDrainsPacketsAfterClose(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			events := make(chan imscall.MediaPacket, 1)
+			events := make(chan imsvoice.MediaPacket, 1)
 			transport := &tunnelMediaTransport{
 				logger:   testMediaLogger(),
 				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
@@ -178,7 +178,7 @@ func TestTunnelMediaTransportDrainsPacketsAfterClose(t *testing.T) {
 				readCh:   make(chan tunnelMediaPacket, 1),
 				rtcpCh:   make(chan tunnelMediaPacket, 1),
 				done:     make(chan struct{}),
-				onPacket: func(packet imscall.MediaPacket) { events <- packet },
+				onPacket: func(packet imsvoice.MediaPacket) { events <- packet },
 			}
 			if err := transport.Close(); err != nil {
 				t.Fatalf("Close() error = %v", err)
@@ -203,8 +203,8 @@ func TestTunnelMediaTransportDrainsPacketsAfterClose(t *testing.T) {
 	}
 }
 
-func mediaConfigForTest(ip net.IP, port int) imscall.MediaConfig {
-	return imscall.MediaConfig{RemoteIP: ip, RemotePort: port}
+func mediaConfigForTest(ip net.IP, port int) imsvoice.MediaConfig {
+	return imsvoice.MediaConfig{RemoteIP: ip, RemotePort: port}
 }
 
 func testMediaLogger() *slog.Logger {

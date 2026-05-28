@@ -7,10 +7,10 @@ import (
 	"net"
 	"sync"
 
-	imssession "github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/swu/esp"
-	"github.com/damonto/ims-client/swu/packet"
-	"github.com/damonto/ims-client/swu/tunnel"
+	imssession "github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/packet"
+	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 var _ imssession.Transport = (*UDPConn)(nil)

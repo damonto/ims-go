@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
@@ -7,14 +7,14 @@ import (
 	"net"
 	"time"
 
-	imscall "github.com/damonto/ims-client/ims/call"
-	"github.com/damonto/ims-client/ims/registration"
-	imssession "github.com/damonto/ims-client/ims/session"
-	imssms "github.com/damonto/ims-client/ims/sms"
-	imsussd "github.com/damonto/ims-client/ims/ussd"
-	swutransport "github.com/damonto/ims-client/swu/transport"
-	swutunnel "github.com/damonto/ims-client/swu/tunnel"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/ims/registration"
+	imssession "github.com/damonto/vowifi-go/ims/session"
+	imssms "github.com/damonto/vowifi-go/ims/sms"
+	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	swutransport "github.com/damonto/vowifi-go/swu/transport"
+	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type activeConn struct {
@@ -25,7 +25,7 @@ type activeConn struct {
 	reg        *registration.Service
 	sms        *imssms.Service
 	ussd       *imsussd.Service
-	call       *imscall.Service
+	voice      *imsvoice.Service
 }
 
 type connectSetup struct {
@@ -41,7 +41,7 @@ type connectSetup struct {
 	reg        *registration.Service
 	sms        *imssms.Service
 	ussd       *imsussd.Service
-	call       *imscall.Service
+	voice      *imsvoice.Service
 }
 
 type tunnelDatagramTransport struct {
@@ -178,23 +178,23 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	}
 	setup.ussd = ussd
 
-	callCfg := setup.imsCfg.Voice
-	if callCfg.PrepareMedia == nil {
-		callCfg.PrepareMedia = openMediaTransport(setup.session)
+	voiceCfg := setup.imsCfg.Voice
+	if voiceCfg.PrepareMedia == nil {
+		voiceCfg.PrepareMedia = openMediaTransport(setup.session)
 	}
-	if callCfg.OpenMedia == nil {
-		callCfg.OpenMedia = openMediaTransport(setup.session)
+	if voiceCfg.OpenMedia == nil {
+		voiceCfg.OpenMedia = openMediaTransport(setup.session)
 	}
-	callCfg.OnIncoming = c.handleIncomingCall
-	callCfg.OnEvent = c.handleCallEvent
-	callCfg.OnError = c.emitError
-	call, err := imscall.New(callCfg, imsSession, reg)
+	voiceCfg.OnIncomingCall = c.handleIncomingVoice
+	voiceCfg.OnCallEvent = c.handleVoiceEvent
+	voiceCfg.OnError = c.emitError
+	voice, err := imsvoice.New(voiceCfg, imsSession, reg)
 	if err != nil {
-		wrapped := fmt.Errorf("creating call service: %w", err)
+		wrapped := fmt.Errorf("creating voice service: %w", err)
 		c.emitConnectFailure(ctx, wrapped)
 		return nil, wrapped
 	}
-	setup.call = call
+	setup.voice = voice
 
 	active, err := c.commitConnect(setup)
 	if err != nil {
@@ -309,7 +309,7 @@ func (c *Client) ensureReady(ctx context.Context) error {
 	if c.card == nil {
 		c.card = card
 		c.cfg = normalized
-		c.logger = normalized.Logger.With("component", "ims-client")
+		c.logger = normalized.Logger.With("component", "vowifi-go")
 	}
 	return nil
 }
@@ -428,18 +428,21 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 
 func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 	return registration.Config{
-		PrivateIdentity:   cfg.PrivateIdentity,
-		PublicIdentity:    cfg.PublicIdentity,
-		HomeDomain:        cfg.HomeDomain,
-		UserAgent:         cfg.UserAgent,
-		AccessNetworkInfo: cfg.AccessNetworkInfo,
-		WLANNodeID:        cfg.WLANNodeID,
-		RegisterExpires:   cfg.RegisterExpires,
-		IMEI:              cfg.IMEI,
-		DialSecureTCP:     cfg.dialSecureTCP,
-		DialSecureUDP:     cfg.dialSecureUDP,
-		ListenSecureTCP:   cfg.listenSecureTCP,
-		ListenSecureUDP:   cfg.listenSecureUDP,
+		PrivateIdentity:         cfg.PrivateIdentity,
+		PublicIdentity:          cfg.PublicIdentity,
+		HomeDomain:              cfg.HomeDomain,
+		UserAgent:               cfg.UserAgent,
+		AccessNetworkInfo:       cfg.AccessNetworkInfo,
+		WLANNodeID:              cfg.WLANNodeID,
+		RegisterExpires:         cfg.RegisterExpires,
+		IMEI:                    cfg.IMEI,
+		GeolocationPIDFRegister: cfg.GeolocationPIDFRegister,
+		GeolocationCountry:      cfg.GeolocationCountry,
+		UseTelURIForPIDFXML:     cfg.UseTelURIForPIDFXML,
+		DialSecureTCP:           cfg.dialSecureTCP,
+		DialSecureUDP:           cfg.dialSecureUDP,
+		ListenSecureTCP:         cfg.listenSecureTCP,
+		ListenSecureUDP:         cfg.listenSecureUDP,
 	}
 }
 
@@ -452,7 +455,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 		reg:        setup.reg,
 		sms:        setup.sms,
 		ussd:       setup.ussd,
-		call:       setup.call,
+		voice:      setup.voice,
 	}
 
 	c.mu.Lock()
@@ -477,7 +480,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	setup.reg = nil
 	setup.sms = nil
 	setup.ussd = nil
-	setup.call = nil
+	setup.voice = nil
 	return active, nil
 }
 
@@ -497,8 +500,8 @@ func (s *connectSetup) rollback() {
 	if s.ussd != nil {
 		_ = s.ussd.CloseContext(ctx)
 	}
-	if s.call != nil {
-		_ = s.call.Close()
+	if s.voice != nil {
+		_ = s.voice.Close()
 	}
 	if s.sms != nil {
 		_ = s.sms.Close()
@@ -764,8 +767,8 @@ func (c *Client) closeActive(ctx context.Context, active *activeConn) error {
 	if active.ussd != nil {
 		err = errors.Join(err, wrapCloseError("closing USSD service", normalizeCloseError(active.ussd.CloseContext(ctx))))
 	}
-	if active.call != nil {
-		err = errors.Join(err, wrapCloseError("closing call service", active.call.Close()))
+	if active.voice != nil {
+		err = errors.Join(err, wrapCloseError("closing voice service", active.voice.Close()))
 	}
 	if active.sms != nil {
 		err = errors.Join(err, wrapCloseError("closing SMS service", active.sms.Close()))
@@ -789,8 +792,8 @@ func (c *Client) closeActiveRuntime(ctx context.Context, active *activeConn) err
 	c.clearUSSDSessionBindings()
 
 	var err error
-	if active.call != nil {
-		err = errors.Join(err, wrapCloseError("closing call service", active.call.Close()))
+	if active.voice != nil {
+		err = errors.Join(err, wrapCloseError("closing voice service", active.voice.Close()))
 	}
 	if active.sms != nil {
 		err = errors.Join(err, wrapCloseError("closing SMS service", active.sms.Close()))

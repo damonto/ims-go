@@ -1,11 +1,12 @@
-package call
+package voice
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,10 +24,10 @@ func (c *Call) handleRequest(ctx context.Context, req session.Request) error {
 		if err := c.service.writeStatus(ctx, req, 200, "OK"); err != nil {
 			return err
 		}
-		c.finish(StateEnded, "remote bye")
+		c.finish(CallStateEnded, "remote bye")
 		return nil
 	case "CANCEL":
-		c.finish(StateEnded, "remote cancel")
+		c.finish(CallStateEnded, "remote cancel")
 		return nil
 	case "PRACK":
 		return c.handlePRACK(ctx, req)
@@ -43,25 +44,25 @@ func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 	media := c.media
 	c.mu.Unlock()
 	if !delayedOffer || prackAnsweredOffer {
-		c.setState(StateActive, "")
+		c.setState(CallStateActive, "")
 		return nil
 	}
-	if state != StateAnswering {
+	if state != CallStateAnswering {
 		return nil
 	}
 	body, ok := sdpBody(req.Message)
 	if !ok {
-		c.finish(StateFailed, "missing delayed-offer sdp answer")
+		c.finish(CallStateFailed, "missing delayed-offer sdp answer")
 		return nil
 	}
 	answer, err := parseSDP(body)
 	if err != nil {
-		c.finish(StateFailed, err.Error())
+		c.finish(CallStateFailed, err.Error())
 		return nil
 	}
 	negotiated, ok := chooseCodec(answer, c.service.cfg.Codecs)
 	if !ok {
-		c.finish(StateFailed, "no compatible delayed-offer answer codec")
+		c.finish(CallStateFailed, "no compatible delayed-offer answer codec")
 		return nil
 	}
 	dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
@@ -70,25 +71,26 @@ func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 	c.media = answerMedia
 	c.mu.Unlock()
 	if err := c.openMedia(ctx); err != nil {
-		c.finish(StateFailed, err.Error())
+		c.finish(CallStateFailed, err.Error())
 		return nil
 	}
 	c.startMediaInactivityWatch()
-	c.setState(StateActive, "")
+	c.setState(CallStateActive, "")
 	return nil
 }
 
 func (c *Call) handleResponse(ctx context.Context, msg sip.Message) error {
 	c.mu.Lock()
-	if c.direction != DirectionOutgoing || sip.CSeqNumber(msg.Header("CSeq")) != c.inviteSeq {
+	if c.direction != CallDirectionOutgoing || sip.CSeqNumber(msg.Header("CSeq")) != c.inviteSeq {
 		c.mu.Unlock()
 		return nil
 	}
 	tag := sip.HeaderTag(msg.Header("To"))
 	if tag != "" && c.remoteTag != "" && tag != c.remoteTag {
-		ack := c.buildACKForResponseLocked(msg)
-		bye := c.buildBYEForResponseLocked(msg, reasonUserTriggered)
+		snap := c.dialogSnapshot()
 		c.mu.Unlock()
+		ack := snap.buildACKForResponse(msg)
+		bye := snap.buildBYEForResponse(msg, c.nextCSeq(), reasonUserTriggered)
 		if err := c.service.sess.Send(ctx, ack); err != nil {
 			return fmt.Errorf("acknowledging forked call 2xx: %w", err)
 		}
@@ -114,7 +116,7 @@ func (c *Call) handleResponse(ctx context.Context, msg sip.Message) error {
 
 func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) error {
 	c.mu.Lock()
-	if c.direction != DirectionOutgoing || sip.CSeqNumber(msg.Header("CSeq")) != c.inviteSeq {
+	if c.direction != CallDirectionOutgoing || sip.CSeqNumber(msg.Header("CSeq")) != c.inviteSeq {
 		c.mu.Unlock()
 		return nil
 	}
@@ -125,7 +127,7 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 		return nil
 	}
 	if msg.StatusCode() == 180 {
-		c.setState(StateRinging, "")
+		c.setState(CallStateRinging, "")
 		c.startRingbackTimer()
 	}
 
@@ -190,8 +192,9 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 		return nil
 	}
 	c.prackedRSeq[key] = struct{}{}
-	prack, err := c.buildPRACKForResponseLocked(msg)
+	snap := c.dialogSnapshot()
 	c.mu.Unlock()
+	prack, err := snap.buildPRACKForResponse(msg, c.nextCSeq())
 	if err != nil {
 		return err
 	}
@@ -202,14 +205,15 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 func (c *Call) markInviteResponse(ctx context.Context) {
 	c.mu.Lock()
 	c.inviteResponse = true
-	if !c.cancelOnResponse || c.cancelSent || c.direction != DirectionOutgoing {
+	if !c.cancelOnResponse || c.cancelSent || c.direction != CallDirectionOutgoing {
 		c.mu.Unlock()
 		return
 	}
 	c.cancelSent = true
-	cancel := c.buildCANCELLocked(reasonUserTriggered)
+	snap := c.dialogSnapshot()
 	c.mu.Unlock()
 
+	cancel := snap.buildCANCEL(reasonUserTriggered)
 	go c.sendCancel(ctx, cancel)
 }
 
@@ -235,7 +239,7 @@ func (c *Call) handleEarlyDialogTerminated(msg sip.Message) {
 	id := c.id
 	state := c.state
 	c.mu.Unlock()
-	c.service.emit(Event{Call: c, CallID: id, State: state, Cause: "early dialog terminated", At: time.Now()})
+	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Cause: "early dialog terminated", At: time.Now()})
 }
 
 func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error) {
@@ -267,10 +271,11 @@ func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) 
 	c.targetURI = c.remoteURI
 	c.routeSet = reverseValues(resp.HeadersByName("Record-Route"))
 	c.earlyDialogs = nil
-	ack := c.buildACKLocked()
-	bye := c.buildBYELocked(reasonUserTriggered)
+	snap := c.dialogSnapshot()
 	c.mu.Unlock()
 
+	ack := snap.buildACK()
+	bye := snap.buildBYE(reasonUserTriggered, c.nextCSeq())
 	if err := c.refreshDialogRegistration(); err != nil {
 		return err
 	}
@@ -287,40 +292,94 @@ func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) 
 	return nil
 }
 
-func (c *Call) buildACK() sip.Message {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.buildACKLocked()
+type dialogSnapshot struct {
+	id                string
+	sessionID         string
+	localURI          string
+	localTag          string
+	remoteTo          string
+	targetURI         string
+	routeSet          []string
+	inviteSeq         int64
+	inviteRequest     sip.Message
+	flow              registration.Flow
+	userAgent         string
+	accessNetworkInfo string
+	transport         string
+	contactHost       string
+	messagePort       int
+	contact           string
 }
 
-func (c *Call) buildACKLocked() sip.Message {
+func (c *Call) dialogSnapshot() dialogSnapshot {
+	// Keep SIP builders off Call's mutable fields. Callers take this snapshot
+	// while holding c.mu, then build messages from the copied state.
 	state := c.service.reg.State()
-	msg := sip.NewRequest("ACK", c.targetURI)
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", c.localURI, c.localTag))
-	msg.Headers.Add("To", c.remoteTo)
-	msg.Headers.Add("Call-ID", c.id)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d ACK", c.inviteSeq))
-	c.service.reg.DialogRequestPolicy(c.routeSet).Apply(&msg)
-	return msg
-}
-
-func (c *Call) buildACKForResponseLocked(resp sip.Message) sip.Message {
-	state := c.service.reg.State()
-	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), c.targetURI)
-	msg := sip.NewRequest("ACK", targetURI)
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", c.localURI, c.localTag))
-	msg.Headers.Add("To", nonEmpty(resp.Header("To"), c.remoteTo))
-	msg.Headers.Add("Call-ID", c.id)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d ACK", c.inviteSeq))
-	c.service.reg.DialogRequestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
-	return msg
-}
-
-func (c *Call) buildCANCELLocked(reason string) sip.Message {
 	invite := c.inviteRequest
-	state := c.service.reg.State()
+	invite.Headers = invite.Headers.Clone()
+	invite.Body = append([]byte(nil), invite.Body...)
+	return dialogSnapshot{
+		id:                c.id,
+		sessionID:         c.sessionID,
+		localURI:          c.localURI,
+		localTag:          c.localTag,
+		remoteTo:          c.remoteTo,
+		targetURI:         c.targetURI,
+		routeSet:          append([]string(nil), c.routeSet...),
+		inviteSeq:         c.inviteSeq,
+		inviteRequest:     invite,
+		flow:              state.Flow,
+		userAgent:         state.UserAgent,
+		accessNetworkInfo: state.AccessNetworkInfo,
+		transport:         sip.TransportToken(c.service.sess.LocalAddr()),
+		contactHost:       state.ContactHost,
+		messagePort:       state.MessagePort,
+		contact:           contactValue(state),
+	}
+}
+
+func (c *Call) nextCSeq() int64 {
+	return atomic.AddInt64(&c.service.cseq, 1)
+}
+
+func (s dialogSnapshot) requestPolicy(routes []string) sip.ClientRequestPolicy {
+	if routes == nil {
+		routes = s.routeSet
+	}
+	return s.flow.DialogRequestPolicy(routes, s.userAgent, s.accessNetworkInfo)
+}
+
+func (s dialogSnapshot) addDialogHeaders(msg *sip.Message, method string, cseq int64) {
+	msg.Headers.Add("Via", sip.BuildVia(s.transport, s.contactHost, s.messagePort, sip.RandomAlphaNum(15)))
+	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", s.localURI, s.localTag))
+	msg.Headers.Add("To", s.remoteTo)
+	msg.Headers.Add("Call-ID", s.id)
+	if s.sessionID != "" {
+		msg.Headers.Add("Session-ID", s.sessionID)
+	}
+	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", cseq, method))
+}
+
+func (s dialogSnapshot) buildACK() sip.Message {
+	msg := sip.NewRequest("ACK", s.targetURI)
+	s.addDialogHeaders(&msg, "ACK", s.inviteSeq)
+	msg.Headers.Del("Session-ID")
+	s.requestPolicy(nil).Apply(&msg)
+	return msg
+}
+
+func (s dialogSnapshot) buildACKForResponse(resp sip.Message) sip.Message {
+	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), s.targetURI)
+	msg := sip.NewRequest("ACK", targetURI)
+	s.addDialogHeaders(&msg, "ACK", s.inviteSeq)
+	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
+	msg.Headers.Del("Session-ID")
+	s.requestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
+	return msg
+}
+
+func (s dialogSnapshot) buildCANCEL(reason string) sip.Message {
+	invite := s.inviteRequest
 	msg := sip.NewRequest("CANCEL", sip.RequestURI(invite))
 	if via := invite.Header("Via"); via != "" {
 		msg.Headers.Add("Via", via)
@@ -328,17 +387,17 @@ func (c *Call) buildCANCELLocked(reason string) sip.Message {
 	msg.Headers.Add("From", invite.Header("From"))
 	msg.Headers.Add("To", invite.Header("To"))
 	msg.Headers.Add("Call-ID", invite.Header("Call-ID"))
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d CANCEL", c.inviteSeq))
+	msg.Headers.Add("CSeq", fmt.Sprintf("%d CANCEL", s.inviteSeq))
 	if maxForwards := invite.Header("Max-Forwards"); maxForwards != "" {
 		msg.Headers.Add("Max-Forwards", maxForwards)
 	}
 	for _, route := range invite.HeadersByName("Route") {
 		msg.Headers.Add("Route", route)
 	}
-	if userAgent := strings.TrimSpace(state.UserAgent); userAgent != "" {
+	if userAgent := strings.TrimSpace(s.userAgent); userAgent != "" {
 		msg.Headers.Add("User-Agent", userAgent)
 	}
-	if accessNetworkInfo := strings.TrimSpace(state.AccessNetworkInfo); accessNetworkInfo != "" {
+	if accessNetworkInfo := strings.TrimSpace(s.accessNetworkInfo); accessNetworkInfo != "" {
 		msg.Headers.Add("P-Access-Network-Info", accessNetworkInfo)
 	}
 	if securityVerify := invite.Header("Security-Verify"); securityVerify != "" {
@@ -350,65 +409,39 @@ func (c *Call) buildCANCELLocked(reason string) sip.Message {
 	return msg
 }
 
-func (c *Call) buildDialogRequest(method string) sip.Message {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	state := c.service.reg.State()
-	msg := sip.NewRequest(method, c.targetURI)
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", c.localURI, c.localTag))
-	msg.Headers.Add("To", c.remoteTo)
-	msg.Headers.Add("Call-ID", c.id)
-	msg.Headers.Add("Session-ID", c.sessionID)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", atomic.AddInt64(&c.service.cseq, 1), method))
-	msg.Headers.Add("Contact", contactValue(state))
-	c.service.reg.DialogRequestPolicy(c.routeSet).Apply(&msg)
-	return msg
-}
-
 func (c *Call) buildBYE(reason string) sip.Message {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.buildBYELocked(reason)
+	snap := c.dialogSnapshot()
+	c.mu.Unlock()
+	return snap.buildBYE(reason, c.nextCSeq())
 }
 
-func (c *Call) buildBYELocked(reason string) sip.Message {
-	msg := c.buildDialogRequestLocked("BYE")
+func (s dialogSnapshot) buildBYE(reason string, cseq int64) sip.Message {
+	msg := s.buildDialogRequest("BYE", cseq)
 	if reason != "" {
 		msg.Headers.Add("Reason", reason)
 	}
 	return msg
 }
 
-func (c *Call) buildBYEForResponseLocked(resp sip.Message, reason string) sip.Message {
-	state := c.service.reg.State()
-	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), c.targetURI)
+func (s dialogSnapshot) buildBYEForResponse(resp sip.Message, cseq int64, reason string) sip.Message {
+	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), s.targetURI)
 	msg := sip.NewRequest("BYE", targetURI)
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", c.localURI, c.localTag))
-	msg.Headers.Add("To", nonEmpty(resp.Header("To"), c.remoteTo))
-	msg.Headers.Add("Call-ID", c.id)
-	msg.Headers.Add("Session-ID", c.sessionID)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d BYE", atomic.AddInt64(&c.service.cseq, 1)))
-	msg.Headers.Add("Contact", contactValue(state))
+	s.addDialogHeaders(&msg, "BYE", cseq)
+	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
+	msg.Headers.Add("Contact", s.contact)
 	if reason != "" {
 		msg.Headers.Add("Reason", reason)
 	}
-	c.service.reg.DialogRequestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
+	s.requestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
 	return msg
 }
 
-func (c *Call) buildDialogRequestLocked(method string) sip.Message {
-	state := c.service.reg.State()
-	msg := sip.NewRequest(method, c.targetURI)
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", c.localURI, c.localTag))
-	msg.Headers.Add("To", c.remoteTo)
-	msg.Headers.Add("Call-ID", c.id)
-	msg.Headers.Add("Session-ID", c.sessionID)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", atomic.AddInt64(&c.service.cseq, 1), method))
-	msg.Headers.Add("Contact", contactValue(state))
-	c.service.reg.DialogRequestPolicy(c.routeSet).Apply(&msg)
+func (s dialogSnapshot) buildDialogRequest(method string, cseq int64) sip.Message {
+	msg := sip.NewRequest(method, s.targetURI)
+	s.addDialogHeaders(&msg, method, cseq)
+	msg.Headers.Add("Contact", s.contact)
+	s.requestPolicy(nil).Apply(&msg)
 	return msg
 }
 
@@ -456,13 +489,13 @@ func (c *Call) writeInviteOK(ctx context.Context, body []byte) error {
 		return err
 	}
 	if err := c.service.sess.WriteResponse(ctx, req, resp); err != nil {
-		c.finish(StateFailed, err.Error())
+		c.finish(CallStateFailed, err.Error())
 		return fmt.Errorf("answering call: %w", err)
 	}
 	c.mu.Lock()
 	c.inviteOK = resp
 	c.mu.Unlock()
-	c.setState(StateAnswering, "")
+	c.setState(CallStateAnswering, "")
 	c.startInviteOKRetransmit(req, resp)
 	return nil
 }
@@ -475,17 +508,17 @@ func (c *Call) buildInviteOK(msg sip.Message, body []byte) (sip.Message, error) 
 	ok.Headers.Add("Session-ID", c.sessionID)
 	ok.Headers.Add("Contact", contactValue(c.service.reg.State()))
 	ok.Headers.Add("Allow", sip.DefaultClientAllow)
-	ok.Headers.Add("Accept", callAcceptHeader(c.service.cfg))
+	ok.Headers.Add("Accept", callAcceptHeader(false))
 	addInviteOKSessionTimer(&ok, msg, c.service.cfg)
 	if len(body) != 0 {
-		if err := setInviteResponseBody(&ok, c.service.cfg, c.localURI, body); err != nil {
+		if err := setInviteResponseBody(&ok, c.service.cfg, c.localURI, false, body); err != nil {
 			return sip.Message{}, err
 		}
 	}
 	return ok, nil
 }
 
-func (c *Call) setState(state State, cause string) {
+func (c *Call) setState(state CallState, cause string) {
 	c.mu.Lock()
 	if c.state == state && cause == "" {
 		c.mu.Unlock()
@@ -494,10 +527,10 @@ func (c *Call) setState(state State, cause string) {
 	c.state = state
 	id := c.id
 	c.mu.Unlock()
-	c.service.emit(Event{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
+	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
 }
 
-func (c *Call) finish(state State, cause string) {
+func (c *Call) finish(state CallState, cause string) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -543,6 +576,6 @@ func (c *Call) finish(state State, cause string) {
 	_ = c.closeMedia()
 	c.service.removeCall(id)
 	if emit {
-		c.service.emit(Event{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
+		c.service.emit(CallEvent{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
 	}
 }

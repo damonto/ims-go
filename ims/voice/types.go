@@ -1,19 +1,19 @@
-package call
+package voice
 
 import (
-	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"log/slog"
 	"sync"
 	"time"
 )
 
-type Direction string
+type CallDirection string
 
 const (
-	DirectionOutgoing Direction = "outgoing"
-	DirectionIncoming Direction = "incoming"
+	CallDirectionOutgoing CallDirection = "outgoing"
+	CallDirectionIncoming CallDirection = "incoming"
 )
 
 const (
@@ -21,26 +21,27 @@ const (
 	mmtelICSIEncoded = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
 )
 
-type State string
+type CallState string
 
 const (
-	StateDialing    State = "dialing"
-	StateRinging    State = "ringing"
-	StateEarlyMedia State = "early_media"
-	StateAnswering  State = "answering"
-	StateConfirmed  State = "confirmed"
-	StateActive     State = "active"
-	StateEnding     State = "ending"
-	StateEnded      State = "ended"
-	StateFailed     State = "failed"
+	CallStateDialing    CallState = "dialing"
+	CallStateRinging    CallState = "ringing"
+	CallStateEarlyMedia CallState = "early_media"
+	CallStateAnswering  CallState = "answering"
+	CallStateConfirmed  CallState = "confirmed"
+	CallStateActive     CallState = "active"
+	CallStateEnding     CallState = "ending"
+	CallStateEnded      CallState = "ended"
+	CallStateFailed     CallState = "failed"
 )
 
-type Request struct {
-	To    string
-	Media MediaOffer
+type DialRequest struct {
+	To        string
+	Media     MediaOffer
+	Emergency bool
 }
 
-type Incoming struct {
+type IncomingCall struct {
 	Call       *Call
 	From       string
 	FromURI    string
@@ -49,10 +50,10 @@ type Incoming struct {
 	Received   time.Time
 }
 
-type Event struct {
+type CallEvent struct {
 	Call   *Call
 	CallID string
-	State  State
+	State  CallState
 	Cause  string
 	At     time.Time
 }
@@ -79,8 +80,8 @@ type Call struct {
 	mu                 sync.Mutex
 	id                 string
 	sessionID          string
-	direction          Direction
-	state              State
+	direction          CallDirection
+	state              CallState
 	localURI           string
 	localTag           string
 	remoteURI          string
@@ -141,13 +142,13 @@ const (
 	reasonMediaBearerReleased = `RELEASE_CAUSE;cause=3;text="Media bearer loss"`
 )
 
-func (c *Call) Direction() Direction {
+func (c *Call) Direction() CallDirection {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.direction
 }
 
-func (c *Call) State() State {
+func (c *Call) State() CallState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state

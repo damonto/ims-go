@@ -8,8 +8,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/damonto/ims-client/swu/esp"
-	"github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 func randomUint32() (uint32, error) {

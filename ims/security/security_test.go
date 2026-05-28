@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type stubAKAProvider struct{}

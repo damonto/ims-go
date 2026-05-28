@@ -1,31 +1,31 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	imscall "github.com/damonto/ims-client/ims/call"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 )
 
 type IncomingCall struct {
-	Call       *imscall.Call
+	Call       *imsvoice.Call
 	From       string
 	FromURI    string
 	FromNumber string
-	Offer      imscall.MediaOffer
+	Offer      imsvoice.MediaOffer
 	ReceivedAt time.Time
 }
 
 type CallEvent struct {
-	Call   *imscall.Call
+	Call   *imsvoice.Call
 	CallID string
-	State  imscall.State
+	State  imsvoice.CallState
 	Cause  string
 	At     time.Time
 }
 
-func (s *VoiceService) Dial(ctx context.Context, req imscall.Request) (*imscall.Call, error) {
+func (s *VoiceService) Dial(ctx context.Context, req imsvoice.DialRequest) (*imsvoice.Call, error) {
 	low, err := s.client.currentVoiceService()
 	if err != nil {
 		return nil, fmt.Errorf("dialing call: %w", err)
@@ -33,17 +33,17 @@ func (s *VoiceService) Dial(ctx context.Context, req imscall.Request) (*imscall.
 	return low.Dial(ctx, req)
 }
 
-func (c *Client) currentVoiceService() (*imscall.Service, error) {
+func (c *Client) currentVoiceService() (*imsvoice.Service, error) {
 	c.mu.Lock()
 	active := c.active
 	c.mu.Unlock()
-	if active == nil || active.call == nil {
+	if active == nil || active.voice == nil {
 		return nil, ErrClientNotConnected
 	}
-	return active.call, nil
+	return active.voice, nil
 }
 
-func (c *Client) handleIncomingCall(event imscall.Incoming) {
+func (c *Client) handleIncomingVoice(event imsvoice.IncomingCall) {
 	c.emitIncomingCall(IncomingCall{
 		Call:       event.Call,
 		From:       event.From,
@@ -54,7 +54,7 @@ func (c *Client) handleIncomingCall(event imscall.Incoming) {
 	})
 }
 
-func (c *Client) handleCallEvent(event imscall.Event) {
+func (c *Client) handleVoiceEvent(event imsvoice.CallEvent) {
 	c.emitCallEvent(CallEvent{
 		Call:   event.Call,
 		CallID: event.CallID,

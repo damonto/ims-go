@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/damonto/ims-client/usim/apdu"
+	"github.com/damonto/vowifi-go/usim/apdu"
 )
 
 const (

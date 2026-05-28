@@ -1,10 +1,10 @@
-package call
+package voice
 
 import (
 	"context"
 	"fmt"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"time"
 )
 
@@ -14,7 +14,7 @@ func (c *Call) startRingbackTimer() {
 		return
 	}
 	c.mu.Lock()
-	if c.ringbackStop != nil || c.closed || c.direction != DirectionOutgoing {
+	if c.ringbackStop != nil || c.closed || c.direction != CallDirectionOutgoing {
 		c.mu.Unlock()
 		return
 	}
@@ -54,7 +54,7 @@ func (c *Call) startRingingTimer() {
 		return
 	}
 	c.mu.Lock()
-	if c.ringingStop != nil || c.closed || c.direction != DirectionIncoming || c.incomingRequest == nil {
+	if c.ringingStop != nil || c.closed || c.direction != CallDirectionIncoming || c.incomingRequest == nil {
 		c.mu.Unlock()
 		return
 	}
@@ -86,7 +86,7 @@ func (c *Call) stopRingingTimer() {
 
 func (c *Call) rejectAfterRingingTimeout() {
 	c.mu.Lock()
-	if c.closed || c.direction != DirectionIncoming || c.state != StateRinging || c.incomingRequest == nil {
+	if c.closed || c.direction != CallDirectionIncoming || c.state != CallStateRinging || c.incomingRequest == nil {
 		c.mu.Unlock()
 		return
 	}
@@ -97,10 +97,10 @@ func (c *Call) rejectAfterRingingTimeout() {
 	defer cancel()
 	if err := c.service.writeStatus(ctx, req, 486, "Busy Here"); err != nil {
 		c.service.emitError(fmt.Errorf("ringing timeout: %w", err))
-		c.finish(StateFailed, err.Error())
+		c.finish(CallStateFailed, err.Error())
 		return
 	}
-	c.finish(StateEnded, "ringing timeout")
+	c.finish(CallStateEnded, "ringing timeout")
 }
 
 func (c *Call) startInviteOKRetransmit(req session.Request, resp sip.Message) {
@@ -126,7 +126,7 @@ func (c *Call) startInviteOKRetransmit(req session.Request, resp sip.Message) {
 			case <-stop:
 				return
 			case <-deadline.C:
-				c.finish(StateEnded, "ack timeout")
+				c.finish(CallStateEnded, "ack timeout")
 				return
 			case <-timer.C:
 				ctx, cancel := context.WithTimeout(context.Background(), min(inviteOKWriteTimeout, interval))

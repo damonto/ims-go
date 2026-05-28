@@ -5,9 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
-	usimreader "github.com/damonto/ims-client/usim/reader"
-	"github.com/damonto/ims-client/usim/simfile"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
+	"github.com/damonto/vowifi-go/usim/simfile"
 )
 
 func (r *Reader) readTransparentResponse(

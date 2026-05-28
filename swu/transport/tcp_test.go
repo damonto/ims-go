@@ -11,7 +11,7 @@ import (
 
 	"log/slog"
 
-	"github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 func TestNextSIPMessage(t *testing.T) {

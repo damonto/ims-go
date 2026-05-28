@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
-	"github.com/damonto/ims-client/usim/command"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/usim/command"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 func (r *Reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {

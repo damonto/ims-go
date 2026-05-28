@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
 )
 
 func (r *Reader) ensureSlotActivated(ctx context.Context) error {

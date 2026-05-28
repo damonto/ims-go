@@ -1,18 +1,18 @@
-package call
+package voice
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
+func (s *Service) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	target := s.targetURI(req.To)
 	if target == "" {
 		return nil, errors.New("dialing call: target is empty")
@@ -28,6 +28,8 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	callID, sessionID, tag, branch := sip.NewTransaction()
 	state := s.reg.State()
 	localURI := preferredIdentity(state)
+	pidfURI := pidfEntityURI(s.cfg, state)
+	includePIDF := includePIDFForInvite(s.cfg, req)
 	inviteSeq := atomic.AddInt64(&s.cseq, 1)
 	invite := sip.NewRequest("INVITE", target)
 	invite.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, state.MessagePort, branch))
@@ -41,10 +43,10 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	invite.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", localURI))
 	invite.Headers.Add("P-Early-Media", "supported")
 	invite.Headers.Add("Contact", contactValue(state))
-	invite.Headers.Add("Accept", callAcceptHeader(s.cfg))
+	invite.Headers.Add("Accept", callAcceptHeader(includePIDF))
 	s.reg.RequestPolicy().Apply(&invite)
 	addInviteSessionTimer(&invite, s.cfg)
-	if err := setInviteBody(&invite, s.cfg, localURI, offer); err != nil {
+	if err := setInviteBody(&invite, s.cfg, pidfURI, includePIDF, offer); err != nil {
 		return nil, err
 	}
 
@@ -52,8 +54,8 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 		service:       s,
 		id:            callID,
 		sessionID:     sessionID,
-		direction:     DirectionOutgoing,
-		state:         StateDialing,
+		direction:     CallDirectionOutgoing,
+		state:         CallStateDialing,
 		localURI:      localURI,
 		localTag:      tag,
 		remoteURI:     target,
@@ -71,17 +73,17 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	}
 	if err := call.prepareMedia(ctx); err != nil {
 		s.removeCall(callID)
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
-	s.emit(Event{Call: call, CallID: callID, State: StateDialing, At: time.Now()})
+	s.emit(CallEvent{Call: call, CallID: callID, State: CallStateDialing, At: time.Now()})
 
 	resp, err := s.exchangeCallInvite(ctx, invite)
 	if err != nil {
 		call.stopRingbackTimer()
 		_ = call.closeMedia()
 		s.removeCall(callID)
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
 	if resp.StatusCode() == 422 && s.cfg.SessionTimer {
@@ -90,42 +92,42 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 			call.stopRingbackTimer()
 			_ = call.closeMedia()
 			s.removeCall(callID)
-			call.setState(StateFailed, err.Error())
+			call.setState(CallStateFailed, err.Error())
 			return nil, fmt.Errorf("dialing call: %w", err)
 		}
 	}
 	call.stopRingbackTimer()
 	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
-		if call.State() == StateEnding {
-			call.finish(StateEnded, "cancelled")
+		if call.State() == CallStateEnding {
+			call.finish(CallStateEnded, "cancelled")
 			return nil, errors.New("dialing call: cancelled")
 		}
 		_ = call.closeMedia()
 		s.removeCall(callID)
 		err := fmt.Errorf("dialing call: expected 2xx, got %w", sip.NewResponseError(resp))
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
-	if call.State() == StateEnding {
+	if call.State() == CallStateEnding {
 		if err := call.releaseCancelledInvite2xx(ctx, resp); err != nil {
-			call.finish(StateFailed, err.Error())
+			call.finish(CallStateFailed, err.Error())
 			return nil, fmt.Errorf("dialing call: %w", err)
 		}
-		call.finish(StateEnded, "cancelled")
+		call.finish(CallStateEnded, "cancelled")
 		return nil, errors.New("dialing call: cancelled")
 	}
 	answer, ok, err := call.answerFromFinalResponse(resp)
 	if err != nil {
 		_ = call.closeMedia()
 		s.removeCall(callID)
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
 	if !ok {
 		_ = call.closeMedia()
 		s.removeCall(callID)
 		err := errors.New("dialing call: missing answer sdp")
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
 	negotiated, ok := chooseCodec(answer, s.cfg.Codecs)
@@ -133,7 +135,7 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 		_ = call.closeMedia()
 		s.removeCall(callID)
 		err := errors.New("dialing call: no compatible answer codec")
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
 	dtmf, hasDTMF := chooseTelephoneEvent(answer, s.cfg.Codecs)
@@ -147,28 +149,29 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	call.routeSet = reverseValues(resp.HeadersByName("Record-Route"))
 	call.media = answerMedia
 	call.earlyDialogs = nil
-	ack := call.buildACKLocked()
+	snap := call.dialogSnapshot()
+	ack := snap.buildACK()
 	call.inviteACK = ack
 	call.mu.Unlock()
 	if err := call.refreshDialogRegistration(); err != nil {
 		_ = call.closeMedia()
 		s.removeCall(callID)
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
 
 	if err := call.openMedia(ctx); err != nil {
 		_ = call.closeMedia()
 		s.removeCall(callID)
-		call.setState(StateFailed, err.Error())
+		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
 	call.startMediaInactivityWatch()
 	if err := s.sess.Send(ctx, ack); err != nil {
-		call.finish(StateFailed, err.Error())
+		call.finish(CallStateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
-	call.setState(StateConfirmed, "")
+	call.setState(CallStateConfirmed, "")
 	return call, nil
 }
 
@@ -241,7 +244,7 @@ func (s *Service) retryInviteWithMinSE(ctx context.Context, call *Call, invite s
 	retry.Headers.Set("Session-Expires", strconv.Itoa(max(durationSeconds(defaultSessionExpires), minSE)))
 
 	call.mu.Lock()
-	if call.state == StateEnding {
+	if call.state == CallStateEnding {
 		call.mu.Unlock()
 		return resp, nil
 	}

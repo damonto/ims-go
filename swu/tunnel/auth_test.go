@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/ims-client/swu/eapaka"
-	"github.com/damonto/ims-client/swu/ike"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/swu/eapaka"
+	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 const akaAttrNonceSTest byte = 21

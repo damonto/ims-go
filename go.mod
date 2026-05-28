@@ -1,4 +1,4 @@
-module github.com/damonto/ims-client
+module github.com/damonto/vowifi-go
 
 go 1.26.3
 

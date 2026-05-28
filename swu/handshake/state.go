@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 var ErrIKETimeout = errors.New("ike timeout")

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/damonto/ims-client/usim/apdu"
-	"github.com/damonto/ims-client/usim/tlv"
+	"github.com/damonto/vowifi-go/usim/apdu"
+	"github.com/damonto/vowifi-go/usim/tlv"
 )
 
 const (

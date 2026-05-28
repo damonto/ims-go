@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	usimcommand "github.com/damonto/ims-client/usim/command"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	usimcommand "github.com/damonto/vowifi-go/usim/command"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 func TestRequestMarshalBinary(t *testing.T) {

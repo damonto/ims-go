@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	imscall "github.com/damonto/ims-client/ims/call"
-	imssession "github.com/damonto/ims-client/ims/session"
-	imsussd "github.com/damonto/ims-client/ims/ussd"
-	swutunnel "github.com/damonto/ims-client/swu/tunnel"
-	"github.com/damonto/ims-client/usim"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	imssession "github.com/damonto/vowifi-go/ims/session"
+	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/vowifi-go/usim"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type Config struct {
@@ -28,22 +28,25 @@ type Config struct {
 }
 
 type IMSConfig struct {
-	Transport              string
-	PrivateIdentity        string
-	PublicIdentity         string
-	HomeDomain             string
-	PhoneContextDomain     string
-	USSDLanguage           string
-	UserAgent              string
-	AccessNetworkInfo      string
-	WLANNodeID             string
-	RegisterExpires        time.Duration
-	ServiceCenter          string
-	IMEI                   string
-	SIPServerPort          int
-	SIPTimers              imssession.TransactionTimers
-	SMSSubmitReportTimeout time.Duration
-	Voice                  imscall.Config
+	Transport               string
+	PrivateIdentity         string
+	PublicIdentity          string
+	HomeDomain              string
+	PhoneContextDomain      string
+	USSDLanguage            string
+	UserAgent               string
+	AccessNetworkInfo       string
+	WLANNodeID              string
+	RegisterExpires         time.Duration
+	ServiceCenter           string
+	IMEI                    string
+	GeolocationPIDFRegister []int
+	GeolocationCountry      string
+	UseTelURIForPIDFXML     bool
+	SIPServerPort           int
+	SIPTimers               imssession.TransactionTimers
+	SMSSubmitReportTimeout  time.Duration
+	Voice                   imsvoice.Config
 
 	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
 	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
@@ -292,7 +295,7 @@ func newClient(cfg Config) *Client {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	client := &Client{
 		cfg:             cfg,
-		logger:          cfg.Logger.With("component", "ims-client"),
+		logger:          cfg.Logger.With("component", "vowifi-go"),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		events:          newEventHub(),

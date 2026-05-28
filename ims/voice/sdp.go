@@ -1,4 +1,4 @@
-package call
+package voice
 
 import (
 	"errors"
@@ -54,7 +54,7 @@ const (
 func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) ([]byte, NegotiatedMedia, error) {
 	codecs := selectOfferCodecs(cfg.Codecs, offer.Codecs)
 	if len(codecs) == 0 {
-		return nil, NegotiatedMedia{}, errors.New("building call SDP offer: no matching codecs")
+		return nil, NegotiatedMedia{}, errors.New("building voice SDP offer: no matching codecs")
 	}
 	if localIP == nil || localIP.IsUnspecified() {
 		localIP = net.IPv4(0, 0, 0, 0)
@@ -64,7 +64,7 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 		ptime = cfg.PTime
 	}
 	if ptime < 0 {
-		return nil, NegotiatedMedia{}, errors.New("building call SDP offer: ptime must be >= 0")
+		return nil, NegotiatedMedia{}, errors.New("building voice SDP offer: ptime must be >= 0")
 	}
 	var b strings.Builder
 	ipType := "IP4"
@@ -105,11 +105,11 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 
 func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, offer MediaOffer) ([]byte, NegotiatedMedia, error) {
 	if len(remote.Payloads) == 0 {
-		return nil, NegotiatedMedia{}, errors.New("building call SDP answer: remote offer has no audio payloads")
+		return nil, NegotiatedMedia{}, errors.New("building voice SDP answer: remote offer has no audio payloads")
 	}
 	selected, ok := chooseCodec(remote, selectOfferCodecs(cfg.Codecs, offer.Codecs))
 	if !ok {
-		return nil, NegotiatedMedia{}, errors.New("building call SDP answer: no compatible codec")
+		return nil, NegotiatedMedia{}, errors.New("building voice SDP answer: no compatible codec")
 	}
 	dtmf, hasDTMF := chooseTelephoneEvent(remote, cfg.Codecs)
 	if localIP == nil || localIP.IsUnspecified() {
@@ -123,7 +123,7 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 		ptime = cfg.PTime
 	}
 	if ptime < 0 {
-		return nil, NegotiatedMedia{}, errors.New("building call SDP answer: ptime must be >= 0")
+		return nil, NegotiatedMedia{}, errors.New("building voice SDP answer: ptime must be >= 0")
 	}
 	ipType := "IP4"
 	if localIP.To4() == nil {
@@ -292,10 +292,10 @@ func parseSDP(text []byte) (sdpOffer, error) {
 		}
 	}
 	if offer.RemotePort == 0 {
-		return sdpOffer{}, errors.New("parsing call SDP: audio media line is missing")
+		return sdpOffer{}, errors.New("parsing voice SDP: audio media line is missing")
 	}
 	if offer.RemoteIP == nil {
-		return sdpOffer{}, errors.New("parsing call SDP: connection line is missing")
+		return sdpOffer{}, errors.New("parsing voice SDP: connection line is missing")
 	}
 	applyStaticRTPPayloads(&offer)
 	return offer, nil
@@ -555,11 +555,11 @@ func evsBandwidthAS(bitrate string) int {
 func parseConnectionLine(line string) (net.IP, error) {
 	fields := strings.Fields(strings.TrimPrefix(line, "c="))
 	if len(fields) != 3 || !strings.EqualFold(fields[0], "IN") {
-		return nil, fmt.Errorf("parsing call SDP: invalid connection line %q", line)
+		return nil, fmt.Errorf("parsing voice SDP: invalid connection line %q", line)
 	}
 	ip := net.ParseIP(fields[2])
 	if ip == nil {
-		return nil, fmt.Errorf("parsing call SDP: invalid connection address %q", fields[2])
+		return nil, fmt.Errorf("parsing voice SDP: invalid connection address %q", fields[2])
 	}
 	return ip, nil
 }
@@ -567,17 +567,17 @@ func parseConnectionLine(line string) (net.IP, error) {
 func parseAudioLine(line string) (int, string, []int, error) {
 	fields := strings.Fields(strings.TrimPrefix(line, "m=audio "))
 	if len(fields) < 3 {
-		return 0, "", nil, fmt.Errorf("parsing call SDP: invalid audio line %q", line)
+		return 0, "", nil, fmt.Errorf("parsing voice SDP: invalid audio line %q", line)
 	}
 	port, ok := parseBoundedDecimal(fields[0], 1, 65535)
 	if !ok {
-		return 0, "", nil, fmt.Errorf("parsing call SDP: invalid audio port %q", fields[0])
+		return 0, "", nil, fmt.Errorf("parsing voice SDP: invalid audio port %q", fields[0])
 	}
 	payloads := make([]int, 0, len(fields)-2)
 	for _, field := range fields[2:] {
 		payload, ok := parseRTPPayloadType(field)
 		if !ok {
-			return 0, "", nil, fmt.Errorf("parsing call SDP: invalid payload type %q", field)
+			return 0, "", nil, fmt.Errorf("parsing voice SDP: invalid payload type %q", field)
 		}
 		payloads = append(payloads, payload)
 	}
@@ -587,10 +587,10 @@ func parseAudioLine(line string) (int, string, []int, error) {
 func parseMediaLine(line string) (sdpMediaLine, error) {
 	fields := strings.Fields(strings.TrimPrefix(line, "m="))
 	if len(fields) < 3 {
-		return sdpMediaLine{}, fmt.Errorf("parsing call SDP: invalid media line %q", line)
+		return sdpMediaLine{}, fmt.Errorf("parsing voice SDP: invalid media line %q", line)
 	}
 	if _, ok := parseBoundedDecimal(fields[1], 0, 65535); !ok {
-		return sdpMediaLine{}, fmt.Errorf("parsing call SDP: invalid media port %q", fields[1])
+		return sdpMediaLine{}, fmt.Errorf("parsing voice SDP: invalid media port %q", fields[1])
 	}
 	return sdpMediaLine{
 		Media:    fields[0],
@@ -631,7 +631,7 @@ func parseRTCPBandwidth(line string) (string, int, bool, error) {
 	}
 	bandwidth, ok := parseNonNegativeDecimal(right)
 	if !ok {
-		return "", 0, false, fmt.Errorf("parsing call SDP: invalid %s bandwidth %q", modifier, right)
+		return "", 0, false, fmt.Errorf("parsing voice SDP: invalid %s bandwidth %q", modifier, right)
 	}
 	return modifier, bandwidth, true, nil
 }
@@ -673,25 +673,25 @@ func parseRTPMap(line string) (int, AudioCodecConfig, error) {
 	value := strings.TrimPrefix(line, "a=rtpmap:")
 	left, right, ok := strings.Cut(value, " ")
 	if !ok {
-		return 0, AudioCodecConfig{}, fmt.Errorf("parsing call SDP: invalid rtpmap %q", line)
+		return 0, AudioCodecConfig{}, fmt.Errorf("parsing voice SDP: invalid rtpmap %q", line)
 	}
 	payloadType, ok := parseRTPPayloadType(left)
 	if !ok {
-		return 0, AudioCodecConfig{}, fmt.Errorf("parsing call SDP: invalid rtpmap payload %q", left)
+		return 0, AudioCodecConfig{}, fmt.Errorf("parsing voice SDP: invalid rtpmap payload %q", left)
 	}
 	parts := strings.Split(right, "/")
 	if len(parts) < 2 {
-		return 0, AudioCodecConfig{}, fmt.Errorf("parsing call SDP: invalid rtpmap encoding %q", right)
+		return 0, AudioCodecConfig{}, fmt.Errorf("parsing voice SDP: invalid rtpmap encoding %q", right)
 	}
 	clock, ok := parsePositiveDecimal(parts[1])
 	if !ok {
-		return 0, AudioCodecConfig{}, fmt.Errorf("parsing call SDP: invalid rtpmap clock %q", parts[1])
+		return 0, AudioCodecConfig{}, fmt.Errorf("parsing voice SDP: invalid rtpmap clock %q", parts[1])
 	}
 	channels := 0
 	if len(parts) > 2 {
 		channels, ok = parsePositiveDecimal(parts[2])
 		if !ok {
-			return 0, AudioCodecConfig{}, fmt.Errorf("parsing call SDP: invalid rtpmap channels %q", parts[2])
+			return 0, AudioCodecConfig{}, fmt.Errorf("parsing voice SDP: invalid rtpmap channels %q", parts[2])
 		}
 	}
 	codec := AudioCodec(strings.TrimSpace(parts[0]))

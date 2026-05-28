@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/ims-client/swu/esp"
-	"github.com/damonto/ims-client/swu/handshake"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/handshake"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type Config struct {

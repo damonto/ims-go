@@ -1,4 +1,4 @@
-package call
+package voice
 
 import (
 	"bytes"
@@ -10,15 +10,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/ims/pidf"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/vowifi-go/usim"
 )
 
-type callStubCard struct{}
+type voiceStubCard struct{}
 
-type callStubTransport struct {
+type voiceStubTransport struct {
 	local  net.Addr
 	remote net.Addr
 
@@ -29,7 +30,7 @@ type callStubTransport struct {
 	onWrite func(sip.Message)
 }
 
-type callMediaTransport struct {
+type voiceMediaTransport struct {
 	local *net.UDPAddr
 
 	mu       sync.Mutex
@@ -39,7 +40,7 @@ type callMediaTransport struct {
 	rtcpCh   chan []byte
 }
 
-type callRTPOnlyMediaTransport struct {
+type voiceRTPOnlyMediaTransport struct {
 	local *net.UDPAddr
 
 	mu       sync.Mutex
@@ -49,8 +50,8 @@ type callRTPOnlyMediaTransport struct {
 	writeCh  chan []byte
 }
 
-func newCallStubTransport() *callStubTransport {
-	return &callStubTransport{
+func newVoiceStubTransport() *voiceStubTransport {
+	return &voiceStubTransport{
 		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
 		remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 		readCh: make(chan []byte, 16),
@@ -58,10 +59,10 @@ func newCallStubTransport() *callStubTransport {
 	}
 }
 
-func (callStubCard) IMSI() string { return "001010123456789" }
-func (callStubCard) MCC() string  { return "001" }
-func (callStubCard) MNC() string  { return "001" }
-func (callStubCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+func (voiceStubCard) IMSI() string { return "001010123456789" }
+func (voiceStubCard) MCC() string  { return "001" }
+func (voiceStubCard) MNC() string  { return "001" }
+func (voiceStubCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{
 		RES: []byte("password"),
 		CK:  []byte("call-test-ck"),
@@ -69,10 +70,10 @@ func (callStubCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error)
 	}, nil
 }
 
-func (t *callStubTransport) LocalAddr() net.Addr  { return t.local }
-func (t *callStubTransport) RemoteAddr() net.Addr { return t.remote }
+func (t *voiceStubTransport) LocalAddr() net.Addr  { return t.local }
+func (t *voiceStubTransport) RemoteAddr() net.Addr { return t.remote }
 
-func (t *callStubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+func (t *voiceStubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	select {
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
@@ -83,7 +84,7 @@ func (t *callStubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, e
 	}
 }
 
-func (t *callStubTransport) WritePacket(ctx context.Context, data []byte) error {
+func (t *voiceStubTransport) WritePacket(ctx context.Context, data []byte) error {
 	t.mu.Lock()
 	t.writes = append(t.writes, append([]byte(nil), data...))
 	onWrite := t.onWrite
@@ -97,7 +98,7 @@ func (t *callStubTransport) WritePacket(ctx context.Context, data []byte) error 
 	return nil
 }
 
-func (t *callStubTransport) Close() error {
+func (t *voiceStubTransport) Close() error {
 	select {
 	case <-t.closed:
 	default:
@@ -106,11 +107,11 @@ func (t *callStubTransport) Close() error {
 	return nil
 }
 
-func (t *callStubTransport) queue(msg sip.Message) {
+func (t *voiceStubTransport) queue(msg sip.Message) {
 	t.readCh <- msg.Bytes()
 }
 
-func (t *callStubTransport) countMethod(method string) int {
+func (t *voiceStubTransport) countMethod(method string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	count := 0
@@ -126,7 +127,7 @@ func (t *callStubTransport) countMethod(method string) int {
 	return count
 }
 
-func (t *callStubTransport) messagesByMethod(method string) []sip.Message {
+func (t *voiceStubTransport) messagesByMethod(method string) []sip.Message {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var messages []sip.Message
@@ -142,7 +143,7 @@ func (t *callStubTransport) messagesByMethod(method string) []sip.Message {
 	return messages
 }
 
-func (t *callStubTransport) messagesByStatus(code int, cseqMethod string) []sip.Message {
+func (t *voiceStubTransport) messagesByStatus(code int, cseqMethod string) []sip.Message {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var messages []sip.Message
@@ -158,15 +159,15 @@ func (t *callStubTransport) messagesByStatus(code int, cseqMethod string) []sip.
 	return messages
 }
 
-func (t *callMediaTransport) LocalAddr() net.Addr { return t.local }
+func (t *voiceMediaTransport) LocalAddr() net.Addr { return t.local }
 
-func (t *callMediaTransport) RemoteAddr() net.Addr {
+func (t *voiceMediaTransport) RemoteAddr() net.Addr {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.remote
 }
 
-func (t *callMediaTransport) ConfigureRemote(ctx context.Context, cfg MediaConfig) error {
+func (t *voiceMediaTransport) ConfigureRemote(ctx context.Context, cfg MediaConfig) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.remote = &net.UDPAddr{IP: append(net.IP(nil), cfg.RemoteIP...), Port: cfg.RemotePort}
@@ -174,14 +175,14 @@ func (t *callMediaTransport) ConfigureRemote(ctx context.Context, cfg MediaConfi
 	return nil
 }
 
-func (t *callMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+func (t *voiceMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	<-ctx.Done()
 	return nil, nil, ctx.Err()
 }
 
-func (t *callMediaTransport) WritePacket(ctx context.Context, data []byte) error { return nil }
+func (t *voiceMediaTransport) WritePacket(ctx context.Context, data []byte) error { return nil }
 
-func (t *callMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
+func (t *voiceMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
 	t.mu.Lock()
 	ch := t.rtcpCh
 	t.mu.Unlock()
@@ -196,20 +197,20 @@ func (t *callMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
 	}
 }
 
-func (t *callMediaTransport) Close() error {
+func (t *voiceMediaTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.closed = true
 	return nil
 }
 
-func (t *callMediaTransport) isClosed() bool {
+func (t *voiceMediaTransport) isClosed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
 }
 
-func (t *callMediaTransport) notify(packet MediaPacket) {
+func (t *voiceMediaTransport) notify(packet MediaPacket) {
 	t.mu.Lock()
 	onPacket := t.onPacket
 	t.mu.Unlock()
@@ -218,15 +219,15 @@ func (t *callMediaTransport) notify(packet MediaPacket) {
 	}
 }
 
-func (t *callRTPOnlyMediaTransport) LocalAddr() net.Addr { return t.local }
+func (t *voiceRTPOnlyMediaTransport) LocalAddr() net.Addr { return t.local }
 
-func (t *callRTPOnlyMediaTransport) RemoteAddr() net.Addr {
+func (t *voiceRTPOnlyMediaTransport) RemoteAddr() net.Addr {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.remote
 }
 
-func (t *callRTPOnlyMediaTransport) ConfigureRemote(ctx context.Context, cfg MediaConfig) error {
+func (t *voiceRTPOnlyMediaTransport) ConfigureRemote(ctx context.Context, cfg MediaConfig) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.remote = &net.UDPAddr{IP: append(net.IP(nil), cfg.RemoteIP...), Port: cfg.RemotePort}
@@ -234,12 +235,12 @@ func (t *callRTPOnlyMediaTransport) ConfigureRemote(ctx context.Context, cfg Med
 	return nil
 }
 
-func (t *callRTPOnlyMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+func (t *voiceRTPOnlyMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	<-ctx.Done()
 	return nil, nil, ctx.Err()
 }
 
-func (t *callRTPOnlyMediaTransport) WritePacket(ctx context.Context, data []byte) error {
+func (t *voiceRTPOnlyMediaTransport) WritePacket(ctx context.Context, data []byte) error {
 	t.mu.Lock()
 	ch := t.writeCh
 	t.mu.Unlock()
@@ -254,7 +255,7 @@ func (t *callRTPOnlyMediaTransport) WritePacket(ctx context.Context, data []byte
 	}
 }
 
-func (t *callRTPOnlyMediaTransport) Close() error {
+func (t *voiceRTPOnlyMediaTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.closed = true
@@ -262,7 +263,7 @@ func (t *callRTPOnlyMediaTransport) Close() error {
 }
 
 func TestTargetURI(t *testing.T) {
-	transport := newCallStubTransport()
+	transport := newVoiceStubTransport()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -275,7 +276,7 @@ func TestTargetURI(t *testing.T) {
 		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 		IMEI:            "123456789012345",
-	}, sess, callStubCard{})
+	}, sess, voiceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -376,7 +377,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -387,7 +388,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				HomeDomain:        "one.att.net",
 				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 				IMEI:              "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -447,7 +448,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				}
 				transport.queue(callOK(msg))
 			}
-			if _, err := svc.Dial(context.Background(), Request{To: "+12242255559"}); err != nil {
+			if _, err := svc.Dial(context.Background(), DialRequest{To: "+12242255559"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 		})
@@ -456,13 +457,51 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 
 func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 	tests := []struct {
-		name string
+		name     string
+		cfg      Config
+		req      DialRequest
+		wantPIDF bool
 	}{
-		{name: "multipart invite carries sdp and pidf location"},
+		{
+			name: "non emergency wifi setting adds pidf",
+			cfg: Config{
+				GeolocationPIDFInvite: []int{GeolocationPIDFNonEmergencyWiFi},
+				GeolocationCountry:    "US",
+			},
+			req:      DialRequest{To: "+12242255559"},
+			wantPIDF: true,
+		},
+		{
+			name: "pixel emergency-only setting omits pidf for normal calls",
+			cfg: Config{
+				GeolocationPIDFInvite: []int{GeolocationPIDFEmergencyCell, GeolocationPIDFEmergencyWiFi},
+				GeolocationCountry:    "US",
+			},
+			req: DialRequest{To: "+12242255559"},
+		},
+		{
+			name: "emergency wifi setting adds pidf for emergency calls",
+			cfg: Config{
+				GeolocationPIDFInvite: []int{GeolocationPIDFEmergencyWiFi},
+				GeolocationCountry:    "US",
+			},
+			req:      DialRequest{To: "911", Emergency: true},
+			wantPIDF: true,
+		},
+		{
+			name: "short code adds pidf for carrier service numbers",
+			cfg: Config{
+				GeolocationPIDFInvite: []int{GeolocationPIDFEmergencyCell, GeolocationPIDFEmergencyWiFi},
+				PIDFShortCodes:        []string{"211"},
+				GeolocationCountry:    "US",
+			},
+			req:      DialRequest{To: "tel:211"},
+			wantPIDF: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -473,11 +512,11 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				HomeDomain:        "one.att.net",
 				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 				IMEI:              "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{IncludeGeolocationPIDF: true, GeolocationCountry: "US"}, sess, reg)
+			svc, err := New(tt.cfg, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -502,15 +541,6 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				if msg.Method() != "INVITE" {
 					return
 				}
-				if got := msg.Header("Accept"); !strings.Contains(got, "application/pidf+xml") {
-					t.Fatalf("INVITE Accept = %q, want PIDF support", got)
-				}
-				if got := msg.Header("Geolocation"); !strings.HasPrefix(got, "<cid:pidf-") {
-					t.Fatalf("INVITE Geolocation = %q, want cid PIDF reference", got)
-				}
-				if got := msg.Header("Geolocation-Routing"); got != "yes" {
-					t.Fatalf("INVITE Geolocation-Routing = %q, want yes", got)
-				}
 				body, ok := sdpBody(msg)
 				if !ok {
 					t.Fatal("sdpBody() ok = false, want SDP part")
@@ -518,12 +548,33 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				if !strings.Contains(string(body), "m=audio ") {
 					t.Fatalf("SDP body = %q, want audio media", string(body))
 				}
-				if !strings.Contains(string(msg.Body), "application/pidf+xml") || !strings.Contains(string(msg.Body), "<country>US</country>") {
-					t.Fatalf("INVITE body missing PIDF country:\n%s", string(msg.Body))
+				if tt.wantPIDF {
+					if got := msg.Header("Accept"); !strings.Contains(got, "application/pidf+xml") {
+						t.Fatalf("INVITE Accept = %q, want PIDF support", got)
+					}
+					if got := msg.Header("Geolocation"); !strings.HasPrefix(got, "<cid:pidf-") {
+						t.Fatalf("INVITE Geolocation = %q, want cid PIDF reference", got)
+					}
+					if got := msg.Header("Geolocation-Routing"); got != "yes" {
+						t.Fatalf("INVITE Geolocation-Routing = %q, want yes", got)
+					}
+					if !strings.Contains(string(msg.Body), "application/pidf+xml") || !strings.Contains(string(msg.Body), "<country>US</country>") {
+						t.Fatalf("INVITE body missing PIDF country:\n%s", string(msg.Body))
+					}
+				} else {
+					if got := msg.Header("Accept"); got != "application/sdp" {
+						t.Fatalf("INVITE Accept = %q, want application/sdp", got)
+					}
+					if got := msg.Header("Geolocation"); got != "" {
+						t.Fatalf("INVITE Geolocation = %q, want empty", got)
+					}
+					if strings.Contains(string(msg.Body), "application/pidf+xml") {
+						t.Fatalf("INVITE body contains PIDF, want SDP only:\n%s", string(msg.Body))
+					}
 				}
 				transport.queue(callOK(msg))
 			}
-			if _, err := svc.Dial(context.Background(), Request{To: "+12242255559"}); err != nil {
+			if _, err := svc.Dial(context.Background(), tt.req); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 		})
@@ -538,7 +589,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -549,7 +600,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 				HomeDomain:        "one.att.net",
 				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 				IMEI:              "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -580,7 +631,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 				}
 				resp := callOK(msg)
 				boundary := "answer-boundary"
-				body, err := buildMultipartInviteBody(boundary, "pidf-answer", resp.Body, buildPIDF("sip:remote@one.att.net", "US"))
+				body, err := buildMultipartInviteBody(boundary, "pidf-answer", resp.Body, pidf.Build("sip:remote@one.att.net", "US"))
 				if err != nil {
 					t.Fatalf("buildMultipartInviteBody() error = %v", err)
 				}
@@ -588,12 +639,12 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 				resp.Body = body
 				transport.queue(resp)
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "+12242255559"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "+12242255559"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if call.State() != StateConfirmed {
-				t.Fatalf("call.State() = %q, want %q", call.State(), StateConfirmed)
+			if call.State() != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", call.State(), CallStateConfirmed)
 			}
 		})
 	}
@@ -607,7 +658,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -621,7 +672,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 				HomeDomain:        "ims.mnc001.mcc001.3gppnetwork.org",
 				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 				IMEI:              "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -667,7 +718,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{
 				TransactionTimers: session.TransactionTimers{T1: 10 * time.Millisecond, T2: 20 * time.Millisecond},
 			}, transport)
@@ -679,7 +730,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -715,7 +766,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 
 			dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
 			defer dialCancel()
-			call, err := svc.Dial(dialCtx, Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -743,7 +794,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -753,7 +804,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -823,7 +874,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 				}
 				transport.queue(callOK(msg))
 			}
-			if _, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"}); err != nil {
+			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 		})
@@ -852,7 +903,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{
 				TransactionTimers: session.TransactionTimers{T1: 10 * time.Millisecond, T2: 20 * time.Millisecond},
 			}, transport)
@@ -864,12 +915,12 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			events := make(chan Event, 8)
-			svc, err := New(Config{OnEvent: func(event Event) { events <- event }}, sess, reg)
+			events := make(chan CallEvent, 8)
+			svc, err := New(Config{OnCallEvent: func(event CallEvent) { events <- event }}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -906,11 +957,11 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 
 			dialErr := make(chan error, 1)
 			go func() {
-				_, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+				_, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 				dialErr <- err
 			}()
 
-			event := nextCallEvent(t, events, StateDialing, "", time.Second)
+			event := nextCallEvent(t, events, CallStateDialing, "", time.Second)
 			call := svc.lookupCall(event.CallID)
 			if call == nil {
 				t.Fatalf("lookupCall(%q) = nil", event.CallID)
@@ -919,7 +970,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 
-			if !waitForCallEvent(events, StateEnded, "cancelled", time.Second) {
+			if !waitForCallEvent(events, CallStateEnded, "cancelled", time.Second) {
 				t.Fatalf("call state = %s, want ended after cancel", call.State())
 			}
 			select {
@@ -1052,7 +1103,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1062,7 +1113,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -1114,7 +1165,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 				}
 			}
 
-			if _, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"}); err != nil {
+			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			if invites != 2 {
@@ -1132,7 +1183,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1142,7 +1193,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -1188,7 +1239,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 				transport.queue(resp)
 			}
 
-			if _, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
+			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
 				t.Fatalf("Dial() error = %v, want cancelled", err)
 			}
 			if invites != 1 {
@@ -1206,7 +1257,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1216,14 +1267,14 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
 			timeout := 80 * time.Millisecond
-			events := make(chan Event, 16)
-			media := &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{
 				RTPInactivityTimeout:  timeout,
 				RTCPInactivityTimeout: time.Second,
@@ -1235,7 +1286,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnEvent: func(event Event) { events <- event },
+				OnCallEvent: func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -1267,18 +1318,18 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 
 			time.Sleep(timeout / 2)
 			media.notify(MediaPacket{})
-			if waitForCallEvent(events, StateEnded, "rtp inactivity timeout", timeout*3/4) {
+			if waitForCallEvent(events, CallStateEnded, "rtp inactivity timeout", timeout*3/4) {
 				t.Fatal("call ended before reset RTP inactivity timeout elapsed")
 			}
-			if !waitForCallEvent(events, StateEnded, "rtp inactivity timeout", 2*timeout) {
-				t.Fatalf("call state = %s, want %s after RTP inactivity", call.State(), StateEnded)
+			if !waitForCallEvent(events, CallStateEnded, "rtp inactivity timeout", 2*timeout) {
+				t.Fatalf("call state = %s, want %s after RTP inactivity", call.State(), CallStateEnded)
 			}
 			select {
 			case closed := <-mediaClosedBeforeBYE:
@@ -1335,7 +1386,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1345,13 +1396,13 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
-			events := make(chan Event, 16)
-			media := &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: time.Second,
@@ -1360,7 +1411,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnEvent: func(event Event) { events <- event },
+				OnCallEvent: func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -1392,14 +1443,14 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 
 			media.notify(MediaPacket{RTCP: true, RTCPBye: true})
-			if !waitForCallEvent(events, StateEnded, "rtcp bye", time.Second) {
-				t.Fatalf("call state = %s, want %s after RTCP BYE", call.State(), StateEnded)
+			if !waitForCallEvent(events, CallStateEnded, "rtcp bye", time.Second) {
+				t.Fatalf("call state = %s, want %s after RTCP BYE", call.State(), CallStateEnded)
 			}
 			select {
 			case closed := <-mediaClosedBeforeBYE:
@@ -1423,14 +1474,14 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 func TestIncomingCancelEndsRingingCall(t *testing.T) {
 	tests := []struct {
 		name      string
-		wantState State
+		wantState CallState
 		wantCause string
 	}{
-		{name: "cancel before answer", wantState: StateEnded, wantCause: "remote cancel"},
+		{name: "cancel before answer", wantState: CallStateEnded, wantCause: "remote cancel"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1438,13 +1489,13 @@ func TestIncomingCancelEndsRingingCall(t *testing.T) {
 			reg, err := registration.New(registration.Config{
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration New() error = %v", err)
 			}
-			events := make(chan Event, 4)
+			events := make(chan CallEvent, 4)
 			svc, err := New(Config{
-				OnEvent: func(event Event) {
+				OnCallEvent: func(event CallEvent) {
 					events <- event
 				},
 			}, sess, reg)
@@ -1483,7 +1534,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1492,7 +1543,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration New() error = %v", err)
 			}
@@ -1518,7 +1569,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			}
 			svc, err := New(Config{
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
-					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
 				},
 			}, sess, reg)
 			if err != nil {
@@ -1553,12 +1604,12 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if call.State() != StateConfirmed {
-				t.Fatalf("call.State() = %q, want %q", call.State(), StateConfirmed)
+			if call.State() != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", call.State(), CallStateConfirmed)
 			}
 			pracks := transport.messagesByMethod("PRACK")
 			if len(pracks) != 1 {
@@ -1593,7 +1644,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1602,14 +1653,14 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			svc, err := New(Config{
 				MOCallRequestTimeout: 50 * time.Millisecond,
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
-					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
 				},
 			}, sess, reg)
 			if err != nil {
@@ -1642,12 +1693,12 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 					transport.queue(callOK(msg))
 				}()
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if call.State() != StateConfirmed {
-				t.Fatalf("call.State() = %q, want %q", call.State(), StateConfirmed)
+			if call.State() != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", call.State(), CallStateConfirmed)
 			}
 		})
 	}
@@ -1661,7 +1712,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1670,7 +1721,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -1695,7 +1746,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 				<-runErr
 			}()
 
-			_, err = svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil || !strings.Contains(err.Error(), "first provisional") {
 				t.Fatalf("Dial() error = %v, want first provisional timeout", err)
 			}
@@ -1711,7 +1762,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1720,14 +1771,14 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			events := make(chan Event, 8)
+			events := make(chan CallEvent, 8)
 			svc, err := New(Config{
 				RingbackTimeout: 50 * time.Millisecond,
-				OnEvent:         func(event Event) { events <- event },
+				OnCallEvent:     func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -1763,14 +1814,14 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 				}
 			}
 
-			_, err = svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil || !strings.Contains(err.Error(), "cancelled") {
 				t.Fatalf("Dial() error = %v, want cancelled", err)
 			}
 			if transport.countMethod("CANCEL") != 1 {
 				t.Fatalf("CANCEL count = %d, want 1", transport.countMethod("CANCEL"))
 			}
-			if !waitForCallEvent(events, StateEnded, "cancelled", time.Second) {
+			if !waitForCallEvent(events, CallStateEnded, "cancelled", time.Second) {
 				t.Fatal("cancelled event was not observed")
 			}
 		})
@@ -1785,7 +1836,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1794,14 +1845,14 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			events := make(chan Event, 8)
+			events := make(chan CallEvent, 8)
 			svc, err := New(Config{
 				RingingTimeout: 50 * time.Millisecond,
-				OnEvent:        func(event Event) { events <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -1827,7 +1878,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 			if !waitForCallTest(func() bool { return len(transport.messagesByStatus(486, "INVITE")) == 1 }) {
 				t.Fatalf("486 count = %d, want 1", len(transport.messagesByStatus(486, "INVITE")))
 			}
-			if !waitForCallEvent(events, StateEnded, "ringing timeout", time.Second) {
+			if !waitForCallEvent(events, CallStateEnded, "ringing timeout", time.Second) {
 				t.Fatal("ringing timeout event was not observed")
 			}
 			resp := transport.messagesByStatus(486, "INVITE")[0]
@@ -1846,7 +1897,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -1855,13 +1906,13 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			incoming := make(chan Incoming, 1)
-			events := make(chan Event, 16)
-			media := &callMediaTransport{}
+			incoming := make(chan IncomingCall, 1)
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{}
 			svc, err := New(Config{
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -1869,8 +1920,8 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnIncoming: func(event Incoming) { incoming <- event },
-				OnEvent:    func(event Event) { events <- event },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -1911,7 +1962,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 
 			invite := reliableDelayedInvite()
 			transport.queue(invite)
-			var got Incoming
+			var got IncomingCall
 			select {
 			case got = <-incoming:
 			case <-time.After(time.Second):
@@ -1988,7 +2039,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 				t.Fatalf("200 OK INVITE body len = %d, want no SDP after PRACK answer", len(inviteOK.Body))
 			}
 			transport.queue(ackWithoutSDP(invite, inviteOK))
-			if !waitForCallEvent(events, StateActive, "", time.Second) {
+			if !waitForCallEvent(events, CallStateActive, "", time.Second) {
 				t.Fatalf("call state = %s, want active after ACK", got.Call.State())
 			}
 		})
@@ -2003,7 +2054,7 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2012,11 +2063,11 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			media := &callMediaTransport{}
+			media := &voiceMediaTransport{}
 			svc, err := New(Config{
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -2096,7 +2147,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2105,7 +2156,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -2113,7 +2164,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 			svc, err := New(Config{
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					opened <- cfg
-					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: cfg.LocalPort}}, nil
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: cfg.LocalPort}}, nil
 				},
 			}, sess, reg)
 			if err != nil {
@@ -2151,7 +2202,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 
 			errCh := make(chan error, 1)
 			go func() {
-				_, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+				_, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 				errCh <- err
 			}()
 			select {
@@ -2194,7 +2245,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2203,11 +2254,11 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			events := make(chan Event, 16)
+			events := make(chan CallEvent, 16)
 			opened := make(chan MediaConfig, 2)
 			svc, err := New(Config{
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -2215,9 +2266,9 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 						t.Fatal("OpenMedia OnPacket is nil")
 					}
 					opened <- cfg
-					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: cfg.LocalPort}}, nil
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: cfg.LocalPort}}, nil
 				},
-				OnEvent: func(event Event) { events <- event },
+				OnCallEvent: func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -2253,18 +2304,18 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if !waitForCallEvent(events, StateEarlyMedia, "", time.Second) {
+			if !waitForCallEvent(events, CallStateEarlyMedia, "", time.Second) {
 				t.Fatalf("call state = %s, want early media event", call.State())
 			}
-			if !waitForCallEvent(events, StateConfirmed, "", time.Second) {
+			if !waitForCallEvent(events, CallStateConfirmed, "", time.Second) {
 				t.Fatalf("call state = %s, want confirmed event", call.State())
 			}
-			if got := call.State(); got != StateConfirmed {
-				t.Fatalf("call.State() = %q, want %q", got, StateConfirmed)
+			if got := call.State(); got != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", got, CallStateConfirmed)
 			}
 			select {
 			case cfg := <-opened:
@@ -2286,7 +2337,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2295,13 +2346,13 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			prepareStarted := make(chan struct{}, 1)
 			releasePrepare := make(chan struct{})
-			incoming := make(chan Incoming, 1)
+			incoming := make(chan IncomingCall, 1)
 			svc, err := New(Config{
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					prepareStarted <- struct{}{}
@@ -2310,9 +2361,9 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 					case <-ctx.Done():
 						return nil, ctx.Err()
 					}
-					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}}, nil
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}}, nil
 				},
-				OnIncoming: func(event Incoming) { incoming <- event },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -2393,7 +2444,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2402,15 +2453,15 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			prepareStarted := make(chan struct{}, 1)
 			releasePrepare := make(chan struct{})
-			incoming := make(chan Incoming, 1)
-			events := make(chan Event, 8)
-			media := &callMediaTransport{}
+			incoming := make(chan IncomingCall, 1)
+			events := make(chan CallEvent, 8)
+			media := &voiceMediaTransport{}
 			svc, err := New(Config{
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -2424,8 +2475,8 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnIncoming: func(event Incoming) { incoming <- event },
-				OnEvent:    func(event Event) { events <- event },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -2469,7 +2520,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			invite.Headers.Add("Allow", sip.DefaultClientAllow)
 			transport.queue(invite)
 
-			var got Incoming
+			var got IncomingCall
 			select {
 			case got = <-incoming:
 			case <-time.After(time.Second):
@@ -2561,7 +2612,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 				t.Fatalf("media remote = %v, want 192.0.2.10:50000", remote)
 			}
 			transport.queue(ackWithoutSDP(invite, inviteOK))
-			if !waitForCallEvent(events, StateActive, "", time.Second) {
+			if !waitForCallEvent(events, CallStateActive, "", time.Second) {
 				t.Fatalf("call state = %s, want active after ACK", got.Call.State())
 			}
 		})
@@ -2576,7 +2627,7 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2585,13 +2636,13 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			incoming := make(chan Incoming, 1)
+			incoming := make(chan IncomingCall, 1)
 			progressCh := make(chan sip.Message, 1)
-			events := make(chan Event, 4)
+			events := make(chan CallEvent, 4)
 			transport.onWrite = func(msg sip.Message) {
 				if msg.StatusCode() == 183 && sip.CSeqMethod(msg.Header("CSeq")) == "INVITE" {
 					progressCh <- msg
@@ -2600,10 +2651,10 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			svc, err := New(Config{
 				ReliableProvisional: true,
 				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
-					return &callMediaTransport{}, nil
+					return &voiceMediaTransport{}, nil
 				},
-				OnIncoming: func(event Incoming) { incoming <- event },
-				OnEvent:    func(event Event) { events <- event },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -2615,7 +2666,7 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
-			var got Incoming
+			var got IncomingCall
 			select {
 			case got = <-incoming:
 			case <-time.After(time.Second):
@@ -2655,10 +2706,10 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			case <-time.After(time.Second):
 				t.Fatal("Answer() did not return after call ended")
 			}
-			if got := got.Call.State(); got != StateEnded {
-				t.Fatalf("call.State() = %s, want %s", got, StateEnded)
+			if got := got.Call.State(); got != CallStateEnded {
+				t.Fatalf("call.State() = %s, want %s", got, CallStateEnded)
 			}
-			if !waitForCallEvent(events, StateEnded, "remote cancel", time.Second) {
+			if !waitForCallEvent(events, CallStateEnded, "remote cancel", time.Second) {
 				t.Fatal("remote cancel event was not observed")
 			}
 		})
@@ -2673,7 +2724,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2682,17 +2733,17 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			events := make(chan Event, 8)
+			events := make(chan CallEvent, 8)
 			svc, err := New(Config{
-				OnEvent: func(event Event) {
+				OnCallEvent: func(event CallEvent) {
 					events <- event
 				},
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
-					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
 				},
 			}, sess, reg)
 			if err != nil {
@@ -2728,11 +2779,11 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 				}
 			}
 
-			_, err = svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil || !strings.Contains(err.Error(), "missing answer sdp") {
 				t.Fatalf("Dial() error = %v, want missing answer sdp", err)
 			}
-			if !waitForCallEvent(events, StateDialing, "early dialog terminated", time.Second) {
+			if !waitForCallEvent(events, CallStateDialing, "early dialog terminated", time.Second) {
 				t.Fatal("early dialog terminated event was not observed")
 			}
 		})
@@ -2747,7 +2798,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2757,13 +2808,13 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			events := make(chan Event, 8)
+			events := make(chan CallEvent, 8)
 			svc, err := New(Config{
-				OnEvent: func(event Event) {
+				OnCallEvent: func(event CallEvent) {
 					events <- event
 				},
 			}, sess, reg)
@@ -2795,17 +2846,17 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 				ok200 = callOK(msg)
 				transport.queue(ok200)
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			transport.queue(byeForConfirmedDialog(ok200))
 
-			if !waitForCallEvent(events, StateEnded, "remote bye", time.Second) {
+			if !waitForCallEvent(events, CallStateEnded, "remote bye", time.Second) {
 				t.Fatal("remote bye event was not observed")
 			}
-			if got := call.State(); got != StateEnded {
-				t.Fatalf("call.State() = %q, want %q", got, StateEnded)
+			if got := call.State(); got != CallStateEnded {
+				t.Fatalf("call.State() = %q, want %q", got, CallStateEnded)
 			}
 		})
 	}
@@ -2819,7 +2870,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2829,13 +2880,13 @@ func TestDialSendsRTCPReports(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
 			rtcpCh := make(chan []byte, 2)
-			media := &callMediaTransport{
+			media := &voiceMediaTransport{
 				local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 				rtcpCh: rtcpCh,
 			}
@@ -2880,7 +2931,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -2915,7 +2966,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -2925,13 +2976,13 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
 			rtcpCh := make(chan []byte, 2)
-			media := &callMediaTransport{
+			media := &voiceMediaTransport{
 				local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 				rtcpCh: rtcpCh,
 			}
@@ -2975,7 +3026,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -3003,7 +3054,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -3013,13 +3064,13 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
 			rtpWrites := make(chan []byte, 2)
-			media := &callRTPOnlyMediaTransport{
+			media := &voiceRTPOnlyMediaTransport{
 				local:   &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 				writeCh: rtpWrites,
 			}
@@ -3061,7 +3112,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -3089,7 +3140,7 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -3099,14 +3150,14 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
 			timeout := 80 * time.Millisecond
-			events := make(chan Event, 16)
-			media := &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: timeout,
@@ -3118,7 +3169,7 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnEvent: func(event Event) { events <- event },
+				OnCallEvent: func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -3150,18 +3201,18 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 
 			time.Sleep(timeout / 2)
 			media.notify(MediaPacket{RTCP: true})
-			if waitForCallEvent(events, StateEnded, "rtcp inactivity timeout", timeout*3/4) {
+			if waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", timeout*3/4) {
 				t.Fatal("call ended before reset RTCP inactivity timeout elapsed")
 			}
-			if !waitForCallEvent(events, StateEnded, "rtcp inactivity timeout", 2*timeout) {
-				t.Fatalf("call state = %s, want %s after RTCP inactivity", call.State(), StateEnded)
+			if !waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", 2*timeout) {
+				t.Fatalf("call state = %s, want %s after RTCP inactivity", call.State(), CallStateEnded)
 			}
 			select {
 			case closed := <-mediaClosedBeforeBYE:
@@ -3190,7 +3241,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -3200,7 +3251,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -3242,7 +3293,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 				}
 			}
 
-			if _, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"}); err != nil {
+			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			transport.queue(forkedOK)
@@ -3267,10 +3318,10 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 func TestHangupIsIdempotentForTerminalStates(t *testing.T) {
 	tests := []struct {
 		name  string
-		state State
+		state CallState
 	}{
-		{name: "ending", state: StateEnding},
-		{name: "ended", state: StateEnded},
+		{name: "ending", state: CallStateEnding},
+		{name: "ended", state: CallStateEnded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3290,7 +3341,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -3300,14 +3351,14 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				IMEI:            "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
-			incoming := make(chan Incoming, 1)
-			events := make(chan Event, 16)
-			media := &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			incoming := make(chan IncomingCall, 1)
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.RemotePort != 0 || len(cfg.RemoteIP) != 0 {
@@ -3317,8 +3368,8 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnIncoming: func(event Incoming) { incoming <- event },
-				OnEvent:    func(event Event) { events <- event },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -3349,7 +3400,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			}
 			transport.queue(invite)
 
-			var got Incoming
+			var got IncomingCall
 			select {
 			case got = <-incoming:
 			case <-time.After(time.Second):
@@ -3369,7 +3420,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			}
 
 			transport.queue(delayedOfferACK(invite, ok200))
-			if !waitForCallEvent(events, StateActive, "", time.Second) {
+			if !waitForCallEvent(events, CallStateActive, "", time.Second) {
 				t.Fatalf("call state = %s, want active after ACK SDP answer", got.Call.State())
 			}
 			remote, ok := media.RemoteAddr().(*net.UDPAddr)
@@ -3383,15 +3434,15 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 	}
 }
 
-func TestIncomingInviteAnswerIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
+func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "200 OK carries multipart sdp and pidf location"},
+		{name: "200 OK carries SDP only under Android invite/register PIDF config"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -3402,16 +3453,16 @@ func TestIncomingInviteAnswerIncludesGeolocationPIDFWhenConfigured(t *testing.T)
 				HomeDomain:        "one.att.net",
 				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 				IMEI:              "123456789012345",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
-			incoming := make(chan Incoming, 1)
+			incoming := make(chan IncomingCall, 1)
 			svc, err := New(Config{
-				IncludeGeolocationPIDF: true,
-				GeolocationCountry:     "US",
-				OnIncoming:             func(event Incoming) { incoming <- event },
+				GeolocationPIDFInvite: []int{GeolocationPIDFNonEmergencyWiFi},
+				GeolocationCountry:    "US",
+				OnIncomingCall:        func(event IncomingCall) { incoming <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -3444,7 +3495,7 @@ func TestIncomingInviteAnswerIncludesGeolocationPIDFWhenConfigured(t *testing.T)
 			}
 			transport.queue(delayedInvite())
 
-			var got Incoming
+			var got IncomingCall
 			select {
 			case got = <-incoming:
 			case <-time.After(time.Second):
@@ -3465,14 +3516,14 @@ func TestIncomingInviteAnswerIncludesGeolocationPIDFWhenConfigured(t *testing.T)
 			if got := ok200.Header("Allow"); got != sip.DefaultClientAllow {
 				t.Fatalf("200 OK Allow = %q, want %q", got, sip.DefaultClientAllow)
 			}
-			if got := ok200.Header("Accept"); !strings.Contains(got, "application/pidf+xml") {
-				t.Fatalf("200 OK Accept = %q, want PIDF support", got)
+			if got := ok200.Header("Accept"); got != "application/sdp" {
+				t.Fatalf("200 OK Accept = %q, want application/sdp", got)
 			}
-			if got := ok200.Header("Geolocation"); !strings.HasPrefix(got, "<cid:pidf-") {
-				t.Fatalf("200 OK Geolocation = %q, want cid PIDF reference", got)
+			if got := ok200.Header("Geolocation"); got != "" {
+				t.Fatalf("200 OK Geolocation = %q, want empty", got)
 			}
-			if got := ok200.Header("Geolocation-Routing"); got != "yes" {
-				t.Fatalf("200 OK Geolocation-Routing = %q, want yes", got)
+			if got := ok200.Header("Geolocation-Routing"); got != "" {
+				t.Fatalf("200 OK Geolocation-Routing = %q, want empty", got)
 			}
 			body, ok := sdpBody(ok200)
 			if !ok {
@@ -3481,11 +3532,11 @@ func TestIncomingInviteAnswerIncludesGeolocationPIDFWhenConfigured(t *testing.T)
 			if !strings.Contains(string(body), "m=audio ") {
 				t.Fatalf("SDP body = %q, want audio media", string(body))
 			}
-			if !strings.Contains(ok200.Header("Content-Type"), "multipart/mixed") {
-				t.Fatalf("200 OK Content-Type = %q, want multipart/mixed", ok200.Header("Content-Type"))
+			if got := ok200.Header("Content-Type"); got != "application/sdp" {
+				t.Fatalf("200 OK Content-Type = %q, want application/sdp", got)
 			}
-			if !strings.Contains(string(ok200.Body), "application/pidf+xml") || !strings.Contains(string(ok200.Body), "<country>US</country>") {
-				t.Fatalf("200 OK body missing PIDF country:\n%s", string(ok200.Body))
+			if strings.Contains(string(ok200.Body), "application/pidf+xml") {
+				t.Fatalf("200 OK body contains PIDF, want SDP only:\n%s", string(ok200.Body))
 			}
 		})
 	}
@@ -3499,7 +3550,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newCallStubTransport()
+			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
@@ -3508,22 +3559,22 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-			}, sess, callStubCard{})
+			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
-			incoming := make(chan Incoming, 1)
-			events := make(chan Event, 8)
-			media := &callMediaTransport{}
+			incoming := make(chan IncomingCall, 1)
+			events := make(chan CallEvent, 8)
+			media := &voiceMediaTransport{}
 			svc, err := New(Config{
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket
 					return media, nil
 				},
-				OnIncoming: func(event Incoming) { incoming <- event },
-				OnEvent:    func(event Event) { events <- event },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -3557,7 +3608,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			}
 			transport.queue(invite)
 
-			var got Incoming
+			var got IncomingCall
 			select {
 			case got = <-incoming:
 			case <-time.After(time.Second):
@@ -3580,7 +3631,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			}
 
 			transport.queue(delayedOfferACK(invite, inviteOK))
-			if !waitForCallEvent(events, StateActive, "", time.Second) {
+			if !waitForCallEvent(events, CallStateActive, "", time.Second) {
 				t.Fatalf("call state = %s, want active after ACK", got.Call.State())
 			}
 			remote, ok := media.RemoteAddr().(*net.UDPAddr)
@@ -3784,7 +3835,7 @@ func delayedOfferACK(invite, ok sip.Message) sip.Message {
 	return msg
 }
 
-func waitForCallEvent(events <-chan Event, state State, cause string, timeout time.Duration) bool {
+func waitForCallEvent(events <-chan CallEvent, state CallState, cause string, timeout time.Duration) bool {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
@@ -3799,7 +3850,7 @@ func waitForCallEvent(events <-chan Event, state State, cause string, timeout ti
 	}
 }
 
-func nextCallEvent(t *testing.T, events <-chan Event, state State, cause string, timeout time.Duration) Event {
+func nextCallEvent(t *testing.T, events <-chan CallEvent, state CallState, cause string, timeout time.Duration) CallEvent {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()

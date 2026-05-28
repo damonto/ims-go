@@ -9,7 +9,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
 )
 
 func (c *Conn) findService(serviceType protocol.ServiceType) (*service, error) {

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"strings"
 
-	qmitransport "github.com/damonto/ims-client/driver/qmi/transport/qmi"
-	"github.com/damonto/ims-client/driver/qmi/uim"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	qmitransport "github.com/damonto/vowifi-go/driver/qmi/transport/qmi"
+	"github.com/damonto/vowifi-go/driver/qmi/uim"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 func Open(ctx context.Context, device string, slot int) (usimreader.Reader, error) {

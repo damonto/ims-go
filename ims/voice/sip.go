@@ -1,16 +1,18 @@
-package call
+package voice
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/registration"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/pidf"
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net"
 	"net/textproto"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,8 +35,8 @@ func mediaOfferFromSDP(offer sdpOffer) MediaOffer {
 	return MediaOffer{Codecs: codecs, PTime: offer.PTime}
 }
 
-func callAcceptHeader(cfg Config) string {
-	if cfg.IncludeGeolocationPIDF {
+func callAcceptHeader(includePIDF bool) string {
+	if includePIDF {
 		return "application/sdp, application/pidf+xml, multipart/mixed"
 	}
 	return "application/sdp"
@@ -106,15 +108,15 @@ func sessionExpiresHasRefresher(value string) bool {
 	return false
 }
 
-func setInviteBody(msg *sip.Message, cfg Config, localURI string, sdp []byte) error {
-	if !cfg.IncludeGeolocationPIDF {
+func setInviteBody(msg *sip.Message, cfg Config, localURI string, includePIDF bool, sdp []byte) error {
+	if !includePIDF {
 		msg.Headers.Add("Content-Type", "application/sdp")
 		msg.Body = sdp
 		return nil
 	}
 	boundary := "call-" + sip.RandomAlphaNum(18)
 	locationID := "pidf-" + sip.RandomAlphaNum(16)
-	body, err := buildMultipartInviteBody(boundary, locationID, sdp, buildPIDF(localURI, cfg.GeolocationCountry))
+	body, err := buildMultipartInviteBody(boundary, locationID, sdp, pidf.Build(localURI, cfg.GeolocationCountry))
 	if err != nil {
 		return fmt.Errorf("building call INVITE body: %w", err)
 	}
@@ -125,15 +127,15 @@ func setInviteBody(msg *sip.Message, cfg Config, localURI string, sdp []byte) er
 	return nil
 }
 
-func setInviteResponseBody(msg *sip.Message, cfg Config, localURI string, sdp []byte) error {
-	if !cfg.IncludeGeolocationPIDF {
+func setInviteResponseBody(msg *sip.Message, cfg Config, localURI string, includePIDF bool, sdp []byte) error {
+	if !includePIDF {
 		msg.Headers.Add("Content-Type", "application/sdp")
 		msg.Body = sdp
 		return nil
 	}
 	boundary := "call-" + sip.RandomAlphaNum(18)
 	locationID := "pidf-" + sip.RandomAlphaNum(16)
-	body, err := buildMultipartInviteBody(boundary, locationID, sdp, buildPIDF(localURI, cfg.GeolocationCountry))
+	body, err := buildMultipartInviteBody(boundary, locationID, sdp, pidf.Build(localURI, cfg.GeolocationCountry))
 	if err != nil {
 		return fmt.Errorf("building call INVITE response body: %w", err)
 	}
@@ -175,6 +177,40 @@ func buildMultipartInviteBody(boundary string, locationID string, sdp []byte, pi
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func includePIDFForInvite(cfg Config, req DialRequest) bool {
+	if req.Emergency {
+		return slices.Contains(cfg.GeolocationPIDFInvite, GeolocationPIDFEmergencyWiFi)
+	}
+	if slices.Contains(cfg.GeolocationPIDFInvite, GeolocationPIDFNonEmergencyWiFi) {
+		return true
+	}
+	return slices.Contains(cfg.PIDFShortCodes, normalizeDialString(req.To))
+}
+
+func pidfEntityURI(cfg Config, state registration.State) string {
+	if cfg.UseTelURIForPIDFXML {
+		if uri := strings.TrimSpace(state.TelPublicID); uri != "" {
+			return uri
+		}
+	}
+	return preferredIdentity(state)
+}
+
+func normalizeDialString(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "tel:") {
+		value = value[4:]
+	}
+	value = strings.TrimPrefix(value, "+")
+	var b strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func sdpBody(msg sip.Message) ([]byte, bool) {

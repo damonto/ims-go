@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type stubTransport struct {
@@ -761,6 +761,62 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 		if got := resp.Header("Server"); got != "test-agent" {
 			t.Fatalf("responses[%d] Server = %q, want test-agent", i+1, got)
 		}
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
+	transport := newStubTransport(5062, 5060)
+	transport.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062}
+	transport.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	handler := &requestHandler{
+		handle: func(ctx context.Context, req Request) (bool, error) {
+			if req.Message.Method() != "INVITE" {
+				return false, nil
+			}
+			return true, sess.WriteStatus(ctx, req, 100, "Trying")
+		},
+	}
+	if _, err := sess.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	invite := newInboundRequest("INVITE", "call-cancel-tcp", "1 INVITE")
+	cancel := newInboundRequest("CANCEL", "call-cancel-tcp", "1 CANCEL")
+	ack := newInboundRequest("ACK", "call-cancel-tcp", "1 ACK")
+	options := newInboundRequest("OPTIONS", "after-ack", "1 OPTIONS")
+	transport.queueRead(invite)
+	waitForWriteCount(t, transport, 1)
+	transport.queueRead(cancel)
+	waitForWriteCount(t, transport, 3)
+	transport.queueRead(ack)
+	transport.queueRead(options)
+	waitForWriteCount(t, transport, 4)
+
+	if got, want := strings.Join(handler.requests, ","), "INVITE,CANCEL,OPTIONS"; got != want {
+		t.Fatalf("handler requests = %q, want %q", got, want)
+	}
+	if writes := transport.snapshotWrites(); len(writes) != 4 {
+		t.Fatalf("len(writes) = %d, want 4", len(writes))
 	}
 
 	runCancel()

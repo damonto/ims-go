@@ -19419,6 +19419,15 @@
     "imsTransport": "tcp",
     "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
+    "imsGeolocationPIDFInSIPInviteSupport": [
+      4,
+      2
+    ],
+    "imsGeolocationPIDFInSIPRegisterSupport": [
+      4,
+      2
+    ],
+    "imsUseTelURIForPIDFXML": true,
     "dhGroups": [
       14
     ],
@@ -19463,6 +19472,15 @@
     "imsPrivateIdentity": "#IMSI#@private.att.net",
     "imsPublicIdentity": "sip:#IMSI#@one.att.net",
     "imsVoice": {
+      "pidfShortCodes": [
+        "211",
+        "311",
+        "411",
+        "511",
+        "611",
+        "711",
+        "811"
+      ],
       "codecs": [
         {
           "name": "AMR-WB",
@@ -28605,6 +28623,15 @@
     "imsTransport": "tcp",
     "imsHomeDomain": "one.att.net",
     "imsAccessNetworkInfo": "IEEE-802.11",
+    "imsGeolocationPIDFInSIPInviteSupport": [
+      4,
+      2
+    ],
+    "imsGeolocationPIDFInSIPRegisterSupport": [
+      4,
+      2
+    ],
+    "imsUseTelURIForPIDFXML": true,
     "dhGroups": [
       14
     ],
@@ -28649,6 +28676,15 @@
     "imsPrivateIdentity": "#IMSI#@private.att.net",
     "imsPublicIdentity": "sip:#IMSI#@one.att.net",
     "imsVoice": {
+      "pidfShortCodes": [
+        "211",
+        "311",
+        "411",
+        "511",
+        "611",
+        "711",
+        "811"
+      ],
       "codecs": [
         {
           "name": "AMR-WB",

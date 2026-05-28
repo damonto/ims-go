@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/ims-client/usim/apdu"
-	usimreader "github.com/damonto/ims-client/usim/reader"
-	"github.com/damonto/ims-client/usim/simfile"
+	"github.com/damonto/vowifi-go/usim/apdu"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
+	"github.com/damonto/vowifi-go/usim/simfile"
 )
 
 type fakeReader struct {

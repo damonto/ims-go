@@ -10,7 +10,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
 	"golang.org/x/sys/unix"
 )
 

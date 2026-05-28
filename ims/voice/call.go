@@ -1,10 +1,10 @@
-package call
+package voice
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"net"
 )
 
@@ -31,11 +31,11 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 	}
 
 	c.mu.Lock()
-	if c.direction != DirectionIncoming {
+	if c.direction != CallDirectionIncoming {
 		c.mu.Unlock()
 		return errors.New("answering call: call is not incoming")
 	}
-	if c.state != StateRinging {
+	if c.state != CallStateRinging {
 		c.mu.Unlock()
 		return fmt.Errorf("answering call: call state is %s", c.state)
 	}
@@ -95,11 +95,11 @@ func (c *Call) Reject(ctx context.Context, code int, reason string) error {
 		reason = "Busy Here"
 	}
 	c.mu.Lock()
-	if c.direction != DirectionIncoming {
+	if c.direction != CallDirectionIncoming {
 		c.mu.Unlock()
 		return errors.New("rejecting call: call is not incoming")
 	}
-	if c.state != StateRinging {
+	if c.state != CallStateRinging {
 		c.mu.Unlock()
 		return fmt.Errorf("rejecting call: call state is %s", c.state)
 	}
@@ -113,7 +113,7 @@ func (c *Call) Reject(ctx context.Context, code int, reason string) error {
 	if err := c.service.writeStatus(ctx, req, code, reason); err != nil {
 		return fmt.Errorf("rejecting call: %w", err)
 	}
-	c.finish(StateEnded, reason)
+	c.finish(CallStateEnded, reason)
 	return nil
 }
 
@@ -123,31 +123,31 @@ func (c *Call) Hangup(ctx context.Context) error {
 	direction := c.direction
 	c.mu.Unlock()
 
-	if direction == DirectionIncoming && state == StateRinging {
+	if direction == CallDirectionIncoming && state == CallStateRinging {
 		return c.Reject(ctx, 486, "Busy Here")
 	}
-	if direction == DirectionOutgoing && (state == StateDialing || state == StateRinging || state == StateEarlyMedia) {
+	if direction == CallDirectionOutgoing && (state == CallStateDialing || state == CallStateRinging || state == CallStateEarlyMedia) {
 		return c.cancelOutgoingInvite(ctx)
 	}
-	if state == StateEnding || state == StateEnded {
+	if state == CallStateEnding || state == CallStateEnded {
 		return nil
 	}
-	if state != StateActive && state != StateConfirmed {
+	if state != CallStateActive && state != CallStateConfirmed {
 		return fmt.Errorf("hanging up call: call state is %s", state)
 	}
-	c.setState(StateEnding, "")
+	c.setState(CallStateEnding, "")
 	_ = c.closeMedia()
 	resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reasonUserTriggered))
 	if err != nil {
-		c.finish(StateFailed, err.Error())
+		c.finish(CallStateFailed, err.Error())
 		return fmt.Errorf("hanging up call: %w", err)
 	}
 	if resp.StatusCode() != 200 {
 		err := fmt.Errorf("hanging up call: expected 200, got %w", sip.NewResponseError(resp))
-		c.finish(StateFailed, err.Error())
+		c.finish(CallStateFailed, err.Error())
 		return err
 	}
-	c.finish(StateEnded, "")
+	c.finish(CallStateEnded, "")
 	return nil
 }
 
@@ -157,7 +157,7 @@ func (c *Call) cancelOutgoingInvite(ctx context.Context) error {
 		c.mu.Unlock()
 		return nil
 	}
-	if c.direction != DirectionOutgoing || (c.state != StateDialing && c.state != StateRinging && c.state != StateEarlyMedia) {
+	if c.direction != CallDirectionOutgoing || (c.state != CallStateDialing && c.state != CallStateRinging && c.state != CallStateEarlyMedia) {
 		state := c.state
 		c.mu.Unlock()
 		return fmt.Errorf("cancelling call: call state is %s", state)
@@ -166,7 +166,7 @@ func (c *Call) cancelOutgoingInvite(ctx context.Context) error {
 		c.cancelOnResponse = true
 		c.mu.Unlock()
 		c.stopRingbackTimer()
-		c.setState(StateEnding, "cancelled")
+		c.setState(CallStateEnding, "cancelled")
 		_ = c.closeMedia()
 		return nil
 	}
@@ -175,10 +175,11 @@ func (c *Call) cancelOutgoingInvite(ctx context.Context) error {
 		return nil
 	}
 	c.cancelSent = true
-	cancel := c.buildCANCELLocked(reasonUserTriggered)
+	snap := c.dialogSnapshot()
 	c.mu.Unlock()
 
-	c.setState(StateEnding, "cancelled")
+	cancel := snap.buildCANCEL(reasonUserTriggered)
+	c.setState(CallStateEnding, "cancelled")
 	c.stopRingbackTimer()
 	_ = c.closeMedia()
 	return c.exchangeCancel(ctx, cancel)

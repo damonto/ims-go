@@ -3,8 +3,8 @@ package ussd
 import (
 	"context"
 	"fmt"
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
 	"sync/atomic"
 )

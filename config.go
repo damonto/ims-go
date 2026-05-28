@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"errors"
@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	imssms "github.com/damonto/ims-client/ims/sms"
-	"github.com/damonto/ims-client/swu/tunnel"
+	"github.com/damonto/vowifi-go/ims/pidf"
+	imssms "github.com/damonto/vowifi-go/ims/sms"
+	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 func cloneConfig(cfg *Config) Config {
@@ -125,6 +126,25 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
+	cfg.GeolocationPIDFRegister = pidf.NormalizeTypes(cfg.GeolocationPIDFRegister)
+	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
+	cfg.Voice.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.Voice.GeolocationCountry))
+	if cfg.GeolocationCountry == "" {
+		cfg.GeolocationCountry = cfg.Voice.GeolocationCountry
+	}
+	if cfg.Voice.GeolocationCountry == "" {
+		cfg.Voice.GeolocationCountry = cfg.GeolocationCountry
+	}
+	if cfg.UseTelURIForPIDFXML {
+		cfg.Voice.UseTelURIForPIDFXML = true
+	}
+	if geolocationPIDFConfigured(cfg) && cfg.GeolocationCountry == "" {
+		cfg.GeolocationCountry = "US"
+		cfg.Voice.GeolocationCountry = "US"
+	}
+	if cfg.GeolocationCountry != "" && len(cfg.GeolocationCountry) != 2 {
+		return IMSConfig{}, errors.New("normalizing ims config: geolocation country must be two letters")
+	}
 	timers, err := cfg.SIPTimers.Normalized()
 	if err != nil {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
@@ -163,6 +183,12 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	}
 	cfg.Voice = voiceCfg
 	return cfg, nil
+}
+
+func geolocationPIDFConfigured(cfg IMSConfig) bool {
+	return len(cfg.GeolocationPIDFRegister) > 0 ||
+		len(cfg.Voice.GeolocationPIDFInvite) > 0 ||
+		len(cfg.Voice.PIDFShortCodes) > 0
 }
 
 func defaultEPDGAddress(card Card) (string, error) {

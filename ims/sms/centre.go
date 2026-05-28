@@ -2,7 +2,7 @@ package sms
 
 import (
 	"errors"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/usim"
 	"strings"
 )
 

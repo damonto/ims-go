@@ -1,4 +1,4 @@
-package imsclient
+package vowifi
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	imscall "github.com/damonto/ims-client/ims/call"
-	"github.com/damonto/ims-client/swu/packet"
-	swutunnel "github.com/damonto/ims-client/swu/tunnel"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	"github.com/damonto/vowifi-go/swu/packet"
+	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 const mediaTransportDrainDelay = 2 * time.Second
@@ -26,7 +26,7 @@ type tunnelMediaTransport struct {
 	readCh     chan tunnelMediaPacket
 	rtcpCh     chan tunnelMediaPacket
 	done       chan struct{}
-	onPacket   func(imscall.MediaPacket)
+	onPacket   func(imsvoice.MediaPacket)
 	closeOnce  sync.Once
 
 	mu          sync.Mutex
@@ -44,27 +44,27 @@ type tunnelMediaPacket struct {
 	err  error
 }
 
-func openMediaTransport(session *swutunnel.Session) func(context.Context, imscall.MediaConfig) (imscall.MediaTransport, error) {
-	return func(ctx context.Context, cfg imscall.MediaConfig) (imscall.MediaTransport, error) {
+func openMediaTransport(session *swutunnel.Session) func(context.Context, imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
+	return func(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 		return newTunnelMediaTransport(ctx, session, cfg)
 	}
 }
 
-func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cfg imscall.MediaConfig) (*tunnelMediaTransport, error) {
+func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cfg imsvoice.MediaConfig) (*tunnelMediaTransport, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
 	if session == nil {
-		return nil, errors.New("opening call media transport: tunnel session is nil")
+		return nil, errors.New("opening voice media transport: tunnel session is nil")
 	}
 	info := session.Tunnel()
 	if len(info.InnerIP) == 0 {
-		return nil, errors.New("opening call media transport: tunnel inner ip is empty")
+		return nil, errors.New("opening voice media transport: tunnel inner ip is empty")
 	}
 	if cfg.LocalPort == 0 {
-		return nil, errors.New("opening call media transport: local port is required")
+		return nil, errors.New("opening voice media transport: local port is required")
 	}
 	transport := &tunnelMediaTransport{
 		session: session,
@@ -86,7 +86,7 @@ func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cf
 	}
 	attachment, err := session.Attach(transport)
 	if err != nil {
-		return nil, fmt.Errorf("opening call media transport: %w", err)
+		return nil, fmt.Errorf("opening voice media transport: %w", err)
 	}
 	transport.attachment = attachment
 	return transport, nil
@@ -100,19 +100,19 @@ func (t *tunnelMediaTransport) RemoteAddr() net.Addr {
 	return cloneMediaUDPAddr(t.remote)
 }
 
-func (t *tunnelMediaTransport) ConfigureRemote(ctx context.Context, cfg imscall.MediaConfig) error {
+func (t *tunnelMediaTransport) ConfigureRemote(ctx context.Context, cfg imsvoice.MediaConfig) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
 	if len(cfg.RemoteIP) == 0 || cfg.RemotePort == 0 {
-		return errors.New("configuring call media remote: remote address is required")
+		return errors.New("configuring voice media remote: remote address is required")
 	}
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
-		return errors.New("configuring call media remote: transport is closed")
+		return errors.New("configuring voice media remote: transport is closed")
 	}
 	t.remote = &net.UDPAddr{IP: append(net.IP(nil), cfg.RemoteIP...), Port: cfg.RemotePort}
 	t.onPacket = cfg.OnPacket
@@ -136,10 +136,10 @@ func (t *tunnelMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp b
 	count := t.nextMediaCountLocked(rtcp, false)
 	t.mu.Unlock()
 	if closed {
-		return errors.New("writing call media packet: transport is closed")
+		return errors.New("writing voice media packet: transport is closed")
 	}
 	if remote == nil {
-		return errors.New("writing call media packet: remote address is not configured")
+		return errors.New("writing voice media packet: remote address is not configured")
 	}
 	t.logMediaPacket("send", rtcp, count, local, remote, len(data))
 	return t.session.WriteInnerPacket(ctx, packet.InnerPacket{
@@ -251,7 +251,7 @@ func (t *tunnelMediaTransport) logMediaPacket(direction string, rtcp bool, count
 	if rtcp {
 		kind = "rtcp"
 	}
-	t.logger.Debug("call media packet", "direction", direction, "kind", kind, "count", count, "local_addr", local, "peer_addr", peer, "payload_len", payloadLen)
+	t.logger.Debug("voice media packet", "direction", direction, "kind", kind, "count", count, "local_addr", local, "peer_addr", peer, "payload_len", payloadLen)
 }
 
 func (t *tunnelMediaTransport) notifyPacket(rtcp bool, payload []byte) {
@@ -259,7 +259,7 @@ func (t *tunnelMediaTransport) notifyPacket(rtcp bool, payload []byte) {
 	onPacket := t.onPacket
 	t.mu.Unlock()
 	if onPacket != nil {
-		onPacket(imscall.MediaPacket{RTCP: rtcp, RTCPBye: rtcp && hasRTCPBye(payload)})
+		onPacket(imsvoice.MediaPacket{RTCP: rtcp, RTCPBye: rtcp && hasRTCPBye(payload)})
 	}
 }
 
@@ -281,7 +281,7 @@ func hasRTCPBye(payload []byte) bool {
 }
 
 func (t *tunnelMediaTransport) HandleError(err error) {
-	t.closeWithError(fmt.Errorf("reading call media packet: %w", err))
+	t.closeWithError(fmt.Errorf("reading voice media packet: %w", err))
 }
 
 func (t *tunnelMediaTransport) closeWithError(err error) {
@@ -309,7 +309,7 @@ func (t *tunnelMediaTransport) closedErr() error {
 	if t.terminalErr != nil {
 		return t.terminalErr
 	}
-	return errors.New("reading call media packet: transport is closed")
+	return errors.New("reading voice media packet: transport is closed")
 }
 
 func mediaPortAddr(addr *net.UDPAddr, rtcp bool) *net.UDPAddr {

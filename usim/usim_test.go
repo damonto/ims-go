@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/ims-client/usim/command"
-	usimreader "github.com/damonto/ims-client/usim/reader"
+	"github.com/damonto/vowifi-go/usim/command"
+	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type apduScriptTransmitter struct {

@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/damonto/ims-client/usim/apdu"
-	"github.com/damonto/ims-client/usim/simfile"
+	"github.com/damonto/vowifi-go/usim/apdu"
+	"github.com/damonto/vowifi-go/usim/simfile"
 )
 
 type ReadBinary struct {

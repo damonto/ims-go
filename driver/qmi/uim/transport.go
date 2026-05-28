@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
 )
 
 func (r *Reader) openProxy(ctx context.Context, device string) error {

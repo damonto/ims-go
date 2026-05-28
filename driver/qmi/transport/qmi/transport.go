@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/ims-client/driver/qmi/protocol"
+	"github.com/damonto/vowifi-go/driver/qmi/protocol"
 )
 
 type QMUXHeader struct {

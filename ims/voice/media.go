@@ -1,10 +1,10 @@
-package call
+package voice
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-client/ims/sip"
+	"github.com/damonto/vowifi-go/ims/sip"
 	"net"
 	"time"
 )
@@ -27,7 +27,7 @@ func (c *Call) openEarlyMedia(ctx context.Context, answer sdpOffer) error {
 	}
 	c.stopRingbackTimer()
 	c.startMediaInactivityWatch()
-	c.setState(StateEarlyMedia, "")
+	c.setState(CallStateEarlyMedia, "")
 	return nil
 }
 
@@ -86,7 +86,7 @@ func (c *Call) openMedia(ctx context.Context) error {
 			ConfigureRemote(context.Context, MediaConfig) error
 		}); ok {
 			if err := configurable.ConfigureRemote(ctx, cfg); err != nil {
-				return fmt.Errorf("configuring call media remote: %w", err)
+				return fmt.Errorf("configuring voice media remote: %w", err)
 			}
 			return nil
 		}
@@ -156,12 +156,12 @@ func (c *Call) writeRTCPReport() {
 	if rtcp, ok := transport.(interface {
 		WriteRTCP(context.Context, []byte) error
 	}); ok {
-		if err := rtcp.WriteRTCP(ctx, packet); err != nil && c.State() != StateEnded {
+		if err := rtcp.WriteRTCP(ctx, packet); err != nil && c.State() != CallStateEnded {
 			c.service.emitError(fmt.Errorf("sending call rtcp: %w", err))
 		}
 		return
 	}
-	if c.State() != StateEnded {
+	if c.State() != CallStateEnded {
 		c.service.emitError(errors.New("sending call rtcp: media transport does not support rtcp"))
 	}
 }
@@ -256,8 +256,8 @@ func (c *Call) endAfterMediaEvent(cause string) {
 	c.mu.Unlock()
 
 	_ = c.closeMedia()
-	if state == StateActive || state == StateConfirmed {
-		c.setState(StateEnding, cause)
+	if state == CallStateActive || state == CallStateConfirmed {
+		c.setState(CallStateEnding, cause)
 		ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
 		resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reasonMediaBearerReleased))
 		cancel()
@@ -267,7 +267,7 @@ func (c *Call) endAfterMediaEvent(cause string) {
 			c.service.emitError(fmt.Errorf("ending call after media event: expected 200, got %w", sip.NewResponseError(resp)))
 		}
 	}
-	c.finish(StateEnded, cause)
+	c.finish(CallStateEnded, cause)
 }
 
 func (c *Call) closeMedia() error {

@@ -12,9 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-client/ims/session"
-	"github.com/damonto/ims-client/ims/sip"
-	"github.com/damonto/ims-client/usim"
+	"github.com/damonto/vowifi-go/ims/pidf"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 const testNonce = "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
@@ -447,6 +448,44 @@ func TestBuildRegisterOmitsGeolocationByDefault(t *testing.T) {
 	}
 	if len(msg.Body) != 0 {
 		t.Fatalf("Body length = %d, want 0", len(msg.Body))
+	}
+}
+
+func TestBuildRegisterIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{
+			name: "non emergency wifi register",
+			cfg: Config{
+				GeolocationPIDFRegister: []int{pidf.GeolocationPIDFNonEmergencyWiFi},
+				GeolocationCountry:      "US",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, tt.cfg, newUDPTransport(5062, 5060), stubCard{})
+
+			msg := svc.buildRegister(nil, nil)
+			if got := msg.Header("Geolocation"); !strings.HasPrefix(got, "<cid:pidf-") {
+				t.Fatalf("Geolocation = %q, want cid PIDF reference", got)
+			}
+			if got := msg.Header("Geolocation-Routing"); got != "yes" {
+				t.Fatalf("Geolocation-Routing = %q, want yes", got)
+			}
+			if got := msg.Header("Content-Type"); got != "application/pidf+xml" {
+				t.Fatalf("Content-Type = %q, want application/pidf+xml", got)
+			}
+			if got := msg.Header("Content-Disposition"); got != "render;handling=optional" {
+				t.Fatalf("Content-Disposition = %q, want render;handling=optional", got)
+			}
+			if !strings.Contains(string(msg.Body), "<country>US</country>") {
+				t.Fatalf("REGISTER body missing PIDF country:\n%s", string(msg.Body))
+			}
+		})
 	}
 }
 
