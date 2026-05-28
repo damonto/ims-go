@@ -235,7 +235,7 @@ func (c *Call) handleEarlyDialogTerminated(msg sip.Message) {
 	id := c.id
 	state := c.state
 	c.mu.Unlock()
-	c.service.emit(Event{CallID: id, State: state, Cause: "early dialog terminated", At: time.Now()})
+	c.service.emit(Event{Call: c, CallID: id, State: state, Cause: "early dialog terminated", At: time.Now()})
 }
 
 func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error) {
@@ -494,7 +494,7 @@ func (c *Call) setState(state State, cause string) {
 	c.state = state
 	id := c.id
 	c.mu.Unlock()
-	c.service.emit(Event{CallID: id, State: state, Cause: cause, At: time.Now()})
+	c.service.emit(Event{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
 }
 
 func (c *Call) finish(state State, cause string) {
@@ -543,6 +543,6 @@ func (c *Call) finish(state State, cause string) {
 	_ = c.closeMedia()
 	c.service.removeCall(id)
 	if emit {
-		c.service.emit(Event{CallID: id, State: state, Cause: cause, At: time.Now()})
+		c.service.emit(Event{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
 	}
 }

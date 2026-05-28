@@ -50,6 +50,7 @@ type Incoming struct {
 }
 
 type Event struct {
+	Call   *Call
 	CallID string
 	State  State
 	Cause  string

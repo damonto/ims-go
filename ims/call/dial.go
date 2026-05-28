@@ -74,7 +74,7 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 		call.setState(StateFailed, err.Error())
 		return nil, err
 	}
-	s.emit(Event{CallID: callID, State: StateDialing, At: time.Now()})
+	s.emit(Event{Call: call, CallID: callID, State: StateDialing, At: time.Now()})
 
 	resp, err := s.exchangeCallInvite(ctx, invite)
 	if err != nil {

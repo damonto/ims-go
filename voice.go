@@ -18,6 +18,7 @@ type IncomingCall struct {
 }
 
 type CallEvent struct {
+	Call   *imscall.Call
 	CallID string
 	State  imscall.State
 	Cause  string
@@ -55,6 +56,7 @@ func (c *Client) handleIncomingCall(event imscall.Incoming) {
 
 func (c *Client) handleCallEvent(event imscall.Event) {
 	c.emitCallEvent(CallEvent{
+		Call:   event.Call,
 		CallID: event.CallID,
 		State:  event.State,
 		Cause:  event.Cause,
