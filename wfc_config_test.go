@@ -114,14 +114,24 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
       "qosPreconditionsSupported": true,
       "reliableProvisionalSupported": true,
       "sessionTimer": true,
+      "sessionExpires": "3600s",
+      "minimumSessionExpires": "600s",
+      "moCallRequestTimeout": "30s",
+      "ringbackTimer": "180s",
+      "ringingTimer": "45s",
+      "audioASBandwidthKbps": 49,
       "rtpInactivityTimeout": "20s",
       "localRTPPortMin": 41000,
       "localRTPPortMax": 41020,
       "codecs": [
+        {"name": "EVS", "payloadTypes": [127], "clockRate": 16000},
         {"name": "AMR-WB", "payloadTypes": [104], "clockRate": 16000},
         {"name": "AMR", "payloadTypes": [102], "clockRate": 8000, "modeSet": "0,2,4,7"},
         {"name": "telephone-event", "payloadTypes": [101], "clockRate": 8000}
-      ]
+      ],
+      "evsPayloadDescriptions": {
+        "127": {"bitrate": "5.9-13.2", "bandwidth": "nb-swb", "channelAwareReceive": 2}
+      }
     }
   }
 ]`)
@@ -182,17 +192,33 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.PTime != 20*time.Millisecond || got.IMS.Voice.MaxPTime != 240*time.Millisecond {
 					t.Fatalf("IMS voice ptime/maxptime = %v/%v, want profile values", got.IMS.Voice.PTime, got.IMS.Voice.MaxPTime)
 				}
-				if got.IMS.Voice.Preconditions || got.IMS.Voice.ReliableProvisional {
-					t.Fatalf("IMS voice unsupported features = preconditions:%v reliableProvisional:%v, want disabled", got.IMS.Voice.Preconditions, got.IMS.Voice.ReliableProvisional)
+				if got.IMS.Voice.Preconditions {
+					t.Fatalf("IMS voice preconditions = true, want disabled")
+				}
+				if !got.IMS.Voice.ReliableProvisional {
+					t.Fatal("IMS voice reliable provisional = false, want profile value")
 				}
 				if !got.IMS.Voice.SessionTimer {
 					t.Fatal("IMS voice session timer = false, want profile value")
 				}
+				if got.IMS.Voice.SessionExpires != 3600*time.Second || got.IMS.Voice.MinSessionExpires != 600*time.Second {
+					t.Fatalf("IMS voice session timers = %v/%v, want profile values", got.IMS.Voice.SessionExpires, got.IMS.Voice.MinSessionExpires)
+				}
+				if got.IMS.Voice.MOCallRequestTimeout != 30*time.Second || got.IMS.Voice.RingbackTimeout != 180*time.Second || got.IMS.Voice.RingingTimeout != 45*time.Second {
+					t.Fatalf("IMS voice call timers = %v/%v/%v, want profile values", got.IMS.Voice.MOCallRequestTimeout, got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
+				}
+				if got.IMS.Voice.AudioASBandwidthKbps != 49 {
+					t.Fatalf("IMS voice AudioASBandwidthKbps = %d, want 49", got.IMS.Voice.AudioASBandwidthKbps)
+				}
 				if got.IMS.Voice.LocalRTPPortMin != 41000 || got.IMS.Voice.LocalRTPPortMax != 41020 {
 					t.Fatalf("IMS voice ports = %d/%d, want profile values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
 				}
-				if len(got.IMS.Voice.Codecs) != 3 || got.IMS.Voice.Codecs[0].Name != imscall.CodecAMRWB || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 104 {
+				if len(got.IMS.Voice.Codecs) != 4 || got.IMS.Voice.Codecs[0].Name != imscall.CodecEVS || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 127 {
 					t.Fatalf("IMS voice codecs = %+v, want profile codecs", got.IMS.Voice.Codecs)
+				}
+				evs := got.IMS.Voice.Codecs[0]
+				if evs.Bitrate != "5.9-13.2" || evs.Bandwidth != "nb-swb" || evs.ChAwRecv == nil || *evs.ChAwRecv != 2 {
+					t.Fatalf("IMS voice EVS codec = %+v, want Pixel EVS payload description", evs)
 				}
 			},
 		},
@@ -437,7 +463,7 @@ func TestEmbeddedWFCConfigATTUsesConfiguredIMSIdentities(t *testing.T) {
 	}
 }
 
-func TestWFCProfileAppliesATTVoiceInterop(t *testing.T) {
+func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 	data := []byte(`[
   {
     "mcc": "310",
@@ -471,17 +497,118 @@ func TestWFCProfileAppliesATTVoiceInterop(t *testing.T) {
 		},
 	}
 	got := cfg.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
-	if len(got.IMS.Voice.Codecs) != 3 {
-		t.Fatalf("Voice codecs = %+v, want AMR, PCMU, and DTMF", got.IMS.Voice.Codecs)
+	if len(got.IMS.Voice.Codecs) != 2 {
+		t.Fatalf("Voice codecs = %+v, want explicit codecs preserved", got.IMS.Voice.Codecs)
 	}
-	if got.IMS.Voice.Codecs[0].Name != imscall.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 110 {
-		t.Fatalf("Voice speech codec = %+v, want AT&T AMR payload 110", got.IMS.Voice.Codecs[0])
+	if got.IMS.Voice.Codecs[0].Name != imscall.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
+		t.Fatalf("Voice speech codec = %+v, want explicit AMR payload 102", got.IMS.Voice.Codecs[0])
 	}
 	if got.IMS.Voice.Codecs[1].Name != imscall.CodecPCMU || got.IMS.Voice.Codecs[1].PayloadTypes[0] != 0 {
-		t.Fatalf("Voice PCMU codec = %+v, want static payload 0", got.IMS.Voice.Codecs[1])
+		t.Fatalf("Voice PCMU codec = %+v, want explicit static payload 0", got.IMS.Voice.Codecs[1])
 	}
-	if got.IMS.Voice.Codecs[2].Name != imscall.CodecTelephoneEvent || got.IMS.Voice.Codecs[2].PayloadTypes[0] != 97 {
-		t.Fatalf("Voice DTMF codec = %+v, want AT&T DTMF payload 97", got.IMS.Voice.Codecs[2])
+
+	got = Config{IMEI: testIMEI}.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imscall.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
+		t.Fatalf("Voice codecs = %+v, want profile JSON codecs without carrier fallback", got.IMS.Voice.Codecs)
+	}
+}
+
+func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
+	tests := []struct {
+		name     string
+		desc     wfcEVSPayloadDescription
+		codec    wfcVoiceCodecProfile
+		wantBR   string
+		wantBW   string
+		wantChAw *int
+	}{
+		{
+			name:     "direct payload description",
+			desc:     wfcEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb", ChannelAwareReceive: testIntPtr(2)},
+			wantBR:   "5.9-13.2",
+			wantBW:   "nb-swb",
+			wantChAw: testIntPtr(2),
+		},
+		{
+			name:   "codec fields override payload description",
+			codec:  wfcVoiceCodecProfile{Bitrate: "13.2", Bandwidth: "swb"},
+			desc:   wfcEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb"},
+			wantBR: "13.2",
+			wantBW: "swb",
+		},
+		{
+			name:   "invalid channel aware sentinel",
+			desc:   wfcEVSPayloadDescription{Bitrate: "5.9-24.4", Bandwidth: "nb-swb", ChannelAwareReceive: testIntPtr(255)},
+			wantBR: "5.9-24.4",
+			wantBW: "nb-swb",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			codec := tt.codec
+			codec.Name = imscall.CodecEVS
+			codec.PayloadTypes = []int{127}
+			codec.ClockRate = 16000
+			codecs := wfcVoiceCodecs(&wfcVoiceProfile{
+				Codecs: []wfcVoiceCodecProfile{codec},
+				EVSPayloadDescriptions: map[string]wfcEVSPayloadDescription{
+					"127": tt.desc,
+				},
+			})
+			if len(codecs) != 1 {
+				t.Fatalf("wfcVoiceCodecs() length = %d, want 1", len(codecs))
+			}
+			got := codecs[0]
+			if got.Bitrate != tt.wantBR || got.Bandwidth != tt.wantBW {
+				t.Fatalf("EVS br/bw = %q/%q, want %q/%q", got.Bitrate, got.Bandwidth, tt.wantBR, tt.wantBW)
+			}
+			if (got.ChAwRecv == nil) != (tt.wantChAw == nil) {
+				t.Fatalf("EVS ChAwRecv = %v, want %v", got.ChAwRecv, tt.wantChAw)
+			}
+			if got.ChAwRecv != nil && *got.ChAwRecv != *tt.wantChAw {
+				t.Fatalf("EVS ChAwRecv = %d, want %d", *got.ChAwRecv, *tt.wantChAw)
+			}
+		})
+	}
+}
+
+func testIntPtr(v int) *int {
+	return &v
+}
+
+func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
+	got, err := Config{IMEI: testIMEI}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
+	if err != nil {
+		t.Fatalf("normalized() error = %v", err)
+	}
+
+	if got.IMS.Voice.AudioASBandwidthKbps != 49 {
+		t.Fatalf("AudioASBandwidthKbps = %d, want Pixel value 49", got.IMS.Voice.AudioASBandwidthKbps)
+	}
+	if got.IMS.Voice.RingbackTimeout != 180*time.Second || got.IMS.Voice.RingingTimeout != 45*time.Second {
+		t.Fatalf("ring timers = %v/%v, want Pixel values", got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
+	}
+	want := []struct {
+		name    imscall.AudioCodec
+		payload int
+	}{
+		{imscall.CodecAMRWB, 104},
+		{imscall.CodecAMR, 110},
+		{imscall.CodecEVS, 127},
+		{imscall.CodecTelephoneEvent, 97},
+	}
+	if len(got.IMS.Voice.Codecs) != len(want) {
+		t.Fatalf("Voice codecs = %+v, want Pixel codec list", got.IMS.Voice.Codecs)
+	}
+	for i, wantCodec := range want {
+		gotCodec := got.IMS.Voice.Codecs[i]
+		if gotCodec.Name != wantCodec.name || len(gotCodec.PayloadTypes) != 1 || gotCodec.PayloadTypes[0] != wantCodec.payload {
+			t.Fatalf("Voice codec[%d] = %+v, want %s/%d", i, gotCodec, wantCodec.name, wantCodec.payload)
+		}
+	}
+	evs := got.IMS.Voice.Codecs[2]
+	if evs.Bitrate != "5.9-13.2" || evs.Bandwidth != "nb-swb" || evs.ChAwRecv == nil || *evs.ChAwRecv != 2 {
+		t.Fatalf("EVS codec = %+v, want Pixel payload description", evs)
 	}
 }
 

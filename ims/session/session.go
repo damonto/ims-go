@@ -40,6 +40,7 @@ type Config struct {
 	Transport         string
 	Logger            *slog.Logger
 	TransactionTimers TransactionTimers
+	ResponseDecorator func(*sip.Message)
 }
 
 type Request struct {
@@ -54,6 +55,10 @@ type Handler interface {
 
 type ResponseHandler interface {
 	HandleResponse(ctx context.Context, msg sip.Message) (bool, error)
+}
+
+type ExchangeOptions struct {
+	OnProvisional func(sip.Message)
 }
 
 type Attachment interface {
@@ -80,7 +85,8 @@ type Session struct {
 	ready        bool
 	running      bool
 
-	notifyOnce sync.Once
+	responseDecorator func(*sip.Message)
+	notifyOnce        sync.Once
 }
 
 type handlerEntry struct {
@@ -216,6 +222,10 @@ func (s *Session) ReplacePrimary(t Transport) error {
 }
 
 func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, error) {
+	return s.ExchangeWithOptions(ctx, req, ExchangeOptions{})
+}
+
+func (s *Session) ExchangeWithOptions(ctx context.Context, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
 	if err := s.ensureOpen("exchanging request"); err != nil {
 		return sip.Message{}, err
 	}
@@ -223,13 +233,13 @@ func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, e
 		if err := s.writeRequest(ctx, s.primaryTransport(), req); err != nil {
 			return sip.Message{}, err
 		}
-		resp, err := s.readFinalTransportResponse(ctx, s.primaryTransport())
+		resp, err := s.readFinalTransportResponse(ctx, s.primaryTransport(), opts)
 		if err != nil {
 			return sip.Message{}, fmt.Errorf("receiving %s response: %w", req.Method(), err)
 		}
 		return resp, nil
 	}
-	tx := newClientTransaction(s, s.primaryTransport(), req)
+	tx := newClientTransaction(s, s.primaryTransport(), req, opts)
 	if err := tx.start(ctx); err != nil {
 		return sip.Message{}, err
 	}
@@ -247,6 +257,7 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 	if err := s.ensureOpen("writing response"); err != nil {
 		return err
 	}
+	s.applyResponseDecorator(&resp)
 	if err := s.writeResponse(ctx, req.Transport, req.Message, resp); err != nil {
 		return err
 	}
@@ -258,6 +269,24 @@ func (s *Session) WriteStatus(ctx context.Context, req Request, code int, reason
 	resp := sip.NewResponse(code, reason)
 	resp.Headers = sip.ResponseHeaders(req.Message, code)
 	return s.WriteResponse(ctx, req, resp)
+}
+
+func (s *Session) SetResponseDecorator(fn func(*sip.Message)) {
+	s.mu.Lock()
+	s.responseDecorator = fn
+	s.mu.Unlock()
+}
+
+func (s *Session) applyResponseDecorator(resp *sip.Message) {
+	s.mu.Lock()
+	fn := s.responseDecorator
+	s.mu.Unlock()
+	if fn == nil {
+		fn = s.cfg.ResponseDecorator
+	}
+	if fn != nil {
+		fn(resp)
+	}
 }
 
 func (s *Session) Run(ctx context.Context) error {
@@ -431,7 +460,7 @@ func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip
 	return nil
 }
 
-func (s *Session) readFinalTransportResponse(ctx context.Context, transport Transport) (sip.Message, error) {
+func (s *Session) readFinalTransportResponse(ctx context.Context, transport Transport, opts ExchangeOptions) (sip.Message, error) {
 	for {
 		inbound, err := readTransportMessage(ctx, transport)
 		if err != nil {
@@ -442,6 +471,9 @@ func (s *Session) readFinalTransportResponse(ctx context.Context, transport Tran
 		}
 		s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
 		if isProvisionalResponse(inbound.msg) {
+			if opts.OnProvisional != nil {
+				opts.OnProvisional(inbound.msg)
+			}
 			continue
 		}
 		return inbound.msg, nil
@@ -492,6 +524,9 @@ func (s *Session) handleRequest(ctx context.Context, req Request) error {
 	}
 	if req.Message.Method() == "ACK" {
 		return nil
+	}
+	if strings.EqualFold(req.Message.Method(), "BYE") {
+		return s.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
 	}
 	return s.WriteStatus(ctx, req, 405, "Method Not Allowed")
 }

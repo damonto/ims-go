@@ -37,6 +37,7 @@ type clientTransaction struct {
 	cancelCh   chan struct{}
 
 	cancelOnce sync.Once
+	opts       ExchangeOptions
 }
 
 type transactionResult struct {
@@ -112,7 +113,7 @@ func (timers TransactionTimers) Normalized() (TransactionTimers, error) {
 	return timers, nil
 }
 
-func newClientTransaction(s *Session, transport Transport, req sip.Message) *clientTransaction {
+func newClientTransaction(s *Session, transport Transport, req sip.Message, opts ExchangeOptions) *clientTransaction {
 	return &clientTransaction{
 		session:    s,
 		transport:  transport,
@@ -124,6 +125,7 @@ func newClientTransaction(s *Session, transport Transport, req sip.Message) *cli
 		responseCh: make(chan sip.Message, 8),
 		resultCh:   make(chan transactionResult, 1),
 		cancelCh:   make(chan struct{}),
+		opts:       opts,
 	}
 }
 
@@ -301,6 +303,9 @@ func (tx *clientTransaction) notifyProvisional(resp sip.Message) error {
 	defer cancel()
 	if err := tx.session.handleInboundResponse(ctx, resp); err != nil {
 		return fmt.Errorf("handling provisional %s response: %w", tx.method, err)
+	}
+	if tx.opts.OnProvisional != nil {
+		tx.opts.OnProvisional(resp)
 	}
 	return nil
 }

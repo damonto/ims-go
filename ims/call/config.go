@@ -29,6 +29,12 @@ type Config struct {
 	Preconditions          bool
 	ReliableProvisional    bool
 	SessionTimer           bool
+	SessionExpires         time.Duration
+	MinSessionExpires      time.Duration
+	MOCallRequestTimeout   time.Duration
+	RingbackTimeout        time.Duration
+	RingingTimeout         time.Duration
+	AudioASBandwidthKbps   int
 	RTPInactivityTimeout   time.Duration
 	RTCPInactivityTimeout  time.Duration
 	LocalRTPPortMin        int
@@ -45,9 +51,11 @@ type AudioCodecConfig struct {
 	PayloadTypes []int
 	ClockRate    int
 	Channels     int
+	OctetAlign   bool
 	ModeSet      string
 	Bitrate      string
 	Bandwidth    string
+	ChAwRecv     *int
 }
 
 type MediaConfig struct {
@@ -86,9 +94,6 @@ func (cfg Config) Normalized() (Config, error) {
 	if cfg.Preconditions {
 		return Config{}, errors.New("normalizing call config: sip preconditions are not supported")
 	}
-	if cfg.ReliableProvisional {
-		return Config{}, errors.New("normalizing call config: reliable provisional responses are not supported")
-	}
 	cfg.RTPProfile = strings.TrimSpace(cfg.RTPProfile)
 	if cfg.RTPProfile == "" {
 		cfg.RTPProfile = defaultRTPProfile
@@ -117,6 +122,33 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	if cfg.MaxPTime < cfg.PTime {
 		return Config{}, errors.New("normalizing call config: maxptime must be >= ptime")
+	}
+	if cfg.AudioASBandwidthKbps < 0 {
+		return Config{}, errors.New("normalizing call config: audio AS bandwidth must be >= 0")
+	}
+	if cfg.SessionExpires < 0 {
+		return Config{}, errors.New("normalizing call config: session expires must be >= 0")
+	}
+	if cfg.SessionExpires > 0 && cfg.SessionExpires < time.Second {
+		return Config{}, errors.New("normalizing call config: session expires must be at least 1s")
+	}
+	if cfg.MinSessionExpires < 0 {
+		return Config{}, errors.New("normalizing call config: min session expires must be >= 0")
+	}
+	if cfg.MinSessionExpires > 0 && cfg.MinSessionExpires < time.Second {
+		return Config{}, errors.New("normalizing call config: min session expires must be at least 1s")
+	}
+	if cfg.SessionExpires > 0 && cfg.MinSessionExpires > cfg.SessionExpires {
+		return Config{}, errors.New("normalizing call config: session expires must be >= min session expires")
+	}
+	if cfg.MOCallRequestTimeout < 0 {
+		return Config{}, errors.New("normalizing call config: mo call request timeout must be >= 0")
+	}
+	if cfg.RingbackTimeout < 0 {
+		return Config{}, errors.New("normalizing call config: ringback timeout must be >= 0")
+	}
+	if cfg.RingingTimeout < 0 {
+		return Config{}, errors.New("normalizing call config: ringing timeout must be >= 0")
 	}
 	if cfg.RTPInactivityTimeout < 0 {
 		return Config{}, errors.New("normalizing call config: rtp inactivity timeout must be >= 0")

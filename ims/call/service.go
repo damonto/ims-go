@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,10 +53,12 @@ type Request struct {
 }
 
 type Incoming struct {
-	Call     *Call
-	From     string
-	Offer    MediaOffer
-	Received time.Time
+	Call       *Call
+	From       string
+	FromURI    string
+	FromNumber string
+	Offer      MediaOffer
+	Received   time.Time
 }
 
 type Event struct {
@@ -84,35 +87,58 @@ type Service struct {
 type Call struct {
 	service *Service
 
-	mu               sync.Mutex
-	id               string
-	sessionID        string
-	direction        Direction
-	state            State
-	localURI         string
-	localTag         string
-	remoteURI        string
-	remoteTag        string
-	remoteTo         string
-	targetURI        string
-	routeSet         []string
-	inviteSeq        int64
-	localPort        int
-	incomingRequest  *session.Request
-	remoteOffer      sdpOffer
-	earlyAnswer      sdpOffer
-	hasEarlyAnswer   bool
-	inviteOK         sip.Message
-	inviteOKStop     chan struct{}
-	inviteACK        sip.Message
-	prackedRSeq      map[string]struct{}
-	delayedOffer     bool
-	mediaActivity    chan MediaPacket
-	mediaWatchStop   chan struct{}
-	dialogAttachment session.Attachment
-	media            NegotiatedMedia
-	transport        MediaTransport
-	closed           bool
+	mu                 sync.Mutex
+	id                 string
+	sessionID          string
+	direction          Direction
+	state              State
+	localURI           string
+	localTag           string
+	remoteURI          string
+	remoteTag          string
+	remoteTo           string
+	targetURI          string
+	routeSet           []string
+	inviteSeq          int64
+	inviteRequest      sip.Message
+	inviteResponse     bool
+	cancelOnResponse   bool
+	cancelSent         bool
+	localPort          int
+	incomingRequest    *session.Request
+	remoteOffer        sdpOffer
+	earlyDialogs       map[string]earlyDialog
+	inviteOK           sip.Message
+	inviteOKStop       chan struct{}
+	ringbackStop       chan struct{}
+	ringingStop        chan struct{}
+	inviteACK          sip.Message
+	prackedRSeq        map[string]struct{}
+	nextRSeq           int64
+	pendingReliable    reliableProvisional
+	provisionalReady   chan struct{}
+	delayedOffer       bool
+	prackAnsweredOffer bool
+	provisionalAnswer  bool
+	mediaActivity      chan MediaPacket
+	mediaWatchStop     chan struct{}
+	dialogAttachment   session.Attachment
+	media              NegotiatedMedia
+	transport          MediaTransport
+	closed             bool
+}
+
+type earlyDialog struct {
+	answer               sdpOffer
+	hasAnswer            bool
+	earlyMediaAuthorized bool
+}
+
+type reliableProvisional struct {
+	rseq   int64
+	cseq   int64
+	method string
+	status int
 }
 
 const (
@@ -151,6 +177,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		return nil, fmt.Errorf("creating call service: %w", err)
 	}
 	svc.attachment = attachment
+	sess.SetResponseDecorator(svc.addAccessNetworkInfo)
 	return svc, nil
 }
 
@@ -185,24 +212,27 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	invite.Headers.Add("Contact", contactValue(state))
 	invite.Headers.Add("Accept", callAcceptHeader(s.cfg))
 	s.reg.RequestPolicy().Apply(&invite)
+	addInviteSessionTimer(&invite, s.cfg)
 	if err := setInviteBody(&invite, s.cfg, localURI, offer); err != nil {
 		return nil, err
 	}
 
 	call := &Call{
-		service:   s,
-		id:        callID,
-		sessionID: sessionID,
-		direction: DirectionOutgoing,
-		state:     StateDialing,
-		localURI:  localURI,
-		localTag:  tag,
-		remoteURI: target,
-		remoteTo:  fmt.Sprintf("<%s>", target),
-		targetURI: target,
-		inviteSeq: inviteSeq,
-		localPort: localPort,
-		media:     media,
+		service:       s,
+		id:            callID,
+		sessionID:     sessionID,
+		direction:     DirectionOutgoing,
+		state:         StateDialing,
+		localURI:      localURI,
+		localTag:      tag,
+		remoteURI:     target,
+		remoteTo:      fmt.Sprintf("<%s>", target),
+		targetURI:     target,
+		inviteSeq:     inviteSeq,
+		inviteRequest: invite,
+		localPort:     localPort,
+		media:         media,
+		earlyDialogs:  make(map[string]earlyDialog),
 	}
 	if err := s.storeCall(call); err != nil {
 		return nil, err
@@ -214,19 +244,43 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	}
 	s.emit(Event{CallID: callID, State: StateDialing, At: time.Now()})
 
-	resp, err := s.sess.Exchange(ctx, invite)
+	resp, err := s.exchangeCallInvite(ctx, invite)
 	if err != nil {
+		call.stopRingbackTimer()
 		_ = call.closeMedia()
 		s.removeCall(callID)
 		call.setState(StateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
+	if resp.StatusCode() == 422 && s.cfg.SessionTimer {
+		resp, err = s.retryInviteWithMinSE(ctx, call, invite, resp)
+		if err != nil {
+			call.stopRingbackTimer()
+			_ = call.closeMedia()
+			s.removeCall(callID)
+			call.setState(StateFailed, err.Error())
+			return nil, fmt.Errorf("dialing call: %w", err)
+		}
+	}
+	call.stopRingbackTimer()
 	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		if call.State() == StateEnding {
+			call.finish(StateEnded, "cancelled")
+			return nil, errors.New("dialing call: cancelled")
+		}
 		_ = call.closeMedia()
 		s.removeCall(callID)
 		err := fmt.Errorf("dialing call: expected 2xx, got %d", resp.StatusCode())
 		call.setState(StateFailed, err.Error())
 		return nil, err
+	}
+	if call.State() == StateEnding {
+		if err := call.releaseCancelledInvite2xx(ctx, resp); err != nil {
+			call.finish(StateFailed, err.Error())
+			return nil, fmt.Errorf("dialing call: %w", err)
+		}
+		call.finish(StateEnded, "cancelled")
+		return nil, errors.New("dialing call: cancelled")
 	}
 	answer, ok, err := call.answerFromFinalResponse(resp)
 	if err != nil {
@@ -260,6 +314,7 @@ func (s *Service) Dial(ctx context.Context, req Request) (*Call, error) {
 	call.targetURI = call.remoteURI
 	call.routeSet = reverseValues(resp.HeadersByName("Record-Route"))
 	call.media = answerMedia
+	call.earlyDialogs = nil
 	ack := call.buildACKLocked()
 	call.inviteACK = ack
 	call.mu.Unlock()
@@ -309,13 +364,107 @@ func (s *Service) Close() error {
 	return nil
 }
 
+func (s *Service) exchangeCallInvite(ctx context.Context, invite sip.Message) (sip.Message, error) {
+	exchangeCtx, cancelExchange := context.WithCancel(ctx)
+	defer cancelExchange()
+
+	var timedOut atomic.Bool
+	stopTimer := s.startMOCallRequestTimer(func() {
+		timedOut.Store(true)
+		cancelExchange()
+	})
+	defer stopTimer()
+
+	resp, err := s.sess.ExchangeWithOptions(exchangeCtx, invite, session.ExchangeOptions{
+		OnProvisional: func(sip.Message) {
+			stopTimer()
+		},
+	})
+	if err != nil && timedOut.Load() {
+		return sip.Message{}, errors.New("waiting for first provisional INVITE response: timeout")
+	}
+	return resp, err
+}
+
+func (s *Service) startMOCallRequestTimer(cancel func()) func() {
+	if s.cfg.MOCallRequestTimeout <= 0 {
+		return func() {}
+	}
+	timer := time.NewTimer(s.cfg.MOCallRequestTimeout)
+	var once sync.Once
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-timer.C:
+			once.Do(func() {
+				close(done)
+				cancel()
+			})
+		case <-done:
+		}
+	}()
+	return func() {
+		once.Do(func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			close(done)
+		})
+	}
+}
+
+func (s *Service) retryInviteWithMinSE(ctx context.Context, call *Call, invite sip.Message, resp sip.Message) (sip.Message, error) {
+	minSE, ok := parseSessionSeconds(resp.Header("Min-SE"))
+	if !ok {
+		return sip.Message{}, fmt.Errorf("session timer retry: invalid Min-SE %q", resp.Header("Min-SE"))
+	}
+	state := s.reg.State()
+	_, _, _, branch := sip.NewTransaction()
+	seq := atomic.AddInt64(&s.cseq, 1)
+	retry := invite
+	retry.Headers = invite.Headers.Clone()
+	retry.Body = append([]byte(nil), invite.Body...)
+	retry.Headers.Set("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, state.MessagePort, branch))
+	retry.Headers.Set("CSeq", fmt.Sprintf("%d INVITE", seq))
+	retry.Headers.Set("Min-SE", strconv.Itoa(minSE))
+	retry.Headers.Set("Session-Expires", strconv.Itoa(max(durationSeconds(defaultSessionExpires), minSE)))
+
+	call.mu.Lock()
+	if call.state == StateEnding {
+		call.mu.Unlock()
+		return resp, nil
+	}
+	call.inviteSeq = seq
+	call.inviteRequest = retry
+	call.inviteResponse = false
+	call.cancelOnResponse = false
+	call.cancelSent = false
+	call.mu.Unlock()
+
+	next, err := s.exchangeCallInvite(ctx, retry)
+	if err != nil {
+		return sip.Message{}, fmt.Errorf("session timer retry: %w", err)
+	}
+	return next, nil
+}
+
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
 	switch strings.ToUpper(req.Message.Method()) {
 	case "INVITE":
 		return true, s.handleIncomingInvite(ctx, req)
-	case "ACK", "BYE", "CANCEL":
+	case "ACK", "BYE", "CANCEL", "PRACK":
 		call := s.lookupCallForMessage(req.Message)
 		if call == nil {
+			s.logger.Debug("call request did not match dialog",
+				"method", req.Message.Method(),
+				"call_id", req.Message.Header("Call-ID"),
+				"from", req.Message.Header("From"),
+				"to", req.Message.Header("To"),
+				"cseq", req.Message.Header("CSeq"),
+			)
 			return false, nil
 		}
 		return true, call.handleRequest(ctx, req)
@@ -332,7 +481,11 @@ func (s *Service) HandleResponse(ctx context.Context, msg sip.Message) (bool, er
 	if call == nil {
 		return false, nil
 	}
-	if msg.StatusCode() > 100 && msg.StatusCode() < 200 {
+	if msg.StatusCode() >= 100 && msg.StatusCode() < 200 {
+		call.markInviteResponse(ctx)
+		if msg.StatusCode() == 100 {
+			return true, nil
+		}
 		return true, call.handleProvisionalResponse(ctx, msg)
 	}
 	if msg.StatusCode() < 200 || msg.StatusCode() >= 300 {
@@ -355,13 +508,14 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		if resp.StartLine != "" {
 			return s.sess.WriteResponse(ctx, req, resp)
 		}
-		return s.writeRinging(ctx, req)
+		return s.writeRinging(ctx, req, existing)
 	}
 
 	localPort := s.reserveRTPPort()
 	localIP := s.localIP()
 	var (
 		offer        sdpOffer
+		answerBody   []byte
 		media        NegotiatedMedia
 		delayedOffer = len(req.Message.Body) == 0
 	)
@@ -375,7 +529,7 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		if err != nil {
 			return s.writeStatus(ctx, req, 488, "Not Acceptable Here")
 		}
-		_, media, err = buildSDPAnswer(s.cfg, localIP, localPort, offer, MediaOffer{})
+		answerBody, media, err = buildSDPAnswer(s.cfg, localIP, localPort, offer, MediaOffer{})
 		if err != nil {
 			return s.writeStatus(ctx, req, 488, "Not Acceptable Here")
 		}
@@ -412,8 +566,53 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 	if err := s.writeStatus(ctx, req, 100, "Trying"); err != nil {
 		return fmt.Errorf("handling call INVITE: sending 100 Trying: %w", err)
 	}
-	if err := s.writeRinging(ctx, req); err != nil {
-		return fmt.Errorf("handling call INVITE: sending 180 Ringing: %w", err)
+	if delayedOffer && s.shouldSendReliableDelayedOffer(req.Message) {
+		offerBody, offerMedia, err := buildSDPOffer(s.cfg, localIP, localPort, MediaOffer{})
+		if err != nil {
+			call.finish(StateFailed, err.Error())
+			return err
+		}
+		call.mu.Lock()
+		call.media = offerMedia
+		call.mu.Unlock()
+		if err := call.prepareMedia(ctx); err != nil {
+			call.finish(StateFailed, err.Error())
+			return err
+		}
+		if err := s.writeProgress(ctx, req, call, offerBody, true); err != nil {
+			return fmt.Errorf("handling call INVITE: sending 183 Session Progress: %w", err)
+		}
+	} else {
+		if !delayedOffer && s.cfg.PrepareMedia != nil {
+			reliableProgress := s.shouldSendReliableDelayedOffer(req.Message)
+			if err := s.writeProgress(ctx, req, call, answerBody, reliableProgress); err != nil {
+				return fmt.Errorf("handling call INVITE: sending 183 Session Progress: %w", err)
+			}
+			if reliableProgress {
+				call.setState(StateRinging, "")
+				if s.cfg.OnIncoming != nil {
+					s.cfg.OnIncoming(Incoming{
+						Call:       call,
+						From:       call.remoteURI,
+						FromURI:    call.remoteURI,
+						FromNumber: incomingCallerNumber(req.Message),
+						Offer:      mediaOfferFromSDP(offer),
+						Received:   time.Now(),
+					})
+				}
+				return nil
+			}
+		}
+		if !delayedOffer {
+			if err := call.prepareMedia(ctx); err != nil {
+				call.finish(StateFailed, err.Error())
+				return s.writeStatus(ctx, req, 488, "Not Acceptable Here")
+			}
+		}
+		if err := s.writeRinging(ctx, req, call); err != nil {
+			return fmt.Errorf("handling call INVITE: sending 180 Ringing: %w", err)
+		}
+		call.startRingingTimer()
 	}
 	call.setState(StateRinging, "")
 	if s.cfg.OnIncoming != nil {
@@ -422,10 +621,12 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 			incomingOffer = mediaOfferFromSDP(offer)
 		}
 		s.cfg.OnIncoming(Incoming{
-			Call:     call,
-			From:     call.remoteURI,
-			Offer:    incomingOffer,
-			Received: time.Now(),
+			Call:       call,
+			From:       call.remoteURI,
+			FromURI:    call.remoteURI,
+			FromNumber: incomingCallerNumber(req.Message),
+			Offer:      incomingOffer,
+			Received:   time.Now(),
 		})
 	}
 	return nil
@@ -438,18 +639,134 @@ func (s *Service) writeStatus(ctx context.Context, req session.Request, code int
 	return s.sess.WriteResponse(ctx, req, resp)
 }
 
-func (s *Service) writeRinging(ctx context.Context, req session.Request) error {
+func incomingCallerNumber(msg sip.Message) string {
+	for _, header := range []string{"P-Asserted-Identity", "Remote-Party-ID", "From"} {
+		for _, value := range msg.HeadersByName(header) {
+			for _, part := range sip.SplitHeaderList(value) {
+				if number := callerNumber(part); number != "" {
+					return number
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func callerNumber(value string) string {
+	uri := sip.AddressURI(value)
+	if uri == "" {
+		return ""
+	}
+	return callerNumberFromURI(uri)
+}
+
+func callerNumberFromURI(uri string) string {
+	uri = strings.TrimSpace(uri)
+	lower := strings.ToLower(uri)
+	switch {
+	case strings.HasPrefix(lower, "tel:"):
+		return cleanCallerUser(uri[len("tel:"):])
+	case strings.HasPrefix(lower, "sip:"):
+		return callerNumberFromSIPUser(uri[len("sip:"):])
+	case strings.HasPrefix(lower, "sips:"):
+		return callerNumberFromSIPUser(uri[len("sips:"):])
+	default:
+		return ""
+	}
+}
+
+func callerNumberFromSIPUser(value string) string {
+	if before, _, ok := strings.Cut(value, "@"); ok {
+		value = before
+	}
+	number := cleanCallerUser(value)
+	if !isDialableCaller(number) {
+		return ""
+	}
+	return number
+}
+
+func cleanCallerUser(value string) string {
+	if before, _, ok := strings.Cut(value, ";"); ok {
+		value = before
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if unescaped, err := url.PathUnescape(value); err == nil {
+		value = unescaped
+	}
+	return strings.TrimSpace(value)
+}
+
+func isDialableCaller(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	digits := 0
+	for i, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '+' && i == 0:
+		case r == '*' || r == '#':
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}
+
+func (s *Service) writeRinging(ctx context.Context, req session.Request, call *Call) error {
 	resp := sip.NewResponse(180, "Ringing")
 	resp.Headers = sip.ResponseHeaders(req.Message, 180)
 	s.addAccessNetworkInfo(&resp)
 	resp.Headers.Add("Contact", contactValue(s.reg.State()))
 	resp.Headers.Add("Allow", sip.DefaultClientAllow)
 	resp.Headers.Add("Accept", callAcceptHeader(s.cfg))
+	if call != nil && s.shouldSendReliable18x(req.Message) {
+		resp.Headers.Add("Require", "100rel")
+		resp.Headers.Add("RSeq", strconv.FormatInt(call.beginReliableProvisional(180, sip.CSeqNumber(req.Message.Header("CSeq")), "INVITE"), 10))
+	}
+	return s.sess.WriteResponse(ctx, req, resp)
+}
+
+func (s *Service) shouldSendReliableDelayedOffer(msg sip.Message) bool {
+	return s.cfg.ReliableProvisional && tokenHeaderContains(msg, "Supported", "100rel")
+}
+
+func (s *Service) shouldSendReliable18x(msg sip.Message) bool {
+	return s.cfg.ReliableProvisional && tokenHeaderContains(msg, "Supported", "100rel")
+}
+
+func (s *Service) writeProgress(ctx context.Context, req session.Request, call *Call, body []byte, reliable bool) error {
+	resp := sip.NewResponse(183, "Session Progress")
+	resp.Headers = sip.ResponseHeaders(req.Message, 183)
+	s.addAccessNetworkInfo(&resp)
+	resp.Headers = sip.UpsertHeader(resp.Headers, "To", sip.WithTag(req.Message.Header("To"), call.localURI, call.localTag))
+	resp.Headers.Add("Contact", contactValue(s.reg.State()))
+	resp.Headers.Add("Allow", sip.DefaultClientAllow)
+	resp.Headers.Add("Accept", callAcceptHeader(s.cfg))
+	if reliable {
+		resp.Headers.Add("Require", "100rel")
+		resp.Headers.Add("RSeq", strconv.FormatInt(call.beginReliableProvisional(183, sip.CSeqNumber(req.Message.Header("CSeq")), "INVITE"), 10))
+	}
+	if len(body) != 0 {
+		if err := setInviteResponseBody(&resp, s.cfg, call.localURI, body); err != nil {
+			return err
+		}
+	}
 	return s.sess.WriteResponse(ctx, req, resp)
 }
 
 func (s *Service) addAccessNetworkInfo(resp *sip.Message) {
-	if value := strings.TrimSpace(s.reg.State().AccessNetworkInfo); value != "" {
+	state := s.reg.State()
+	if value := strings.TrimSpace(state.UserAgent); value != "" && strings.TrimSpace(resp.Header("Server")) == "" {
+		resp.Headers.Add("Server", value)
+	}
+	if value := strings.TrimSpace(state.AccessNetworkInfo); value != "" && strings.TrimSpace(resp.Header("P-Access-Network-Info")) == "" {
 		resp.Headers.Add("P-Access-Network-Info", value)
 	}
 }
@@ -481,6 +798,13 @@ func (c *Call) Media() NegotiatedMedia {
 }
 
 func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := c.waitForReliableProvisionalAnswer(ctx); err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	if c.direction != DirectionIncoming {
 		c.mu.Unlock()
@@ -496,6 +820,8 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 	}
 	remoteOffer := c.remoteOffer
 	localPort := c.localPort
+	prackAnsweredOffer := c.prackAnsweredOffer
+	provisionalAnswer := c.provisionalAnswer
 	c.mu.Unlock()
 
 	var (
@@ -503,7 +829,11 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 		media  NegotiatedMedia
 		err    error
 	)
-	if c.delayedOffer {
+	if c.delayedOffer && prackAnsweredOffer {
+		// The delayed offer/answer exchange completed in reliable provisional response + PRACK.
+	} else if provisionalAnswer {
+		// The INVITE offer was already answered in a provisional response.
+	} else if c.delayedOffer {
 		answer, media, err = buildSDPOffer(c.service.cfg, c.service.localIP(), localPort, offer)
 	} else {
 		answer, media, err = buildSDPAnswer(c.service.cfg, c.service.localIP(), localPort, remoteOffer, offer)
@@ -511,10 +841,14 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.media = media
-	c.mu.Unlock()
-	if c.delayedOffer {
+	if !prackAnsweredOffer && !provisionalAnswer {
+		c.mu.Lock()
+		c.media = media
+		c.mu.Unlock()
+	}
+	if c.delayedOffer && prackAnsweredOffer {
+		// Media was opened after the PRACK SDP answer.
+	} else if c.delayedOffer {
 		if err := c.prepareMedia(ctx); err != nil {
 			return err
 		}
@@ -524,6 +858,7 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 		}
 		c.startMediaInactivityWatch()
 	}
+	c.stopRingingTimer()
 	return c.writeInviteOK(ctx, answer)
 }
 
@@ -549,6 +884,7 @@ func (c *Call) Reject(ctx context.Context, code int, reason string) error {
 	}
 	req := *c.incomingRequest
 	c.mu.Unlock()
+	c.stopRingingTimer()
 	if err := c.service.writeStatus(ctx, req, code, reason); err != nil {
 		return fmt.Errorf("rejecting call: %w", err)
 	}
@@ -564,6 +900,9 @@ func (c *Call) Hangup(ctx context.Context) error {
 
 	if direction == DirectionIncoming && state == StateRinging {
 		return c.Reject(ctx, 486, "Busy Here")
+	}
+	if direction == DirectionOutgoing && (state == StateDialing || state == StateRinging) {
+		return c.cancelOutgoingInvite(ctx)
 	}
 	if state == StateEnding || state == StateEnded {
 		return nil
@@ -584,6 +923,50 @@ func (c *Call) Hangup(ctx context.Context) error {
 		return err
 	}
 	c.finish(StateEnded, "")
+	return nil
+}
+
+func (c *Call) cancelOutgoingInvite(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	if c.direction != DirectionOutgoing || (c.state != StateDialing && c.state != StateRinging) {
+		state := c.state
+		c.mu.Unlock()
+		return fmt.Errorf("cancelling call: call state is %s", state)
+	}
+	if !c.inviteResponse {
+		c.cancelOnResponse = true
+		c.mu.Unlock()
+		c.stopRingbackTimer()
+		c.setState(StateEnding, "cancelled")
+		_ = c.closeMedia()
+		return nil
+	}
+	if c.cancelSent {
+		c.mu.Unlock()
+		return nil
+	}
+	c.cancelSent = true
+	cancel := c.buildCANCELLocked(reasonUserTriggered)
+	c.mu.Unlock()
+
+	c.setState(StateEnding, "cancelled")
+	c.stopRingbackTimer()
+	_ = c.closeMedia()
+	return c.exchangeCancel(ctx, cancel)
+}
+
+func (c *Call) exchangeCancel(ctx context.Context, cancel sip.Message) error {
+	resp, err := c.service.sess.Exchange(ctx, cancel)
+	if err != nil {
+		return fmt.Errorf("cancelling call: %w", err)
+	}
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return fmt.Errorf("cancelling call: expected 2xx, got %d", resp.StatusCode())
+	}
 	return nil
 }
 
@@ -654,18 +1037,109 @@ func (c *Call) handleRequest(ctx context.Context, req session.Request) error {
 	case "CANCEL":
 		c.finish(StateEnded, "remote cancel")
 		return nil
+	case "PRACK":
+		return c.handlePRACK(ctx, req)
 	default:
 		return nil
 	}
 }
 
+func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
+	c.mu.Lock()
+	delayedOffer := c.delayedOffer
+	prackAnsweredOffer := c.prackAnsweredOffer
+	provisionalAnswer := c.provisionalAnswer
+	state := c.state
+	media := c.media
+	inviteReq := c.incomingRequest
+	pending := c.pendingReliable
+	c.mu.Unlock()
+
+	rack, err := parseRAck(req.Message.Header("RAck"))
+	if err != nil {
+		return c.service.writeStatus(ctx, req, 400, "Bad Request")
+	}
+	if !pending.matches(rack) {
+		return c.service.writeStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+	}
+
+	answeringDelayedOffer := delayedOffer && !prackAnsweredOffer && state == StateRinging && pending.status == 183
+	acknowledgingProvisionalAnswer := !delayedOffer && !provisionalAnswer && state == StateRinging && pending.status == 183
+	if answeringDelayedOffer {
+		body, ok := sdpBody(req.Message)
+		if !ok {
+			if err := c.service.writeStatus(ctx, req, 488, "Not Acceptable Here"); err != nil {
+				return err
+			}
+			c.finish(StateFailed, "missing PRACK SDP answer")
+			return nil
+		}
+		answer, err := parseSDP(body)
+		if err != nil {
+			if writeErr := c.service.writeStatus(ctx, req, 488, "Not Acceptable Here"); writeErr != nil {
+				return writeErr
+			}
+			c.finish(StateFailed, err.Error())
+			return nil
+		}
+		negotiated, ok := chooseCodec(answer, c.service.cfg.Codecs)
+		if !ok {
+			if err := c.service.writeStatus(ctx, req, 488, "Not Acceptable Here"); err != nil {
+				return err
+			}
+			c.finish(StateFailed, "no compatible PRACK answer codec")
+			return nil
+		}
+		dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
+		answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), dtmf, hasDTMF)
+		c.mu.Lock()
+		c.media = answerMedia
+		c.prackAnsweredOffer = true
+		c.mu.Unlock()
+		if err := c.openMedia(ctx); err != nil {
+			c.finish(StateFailed, err.Error())
+			c.signalProvisionalReady()
+			return nil
+		}
+		c.startMediaInactivityWatch()
+	}
+
+	if err := c.service.writeStatus(ctx, req, 200, "OK"); err != nil {
+		return err
+	}
+	c.clearReliableProvisional(rack.rseq)
+	if acknowledgingProvisionalAnswer {
+		c.mu.Lock()
+		c.provisionalAnswer = true
+		c.mu.Unlock()
+		if err := c.prepareMedia(ctx); err != nil {
+			c.finish(StateFailed, err.Error())
+			c.signalProvisionalReady()
+			if inviteReq != nil {
+				return c.service.writeStatus(ctx, *inviteReq, 488, "Not Acceptable Here")
+			}
+			return nil
+		}
+	}
+	if (answeringDelayedOffer || acknowledgingProvisionalAnswer) && inviteReq != nil {
+		if err := c.service.writeRinging(ctx, *inviteReq, c); err != nil {
+			c.signalProvisionalReady()
+			return err
+		}
+		c.startRingingTimer()
+	}
+	c.signalProvisionalReady()
+	return nil
+}
+
 func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 	c.mu.Lock()
 	delayedOffer := c.delayedOffer
+	prackAnsweredOffer := c.prackAnsweredOffer
 	state := c.state
 	media := c.media
 	c.mu.Unlock()
-	if !delayedOffer {
+	if !delayedOffer || prackAnsweredOffer {
 		c.setState(StateActive, "")
 		return nil
 	}
@@ -735,7 +1209,7 @@ func (c *Call) handleResponse(ctx context.Context, msg sip.Message) error {
 	return nil
 }
 
-func (c *Call) handleProvisionalResponse(_ context.Context, msg sip.Message) error {
+func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) error {
 	c.mu.Lock()
 	if c.direction != DirectionOutgoing || sip.CSeqNumber(msg.Header("CSeq")) != c.inviteSeq {
 		c.mu.Unlock()
@@ -743,14 +1217,56 @@ func (c *Call) handleProvisionalResponse(_ context.Context, msg sip.Message) err
 	}
 	c.mu.Unlock()
 
+	if msg.StatusCode() == 199 {
+		c.handleEarlyDialogTerminated(msg)
+		return nil
+	}
+	if msg.StatusCode() == 180 {
+		c.setState(StateRinging, "")
+		c.startRingbackTimer()
+	}
+
+	remoteTag := sip.HeaderTag(msg.Header("To"))
+	var authorized bool
+	if remoteTag != "" {
+		c.mu.Lock()
+		if c.earlyDialogs == nil {
+			c.earlyDialogs = make(map[string]earlyDialog)
+		}
+		dialog := c.earlyDialogs[remoteTag]
+		if hasEarlyMediaHeader(msg) {
+			dialog.earlyMediaAuthorized = earlyMediaAuthorized(msg)
+		}
+		authorized = dialog.earlyMediaAuthorized
+		c.earlyDialogs[remoteTag] = dialog
+		c.mu.Unlock()
+	}
 	if body, ok := sdpBody(msg); ok {
 		answer, err := parseSDP(body)
 		if err != nil {
 			return fmt.Errorf("handling provisional call answer: %w", err)
 		}
+		if authorized {
+			if err := c.openEarlyMedia(ctx, answer); err != nil {
+				return err
+			}
+		}
 		c.mu.Lock()
-		c.earlyAnswer = answer
-		c.hasEarlyAnswer = true
+		if remoteTag != "" {
+			dialog := c.earlyDialogs[remoteTag]
+			dialog.answer = answer
+			dialog.hasAnswer = true
+			c.earlyDialogs[remoteTag] = dialog
+		}
+		c.mu.Unlock()
+	} else if remoteTag != "" {
+		c.mu.Lock()
+		if c.earlyDialogs == nil {
+			c.earlyDialogs = make(map[string]earlyDialog)
+		}
+		if _, ok := c.earlyDialogs[remoteTag]; !ok {
+			c.earlyDialogs[remoteTag] = earlyDialog{}
+		}
 		c.mu.Unlock()
 	}
 
@@ -780,6 +1296,160 @@ func (c *Call) handleProvisionalResponse(_ context.Context, msg sip.Message) err
 	return nil
 }
 
+func (c *Call) openEarlyMedia(ctx context.Context, answer sdpOffer) error {
+	negotiated, ok := chooseCodec(answer, c.service.cfg.Codecs)
+	if !ok {
+		return errors.New("handling provisional call answer: no compatible codec")
+	}
+	dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
+	c.mu.Lock()
+	current := c.media
+	c.mu.Unlock()
+	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), dtmf, hasDTMF)
+	c.mu.Lock()
+	c.media = answerMedia
+	c.mu.Unlock()
+	if err := c.openMedia(ctx); err != nil {
+		return err
+	}
+	c.startMediaInactivityWatch()
+	return nil
+}
+
+func (c *Call) markInviteResponse(ctx context.Context) {
+	c.mu.Lock()
+	c.inviteResponse = true
+	if !c.cancelOnResponse || c.cancelSent || c.direction != DirectionOutgoing {
+		c.mu.Unlock()
+		return
+	}
+	c.cancelSent = true
+	cancel := c.buildCANCELLocked(reasonUserTriggered)
+	c.mu.Unlock()
+
+	go c.sendCancel(ctx, cancel)
+}
+
+func (c *Call) sendCancel(parent context.Context, cancel sip.Message) {
+	ctx, stop := context.WithTimeout(context.WithoutCancel(parent), callReleaseTimeout)
+	defer stop()
+	if err := c.exchangeCancel(ctx, cancel); err != nil {
+		c.service.emitError(err)
+	}
+}
+
+func (c *Call) handleEarlyDialogTerminated(msg sip.Message) {
+	remoteTag := sip.HeaderTag(msg.Header("To"))
+	if remoteTag == "" {
+		return
+	}
+	c.mu.Lock()
+	if _, ok := c.earlyDialogs[remoteTag]; !ok {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.earlyDialogs, remoteTag)
+	id := c.id
+	state := c.state
+	c.mu.Unlock()
+	c.service.emit(Event{CallID: id, State: state, Cause: "early dialog terminated", At: time.Now()})
+}
+
+func (c *Call) startRingbackTimer() {
+	timeout := c.service.cfg.RingbackTimeout
+	if timeout <= 0 {
+		return
+	}
+	c.mu.Lock()
+	if c.ringbackStop != nil || c.closed || c.direction != DirectionOutgoing {
+		c.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	c.ringbackStop = stop
+	c.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
+			defer cancel()
+			if err := c.cancelOutgoingInvite(ctx); err != nil {
+				c.service.emitError(fmt.Errorf("ringback timeout: %w", err))
+			}
+		}
+	}()
+}
+
+func (c *Call) stopRingbackTimer() {
+	c.mu.Lock()
+	stop := c.ringbackStop
+	c.ringbackStop = nil
+	c.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
+func (c *Call) startRingingTimer() {
+	timeout := c.service.cfg.RingingTimeout
+	if timeout <= 0 {
+		return
+	}
+	c.mu.Lock()
+	if c.ringingStop != nil || c.closed || c.direction != DirectionIncoming || c.incomingRequest == nil {
+		c.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	c.ringingStop = stop
+	c.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			c.rejectAfterRingingTimeout()
+		}
+	}()
+}
+
+func (c *Call) stopRingingTimer() {
+	c.mu.Lock()
+	stop := c.ringingStop
+	c.ringingStop = nil
+	c.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
+func (c *Call) rejectAfterRingingTimeout() {
+	c.mu.Lock()
+	if c.closed || c.direction != DirectionIncoming || c.state != StateRinging || c.incomingRequest == nil {
+		c.mu.Unlock()
+		return
+	}
+	req := *c.incomingRequest
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
+	defer cancel()
+	if err := c.service.writeStatus(ctx, req, 486, "Busy Here"); err != nil {
+		c.service.emitError(fmt.Errorf("ringing timeout: %w", err))
+		c.finish(StateFailed, err.Error())
+		return
+	}
+	c.finish(StateEnded, "ringing timeout")
+}
+
 func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error) {
 	if answerBody, ok := sdpBody(resp); ok {
 		answer, err := parseSDP(answerBody)
@@ -788,11 +1458,45 @@ func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error)
 		}
 		return answer, true, nil
 	}
+	remoteTag := sip.HeaderTag(resp.Header("To"))
+	if remoteTag == "" {
+		return sdpOffer{}, false, nil
+	}
 	c.mu.Lock()
-	answer := c.earlyAnswer
-	ok := c.hasEarlyAnswer
+	dialog, ok := c.earlyDialogs[remoteTag]
 	c.mu.Unlock()
-	return answer, ok, nil
+	if !ok || !dialog.hasAnswer {
+		return sdpOffer{}, false, nil
+	}
+	return dialog.answer, true, nil
+}
+
+func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) error {
+	c.mu.Lock()
+	c.remoteTag = sip.HeaderTag(resp.Header("To"))
+	c.remoteTo = nonEmpty(resp.Header("To"), c.remoteTo)
+	c.remoteURI = nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), c.remoteURI)
+	c.targetURI = c.remoteURI
+	c.routeSet = reverseValues(resp.HeadersByName("Record-Route"))
+	c.earlyDialogs = nil
+	ack := c.buildACKLocked()
+	bye := c.buildBYELocked(reasonUserTriggered)
+	c.mu.Unlock()
+
+	if err := c.refreshDialogRegistration(); err != nil {
+		return err
+	}
+	if err := c.service.sess.Send(ctx, ack); err != nil {
+		return fmt.Errorf("acknowledging cancelled call 2xx: %w", err)
+	}
+	resp, err := c.service.sess.Exchange(ctx, bye)
+	if err != nil {
+		return fmt.Errorf("releasing cancelled call 2xx: %w", err)
+	}
+	if resp.StatusCode() != 200 {
+		return fmt.Errorf("releasing cancelled call 2xx: expected 200, got %d", resp.StatusCode())
+	}
+	return nil
 }
 
 func (c *Call) sendPRACK(prack sip.Message) {
@@ -805,6 +1509,68 @@ func (c *Call) sendPRACK(prack sip.Message) {
 	}
 	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
 		c.service.emitError(fmt.Errorf("sending call PRACK: expected 2xx, got %d", resp.StatusCode()))
+	}
+}
+
+func (c *Call) beginReliableProvisional(status int, cseq int64, method string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextRSeq++
+	if status == 183 && c.provisionalReady == nil {
+		c.provisionalReady = make(chan struct{})
+	}
+	c.pendingReliable = reliableProvisional{
+		rseq:   c.nextRSeq,
+		cseq:   cseq,
+		method: strings.ToUpper(strings.TrimSpace(method)),
+		status: status,
+	}
+	return c.nextRSeq
+}
+
+func (c *Call) clearReliableProvisional(rseq int64) {
+	c.mu.Lock()
+	if c.pendingReliable.rseq == rseq {
+		c.pendingReliable = reliableProvisional{}
+	}
+	c.mu.Unlock()
+}
+
+func (c *Call) waitForReliableProvisionalAnswer(ctx context.Context) error {
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return errors.New("answering call: call is closed")
+		}
+		wait := c.direction == DirectionIncoming &&
+			c.state == StateRinging &&
+			c.pendingReliable.status == 183 &&
+			((c.delayedOffer && !c.prackAnsweredOffer) || (!c.delayedOffer && !c.provisionalAnswer))
+		ch := c.provisionalReady
+		if wait && ch == nil {
+			ch = make(chan struct{})
+			c.provisionalReady = ch
+		}
+		c.mu.Unlock()
+		if !wait {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("answering call: waiting for PRACK: %w", ctx.Err())
+		case <-ch:
+		}
+	}
+}
+
+func (c *Call) signalProvisionalReady() {
+	c.mu.Lock()
+	ch := c.provisionalReady
+	c.provisionalReady = nil
+	c.mu.Unlock()
+	if ch != nil {
+		close(ch)
 	}
 }
 
@@ -835,7 +1601,10 @@ func (c *Call) prepareMedia(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return transport.Close()
+		if err := transport.Close(); err != nil {
+			return fmt.Errorf("closing prepared call media: %w", err)
+		}
+		return nil
 	}
 	c.transport = transport
 	c.mu.Unlock()
@@ -885,10 +1654,16 @@ func (c *Call) openMedia(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening call media: %w", err)
 	}
+	if transport == nil {
+		return errors.New("opening call media: media transport is nil")
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return transport.Close()
+		if err := transport.Close(); err != nil {
+			return fmt.Errorf("closing opened call media: %w", err)
+		}
+		return nil
 	}
 	c.transport = transport
 	c.mu.Unlock()
@@ -1090,6 +1865,38 @@ func (c *Call) buildACKForResponseLocked(resp sip.Message) sip.Message {
 	return msg
 }
 
+func (c *Call) buildCANCELLocked(reason string) sip.Message {
+	invite := c.inviteRequest
+	state := c.service.reg.State()
+	msg := sip.NewRequest("CANCEL", sip.RequestURI(invite))
+	if via := invite.Header("Via"); via != "" {
+		msg.Headers.Add("Via", via)
+	}
+	msg.Headers.Add("From", invite.Header("From"))
+	msg.Headers.Add("To", invite.Header("To"))
+	msg.Headers.Add("Call-ID", invite.Header("Call-ID"))
+	msg.Headers.Add("CSeq", fmt.Sprintf("%d CANCEL", c.inviteSeq))
+	if maxForwards := invite.Header("Max-Forwards"); maxForwards != "" {
+		msg.Headers.Add("Max-Forwards", maxForwards)
+	}
+	for _, route := range invite.HeadersByName("Route") {
+		msg.Headers.Add("Route", route)
+	}
+	if userAgent := strings.TrimSpace(state.UserAgent); userAgent != "" {
+		msg.Headers.Add("User-Agent", userAgent)
+	}
+	if accessNetworkInfo := strings.TrimSpace(state.AccessNetworkInfo); accessNetworkInfo != "" {
+		msg.Headers.Add("P-Access-Network-Info", accessNetworkInfo)
+	}
+	if securityVerify := invite.Header("Security-Verify"); securityVerify != "" {
+		msg.Headers.Add("Security-Verify", securityVerify)
+	}
+	if reason != "" {
+		msg.Headers.Add("Reason", reason)
+	}
+	return msg
+}
+
 func (c *Call) buildDialogRequest(method string) sip.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1265,27 +2072,46 @@ func (c *Call) finish(state State, cause string) {
 	}
 	c.closed = true
 	id := c.id
+	emit := c.state != state || cause != ""
+	c.state = state
 	attachment := c.dialogAttachment
 	stop := c.inviteOKStop
+	ringbackStop := c.ringbackStop
+	ringingStop := c.ringingStop
 	mediaStop := c.mediaWatchStop
+	provisionalReady := c.provisionalReady
 	c.inviteOKStop = nil
+	c.ringbackStop = nil
+	c.ringingStop = nil
 	c.mediaActivity = nil
 	c.mediaWatchStop = nil
+	c.provisionalReady = nil
 	c.dialogAttachment = nil
 	c.mu.Unlock()
 
 	if stop != nil {
 		close(stop)
 	}
+	if ringbackStop != nil {
+		close(ringbackStop)
+	}
+	if ringingStop != nil {
+		close(ringingStop)
+	}
 	if mediaStop != nil {
 		close(mediaStop)
+	}
+	if provisionalReady != nil {
+		close(provisionalReady)
 	}
 	if attachment != nil {
 		_ = attachment.Close()
 	}
 	_ = c.closeMedia()
 	c.service.removeCall(id)
-	c.setState(state, cause)
+	if emit {
+		c.service.emit(Event{CallID: id, State: state, Cause: cause, At: time.Now()})
+	}
 }
 
 func (s *Service) storeCall(call *Call) error {
@@ -1320,9 +2146,14 @@ func (s *Service) removeCall(callID string) {
 		}
 	}
 	s.mu.Unlock()
-	if call != nil && call.dialogAttachment != nil {
-		_ = call.dialogAttachment.Close()
+	if call != nil {
+		call.mu.Lock()
+		attachment := call.dialogAttachment
 		call.dialogAttachment = nil
+		call.mu.Unlock()
+		if attachment != nil {
+			_ = attachment.Close()
+		}
 	}
 }
 
@@ -1444,7 +2275,7 @@ func addInviteOKSessionTimer(resp *sip.Message, invite sip.Message, cfg Config) 
 	}
 	sessionExpires := strings.TrimSpace(invite.Header("Session-Expires"))
 	if sessionExpires == "" {
-		seconds := int(defaultSessionExpires / time.Second)
+		seconds := sessionExpiresSeconds()
 		if minSE, ok := parseSessionSeconds(invite.Header("Min-SE")); ok && minSE > seconds {
 			seconds = minSE
 		}
@@ -1456,6 +2287,33 @@ func addInviteOKSessionTimer(resp *sip.Message, invite sip.Message, cfg Config) 
 		return
 	}
 	resp.Headers.Set("Session-Expires", strings.TrimSpace(sessionExpires)+";refresher=uac")
+}
+
+func addInviteSessionTimer(invite *sip.Message, cfg Config) {
+	if !cfg.SessionTimer {
+		return
+	}
+	addTokenHeader(invite, "Supported", "timer")
+}
+
+func addTokenHeader(msg *sip.Message, name string, token string) {
+	current := strings.TrimSpace(msg.Header(name))
+	if current == "" {
+		msg.Headers.Set(name, token)
+		return
+	}
+	if sip.TokenListContains(current, token) {
+		return
+	}
+	msg.Headers.Set(name, current+","+token)
+}
+
+func sessionExpiresSeconds() int {
+	return durationSeconds(defaultSessionExpires)
+}
+
+func durationSeconds(d time.Duration) int {
+	return int(d / time.Second)
 }
 
 func parseSessionSeconds(value string) (int, bool) {
@@ -1596,6 +2454,7 @@ func incomingInviteKey(msg sip.Message) string {
 
 func contactValue(state registration.State) string {
 	params := []string{
+		`audio`,
 		fmt.Sprintf(`+g.3gpp.icsi-ref="%s"`, mmtelICSIEncoded),
 		`+g.3gpp.mid-call`,
 		`+g.3gpp.ps2cs-srvcc-orig-pre-alerting`,
@@ -1657,6 +2516,29 @@ func isReliableProvisional(msg sip.Message) bool {
 	return tokenHeaderContains(msg, "Require", "100rel")
 }
 
+func hasEarlyMediaHeader(msg sip.Message) bool {
+	for _, value := range msg.HeadersByName("P-Early-Media") {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func earlyMediaAuthorized(msg sip.Message) bool {
+	for _, value := range msg.HeadersByName("P-Early-Media") {
+		for _, token := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ';' || r == ' ' || r == '\t'
+		}) {
+			switch strings.ToLower(strings.TrimSpace(token)) {
+			case "sendrecv", "sendonly":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func provisionalResponseKey(msg sip.Message) string {
 	rseq := strings.TrimSpace(msg.Header("RSeq"))
 	if rseq == "" {
@@ -1671,6 +2553,36 @@ func parseRSeq(value string) (int64, error) {
 		return 0, fmt.Errorf("building PRACK: invalid RSeq %q", value)
 	}
 	return rseq, nil
+}
+
+type rackHeader struct {
+	rseq   int64
+	cseq   int64
+	method string
+}
+
+func parseRAck(value string) (rackHeader, error) {
+	fields := strings.Fields(value)
+	if len(fields) != 3 {
+		return rackHeader{}, fmt.Errorf("handling PRACK: invalid RAck %q", value)
+	}
+	rseq, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || rseq <= 0 {
+		return rackHeader{}, fmt.Errorf("handling PRACK: invalid RAck RSeq %q", value)
+	}
+	cseq, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || cseq <= 0 {
+		return rackHeader{}, fmt.Errorf("handling PRACK: invalid RAck CSeq %q", value)
+	}
+	method := strings.ToUpper(strings.TrimSpace(fields[2]))
+	if method == "" {
+		return rackHeader{}, fmt.Errorf("handling PRACK: invalid RAck method %q", value)
+	}
+	return rackHeader{rseq: rseq, cseq: cseq, method: method}, nil
+}
+
+func (p reliableProvisional) matches(rack rackHeader) bool {
+	return p.rseq == rack.rseq && p.cseq == rack.cseq && strings.EqualFold(p.method, rack.method)
 }
 
 func tokenHeaderContains(msg sip.Message, name string, want string) bool {

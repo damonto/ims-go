@@ -11,6 +11,8 @@ import (
 type IncomingCall struct {
 	Call       *imscall.Call
 	From       string
+	FromURI    string
+	FromNumber string
 	Offer      imscall.MediaOffer
 	ReceivedAt time.Time
 }
@@ -44,6 +46,8 @@ func (c *Client) handleIncomingCall(event imscall.Incoming) {
 	c.emitIncomingCall(IncomingCall{
 		Call:       event.Call,
 		From:       event.From,
+		FromURI:    event.FromURI,
+		FromNumber: event.FromNumber,
 		Offer:      event.Offer,
 		ReceivedAt: event.Received,
 	})

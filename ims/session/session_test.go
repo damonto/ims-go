@@ -506,6 +506,7 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "ack ignored", msg: newInboundRequest("ACK", "ack-1", "1 ACK"), wantWrites: 0},
+		{name: "unmatched bye gets 481", msg: newInboundRequest("BYE", "bye-1", "1 BYE"), wantWrites: 1, wantStatus: 481},
 		{name: "unhandled request gets 405", msg: newInboundRequest("OPTIONS", "options-1", "1 OPTIONS"), wantWrites: 1, wantStatus: 405},
 	}
 
@@ -684,7 +685,11 @@ func TestRunRetransmitsFinalResponseForRepeatedInboundRequest(t *testing.T) {
 
 func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
-	sess, err := Open(Config{}, transport)
+	sess, err := Open(Config{
+		ResponseDecorator: func(resp *sip.Message) {
+			resp.Headers.Set("Server", "test-agent")
+		},
+	}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -746,6 +751,15 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("responses[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for i, data := range writes[1:] {
+		resp, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage(%d) error = %v", i+1, err)
+		}
+		if got := resp.Header("Server"); got != "test-agent" {
+			t.Fatalf("responses[%d] Server = %q, want test-agent", i+1, got)
 		}
 	}
 
@@ -1055,7 +1069,7 @@ func TestInviteTransactionDefaultTimerDUsesIMSProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	tx := newClientTransaction(sess, transport, newRequest("INVITE", "call-d", "1 INVITE"))
+	tx := newClientTransaction(sess, transport, newRequest("INVITE", "call-d", "1 INVITE"), ExchangeOptions{})
 	if got := tx.timerD(); got != 130*time.Second {
 		t.Fatalf("timerD() = %v, want 130s", got)
 	}

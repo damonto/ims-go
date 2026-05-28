@@ -56,19 +56,26 @@ type wfcProfile struct {
 }
 
 type wfcVoiceProfile struct {
-	RTPProfile                   string                 `json:"rtpProfile"`
-	PTime                        *wfcDuration           `json:"ptime"`
-	MaxPTime                     *wfcDuration           `json:"maxptime"`
-	IncludeGeolocationPIDF       *bool                  `json:"includeGeolocationPIDF"`
-	GeolocationCountry           string                 `json:"geolocationCountry"`
-	QoSPreconditionsSupported    *bool                  `json:"qosPreconditionsSupported"`
-	ReliableProvisionalSupported *bool                  `json:"reliableProvisionalSupported"`
-	SessionTimer                 *bool                  `json:"sessionTimer"`
-	RTPInactivityTimeout         *wfcDuration           `json:"rtpInactivityTimeout"`
-	RTCPInactivityTimeout        *wfcDuration           `json:"rtcpInactivityTimeout"`
-	LocalRTPPortMin              int                    `json:"localRTPPortMin"`
-	LocalRTPPortMax              int                    `json:"localRTPPortMax"`
-	Codecs                       []wfcVoiceCodecProfile `json:"codecs"`
+	RTPProfile                   string                              `json:"rtpProfile"`
+	PTime                        *wfcDuration                        `json:"ptime"`
+	MaxPTime                     *wfcDuration                        `json:"maxptime"`
+	IncludeGeolocationPIDF       *bool                               `json:"includeGeolocationPIDF"`
+	GeolocationCountry           string                              `json:"geolocationCountry"`
+	QoSPreconditionsSupported    *bool                               `json:"qosPreconditionsSupported"`
+	ReliableProvisionalSupported *bool                               `json:"reliableProvisionalSupported"`
+	SessionTimer                 *bool                               `json:"sessionTimer"`
+	SessionExpires               *wfcDuration                        `json:"sessionExpires"`
+	MinimumSessionExpires        *wfcDuration                        `json:"minimumSessionExpires"`
+	MOCallRequestTimeout         *wfcDuration                        `json:"moCallRequestTimeout"`
+	RingbackTimer                *wfcDuration                        `json:"ringbackTimer"`
+	RingingTimer                 *wfcDuration                        `json:"ringingTimer"`
+	AudioASBandwidthKbps         int                                 `json:"audioASBandwidthKbps"`
+	RTPInactivityTimeout         *wfcDuration                        `json:"rtpInactivityTimeout"`
+	RTCPInactivityTimeout        *wfcDuration                        `json:"rtcpInactivityTimeout"`
+	LocalRTPPortMin              int                                 `json:"localRTPPortMin"`
+	LocalRTPPortMax              int                                 `json:"localRTPPortMax"`
+	Codecs                       []wfcVoiceCodecProfile              `json:"codecs"`
+	EVSPayloadDescriptions       map[string]wfcEVSPayloadDescription `json:"evsPayloadDescriptions"`
 }
 
 type wfcVoiceCodecProfile struct {
@@ -79,6 +86,13 @@ type wfcVoiceCodecProfile struct {
 	ModeSet      string             `json:"modeSet"`
 	Bitrate      string             `json:"bitrate"`
 	Bandwidth    string             `json:"bandwidth"`
+	OctetAlign   bool               `json:"octetAlign"`
+}
+
+type wfcEVSPayloadDescription struct {
+	Bitrate             string `json:"bitrate"`
+	Bandwidth           string `json:"bandwidth"`
+	ChannelAwareReceive *int   `json:"channelAwareReceive"`
 }
 
 type wfcDuration struct {
@@ -302,9 +316,6 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 		cfg.IMS.SIPTimers.TJ = profile.IMSSIPTimerJ.Duration
 	}
 	cfg = cfg.withWFCVoiceProfile(profile.IMSVoice)
-	if strings.EqualFold(strings.TrimSpace(profile.IMSHomeDomain), "one.att.net") {
-		cfg = cfg.withATTVoiceProfile()
-	}
 	return cfg
 }
 
@@ -327,8 +338,29 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	if strings.TrimSpace(cfg.IMS.Voice.GeolocationCountry) == "" {
 		cfg.IMS.Voice.GeolocationCountry = profile.GeolocationCountry
 	}
+	if !cfg.IMS.Voice.ReliableProvisional && profile.ReliableProvisionalSupported != nil {
+		cfg.IMS.Voice.ReliableProvisional = *profile.ReliableProvisionalSupported
+	}
 	if !cfg.IMS.Voice.SessionTimer && profile.SessionTimer != nil {
 		cfg.IMS.Voice.SessionTimer = *profile.SessionTimer
+	}
+	if cfg.IMS.Voice.SessionExpires == 0 && profile.SessionExpires != nil {
+		cfg.IMS.Voice.SessionExpires = profile.SessionExpires.Duration
+	}
+	if cfg.IMS.Voice.MinSessionExpires == 0 && profile.MinimumSessionExpires != nil {
+		cfg.IMS.Voice.MinSessionExpires = profile.MinimumSessionExpires.Duration
+	}
+	if cfg.IMS.Voice.MOCallRequestTimeout == 0 && profile.MOCallRequestTimeout != nil {
+		cfg.IMS.Voice.MOCallRequestTimeout = profile.MOCallRequestTimeout.Duration
+	}
+	if cfg.IMS.Voice.RingbackTimeout == 0 && profile.RingbackTimer != nil {
+		cfg.IMS.Voice.RingbackTimeout = profile.RingbackTimer.Duration
+	}
+	if cfg.IMS.Voice.RingingTimeout == 0 && profile.RingingTimer != nil {
+		cfg.IMS.Voice.RingingTimeout = profile.RingingTimer.Duration
+	}
+	if cfg.IMS.Voice.AudioASBandwidthKbps == 0 {
+		cfg.IMS.Voice.AudioASBandwidthKbps = profile.AudioASBandwidthKbps
 	}
 	if cfg.IMS.Voice.RTPInactivityTimeout == 0 && profile.RTPInactivityTimeout != nil {
 		cfg.IMS.Voice.RTPInactivityTimeout = profile.RTPInactivityTimeout.Duration
@@ -343,106 +375,62 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 		cfg.IMS.Voice.LocalRTPPortMax = profile.LocalRTPPortMax
 	}
 	if len(cfg.IMS.Voice.Codecs) == 0 {
-		cfg.IMS.Voice.Codecs = wfcVoiceCodecs(profile.Codecs)
+		cfg.IMS.Voice.Codecs = wfcVoiceCodecs(profile)
 	}
 	return cfg
 }
 
-func wfcVoiceCodecs(codecs []wfcVoiceCodecProfile) []imscall.AudioCodecConfig {
-	if len(codecs) == 0 {
+func wfcVoiceCodecs(profile *wfcVoiceProfile) []imscall.AudioCodecConfig {
+	if profile == nil || len(profile.Codecs) == 0 {
 		return nil
 	}
-	out := make([]imscall.AudioCodecConfig, 0, len(codecs))
-	for _, codec := range codecs {
-		out = append(out, imscall.AudioCodecConfig{
+	out := make([]imscall.AudioCodecConfig, 0, len(profile.Codecs))
+	for _, codec := range profile.Codecs {
+		callCodec := imscall.AudioCodecConfig{
 			Name:         codec.Name,
 			PayloadTypes: append([]int(nil), codec.PayloadTypes...),
 			ClockRate:    codec.ClockRate,
 			Channels:     codec.Channels,
+			OctetAlign:   codec.OctetAlign,
 			ModeSet:      codec.ModeSet,
 			Bitrate:      codec.Bitrate,
 			Bandwidth:    codec.Bandwidth,
-		})
+		}
+		if strings.EqualFold(string(codec.Name), string(imscall.CodecEVS)) {
+			applyWFCVoiceEVSDescription(&callCodec, profile.EVSPayloadDescriptions)
+		}
+		out = append(out, callCodec)
 	}
 	return out
 }
 
-func (cfg Config) withATTVoiceProfile() Config {
-	cfg.IMS.Voice.Codecs = attVoiceCodecs(cfg.IMS.Voice.Codecs)
-	return cfg
+func applyWFCVoiceEVSDescription(codec *imscall.AudioCodecConfig, descriptions map[string]wfcEVSPayloadDescription) {
+	if len(codec.PayloadTypes) == 0 || len(descriptions) == 0 {
+		return
+	}
+	desc, ok := descriptions[fmt.Sprint(codec.PayloadTypes[0])]
+	if !ok {
+		return
+	}
+	if codec.Bitrate == "" {
+		codec.Bitrate = strings.TrimSpace(desc.Bitrate)
+	}
+	if codec.Bandwidth == "" {
+		codec.Bandwidth = strings.TrimSpace(desc.Bandwidth)
+	}
+	if desc.ChannelAwareReceive != nil && validEVSChannelAwareReceive(*desc.ChannelAwareReceive) {
+		value := *desc.ChannelAwareReceive
+		codec.ChAwRecv = &value
+	}
 }
 
-func attVoiceCodecs(codecs []imscall.AudioCodecConfig) []imscall.AudioCodecConfig {
-	profile := map[imscall.AudioCodec]imscall.AudioCodecConfig{
-		imscall.CodecEVS: {
-			Name:         imscall.CodecEVS,
-			PayloadTypes: []int{127},
-			ClockRate:    16000,
-			Bitrate:      "13.2",
-			Bandwidth:    "nb-swb",
-		},
-		imscall.CodecAMRWB: {
-			Name:         imscall.CodecAMRWB,
-			PayloadTypes: []int{104},
-			ClockRate:    16000,
-		},
-		imscall.CodecAMR: {
-			Name:         imscall.CodecAMR,
-			PayloadTypes: []int{110},
-			ClockRate:    8000,
-			ModeSet:      "0,2,4,7",
-		},
-		imscall.CodecPCMU: {
-			Name:         imscall.CodecPCMU,
-			PayloadTypes: []int{0},
-			ClockRate:    8000,
-		},
-		imscall.CodecTelephoneEvent: {
-			Name:         imscall.CodecTelephoneEvent,
-			PayloadTypes: []int{97},
-			ClockRate:    8000,
-		},
+func validEVSChannelAwareReceive(value int) bool {
+	switch value {
+	case -1, 0, 2, 3, 5, 7:
+		return true
+	default:
+		return false
 	}
-	if len(codecs) == 0 {
-		return []imscall.AudioCodecConfig{
-			cloneVoiceCodec(profile[imscall.CodecAMRWB]),
-			cloneVoiceCodec(profile[imscall.CodecAMR]),
-			cloneVoiceCodec(profile[imscall.CodecTelephoneEvent]),
-		}
-	}
-
-	out := make([]imscall.AudioCodecConfig, 0, len(codecs))
-	hasSpeech := false
-	hasDTMF := false
-	seen := make(map[imscall.AudioCodec]struct{}, len(codecs))
-	for _, codec := range codecs {
-		profileCodec, ok := profile[codec.Name]
-		if !ok {
-			continue
-		}
-		if _, ok := seen[profileCodec.Name]; ok {
-			continue
-		}
-		seen[profileCodec.Name] = struct{}{}
-		if profileCodec.Name == imscall.CodecTelephoneEvent {
-			hasDTMF = true
-		} else {
-			hasSpeech = true
-		}
-		out = append(out, cloneVoiceCodec(profileCodec))
-	}
-	if !hasSpeech {
-		out = append([]imscall.AudioCodecConfig{cloneVoiceCodec(profile[imscall.CodecAMR])}, out...)
-	}
-	if !hasDTMF {
-		out = append(out, cloneVoiceCodec(profile[imscall.CodecTelephoneEvent]))
-	}
-	return out
-}
-
-func cloneVoiceCodec(codec imscall.AudioCodecConfig) imscall.AudioCodecConfig {
-	codec.PayloadTypes = append([]int(nil), codec.PayloadTypes...)
-	return codec
 }
 
 func renderWFCIdentity(template string, cfg Config, card Card) string {

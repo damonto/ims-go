@@ -219,6 +219,7 @@ func (tx *serverTransaction) handleCancel(ctx context.Context) error {
 	}
 	resp := sip.NewResponse(487, "Request Terminated")
 	resp.Headers = sip.ResponseHeaders(req, 487)
+	tx.session.applyResponseDecorator(&resp)
 	if err := tx.session.writeResponse(ctx, transport, req, resp); err != nil {
 		return err
 	}

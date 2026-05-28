@@ -19,6 +19,7 @@ type NegotiatedMedia struct {
 	PayloadType     int
 	ClockRate       int
 	Channels        int
+	OctetAlign      bool
 	DTMFPayloadType int
 	DTMFClockRate   int
 	PTime           time.Duration
@@ -27,12 +28,19 @@ type NegotiatedMedia struct {
 }
 
 type sdpOffer struct {
-	RemoteIP   net.IP
-	RemotePort int
-	Profile    string
-	Payloads   []int
-	Codecs     map[int]AudioCodecConfig
-	PTime      time.Duration
+	RemoteIP         net.IP
+	RemotePort       int
+	Profile          string
+	Payloads         []int
+	Codecs           map[int]AudioCodecConfig
+	PTime            time.Duration
+	UnsupportedMedia []sdpMediaLine
+}
+
+type sdpMediaLine struct {
+	Media    string
+	Protocol string
+	Formats  []string
 }
 
 const (
@@ -67,7 +75,7 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 	fmt.Fprintf(&b, "c=IN %s %s\r\n", ipType, localIP.String())
 	fmt.Fprintf(&b, "t=0 0\r\n")
 	fmt.Fprintf(&b, "m=audio %d %s %s\r\n", localPort, cfg.RTPProfile, strings.Join(payloads, " "))
-	if bandwidth := codecBandwidthAS(firstSpeechCodec(codecs)); bandwidth > 0 {
+	if bandwidth := audioBandwidthAS(cfg, firstSpeechCodec(codecs)); bandwidth > 0 {
 		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
 	}
 	appendRTCPBandwidth(&b, rtcpSenderBandwidth, rtcpReceiverBandwidth)
@@ -86,6 +94,7 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 		PayloadType: firstSpeechCodec(codecs).PayloadTypes[0],
 		ClockRate:   firstSpeechCodec(codecs).ClockRate,
 		Channels:    firstSpeechCodec(codecs).Channels,
+		OctetAlign:  firstSpeechCodec(codecs).OctetAlign,
 		PTime:       ptime,
 	}
 	return []byte(b.String()), media, nil
@@ -128,7 +137,7 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 		answerPayloads = append(answerPayloads, strconv.Itoa(dtmf.PayloadTypes[0]))
 	}
 	fmt.Fprintf(&b, "m=audio %d %s %s\r\n", localPort, cfg.RTPProfile, strings.Join(answerPayloads, " "))
-	if bandwidth := codecBandwidthAS(selected); bandwidth > 0 {
+	if bandwidth := audioBandwidthAS(cfg, selected); bandwidth > 0 {
 		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
 	}
 	appendRTCPBandwidth(&b, rtcpSenderBandwidth, rtcpReceiverBandwidth)
@@ -143,7 +152,21 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 		fmt.Fprintf(&b, "a=maxptime:%d\r\n", durationMillis(cfg.MaxPTime))
 	}
 	fmt.Fprintf(&b, "a=sendrecv\r\n")
+	appendRejectedMedia(&b, remote.UnsupportedMedia)
 	return []byte(b.String()), negotiatedMedia(remote, selected, ptime, dtmf, hasDTMF), nil
+}
+
+func appendRejectedMedia(b *strings.Builder, media []sdpMediaLine) {
+	for _, m := range media {
+		if m.Media == "" || m.Protocol == "" {
+			continue
+		}
+		line := "m=" + m.Media + " 0 " + m.Protocol
+		if len(m.Formats) > 0 {
+			line += " " + strings.Join(m.Formats, " ")
+		}
+		fmt.Fprintf(b, "%s\r\n", line)
+	}
 }
 
 func appendRTCPBandwidth(b *strings.Builder, rs int, rr int) {
@@ -157,6 +180,7 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Dura
 		PayloadType: selected.PayloadTypes[0],
 		ClockRate:   selected.ClockRate,
 		Channels:    selected.Channels,
+		OctetAlign:  selected.OctetAlign,
 		PTime:       ptime,
 		RemoteIP:    append(net.IP(nil), remote.RemoteIP...),
 		RemotePort:  remote.RemotePort,
@@ -171,6 +195,7 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Dura
 func parseSDP(text []byte) (sdpOffer, error) {
 	offer := sdpOffer{Codecs: make(map[int]AudioCodecConfig)}
 	var mediaPayloads map[int]struct{}
+	inAudio := false
 	lines := strings.FieldsFunc(string(text), func(r rune) bool { return r == '\n' || r == '\r' })
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -183,12 +208,15 @@ func parseSDP(text []byte) (sdpOffer, error) {
 			if err != nil {
 				return sdpOffer{}, err
 			}
-			offer.RemoteIP = ip
+			if inAudio || offer.RemoteIP == nil {
+				offer.RemoteIP = ip
+			}
 		case strings.HasPrefix(line, "m=audio "):
 			port, profile, payloads, err := parseAudioLine(line)
 			if err != nil {
 				return sdpOffer{}, err
 			}
+			inAudio = true
 			offer.RemotePort = port
 			offer.Profile = profile
 			offer.Payloads = payloads
@@ -196,7 +224,17 @@ func parseSDP(text []byte) (sdpOffer, error) {
 			for _, payload := range payloads {
 				mediaPayloads[payload] = struct{}{}
 			}
+		case strings.HasPrefix(line, "m="):
+			inAudio = false
+			media, err := parseMediaLine(line)
+			if err != nil {
+				return sdpOffer{}, err
+			}
+			offer.UnsupportedMedia = append(offer.UnsupportedMedia, media)
 		case strings.HasPrefix(line, "a=rtpmap:"):
+			if !inAudio {
+				continue
+			}
 			payloadType, codec, err := parseRTPMap(line)
 			if err != nil {
 				return sdpOffer{}, err
@@ -208,16 +246,25 @@ func parseSDP(text []byte) (sdpOffer, error) {
 				offer.Codecs[payloadType] = codec
 			}
 		case strings.HasPrefix(line, "a=fmtp:"):
+			if !inAudio {
+				continue
+			}
 			payloadType, fmtp := parseFMTP(line)
 			codec := offer.Codecs[payloadType]
+			codec.OctetAlign = fmtpFlag(fmtp, "octet-align")
 			codec.ModeSet = fmtpParam(fmtp, "mode-set")
 			codec.Bitrate = fmtpParam(fmtp, "br")
 			codec.Bandwidth = fmtpParam(fmtp, "bw")
+			if value, ok := fmtpSignedParam(fmtp, "ch-aw-recv"); ok {
+				codec.ChAwRecv = &value
+			}
 			if codec.Name != "" {
 				offer.Codecs[payloadType] = codec
 			}
 		case strings.HasPrefix(line, "a=ptime:"):
-			offer.PTime = parseSDPDuration(strings.TrimPrefix(line, "a=ptime:"))
+			if inAudio {
+				offer.PTime = parseSDPDuration(strings.TrimPrefix(line, "a=ptime:"))
+			}
 		}
 	}
 	if offer.RemotePort == 0 {
@@ -312,14 +359,26 @@ func chooseCodec(remote sdpOffer, local []AudioCodecConfig) (AudioCodecConfig, b
 		if remoteCodec.Channels != 0 {
 			selected.Channels = remoteCodec.Channels
 		}
+		if selected.Name == CodecEVS {
+			selected.ModeSet = remoteCodec.ModeSet
+			selected.Bitrate = remoteCodec.Bitrate
+			selected.Bandwidth = remoteCodec.Bandwidth
+		}
 		if selected.ModeSet == "" {
 			selected.ModeSet = remoteCodec.ModeSet
+		}
+		if remoteCodec.OctetAlign {
+			selected.OctetAlign = true
 		}
 		if selected.Bitrate == "" {
 			selected.Bitrate = remoteCodec.Bitrate
 		}
 		if selected.Bandwidth == "" {
 			selected.Bandwidth = remoteCodec.Bandwidth
+		}
+		if remoteCodec.ChAwRecv != nil {
+			value := *remoteCodec.ChAwRecv
+			selected.ChAwRecv = &value
 		}
 		return selected, true
 	}
@@ -386,7 +445,22 @@ func appendAnswerCodecAttributes(b *strings.Builder, codec AudioCodecConfig) {
 func offerCodecFMTP(codec AudioCodecConfig) string {
 	switch codec.Name {
 	case CodecAMR, CodecAMRWB:
-		return "octet-align=1"
+		if codec.OctetAlign {
+			return "octet-align=1"
+		}
+		return ""
+	case CodecEVS:
+		var params []string
+		if codec.Bitrate != "" {
+			params = append(params, "br="+codec.Bitrate)
+		}
+		if codec.Bandwidth != "" {
+			params = append(params, "bw="+codec.Bandwidth)
+		}
+		if codec.ChAwRecv != nil {
+			params = append(params, "ch-aw-recv="+strconv.Itoa(*codec.ChAwRecv))
+		}
+		return strings.Join(params, ";")
 	default:
 		return answerCodecFMTP(codec)
 	}
@@ -396,7 +470,9 @@ func answerCodecFMTP(codec AudioCodecConfig) string {
 	var params []string
 	switch codec.Name {
 	case CodecAMR, CodecAMRWB:
-		params = append(params, "octet-align=1")
+		if codec.OctetAlign {
+			params = append(params, "octet-align=1")
+		}
 		if codec.ModeSet != "" {
 			params = append(params, "mode-set="+codec.ModeSet)
 		}
@@ -407,11 +483,21 @@ func answerCodecFMTP(codec AudioCodecConfig) string {
 		if codec.Bandwidth != "" {
 			params = append(params, "bw="+codec.Bandwidth)
 		}
+		if codec.ChAwRecv != nil {
+			params = append(params, "ch-aw-recv="+strconv.Itoa(*codec.ChAwRecv))
+		}
 		if codec.ModeSet != "" {
 			params = append(params, "mode-set="+codec.ModeSet)
 		}
 	}
 	return strings.Join(params, ";")
+}
+
+func audioBandwidthAS(cfg Config, codec AudioCodecConfig) int {
+	if cfg.AudioASBandwidthKbps > 0 {
+		return cfg.AudioASBandwidthKbps
+	}
+	return codecBandwidthAS(codec)
 }
 
 func codecBandwidthAS(codec AudioCodecConfig) int {
@@ -472,6 +558,21 @@ func parseAudioLine(line string) (int, string, []int, error) {
 		payloads = append(payloads, payload)
 	}
 	return port, fields[1], payloads, nil
+}
+
+func parseMediaLine(line string) (sdpMediaLine, error) {
+	fields := strings.Fields(strings.TrimPrefix(line, "m="))
+	if len(fields) < 3 {
+		return sdpMediaLine{}, fmt.Errorf("parsing call SDP: invalid media line %q", line)
+	}
+	if _, ok := parseBoundedDecimal(fields[1], 0, 65535); !ok {
+		return sdpMediaLine{}, fmt.Errorf("parsing call SDP: invalid media port %q", fields[1])
+	}
+	return sdpMediaLine{
+		Media:    fields[0],
+		Protocol: fields[2],
+		Formats:  append([]string(nil), fields[3:]...),
+	}, nil
 }
 
 func parseRTPPayloadType(value string) (int, bool) {
@@ -560,6 +661,29 @@ func fmtpParam(fmtp, want string) string {
 	return ""
 }
 
+func fmtpSignedParam(fmtp, want string) (int, bool) {
+	value := fmtpParam(fmtp, want)
+	if value == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func fmtpFlag(fmtp, want string) bool {
+	for _, part := range strings.Split(fmtp, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(name, want) {
+			continue
+		}
+		return strings.TrimSpace(value) == "1"
+	}
+	return false
+}
+
 func parseSDPDuration(value string) time.Duration {
 	ms, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || ms < 0 {
@@ -599,6 +723,10 @@ func cloneCodecConfigs(codecs []AudioCodecConfig) []AudioCodecConfig {
 
 func cloneCodecConfig(codec AudioCodecConfig) AudioCodecConfig {
 	codec.PayloadTypes = append([]int(nil), codec.PayloadTypes...)
+	if codec.ChAwRecv != nil {
+		value := *codec.ChAwRecv
+		codec.ChAwRecv = &value
+	}
 	return codec
 }
 

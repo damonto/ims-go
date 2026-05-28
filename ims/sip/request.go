@@ -11,7 +11,7 @@ import (
 
 const (
 	DefaultClientAllow     = "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,REFER,UPDATE"
-	DefaultClientSupported = "100rel,path,replaces,sec-agree"
+	DefaultClientSupported = "100rel,199,path,replaces,sec-agree"
 )
 
 type SecurityAgreement struct {
