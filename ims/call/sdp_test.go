@@ -132,6 +132,47 @@ func TestParseSDPInfersStaticRTPPayloads(t *testing.T) {
 	}
 }
 
+func TestParseSDPReadsRTCPBandwidth(t *testing.T) {
+	tests := []struct {
+		name         string
+		sdp          string
+		wantRS       int
+		wantRR       int
+		wantDisabled bool
+	}{
+		{
+			name:         "rtcp disabled",
+			sdp:          "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\nb=RS:0\r\nb=RR:0\r\na=rtpmap:104 AMR-WB/16000\r\n",
+			wantRS:       0,
+			wantRR:       0,
+			wantDisabled: true,
+		},
+		{
+			name:   "rtcp enabled with bandwidth",
+			sdp:    "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\nb=RS:120\r\nb=RR:240\r\na=rtpmap:104 AMR-WB/16000\r\n",
+			wantRS: 120,
+			wantRR: 240,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			offer, err := parseSDP([]byte(tt.sdp))
+			if err != nil {
+				t.Fatalf("parseSDP() error = %v", err)
+			}
+			if offer.RTCPSenderBandwidth == nil || *offer.RTCPSenderBandwidth != tt.wantRS {
+				t.Fatalf("RTCP sender bandwidth = %v, want %d", offer.RTCPSenderBandwidth, tt.wantRS)
+			}
+			if offer.RTCPReceiverBandwidth == nil || *offer.RTCPReceiverBandwidth != tt.wantRR {
+				t.Fatalf("RTCP receiver bandwidth = %v, want %d", offer.RTCPReceiverBandwidth, tt.wantRR)
+			}
+			if got := rtcpDisabled(offer); got != tt.wantDisabled {
+				t.Fatalf("rtcpDisabled() = %v, want %v", got, tt.wantDisabled)
+			}
+		})
+	}
+}
+
 func TestParseSDPRejectsInvalidNumbers(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -163,6 +204,11 @@ func TestParseSDPRejectsInvalidNumbers(t *testing.T) {
 			sdp:     "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\na=rtpmap:104 AMR-WB/16000/0\r\n",
 			wantErr: "invalid rtpmap channels",
 		},
+		{
+			name:    "rtcp bandwidth must be non-negative",
+			sdp:     "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\nb=RR:-1\r\na=rtpmap:104 AMR-WB/16000\r\n",
+			wantErr: "invalid RR bandwidth",
+		},
 	}
 
 	for _, tt := range tests {
@@ -173,6 +219,54 @@ func TestParseSDPRejectsInvalidNumbers(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("parseSDP() error = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildSDPAnswerReflectsDisabledRTCP(t *testing.T) {
+	tests := []struct {
+		name         string
+		sdp          string
+		want         []string
+		wantDisabled bool
+	}{
+		{
+			name:         "both rtcp bandwidth directions disabled",
+			sdp:          "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\nb=RS:0\r\nb=RR:0\r\na=rtpmap:104 AMR-WB/16000\r\n",
+			want:         []string{"b=RS:0", "b=RR:0"},
+			wantDisabled: true,
+		},
+		{
+			name:         "only receiver bandwidth disabled",
+			sdp:          "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\nb=RR:0\r\na=rtpmap:104 AMR-WB/16000\r\n",
+			want:         []string{"b=RS:0", "b=RR:0"},
+			wantDisabled: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := (Config{}).Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			remote, err := parseSDP([]byte(tt.sdp))
+			if err != nil {
+				t.Fatalf("parseSDP() error = %v", err)
+			}
+
+			body, media, err := buildSDPAnswer(cfg, net.IPv4(10, 0, 0, 2), 40000, remote, MediaOffer{})
+			if err != nil {
+				t.Fatalf("buildSDPAnswer() error = %v", err)
+			}
+			text := string(body)
+			for _, want := range tt.want {
+				if !strings.Contains(text, want) {
+					t.Fatalf("SDP answer missing %q:\n%s", want, text)
+				}
+			}
+			if got := media.RTCPDisabled; got != tt.wantDisabled {
+				t.Fatalf("NegotiatedMedia.RTCPDisabled = %v, want %v", got, tt.wantDisabled)
 			}
 		})
 	}

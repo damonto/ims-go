@@ -157,6 +157,17 @@ func (m Message) StatusCode() int {
 	return code
 }
 
+func (m Message) ReasonPhrase() string {
+	if m.IsRequest() {
+		return ""
+	}
+	parts := strings.SplitN(m.StartLine, " ", 3)
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.TrimSpace(parts[2])
+}
+
 func (m Message) Header(name string) string {
 	return m.Headers.Get(name)
 }

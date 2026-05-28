@@ -395,6 +395,41 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	}
 }
 
+func TestValidateInviteOKDoesNotRequireAccept(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers sip.Headers
+		wantErr bool
+	}{
+		{
+			name: "recv info and sdp without accept",
+			headers: sip.Headers{
+				{Name: "Recv-Info", Value: infoPackage},
+				{Name: "Content-Type", Value: "application/sdp"},
+			},
+		},
+		{
+			name: "missing recv info",
+			headers: sip.Headers{
+				{Name: "Content-Type", Value: "application/sdp"},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := sip.NewResponse(200, "OK")
+			msg.Headers = tt.headers
+			msg.Body = []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")
+
+			err := validateInviteOK(msg)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("validateInviteOK() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)

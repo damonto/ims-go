@@ -1,16 +1,21 @@
 package call
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
-	rtpHeaderSize    = 12
-	rtpVersion       = 2
-	AMRNoModeRequest = 15
+	rtpHeaderSize      = 12
+	rtpVersion         = 2
+	rtcpRRPacketType   = 201
+	rtcpSDESPacketType = 202
+	rtcpSDESCNAMEItem  = 1
+	AMRNoModeRequest   = 15
 )
 
 var (
@@ -95,6 +100,53 @@ func BuildRTPPacket(packet RTPPacket) ([]byte, error) {
 	binary.BigEndian.PutUint32(out[8:12], packet.SSRC)
 	copy(out[rtpHeaderSize:], packet.Payload)
 	return out, nil
+}
+
+func randomRTCPSSRC() uint32 {
+	var data [4]byte
+	if _, err := rand.Read(data[:]); err == nil {
+		if ssrc := binary.BigEndian.Uint32(data[:]); ssrc != 0 {
+			return ssrc
+		}
+	}
+	return uint32(time.Now().UnixNano()) | 1
+}
+
+func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
+	if ssrc == 0 {
+		ssrc = 1
+	}
+	cname = strings.TrimSpace(cname)
+	if len(cname) > 255 {
+		cname = cname[:255]
+	}
+	if cname == "" {
+		cname = "ims-client"
+	}
+
+	rr := make([]byte, 8)
+	rr[0] = rtpVersion << 6
+	rr[1] = rtcpRRPacketType
+	binary.BigEndian.PutUint16(rr[2:4], 1)
+	binary.BigEndian.PutUint32(rr[4:8], ssrc)
+
+	sdesLen := 4 + 2 + len(cname) + 1
+	for sdesLen%4 != 0 {
+		sdesLen++
+	}
+	sdes := make([]byte, 4+sdesLen)
+	sdes[0] = (rtpVersion << 6) | 1
+	sdes[1] = rtcpSDESPacketType
+	binary.BigEndian.PutUint16(sdes[2:4], uint16(len(sdes)/4-1))
+	binary.BigEndian.PutUint32(sdes[4:8], ssrc)
+	sdes[8] = rtcpSDESCNAMEItem
+	sdes[9] = byte(len(cname))
+	copy(sdes[10:], cname)
+
+	out := make([]byte, 0, len(rr)+len(sdes))
+	out = append(out, rr...)
+	out = append(out, sdes...)
+	return out
 }
 
 func ParseAMRPayload(media NegotiatedMedia, payload []byte) (AMRPayload, error) {

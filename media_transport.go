@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	imscall "github.com/damonto/ims-client/ims/call"
 	"github.com/damonto/ims-client/swu/packet"
 	swutunnel "github.com/damonto/ims-client/swu/tunnel"
 )
+
+const mediaTransportDrainDelay = 2 * time.Second
 
 type tunnelMediaTransport struct {
 	session    *swutunnel.Session
@@ -188,13 +191,23 @@ func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	t.mu.Lock()
 	closed := t.closed
 	local := cloneMediaUDPAddr(t.local)
+	remote := cloneMediaUDPAddr(t.remote)
 	t.mu.Unlock()
-	if closed || local == nil {
+	if local == nil {
 		return false
 	}
 	rtcp := mediaAddrMatches(pkt.UDP.Dst, mediaPortAddr(local, true))
 	if !mediaAddrMatches(pkt.UDP.Dst, local) && !rtcp {
 		return false
+	}
+	if closed {
+		if remote == nil {
+			return false
+		}
+		return mediaAddrMatches(pkt.UDP.Src, mediaPortAddr(remote, rtcp))
+	}
+	if remote == nil {
+		return true
 	}
 	t.mu.Lock()
 	count := t.nextMediaCountLocked(rtcp, true)
@@ -278,8 +291,13 @@ func (t *tunnelMediaTransport) closeWithError(err error) {
 		t.terminalErr = err
 		attachment := t.attachment
 		t.mu.Unlock()
-		if attachment != nil {
+		if attachment != nil && err != nil {
 			_ = attachment.Close()
+		}
+		if attachment != nil && err == nil {
+			time.AfterFunc(mediaTransportDrainDelay, func() {
+				_ = attachment.Close()
+			})
 		}
 		close(t.done)
 	})

@@ -176,7 +176,7 @@ func (s *Service) Subscribe(ctx context.Context) error {
 		return nil
 	}
 	if resp.StatusCode() != 200 {
-		return fmt.Errorf("subscribing IMS registration: expected 200, got %d", resp.StatusCode())
+		return fmt.Errorf("subscribing IMS registration: expected 200, got %w", sip.NewResponseError(resp))
 	}
 	return nil
 }
@@ -445,7 +445,7 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			continue
 		}
 		if resp.StatusCode() != 200 {
-			return fmt.Errorf("registering IMS: expected 200, got %d", resp.StatusCode())
+			return fmt.Errorf("registering IMS: expected 200, got %w", sip.NewResponseError(resp))
 		}
 		s.applyRegisterSuccess(resp)
 		return nil
@@ -713,7 +713,7 @@ func (s *Service) handleRefreshRegistration(resp sip.Message, state *refreshRegi
 		state.restarted = true
 		return false, nil
 	default:
-		return false, fmt.Errorf("refreshing IMS registration: unexpected status %d", resp.StatusCode())
+		return false, fmt.Errorf("refreshing IMS registration: unexpected response: %w", sip.NewResponseError(resp))
 	}
 }
 
@@ -756,7 +756,7 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 		*challenged = true
 		return false, nil
 	default:
-		return false, fmt.Errorf("deregistering IMS: unexpected status %d", resp.StatusCode())
+		return false, fmt.Errorf("deregistering IMS: unexpected response: %w", sip.NewResponseError(resp))
 	}
 }
 

@@ -37,6 +37,7 @@ type Config struct {
 	AudioASBandwidthKbps   int
 	RTPInactivityTimeout   time.Duration
 	RTCPInactivityTimeout  time.Duration
+	RTCPSendInterval       time.Duration
 	LocalRTPPortMin        int
 	LocalRTPPortMax        int
 	PrepareMedia           func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
@@ -79,6 +80,11 @@ type MediaTransport interface {
 	Close() error
 }
 
+type RTCPMediaTransport interface {
+	ReadRTCP(ctx context.Context) ([]byte, net.Addr, error)
+	WriteRTCP(ctx context.Context, data []byte) error
+}
+
 const (
 	defaultRTPProfile      = "RTP/AVP"
 	defaultPTime           = 20 * time.Millisecond
@@ -86,6 +92,7 @@ const (
 	defaultSessionExpires  = 1800 * time.Second
 	defaultRTPInactivity   = 20 * time.Second
 	defaultRTCPInactivity  = 20 * time.Second
+	defaultRTCPSend        = 5 * time.Second
 	defaultLocalRTPPortMin = 40000
 	defaultLocalRTPPortMax = 40100
 )
@@ -161,6 +168,12 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	if cfg.RTCPInactivityTimeout == 0 {
 		cfg.RTCPInactivityTimeout = defaultRTCPInactivity
+	}
+	if cfg.RTCPSendInterval < 0 {
+		return Config{}, errors.New("normalizing call config: rtcp send interval must be >= 0")
+	}
+	if cfg.RTCPSendInterval == 0 {
+		cfg.RTCPSendInterval = defaultRTCPSend
 	}
 	if cfg.LocalRTPPortMin == 0 {
 		cfg.LocalRTPPortMin = defaultLocalRTPPortMin

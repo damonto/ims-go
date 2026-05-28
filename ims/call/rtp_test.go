@@ -2,6 +2,7 @@ package call
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -29,6 +30,39 @@ func TestRTPPacketRoundTrip(t *testing.T) {
 		got.Marker != packet.Marker ||
 		!bytes.Equal(got.Payload, packet.Payload) {
 		t.Fatalf("ParseRTPPacket() = %+v, want %+v", got, packet)
+	}
+}
+
+func TestBuildRTCPReceiverReport(t *testing.T) {
+	tests := []struct {
+		name  string
+		ssrc  uint32
+		cname string
+	}{
+		{name: "receiver report with cname", ssrc: 0x01020304, cname: "call-id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire := buildRTCPReceiverReport(tt.ssrc, tt.cname)
+			if len(wire) < 20 {
+				t.Fatalf("RTCP length = %d, want compound packet", len(wire))
+			}
+			if got := wire[0] >> 6; got != rtpVersion {
+				t.Fatalf("RR version = %d, want %d", got, rtpVersion)
+			}
+			if got := wire[1]; got != rtcpRRPacketType {
+				t.Fatalf("RR packet type = %d, want %d", got, rtcpRRPacketType)
+			}
+			if got := binary.BigEndian.Uint32(wire[4:8]); got != tt.ssrc {
+				t.Fatalf("RR SSRC = %#x, want %#x", got, tt.ssrc)
+			}
+			if got := wire[9]; got != rtcpSDESPacketType {
+				t.Fatalf("SDES packet type = %d, want %d", got, rtcpSDESPacketType)
+			}
+			if !bytes.Contains(wire, []byte(tt.cname)) {
+				t.Fatalf("RTCP packet missing CNAME %q: %x", tt.cname, wire)
+			}
+		})
 	}
 }
 

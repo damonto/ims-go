@@ -72,6 +72,7 @@ type wfcVoiceProfile struct {
 	AudioASBandwidthKbps         int                                 `json:"audioASBandwidthKbps"`
 	RTPInactivityTimeout         *wfcDuration                        `json:"rtpInactivityTimeout"`
 	RTCPInactivityTimeout        *wfcDuration                        `json:"rtcpInactivityTimeout"`
+	RTCPSendInterval             *wfcDuration                        `json:"rtcpSendInterval"`
 	LocalRTPPortMin              int                                 `json:"localRTPPortMin"`
 	LocalRTPPortMax              int                                 `json:"localRTPPortMax"`
 	Codecs                       []wfcVoiceCodecProfile              `json:"codecs"`
@@ -367,6 +368,9 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	}
 	if cfg.IMS.Voice.RTCPInactivityTimeout == 0 && profile.RTCPInactivityTimeout != nil {
 		cfg.IMS.Voice.RTCPInactivityTimeout = profile.RTCPInactivityTimeout.Duration
+	}
+	if cfg.IMS.Voice.RTCPSendInterval == 0 && profile.RTCPSendInterval != nil {
+		cfg.IMS.Voice.RTCPSendInterval = profile.RTCPSendInterval.Duration
 	}
 	if cfg.IMS.Voice.LocalRTPPortMin == 0 {
 		cfg.IMS.Voice.LocalRTPPortMin = profile.LocalRTPPortMin

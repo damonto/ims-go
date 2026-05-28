@@ -18,10 +18,11 @@ func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {
 		dstPort    int
 		remote     *net.UDPAddr
 		wantHandle bool
+		wantQueue  bool
 	}{
-		{name: "rtp", srcPort: 50000, dstPort: 40000, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: true},
-		{name: "rtcp", srcPort: 50001, dstPort: 40001, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: true},
-		{name: "rtp from alternate source port", srcPort: 51000, dstPort: 40000, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: true},
+		{name: "rtp", srcPort: 50000, dstPort: 40000, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: true, wantQueue: true},
+		{name: "rtcp", srcPort: 50001, dstPort: 40001, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: true, wantQueue: true},
+		{name: "rtp from alternate source port", srcPort: 51000, dstPort: 40000, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: true, wantQueue: true},
 		{name: "unrelated destination", srcPort: 50000, dstPort: 40002, remote: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, wantHandle: false},
 		{name: "prepared rtp before remote is known", srcPort: 50000, dstPort: 40000, wantHandle: true},
 	}
@@ -46,6 +47,12 @@ func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {
 				t.Fatalf("HandleInnerPacket() = %v, want %v", got, tt.wantHandle)
 			}
 			if !tt.wantHandle {
+				return
+			}
+			if !tt.wantQueue {
+				if len(transport.readCh) != 0 || len(transport.rtcpCh) != 0 {
+					t.Fatal("HandleInnerPacket() queued media before remote was configured")
+				}
 				return
 			}
 			readPacket := transport.ReadPacket
@@ -142,6 +149,55 @@ func TestTunnelMediaTransportNotifiesMediaPackets(t *testing.T) {
 			}
 			if got.RTCPBye != tt.wantBye {
 				t.Fatalf("MediaPacket.RTCPBye = %v, want %v", got.RTCPBye, tt.wantBye)
+			}
+		})
+	}
+}
+
+func TestTunnelMediaTransportDrainsPacketsAfterClose(t *testing.T) {
+	tests := []struct {
+		name       string
+		srcIP      net.IP
+		srcPort    int
+		dstPort    int
+		wantHandle bool
+	}{
+		{name: "closed rtp from negotiated remote", srcIP: net.IPv4(192, 0, 2, 10), srcPort: 50000, dstPort: 40000, wantHandle: true},
+		{name: "closed rtcp from negotiated remote", srcIP: net.IPv4(192, 0, 2, 10), srcPort: 50001, dstPort: 40001, wantHandle: true},
+		{name: "closed rtp from new remote", srcIP: net.IPv4(192, 0, 2, 20), srcPort: 51000, dstPort: 40000},
+		{name: "closed rtp from alternate source port", srcIP: net.IPv4(192, 0, 2, 10), srcPort: 51000, dstPort: 40000},
+		{name: "closed unrelated destination", srcIP: net.IPv4(192, 0, 2, 10), srcPort: 50000, dstPort: 40002},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan imscall.MediaPacket, 1)
+			transport := &tunnelMediaTransport{
+				logger:   testMediaLogger(),
+				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+				remote:   &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
+				readCh:   make(chan tunnelMediaPacket, 1),
+				rtcpCh:   make(chan tunnelMediaPacket, 1),
+				done:     make(chan struct{}),
+				onPacket: func(packet imscall.MediaPacket) { events <- packet },
+			}
+			if err := transport.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			got := transport.HandleInnerPacket(packet.InnerPacket{
+				UDP: &packet.UDPSegment{
+					Src:     &net.UDPAddr{IP: tt.srcIP, Port: tt.srcPort},
+					Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: tt.dstPort},
+					Payload: []byte("late media"),
+				},
+			})
+			if got != tt.wantHandle {
+				t.Fatalf("HandleInnerPacket() = %v, want %v", got, tt.wantHandle)
+			}
+			if len(events) != 0 {
+				t.Fatal("HandleInnerPacket() notified media activity after close")
+			}
+			if len(transport.readCh) != 0 || len(transport.rtcpCh) != 0 {
+				t.Fatal("HandleInnerPacket() queued media after close")
 			}
 		})
 	}

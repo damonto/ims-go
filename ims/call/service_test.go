@@ -36,6 +36,17 @@ type callMediaTransport struct {
 	remote   net.Addr
 	onPacket func(MediaPacket)
 	closed   bool
+	rtcpCh   chan []byte
+}
+
+type callRTPOnlyMediaTransport struct {
+	local *net.UDPAddr
+
+	mu       sync.Mutex
+	remote   net.Addr
+	onPacket func(MediaPacket)
+	closed   bool
+	writeCh  chan []byte
 }
 
 func newCallStubTransport() *callStubTransport {
@@ -170,6 +181,21 @@ func (t *callMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, 
 
 func (t *callMediaTransport) WritePacket(ctx context.Context, data []byte) error { return nil }
 
+func (t *callMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
+	t.mu.Lock()
+	ch := t.rtcpCh
+	t.mu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	select {
+	case ch <- append([]byte(nil), data...):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (t *callMediaTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -190,6 +216,49 @@ func (t *callMediaTransport) notify(packet MediaPacket) {
 	if onPacket != nil {
 		onPacket(packet)
 	}
+}
+
+func (t *callRTPOnlyMediaTransport) LocalAddr() net.Addr { return t.local }
+
+func (t *callRTPOnlyMediaTransport) RemoteAddr() net.Addr {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.remote
+}
+
+func (t *callRTPOnlyMediaTransport) ConfigureRemote(ctx context.Context, cfg MediaConfig) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.remote = &net.UDPAddr{IP: append(net.IP(nil), cfg.RemoteIP...), Port: cfg.RemotePort}
+	t.onPacket = cfg.OnPacket
+	return nil
+}
+
+func (t *callRTPOnlyMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	<-ctx.Done()
+	return nil, nil, ctx.Err()
+}
+
+func (t *callRTPOnlyMediaTransport) WritePacket(ctx context.Context, data []byte) error {
+	t.mu.Lock()
+	ch := t.writeCh
+	t.mu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	select {
+	case ch <- append([]byte(nil), data...):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (t *callRTPOnlyMediaTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
+	return nil
 }
 
 func TestTargetURI(t *testing.T) {
@@ -523,8 +592,8 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if call.State() != StateActive {
-				t.Fatalf("call.State() = %q, want %q", call.State(), StateActive)
+			if call.State() != StateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", call.State(), StateConfirmed)
 			}
 		})
 	}
@@ -1488,8 +1557,8 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if call.State() != StateActive {
-				t.Fatalf("call.State() = %q, want %q", call.State(), StateActive)
+			if call.State() != StateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", call.State(), StateConfirmed)
 			}
 			pracks := transport.messagesByMethod("PRACK")
 			if len(pracks) != 1 {
@@ -1577,8 +1646,8 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if call.State() != StateActive {
-				t.Fatalf("call.State() = %q, want %q", call.State(), StateActive)
+			if call.State() != StateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", call.State(), StateConfirmed)
 			}
 		})
 	}
@@ -2117,6 +2186,98 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 	}
 }
 
+func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "183 with P-Early-Media sendrecv opens early media"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newCallStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, callStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			events := make(chan Event, 16)
+			opened := make(chan MediaConfig, 2)
+			svc, err := New(Config{
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					if cfg.OnPacket == nil {
+						t.Fatal("OpenMedia OnPacket is nil")
+					}
+					opened <- cfg
+					return &callMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: cfg.LocalPort}}, nil
+				},
+				OnEvent: func(event Event) { events <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			var invite sip.Message
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					invite = msg
+					progress := reliableCallProgress(msg)
+					progress.Headers.Add("P-Early-Media", "sendrecv")
+					transport.queue(progress)
+				case "PRACK":
+					transport.queue(callStatus(msg, 200, "OK"))
+					transport.queue(callOKWithoutSDP(invite, "early-tag"))
+				}
+			}
+
+			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if !waitForCallEvent(events, StateEarlyMedia, "", time.Second) {
+				t.Fatalf("call state = %s, want early media event", call.State())
+			}
+			if !waitForCallEvent(events, StateConfirmed, "", time.Second) {
+				t.Fatalf("call state = %s, want confirmed event", call.State())
+			}
+			if got := call.State(); got != StateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", got, StateConfirmed)
+			}
+			select {
+			case cfg := <-opened:
+				if cfg.RemotePort != 50000 || !cfg.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+					t.Fatalf("OpenMedia remote = %v:%d, want 192.0.2.10:50000", cfg.RemoteIP, cfg.RemotePort)
+				}
+			default:
+				t.Fatal("OpenMedia was not called for authorized early media")
+			}
+		})
+	}
+}
+
 func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2645,6 +2806,276 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 			}
 			if got := call.State(); got != StateEnded {
 				t.Fatalf("call.State() = %q, want %q", got, StateEnded)
+			}
+		})
+	}
+}
+
+func TestDialSendsRTCPReports(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "confirmed call sends compound rtcp receiver report"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newCallStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, callStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+
+			rtcpCh := make(chan []byte, 2)
+			media := &callMediaTransport{
+				local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				rtcpCh: rtcpCh,
+			}
+			svc, err := New(Config{
+				RTPInactivityTimeout:  time.Second,
+				RTCPInactivityTimeout: time.Second,
+				RTCPSendInterval:      20 * time.Millisecond,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					if cfg.OnPacket == nil {
+						t.Fatal("OpenMedia OnPacket is nil")
+					}
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "BYE":
+					transport.queue(callStatus(msg, 200, "OK"))
+				}
+			}
+			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+
+			var packet []byte
+			select {
+			case packet = <-rtcpCh:
+			case <-time.After(time.Second):
+				t.Fatal("RTCP report was not sent")
+			}
+			if len(packet) < 12 {
+				t.Fatalf("RTCP packet len = %d, want compound report", len(packet))
+			}
+			if got := packet[1]; got != rtcpRRPacketType {
+				t.Fatalf("RTCP first packet type = %d, want %d", got, rtcpRRPacketType)
+			}
+			if got := packet[9]; got != rtcpSDESPacketType {
+				t.Fatalf("RTCP second packet type = %d, want %d", got, rtcpSDESPacketType)
+			}
+			if err := call.Hangup(context.Background()); err != nil {
+				t.Fatalf("Hangup() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "answer b=RS:0 and b=RR:0 disables rtcp sender"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newCallStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, callStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+
+			rtcpCh := make(chan []byte, 2)
+			media := &callMediaTransport{
+				local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				rtcpCh: rtcpCh,
+			}
+			svc, err := New(Config{
+				RTPInactivityTimeout:  time.Second,
+				RTCPInactivityTimeout: 40 * time.Millisecond,
+				RTCPSendInterval:      20 * time.Millisecond,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					resp := callOK(msg)
+					resp.Body = bytes.Replace(resp.Body, []byte("m=audio 50000 RTP/AVP 104 101\r\n"), []byte("m=audio 50000 RTP/AVP 104 101\r\nb=RS:0\r\nb=RR:0\r\n"), 1)
+					transport.queue(resp)
+				case "BYE":
+					transport.queue(callStatus(msg, 200, "OK"))
+				}
+			}
+			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if media := call.Media(); !media.RTCPDisabled {
+				t.Fatalf("Call.Media().RTCPDisabled = false, want true")
+			}
+
+			select {
+			case packet := <-rtcpCh:
+				t.Fatalf("RTCP packet was sent despite disabled RTCP: %x", packet)
+			case <-time.After(80 * time.Millisecond):
+			}
+			if err := call.Hangup(context.Background()); err != nil {
+				t.Fatalf("Hangup() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "transport without rtcp writer does not receive rtcp on rtp path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newCallStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, callStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+
+			rtpWrites := make(chan []byte, 2)
+			media := &callRTPOnlyMediaTransport{
+				local:   &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				writeCh: rtpWrites,
+			}
+			svc, err := New(Config{
+				RTPInactivityTimeout:  time.Second,
+				RTCPInactivityTimeout: time.Second,
+				RTCPSendInterval:      20 * time.Millisecond,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "BYE":
+					transport.queue(callStatus(msg, 200, "OK"))
+				}
+			}
+			call, err := svc.Dial(context.Background(), Request{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if err := call.WriteRTCP(context.Background(), []byte("rtcp")); err == nil {
+				t.Fatal("WriteRTCP() error = nil, want unsupported transport error")
+			}
+
+			select {
+			case packet := <-rtpWrites:
+				t.Fatalf("RTP WritePacket received RTCP fallback packet: %x", packet)
+			case <-time.After(80 * time.Millisecond):
+			}
+			if err := call.Hangup(context.Background()); err != nil {
+				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
 	}

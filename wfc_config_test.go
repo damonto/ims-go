@@ -121,6 +121,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
       "ringingTimer": "45s",
       "audioASBandwidthKbps": 49,
       "rtpInactivityTimeout": "20s",
+      "rtcpInactivityTimeout": "21s",
+      "rtcpSendInterval": "5s",
       "localRTPPortMin": 41000,
       "localRTPPortMax": 41020,
       "codecs": [
@@ -209,6 +211,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				}
 				if got.IMS.Voice.AudioASBandwidthKbps != 49 {
 					t.Fatalf("IMS voice AudioASBandwidthKbps = %d, want 49", got.IMS.Voice.AudioASBandwidthKbps)
+				}
+				if got.IMS.Voice.RTPInactivityTimeout != 20*time.Second || got.IMS.Voice.RTCPInactivityTimeout != 21*time.Second || got.IMS.Voice.RTCPSendInterval != 5*time.Second {
+					t.Fatalf("IMS voice media timers = %v/%v/%v, want profile values", got.IMS.Voice.RTPInactivityTimeout, got.IMS.Voice.RTCPInactivityTimeout, got.IMS.Voice.RTCPSendInterval)
 				}
 				if got.IMS.Voice.LocalRTPPortMin != 41000 || got.IMS.Voice.LocalRTPPortMax != 41020 {
 					t.Fatalf("IMS voice ports = %d/%d, want profile values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)

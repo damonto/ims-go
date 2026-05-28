@@ -25,16 +25,19 @@ type NegotiatedMedia struct {
 	PTime           time.Duration
 	RemoteIP        net.IP
 	RemotePort      int
+	RTCPDisabled    bool
 }
 
 type sdpOffer struct {
-	RemoteIP         net.IP
-	RemotePort       int
-	Profile          string
-	Payloads         []int
-	Codecs           map[int]AudioCodecConfig
-	PTime            time.Duration
-	UnsupportedMedia []sdpMediaLine
+	RemoteIP              net.IP
+	RemotePort            int
+	Profile               string
+	Payloads              []int
+	Codecs                map[int]AudioCodecConfig
+	PTime                 time.Duration
+	RTCPSenderBandwidth   *int
+	RTCPReceiverBandwidth *int
+	UnsupportedMedia      []sdpMediaLine
 }
 
 type sdpMediaLine struct {
@@ -140,7 +143,8 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 	if bandwidth := audioBandwidthAS(cfg, selected); bandwidth > 0 {
 		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
 	}
-	appendRTCPBandwidth(&b, rtcpSenderBandwidth, rtcpReceiverBandwidth)
+	rs, rr := rtcpAnswerBandwidth(remote)
+	appendRTCPBandwidth(&b, rs, rr)
 	appendAnswerCodecAttributes(&b, selected)
 	if hasDTMF {
 		appendAnswerCodecAttributes(&b, dtmf)
@@ -153,7 +157,9 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 	}
 	fmt.Fprintf(&b, "a=sendrecv\r\n")
 	appendRejectedMedia(&b, remote.UnsupportedMedia)
-	return []byte(b.String()), negotiatedMedia(remote, selected, ptime, dtmf, hasDTMF), nil
+	media := negotiatedMedia(remote, selected, ptime, dtmf, hasDTMF)
+	media.RTCPDisabled = rtcpBandwidthDisabled(rs, rr)
+	return []byte(b.String()), media, nil
 }
 
 func appendRejectedMedia(b *strings.Builder, media []sdpMediaLine) {
@@ -176,14 +182,15 @@ func appendRTCPBandwidth(b *strings.Builder, rs int, rr int) {
 
 func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Duration, dtmf AudioCodecConfig, hasDTMF bool) NegotiatedMedia {
 	media := NegotiatedMedia{
-		Codec:       selected.Name,
-		PayloadType: selected.PayloadTypes[0],
-		ClockRate:   selected.ClockRate,
-		Channels:    selected.Channels,
-		OctetAlign:  selected.OctetAlign,
-		PTime:       ptime,
-		RemoteIP:    append(net.IP(nil), remote.RemoteIP...),
-		RemotePort:  remote.RemotePort,
+		Codec:        selected.Name,
+		PayloadType:  selected.PayloadTypes[0],
+		ClockRate:    selected.ClockRate,
+		Channels:     selected.Channels,
+		OctetAlign:   selected.OctetAlign,
+		PTime:        ptime,
+		RemoteIP:     append(net.IP(nil), remote.RemoteIP...),
+		RemotePort:   remote.RemotePort,
+		RTCPDisabled: rtcpDisabled(remote),
 	}
 	if hasDTMF {
 		media.DTMFPayloadType = dtmf.PayloadTypes[0]
@@ -264,6 +271,23 @@ func parseSDP(text []byte) (sdpOffer, error) {
 		case strings.HasPrefix(line, "a=ptime:"):
 			if inAudio {
 				offer.PTime = parseSDPDuration(strings.TrimPrefix(line, "a=ptime:"))
+			}
+		case strings.HasPrefix(line, "b="):
+			if !inAudio {
+				continue
+			}
+			modifier, value, ok, err := parseRTCPBandwidth(line)
+			if err != nil {
+				return sdpOffer{}, err
+			}
+			if !ok {
+				continue
+			}
+			switch modifier {
+			case "RS":
+				offer.RTCPSenderBandwidth = intPtr(value)
+			case "RR":
+				offer.RTCPReceiverBandwidth = intPtr(value)
 			}
 		}
 	}
@@ -585,6 +609,56 @@ func parsePositiveDecimal(value string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+func parseNonNegativeDecimal(value string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func parseRTCPBandwidth(line string) (string, int, bool, error) {
+	value := strings.TrimPrefix(line, "b=")
+	left, right, ok := strings.Cut(value, ":")
+	if !ok {
+		return "", 0, false, nil
+	}
+	modifier := strings.ToUpper(strings.TrimSpace(left))
+	if modifier != "RS" && modifier != "RR" {
+		return "", 0, false, nil
+	}
+	bandwidth, ok := parseNonNegativeDecimal(right)
+	if !ok {
+		return "", 0, false, fmt.Errorf("parsing call SDP: invalid %s bandwidth %q", modifier, right)
+	}
+	return modifier, bandwidth, true, nil
+}
+
+func rtcpAnswerBandwidth(remote sdpOffer) (int, int) {
+	rs := rtcpSenderBandwidth
+	rr := rtcpReceiverBandwidth
+	if remote.RTCPSenderBandwidth != nil && *remote.RTCPSenderBandwidth == 0 {
+		rs = 0
+	}
+	if remote.RTCPReceiverBandwidth != nil && *remote.RTCPReceiverBandwidth == 0 {
+		rr = 0
+	}
+	return rs, rr
+}
+
+func rtcpDisabled(remote sdpOffer) bool {
+	return remote.RTCPSenderBandwidth != nil && *remote.RTCPSenderBandwidth == 0 &&
+		remote.RTCPReceiverBandwidth != nil && *remote.RTCPReceiverBandwidth == 0
+}
+
+func rtcpBandwidthDisabled(rs int, rr int) bool {
+	return rs == 0 && rr == 0
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func parseBoundedDecimal(value string, minValue, maxValue int) (int, bool) {

@@ -2,6 +2,7 @@ package sip
 
 import (
 	"bytes"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -39,6 +40,71 @@ func TestParseMessage(t *testing.T) {
 			}
 			if got := msg.StatusCode(); got != tt.wantCode {
 				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestResponseError(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    Message
+		wantReason string
+		wantText   string
+		wantError  string
+	}{
+		{
+			name: "warning text",
+			message: Message{
+				StartLine: "SIP/2.0 403 Forbidden",
+				Headers: Headers{
+					{Name: "Warning", Value: `399 anonymous.invalid "Credit limit reached"`},
+				},
+			},
+			wantReason: "Forbidden",
+			wantText:   "Credit limit reached",
+			wantError:  "403 Forbidden: Credit limit reached",
+		},
+		{
+			name: "multiple warning headers",
+			message: Message{
+				StartLine: "SIP/2.0 488 Not Acceptable Here",
+				Headers: Headers{
+					{Name: "Warning", Value: `301 ims.example "Incompatible network address type", 399 ims.example "Codec rejected"`},
+				},
+			},
+			wantReason: "Not Acceptable Here",
+			wantText:   "Incompatible network address type; Codec rejected",
+			wantError:  "488 Not Acceptable Here: Incompatible network address type; Codec rejected",
+		},
+		{
+			name: "status only",
+			message: Message{
+				StartLine: "SIP/2.0 500",
+			},
+			wantError: "500",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := NewResponseError(tt.message)
+			if got := tt.message.ReasonPhrase(); got != tt.wantReason {
+				t.Fatalf("ReasonPhrase() = %q, want %q", got, tt.wantReason)
+			}
+			if got := err.WarningText(); got != tt.wantText {
+				t.Fatalf("WarningText() = %q, want %q", got, tt.wantText)
+			}
+			if got := err.Error(); got != tt.wantError {
+				t.Fatalf("Error() = %q, want %q", got, tt.wantError)
+			}
+			wrapped := errors.Join(err)
+			var responseErr *ResponseError
+			if !errors.As(wrapped, &responseErr) {
+				t.Fatal("errors.As() = false, want true")
+			}
+			if responseErr.StatusCode != tt.message.StatusCode() {
+				t.Fatalf("ResponseError.StatusCode = %d, want %d", responseErr.StatusCode, tt.message.StatusCode())
 			}
 		})
 	}
