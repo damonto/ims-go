@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	imscall "github.com/damonto/ims-client/ims/call"
 	"github.com/damonto/ims-client/ims/registration"
 	imssession "github.com/damonto/ims-client/ims/session"
 	imssms "github.com/damonto/ims-client/ims/sms"
@@ -24,6 +25,7 @@ type activeConn struct {
 	reg        *registration.Service
 	sms        *imssms.Service
 	ussd       *imsussd.Service
+	call       *imscall.Service
 }
 
 type connectSetup struct {
@@ -39,6 +41,7 @@ type connectSetup struct {
 	reg        *registration.Service
 	sms        *imssms.Service
 	ussd       *imsussd.Service
+	call       *imscall.Service
 }
 
 type tunnelDatagramTransport struct {
@@ -71,10 +74,6 @@ const defaultReconnectDelay = 3 * time.Second
 var reconnectAttemptTimeout = 30 * time.Second
 
 func (c *Client) Connect(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	done, ok := c.reserveCloseTask()
 	if !ok {
 		return fmt.Errorf("connecting client: %w", ErrClientClosed)
@@ -178,6 +177,24 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		return nil, wrapped
 	}
 	setup.ussd = ussd
+
+	callCfg := setup.imsCfg.Voice
+	if callCfg.PrepareMedia == nil {
+		callCfg.PrepareMedia = openMediaTransport(setup.session)
+	}
+	if callCfg.OpenMedia == nil {
+		callCfg.OpenMedia = openMediaTransport(setup.session)
+	}
+	callCfg.OnIncoming = c.handleIncomingCall
+	callCfg.OnEvent = c.handleCallEvent
+	callCfg.OnError = c.emitError
+	call, err := imscall.New(callCfg, imsSession, reg)
+	if err != nil {
+		wrapped := fmt.Errorf("creating call service: %w", err)
+		c.emitConnectFailure(ctx, wrapped)
+		return nil, wrapped
+	}
+	setup.call = call
 
 	active, err := c.commitConnect(setup)
 	if err != nil {
@@ -435,6 +452,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 		reg:        setup.reg,
 		sms:        setup.sms,
 		ussd:       setup.ussd,
+		call:       setup.call,
 	}
 
 	c.mu.Lock()
@@ -459,6 +477,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	setup.reg = nil
 	setup.sms = nil
 	setup.ussd = nil
+	setup.call = nil
 	return active, nil
 }
 
@@ -477,6 +496,9 @@ func (s *connectSetup) rollback() {
 	defer cancel()
 	if s.ussd != nil {
 		_ = s.ussd.CloseContext(ctx)
+	}
+	if s.call != nil {
+		_ = s.call.Close()
 	}
 	if s.sms != nil {
 		_ = s.sms.Close()
@@ -682,10 +704,6 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) CloseContext(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	var err error
 	c.close.Do(func() {
 		c.mu.Lock()
@@ -746,6 +764,9 @@ func (c *Client) closeActive(ctx context.Context, active *activeConn) error {
 	if active.ussd != nil {
 		err = errors.Join(err, wrapCloseError("closing USSD service", normalizeCloseError(active.ussd.CloseContext(ctx))))
 	}
+	if active.call != nil {
+		err = errors.Join(err, wrapCloseError("closing call service", active.call.Close()))
+	}
 	if active.sms != nil {
 		err = errors.Join(err, wrapCloseError("closing SMS service", active.sms.Close()))
 	}
@@ -768,6 +789,9 @@ func (c *Client) closeActiveRuntime(ctx context.Context, active *activeConn) err
 	c.clearUSSDSessionBindings()
 
 	var err error
+	if active.call != nil {
+		err = errors.Join(err, wrapCloseError("closing call service", active.call.Close()))
+	}
 	if active.sms != nil {
 		err = errors.Join(err, wrapCloseError("closing SMS service", active.sms.Close()))
 	}

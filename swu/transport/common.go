@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"context"
 	crand "crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -12,13 +11,6 @@ import (
 	"github.com/damonto/ims-client/swu/esp"
 	"github.com/damonto/ims-client/swu/tunnel"
 )
-
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
-}
 
 func randomUint32() (uint32, error) {
 	buf := make([]byte, 4)

@@ -76,7 +76,11 @@ func (s *Session) processServerTransaction(ctx context.Context, req Request) (bo
 		if err := s.WriteStatus(ctx, req, 200, "OK"); err != nil {
 			return true, err
 		}
-		return true, tx.handleCancel(ctx)
+		if err := tx.handleCancel(ctx); err != nil {
+			return true, err
+		}
+		_, err := s.dispatchRequest(ctx, req)
+		return true, err
 	default:
 		if tx := s.lookupServerTransaction(req.Message); tx != nil {
 			return true, tx.retransmit(ctx)

@@ -441,9 +441,10 @@ func TestWriteResponseTargetsUDPSourceAndFallsBack(t *testing.T) {
 
 func TestResponseDestinationUsesTopViaReceivedAndPort(t *testing.T) {
 	tests := []struct {
-		name string
-		via  string
-		want *net.UDPAddr
+		name   string
+		remote *net.UDPAddr
+		via    string
+		want   *net.UDPAddr
 	}{
 		{
 			name: "uses received and rport",
@@ -470,11 +471,20 @@ func TestResponseDestinationUsesTopViaReceivedAndPort(t *testing.T) {
 			via:  "SIP/2.0/UDP 10.0.0.10;branch=z9hG4bK-1",
 			want: &net.UDPAddr{IP: net.ParseIP("10.0.0.10"), Port: 5060},
 		},
+		{
+			name:   "uses sent-by port for secure udp peer without rport",
+			remote: &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 32821},
+			via:    "SIP/2.0/UDP 10.0.0.10:6000;branch=z9hG4bK-1",
+			want:   &net.UDPAddr{IP: net.ParseIP("10.0.0.10"), Port: 6000},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			remote := &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 5060}
+			if tt.remote != nil {
+				remote = tt.remote
+			}
 
 			gotAddr := responseDestination(remote, tt.via)
 			got, ok := gotAddr.(*net.UDPAddr)
@@ -712,6 +722,9 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 
 	if got := len(handled); got != 1 {
 		t.Fatalf("handler count = %d, want 1", got)
+	}
+	if got, want := strings.Join(handler.requests, ","), "INVITE,CANCEL"; got != want {
+		t.Fatalf("handler requests = %q, want %q", got, want)
 	}
 	writes := transport.snapshotWrites()
 	if len(writes) != 3 {

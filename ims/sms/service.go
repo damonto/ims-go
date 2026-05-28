@@ -192,7 +192,6 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 }
 
 func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegment, error) {
-	ctx = normalizeContext(ctx)
 	if err := s.beginMOTransfer(); err != nil {
 		return nil, err
 	}
@@ -907,7 +906,6 @@ func isSubmitReport(rp rpMessage) bool {
 }
 
 func (s *Service) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage) bool {
-	ctx = normalizeContext(ctx)
 	if !s.markDeliveryReportSent(msg) {
 		return true
 	}
@@ -945,7 +943,7 @@ func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, repor
 		return fmt.Errorf("building sms delivery report: %w", err)
 	}
 	reportMsg := s.buildMessage(target, payload, msg.Header("Call-ID"))
-	resp, err := s.sess.Exchange(normalizeContext(ctx), reportMsg)
+	resp, err := s.sess.Exchange(ctx, reportMsg)
 	if err != nil {
 		return fmt.Errorf("sending sms delivery report: %w", err)
 	}
@@ -1213,13 +1211,6 @@ func seenKey(msg sip.Message) (string, bool) {
 		return "", false
 	}
 	return callID + "|" + cseq, true
-}
-
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
 }
 
 func (s *Service) emitAsyncError(err error) {

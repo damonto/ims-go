@@ -20,10 +20,6 @@ func (s *USSDService) Start() (*Session, error) {
 }
 
 func (s *Session) Send(ctx context.Context, code string) (USSDResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	if err := s.beginSend(); err != nil {
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
@@ -50,10 +46,6 @@ func (s *Session) Send(ctx context.Context, code string) (USSDResult, error) {
 }
 
 func (s *Session) Reply(ctx context.Context, text string) (USSDResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	low, err := s.beginActive("replying USSD")
 	if err != nil {
 		return USSDResult{}, err
@@ -72,10 +64,6 @@ func (s *Session) Reply(ctx context.Context, text string) (USSDResult, error) {
 }
 
 func (s *Session) Close(ctx context.Context) (USSDResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	low, started, err := s.beginClose()
 	if err != nil {
 		return USSDResult{}, fmt.Errorf("closing USSD: %w", err)

@@ -2,6 +2,7 @@ package sip
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,157 @@ func TestParseMessageFoldedHeader(t *testing.T) {
 	want := `Digest realm="ims.example", nonce="abc", algorithm=AKAv1-MD5`
 	if got := msg.Header("WWW-Authenticate"); got != want {
 		t.Fatalf("Header() = %q, want %q", got, want)
+	}
+}
+
+func TestParseMessageCompactHeaders(t *testing.T) {
+	data := []byte("INVITE sip:user@example.com SIP/2.0\r\n" +
+		"i: call-1@example.com\r\n" +
+		"v: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-1\r\n" +
+		"f: <sip:alice@example.com>;tag=a\r\n" +
+		"t: <sip:bob@example.com>\r\n" +
+		"m: <sip:alice@192.0.2.10>\r\n" +
+		"c: application/sdp\r\n" +
+		"k: 100rel\r\n" +
+		"l: 5\r\n" +
+		"\r\nhello")
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "Call-ID", want: "call-1@example.com"},
+		{name: "Via", want: "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-1"},
+		{name: "From", want: "<sip:alice@example.com>;tag=a"},
+		{name: "To", want: "<sip:bob@example.com>"},
+		{name: "Contact", want: "<sip:alice@192.0.2.10>"},
+		{name: "Content-Type", want: "application/sdp"},
+		{name: "Supported", want: "100rel"},
+		{name: "Content-Length", want: "5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := msg.Header(tt.name); got != tt.want {
+				t.Fatalf("Header(%q) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+	if string(msg.Body) != "hello" {
+		t.Fatalf("Body = %q, want hello", string(msg.Body))
+	}
+}
+
+func TestSplitHeaderList(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{
+			name:  "empty",
+			value: "",
+		},
+		{
+			name:  "simple",
+			value: "<sip:a@example.com>, <sip:b@example.com>",
+			want:  []string{"<sip:a@example.com>", "<sip:b@example.com>"},
+		},
+		{
+			name:  "comma inside quoted display name",
+			value: `"Doe, Jane" <sip:jane@example.com>, <sip:bob@example.com>`,
+			want:  []string{`"Doe, Jane" <sip:jane@example.com>`, "<sip:bob@example.com>"},
+		},
+		{
+			name:  "comma inside angle brackets",
+			value: `<sip:a@example.com;note=one,two>, <sip:b@example.com>`,
+			want:  []string{"<sip:a@example.com;note=one,two>", "<sip:b@example.com>"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SplitHeaderList(tt.value); !slices.Equal(got, tt.want) {
+				t.Fatalf("SplitHeaderList() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAddressURIAndParams(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		wantURI    string
+		wantParams string
+	}{
+		{
+			name:       "empty",
+			value:      "",
+			wantURI:    "",
+			wantParams: "",
+		},
+		{
+			name:       "name addr with params",
+			value:      `<sip:alice@example.com>;expires=120`,
+			wantURI:    "sip:alice@example.com",
+			wantParams: ";expires=120",
+		},
+		{
+			name:       "strips uri params inside brackets",
+			value:      `<sip:alice@example.com;transport=tcp>;expires=120`,
+			wantURI:    "sip:alice@example.com",
+			wantParams: ";expires=120",
+		},
+		{
+			name:       "addr spec with params",
+			value:      `sip:alice@example.com;expires=120`,
+			wantURI:    "sip:alice@example.com",
+			wantParams: ";expires=120",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURI, gotParams := AddressURIAndParams(tt.value)
+			if gotURI != tt.wantURI || gotParams != tt.wantParams {
+				t.Fatalf("AddressURIAndParams() = %q, %q; want %q, %q", gotURI, gotParams, tt.wantURI, tt.wantParams)
+			}
+		})
+	}
+}
+
+func TestHeaderParam(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+		want   string
+	}{
+		{
+			name:   "empty",
+			params: "",
+		},
+		{
+			name:   "matching param",
+			params: `;expires=120;q=0.5`,
+			want:   "120",
+		},
+		{
+			name:   "case insensitive quoted param",
+			params: `;Expires="120"`,
+			want:   "120",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HeaderParam(tt.params, "expires"); got != tt.want {
+				t.Fatalf("HeaderParam() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

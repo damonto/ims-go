@@ -9,10 +9,6 @@ import (
 )
 
 func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	low, err := s.client.currentSMSService()
 	if err != nil {
 		return SMSSubmission{}, fmt.Errorf("sending SMS: %w", err)

@@ -157,6 +157,11 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	if cfg.SMSSubmitReportTimeout == 0 {
 		cfg.SMSSubmitReportTimeout = imssms.DefaultSubmitReportTimeout()
 	}
+	voiceCfg, err := cfg.Voice.Normalized()
+	if err != nil {
+		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+	}
+	cfg.Voice = voiceCfg
 	return cfg, nil
 }
 

@@ -20,7 +20,6 @@ type innerWriteState struct {
 }
 
 func (s *Session) WritePacket(ctx context.Context, data []byte) error {
-	ctx = normalizeContext(ctx)
 	if s.isClosed() {
 		return errors.New("writing packet: session is closed")
 	}
@@ -103,7 +102,6 @@ func (s *Session) writeInner(ctx context.Context, innerPacket []byte, nextHeader
 }
 
 func (s *Session) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) error {
-	ctx = normalizeContext(ctx)
 	wire, err := pkt.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("writing inner packet: %w", err)
@@ -143,7 +141,6 @@ func (s *Session) readConnectedPacket(ctx context.Context) ([]byte, net.Addr, er
 }
 
 func (s *Session) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	ctx = normalizeContext(ctx)
 	if s.isClosed() {
 		return nil, nil, errors.New("reading packet: session is closed")
 	}

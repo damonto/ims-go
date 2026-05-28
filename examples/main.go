@@ -576,10 +576,6 @@ func (t *tcpAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, 
 	if len(req) == 0 {
 		return nil, errors.New("transmitting APDU: request is empty")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {

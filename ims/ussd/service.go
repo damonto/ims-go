@@ -167,7 +167,6 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 }
 
 func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
-	ctx = normalizeContext(ctx)
 	start, invite, err := s.newStart(code)
 	if err != nil {
 		return nil, err
@@ -188,7 +187,6 @@ func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 }
 
 func (s *Service) CloseContext(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -356,9 +354,6 @@ func (s *Service) startSession(ctx context.Context, start startRequest, invite, 
 }
 
 func (s *Service) cancelInvite(parent context.Context, invite sip.Message) {
-	if parent == nil {
-		parent = context.Background()
-	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 2*time.Second)
 	defer cancel()
 	_ = s.sess.Send(ctx, buildCancel(invite))
@@ -959,7 +954,6 @@ func (s *Session) setDeliveringInvite(active bool) {
 }
 
 func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, action string, final bool) (bool, error) {
-	ctx = normalizeContext(ctx)
 	timeout, err := queuedRequestTimeout(ctx)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", action, err)
@@ -1382,13 +1376,6 @@ func preferredIdentity(state registration.State) string {
 		return identity
 	}
 	return state.PublicIdentity
-}
-
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
 }
 
 func queuedRequestTimeout(ctx context.Context) (time.Duration, error) {

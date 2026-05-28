@@ -19,6 +19,8 @@ import (
 
 const tcpDefaultSegmentSize = 1024
 
+var tcpDataACKTimeout = 2 * time.Second
+
 var _ imssession.Transport = (*TCPConn)(nil)
 
 type TCPConfig struct {
@@ -69,11 +71,11 @@ type TCPConn struct {
 }
 
 func DialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig) (*TCPConn, error) {
-	return dialTCP(normalizeContext(ctx), s, cfg, nil)
+	return dialTCP(ctx, s, cfg, nil)
 }
 
 func DialSecureTCP(ctx context.Context, s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
-	return dialTCP(normalizeContext(ctx), s, cfg.TCPConfig, &cfg)
+	return dialTCP(ctx, s, cfg.TCPConfig, &cfg)
 }
 
 func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
@@ -225,7 +227,6 @@ func (t *TCPConn) RemoteAddr() net.Addr {
 }
 
 func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
-	ctx = normalizeContext(ctx)
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 
@@ -279,7 +280,7 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			if attempt == 0 {
 				t.noteSent(wantAck)
 			}
-			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			waitCtx, cancel := context.WithTimeout(ctx, tcpDataACKTimeout)
 			err := t.waitForAck(waitCtx, wantAck)
 			cancel()
 			if err == nil {
@@ -292,7 +293,9 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			t.session.Logger().Debug("TCP data ACK timed out", "seq", seq, "want_ack", wantAck, "attempt", attempt+1)
 		}
 		if !acked {
-			return fmt.Errorf("writing tcp packet: waiting for ack %d", wantAck)
+			err := fmt.Errorf("writing tcp packet: waiting for ack %d", wantAck)
+			t.closeWithError(err)
+			return err
 		}
 		remaining = remaining[len(chunk):]
 	}
@@ -300,7 +303,6 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 }
 
 func (t *TCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	ctx = normalizeContext(ctx)
 	for {
 		select {
 		case <-ctx.Done():

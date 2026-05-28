@@ -52,6 +52,10 @@ type Handler interface {
 	HandleError(err error)
 }
 
+type ResponseHandler interface {
+	HandleResponse(ctx context.Context, msg sip.Message) (bool, error)
+}
+
 type Attachment interface {
 	Close() error
 }
@@ -151,6 +155,12 @@ func (s *Session) RemoteAddr() net.Addr {
 	return s.primary.RemoteAddr()
 }
 
+func (s *Session) TransactionTimers() TransactionTimers {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.TransactionTimers
+}
+
 func (s *Session) Attach(h Handler) (Attachment, error) {
 	if h == nil {
 		return nil, errors.New("attaching handler: handler is nil")
@@ -206,7 +216,6 @@ func (s *Session) ReplacePrimary(t Transport) error {
 }
 
 func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, error) {
-	ctx = normalizeContext(ctx)
 	if err := s.ensureOpen("exchanging request"); err != nil {
 		return sip.Message{}, err
 	}
@@ -228,7 +237,6 @@ func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, e
 }
 
 func (s *Session) Send(ctx context.Context, req sip.Message) error {
-	ctx = normalizeContext(ctx)
 	if err := s.ensureOpen("sending request"); err != nil {
 		return err
 	}
@@ -236,7 +244,6 @@ func (s *Session) Send(ctx context.Context, req sip.Message) error {
 }
 
 func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Message) error {
-	ctx = normalizeContext(ctx)
 	if err := s.ensureOpen("writing response"); err != nil {
 		return err
 	}
@@ -254,7 +261,6 @@ func (s *Session) WriteStatus(ctx context.Context, req Request, code int, reason
 }
 
 func (s *Session) Run(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -296,7 +302,11 @@ func (s *Session) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			s.dispatchResponse(inbound.msg)
+			if !s.dispatchResponse(inbound.msg) {
+				if err := s.handleInboundResponse(ctx, inbound.msg); err != nil {
+					return err
+				}
+			}
 		}
 	}
 }
@@ -310,7 +320,6 @@ func (s *Session) handleInboundRequest(ctx context.Context, req Request) error {
 }
 
 func (s *Session) WaitStarted(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	s.mu.Lock()
 	if s.ready {
 		s.mu.Unlock()
@@ -343,7 +352,6 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) CloseContext(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 
 	var closeErr error
 	s.mu.Lock()
@@ -475,11 +483,45 @@ func (s *Session) startReadLoop(ctx context.Context, transport Transport, out ch
 }
 
 func (s *Session) handleRequest(ctx context.Context, req Request) error {
+	handled, err := s.dispatchRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
+	if req.Message.Method() == "ACK" {
+		return nil
+	}
+	return s.WriteStatus(ctx, req, 405, "Method Not Allowed")
+}
+
+func (s *Session) dispatchRequest(ctx context.Context, req Request) (bool, error) {
 	for _, entry := range s.handlerSnapshot() {
 		if entry.closed {
 			continue
 		}
 		handled, err := entry.handler.HandleRequest(ctx, req)
+		if err != nil {
+			return false, err
+		}
+		if handled {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Session) handleInboundResponse(ctx context.Context, msg sip.Message) error {
+	for _, entry := range s.handlerSnapshot() {
+		if entry.closed {
+			continue
+		}
+		handler, ok := entry.handler.(ResponseHandler)
+		if !ok {
+			continue
+		}
+		handled, err := handler.HandleResponse(ctx, msg)
 		if err != nil {
 			return err
 		}
@@ -487,10 +529,7 @@ func (s *Session) handleRequest(ctx context.Context, req Request) error {
 			return nil
 		}
 	}
-	if req.Message.Method() == "ACK" {
-		return nil
-	}
-	return s.WriteStatus(ctx, req, 405, "Method Not Allowed")
+	return nil
 }
 
 func (s *Session) writePacket(ctx context.Context, transport Transport, data []byte) error {
@@ -648,13 +687,6 @@ func (s *Session) setRunning(running bool) {
 func isProvisionalResponse(msg sip.Message) bool {
 	status := msg.StatusCode()
 	return status >= 100 && status < 200
-}
-
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
 }
 
 func (a *handlerEntry) Close() error {

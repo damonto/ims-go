@@ -3,8 +3,15 @@ package transport
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
+	"strings"
 	"testing"
 	"time"
+
+	"log/slog"
+
+	"github.com/damonto/ims-client/swu/tunnel"
 )
 
 func TestNextSIPMessage(t *testing.T) {
@@ -100,5 +107,70 @@ func TestTCPConnReadPacketReturnsTerminalErrorAfterHandleError(t *testing.T) {
 		if !errors.Is(err, cause) {
 			t.Fatalf("ReadPacket() error = %v, want wrapped %v", err, cause)
 		}
+	}
+}
+
+func TestTCPConnWritePacketClosesOnAckTimeout(t *testing.T) {
+	oldTimeout := tcpDataACKTimeout
+	tcpDataACKTimeout = 10 * time.Millisecond
+	t.Cleanup(func() {
+		tcpDataACKTimeout = oldTimeout
+	})
+
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = packetConn.Close()
+	})
+	session, err := tunnel.Dial(context.Background(), tunnel.Config{
+		RemoteAddr: "127.0.0.1:9",
+		PacketConn: packetConn,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = session.Close()
+	})
+	conn := &TCPConn{
+		session:     session,
+		local:       &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+		remote:      &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
+		established: true,
+		sendSeq:     1001,
+		recvSeq:     2001,
+		ackedSeq:    1000,
+		errCh:       make(chan error, 1),
+		msgCh:       make(chan []byte, 1),
+		readyCh:     make(chan struct{}),
+		ackCh:       make(chan struct{}, 1),
+		done:        make(chan struct{}),
+	}
+	err = conn.WritePacket(context.Background(), []byte("INVITE sip:test SIP/2.0\r\nContent-Length: 0\r\n\r\n"))
+	if err == nil {
+		t.Fatal("WritePacket() error = nil, want ack timeout")
+	}
+	if !strings.Contains(err.Error(), "waiting for ack") {
+		t.Fatalf("WritePacket() error = %v, want ack timeout", err)
+	}
+
+	if !conn.closed {
+		t.Fatal("closed = false, want true")
+	}
+	select {
+	case <-conn.done:
+	case <-time.After(time.Second):
+		t.Fatal("done was not closed after ack timeout")
+	}
+
+	_, _, readErr := conn.ReadPacket(context.Background())
+	if readErr == nil {
+		t.Fatal("ReadPacket() error = nil, want terminal error")
+	}
+	if !strings.Contains(readErr.Error(), "waiting for ack") {
+		t.Fatalf("ReadPacket() error = %v, want ack timeout", readErr)
 	}
 }

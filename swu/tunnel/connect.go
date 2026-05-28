@@ -42,7 +42,6 @@ type connectState struct {
 }
 
 func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
-	ctx = normalizeContext(ctx)
 	state, finish, err := s.prepareConnect(imei, card)
 	if err != nil {
 		return fmt.Errorf("connecting swu session: %w", err)

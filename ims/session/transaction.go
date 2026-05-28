@@ -271,6 +271,10 @@ func (tx *clientTransaction) runInvite() {
 		case resp := <-tx.responseCh:
 			switch {
 			case isProvisionalResponse(resp):
+				if err := tx.notifyProvisional(resp); err != nil {
+					tx.abort(err)
+					return
+				}
 				timerAC = nil
 				stopTimer(timerA)
 			case resp.StatusCode() >= 200 && resp.StatusCode() < 300:
@@ -290,6 +294,15 @@ func (tx *clientTransaction) runInvite() {
 			}
 		}
 	}
+}
+
+func (tx *clientTransaction) notifyProvisional(resp sip.Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), max(tx.timers.T1, 250*time.Millisecond))
+	defer cancel()
+	if err := tx.session.handleInboundResponse(ctx, resp); err != nil {
+		return fmt.Errorf("handling provisional %s response: %w", tx.method, err)
+	}
+	return nil
 }
 
 func (tx *clientTransaction) resend() bool {

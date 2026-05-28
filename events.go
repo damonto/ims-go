@@ -14,6 +14,8 @@ type eventHub struct {
 	smsIncoming broadcaster[SMS]
 	smsReports  broadcaster[SMSReport]
 	ussd        broadcaster[IncomingUSSD]
+	voiceIn     broadcaster[IncomingCall]
+	voiceEvents broadcaster[CallEvent]
 }
 
 func newEventHub() eventHub {
@@ -23,6 +25,8 @@ func newEventHub() eventHub {
 		smsIncoming: newBroadcaster[SMS](),
 		smsReports:  newBroadcaster[SMSReport](),
 		ussd:        newBroadcaster[IncomingUSSD](),
+		voiceIn:     newBroadcaster[IncomingCall](),
+		voiceEvents: newBroadcaster[CallEvent](),
 	}
 }
 
@@ -32,6 +36,8 @@ func (h *eventHub) close() {
 	h.smsIncoming.close()
 	h.smsReports.close()
 	h.ussd.close()
+	h.voiceIn.close()
+	h.voiceEvents.close()
 }
 
 type broadcaster[T any] struct {
@@ -196,6 +202,35 @@ func (s *USSDService) Subscribe(fn func(IncomingUSSD) error) func() {
 	return events.Close
 }
 
+func (s *VoiceService) Events() *VoiceEvents {
+	incomingSub := s.client.events.voiceIn.subscribe(eventBufferSize)
+	eventSub := s.client.events.voiceEvents.subscribe(eventBufferSize)
+	return &VoiceEvents{
+		Incoming: incomingSub.channel,
+		Events:   eventSub.channel,
+		closeFn: func() {
+			incomingSub.close()
+			eventSub.close()
+		},
+	}
+}
+
+func (s *VoiceService) SubscribeIncoming(fn func(IncomingCall) error) func() {
+	events := s.Events()
+	if fn != nil {
+		go runSubscription(s.client, "voice incoming subscriber", events.Incoming, fn)
+	}
+	return events.Close
+}
+
+func (s *VoiceService) SubscribeEvents(fn func(CallEvent) error) func() {
+	events := s.Events()
+	if fn != nil {
+		go runSubscription(s.client, "voice event subscriber", events.Events, fn)
+	}
+	return events.Close
+}
+
 func runSubscription[T any](client *Client, name string, ch <-chan T, fn func(T) error) {
 	for value := range ch {
 		if err := fn(value); err != nil {
@@ -235,5 +270,17 @@ func (c *Client) emitSMSReport(report SMSReport) {
 func (c *Client) emitIncomingUSSD(event IncomingUSSD) {
 	c.events.ussd.publish(event, func() {
 		c.logger.Debug("dropping ussd event", "text", event.Message.Text, "request", event.Message.Request, "notify", event.Message.Notify, "final", event.Message.Final)
+	})
+}
+
+func (c *Client) emitIncomingCall(event IncomingCall) {
+	c.events.voiceIn.publish(event, func() {
+		c.logger.Debug("dropping incoming call event", "from", event.From)
+	})
+}
+
+func (c *Client) emitCallEvent(event CallEvent) {
+	c.events.voiceEvents.publish(event, func() {
+		c.logger.Debug("dropping call event", "call_id", event.CallID, "state", event.State)
 	})
 }

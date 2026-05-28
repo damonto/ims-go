@@ -196,9 +196,6 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 }
 
 func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(req.Rand) != 16 {
 		return nil, fmt.Errorf("authenticating MBIM AKA: RAND length %d, want 16", len(req.Rand))
 	}

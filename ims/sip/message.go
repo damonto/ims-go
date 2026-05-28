@@ -291,6 +291,85 @@ func AddressURI(value string) string {
 	return value
 }
 
+// AddressURIAndParams returns the address URI and header parameters from a SIP
+// name-addr or addr-spec value.
+func AddressURIAndParams(value string) (string, string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ""
+	}
+	if left := strings.IndexByte(value, '<'); left >= 0 {
+		right := strings.IndexByte(value[left+1:], '>')
+		if right >= 0 {
+			uri := strings.TrimSpace(value[left+1 : left+1+right])
+			if semi := strings.IndexByte(uri, ';'); semi >= 0 {
+				uri = strings.TrimSpace(uri[:semi])
+			}
+			return uri, value[left+1+right+1:]
+		}
+	}
+	if semi := strings.IndexByte(value, ';'); semi >= 0 {
+		return strings.TrimSpace(value[:semi]), value[semi:]
+	}
+	return value, ""
+}
+
+// SplitHeaderList splits comma-separated SIP header values without splitting
+// inside quoted strings or name-addr brackets.
+func SplitHeaderList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := make([]string, 0, 1)
+	start := 0
+	inQuote := false
+	angleDepth := 0
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '"':
+			inQuote = !inQuote
+		case '<':
+			if !inQuote {
+				angleDepth++
+			}
+		case '>':
+			if !inQuote && angleDepth > 0 {
+				angleDepth--
+			}
+		case ',':
+			if !inQuote && angleDepth == 0 {
+				part := strings.TrimSpace(value[start:i])
+				if part != "" {
+					parts = append(parts, part)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if tail := strings.TrimSpace(value[start:]); tail != "" {
+		parts = append(parts, tail)
+	}
+	return parts
+}
+
+// HeaderParam returns a semicolon parameter value using SIP's case-insensitive
+// parameter names.
+func HeaderParam(params, name string) string {
+	for _, part := range strings.Split(params, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), name) {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return ""
+}
+
 func HeaderTag(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -487,7 +566,50 @@ func appendParsedHeader(headers Headers, line string) (Headers, error) {
 	}
 	name := strings.TrimSpace(line[:idx])
 	value := strings.TrimSpace(line[idx+1:])
-	return append(headers, Header{Name: name, Value: value}), nil
+	return append(headers, Header{Name: expandedHeaderName(name), Value: value}), nil
+}
+
+func expandedHeaderName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "a":
+		return "Accept-Contact"
+	case "b":
+		return "Referred-By"
+	case "c":
+		return "Content-Type"
+	case "d":
+		return "Request-Disposition"
+	case "e":
+		return "Content-Encoding"
+	case "f":
+		return "From"
+	case "i":
+		return "Call-ID"
+	case "j":
+		return "Reject-Contact"
+	case "k":
+		return "Supported"
+	case "l":
+		return "Content-Length"
+	case "m":
+		return "Contact"
+	case "o":
+		return "Event"
+	case "r":
+		return "Refer-To"
+	case "s":
+		return "Subject"
+	case "t":
+		return "To"
+	case "u":
+		return "Allow-Events"
+	case "v":
+		return "Via"
+	case "x":
+		return "Session-Expires"
+	default:
+		return name
+	}
 }
 
 func readHeaderSection(br *bufio.Reader) (string, Headers, int64, error) {

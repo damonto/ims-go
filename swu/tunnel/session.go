@@ -112,7 +112,6 @@ const (
 )
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
-	ctx = normalizeContext(ctx)
 	cfg, err := cfg.Normalized()
 	if err != nil {
 		return nil, fmt.Errorf("normalizing session config: %w", err)
@@ -129,13 +128,6 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	return newSession(cfg, conn, owned, remote), nil
-}
-
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
 }
 
 func handshakeConfig(cfg Config) handshake.Config {

@@ -481,6 +481,29 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 				if state.DefaultPublicID != "sip:alice@example.com" {
 					t.Fatalf("DefaultPublicID = %q, want sip:alice@example.com", state.DefaultPublicID)
 				}
+				if state.SIPPublicID != "sip:alice@example.com" {
+					t.Fatalf("SIPPublicID = %q, want sip:alice@example.com", state.SIPPublicID)
+				}
+				if state.TelPublicID != "tel:+15551234567" {
+					t.Fatalf("TelPublicID = %q, want tel:+15551234567", state.TelPublicID)
+				}
+			},
+		},
+		{
+			name: "keeps sip alias when tel uri is first",
+			headersFor: func(sip.Message) []sip.Header {
+				return []sip.Header{
+					{Name: "P-Associated-URI", Value: "<tel:+15551234567>,<sip:+15551234567@example.com;user=phone>"},
+				}
+			},
+			checkState: func(t *testing.T, state State) {
+				t.Helper()
+				if state.DefaultPublicID != "tel:+15551234567" {
+					t.Fatalf("DefaultPublicID = %q, want tel:+15551234567", state.DefaultPublicID)
+				}
+				if state.SIPPublicID != "sip:+15551234567@example.com;user=phone" {
+					t.Fatalf("SIPPublicID = %q, want sip:+15551234567@example.com;user=phone", state.SIPPublicID)
+				}
 				if state.TelPublicID != "tel:+15551234567" {
 					t.Fatalf("TelPublicID = %q, want tel:+15551234567", state.TelPublicID)
 				}
@@ -504,7 +527,7 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 		{
 			name: "matches registered contact with network user part",
 			headersFor: func(req sip.Message) []sip.Header {
-				uri, params := contactURIAndParams(req.Header("Contact"))
+				uri, params := sip.AddressURIAndParams(req.Header("Contact"))
 				hostPort := strings.TrimPrefix(uri, "sip:")
 				return []sip.Header{
 					{Name: "Contact", Value: `<sip:001010123456789@` + hostPort + `>` + params + `;expires=1800`},

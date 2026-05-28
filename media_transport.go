@@ -1,0 +1,318 @@
+package imsclient
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"sync"
+
+	imscall "github.com/damonto/ims-client/ims/call"
+	"github.com/damonto/ims-client/swu/packet"
+	swutunnel "github.com/damonto/ims-client/swu/tunnel"
+)
+
+type tunnelMediaTransport struct {
+	session    *swutunnel.Session
+	logger     *slog.Logger
+	attachment swutunnel.Attachment
+	local      *net.UDPAddr
+	remote     *net.UDPAddr
+	readCh     chan tunnelMediaPacket
+	rtcpCh     chan tunnelMediaPacket
+	done       chan struct{}
+	onPacket   func(imscall.MediaPacket)
+	closeOnce  sync.Once
+
+	mu          sync.Mutex
+	closed      bool
+	terminalErr error
+	inRTP       int
+	inRTCP      int
+	outRTP      int
+	outRTCP     int
+}
+
+type tunnelMediaPacket struct {
+	data []byte
+	addr net.Addr
+	err  error
+}
+
+func openMediaTransport(session *swutunnel.Session) func(context.Context, imscall.MediaConfig) (imscall.MediaTransport, error) {
+	return func(ctx context.Context, cfg imscall.MediaConfig) (imscall.MediaTransport, error) {
+		return newTunnelMediaTransport(ctx, session, cfg)
+	}
+}
+
+func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cfg imscall.MediaConfig) (*tunnelMediaTransport, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	if session == nil {
+		return nil, errors.New("opening call media transport: tunnel session is nil")
+	}
+	info := session.Tunnel()
+	if len(info.InnerIP) == 0 {
+		return nil, errors.New("opening call media transport: tunnel inner ip is empty")
+	}
+	if cfg.LocalPort == 0 {
+		return nil, errors.New("opening call media transport: local port is required")
+	}
+	transport := &tunnelMediaTransport{
+		session: session,
+		logger:  session.Logger(),
+		local: &net.UDPAddr{
+			IP:   append(net.IP(nil), info.InnerIP...),
+			Port: cfg.LocalPort,
+		},
+		readCh:   make(chan tunnelMediaPacket, 32),
+		rtcpCh:   make(chan tunnelMediaPacket, 32),
+		done:     make(chan struct{}),
+		onPacket: cfg.OnPacket,
+	}
+	if len(cfg.RemoteIP) != 0 && cfg.RemotePort != 0 {
+		transport.remote = &net.UDPAddr{
+			IP:   append(net.IP(nil), cfg.RemoteIP...),
+			Port: cfg.RemotePort,
+		}
+	}
+	attachment, err := session.Attach(transport)
+	if err != nil {
+		return nil, fmt.Errorf("opening call media transport: %w", err)
+	}
+	transport.attachment = attachment
+	return transport, nil
+}
+
+func (t *tunnelMediaTransport) LocalAddr() net.Addr {
+	return cloneMediaUDPAddr(t.local)
+}
+
+func (t *tunnelMediaTransport) RemoteAddr() net.Addr {
+	return cloneMediaUDPAddr(t.remote)
+}
+
+func (t *tunnelMediaTransport) ConfigureRemote(ctx context.Context, cfg imscall.MediaConfig) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if len(cfg.RemoteIP) == 0 || cfg.RemotePort == 0 {
+		return errors.New("configuring call media remote: remote address is required")
+	}
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return errors.New("configuring call media remote: transport is closed")
+	}
+	t.remote = &net.UDPAddr{IP: append(net.IP(nil), cfg.RemoteIP...), Port: cfg.RemotePort}
+	t.onPacket = cfg.OnPacket
+	t.mu.Unlock()
+	return nil
+}
+
+func (t *tunnelMediaTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.writeUDP(ctx, data, false)
+}
+
+func (t *tunnelMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
+	return t.writeUDP(ctx, data, true)
+}
+
+func (t *tunnelMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp bool) error {
+	t.mu.Lock()
+	closed := t.closed
+	local := mediaPortAddr(t.local, rtcp)
+	remote := mediaPortAddr(t.remote, rtcp)
+	count := t.nextMediaCountLocked(rtcp, false)
+	t.mu.Unlock()
+	if closed {
+		return errors.New("writing call media packet: transport is closed")
+	}
+	if remote == nil {
+		return errors.New("writing call media packet: remote address is not configured")
+	}
+	t.logMediaPacket("send", rtcp, count, local, remote, len(data))
+	return t.session.WriteInnerPacket(ctx, packet.InnerPacket{
+		UDP: &packet.UDPSegment{
+			Src:     local,
+			Dst:     remote,
+			Payload: append([]byte(nil), data...),
+		},
+	})
+}
+
+func (t *tunnelMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	return t.readUDP(ctx, false)
+}
+
+func (t *tunnelMediaTransport) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {
+	return t.readUDP(ctx, true)
+}
+
+func (t *tunnelMediaTransport) readUDP(ctx context.Context, rtcp bool) ([]byte, net.Addr, error) {
+	readCh := t.readCh
+	if rtcp {
+		readCh = t.rtcpCh
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-t.done:
+			return nil, nil, t.closedErr()
+		case inbound := <-readCh:
+			if inbound.err != nil {
+				return nil, nil, inbound.err
+			}
+			return inbound.data, inbound.addr, nil
+		}
+	}
+}
+
+func (t *tunnelMediaTransport) Close() error {
+	t.closeWithError(nil)
+	return nil
+}
+
+func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
+	if pkt.UDP == nil || pkt.UDP.Src == nil || pkt.UDP.Dst == nil {
+		return false
+	}
+	t.mu.Lock()
+	closed := t.closed
+	local := cloneMediaUDPAddr(t.local)
+	t.mu.Unlock()
+	if closed || local == nil {
+		return false
+	}
+	rtcp := mediaAddrMatches(pkt.UDP.Dst, mediaPortAddr(local, true))
+	if !mediaAddrMatches(pkt.UDP.Dst, local) && !rtcp {
+		return false
+	}
+	t.mu.Lock()
+	count := t.nextMediaCountLocked(rtcp, true)
+	t.mu.Unlock()
+	t.logMediaPacket("recv", rtcp, count, pkt.UDP.Dst, pkt.UDP.Src, len(pkt.UDP.Payload))
+	t.notifyPacket(rtcp, pkt.UDP.Payload)
+	readCh := t.readCh
+	if rtcp {
+		readCh = t.rtcpCh
+	}
+	select {
+	case readCh <- tunnelMediaPacket{data: append([]byte(nil), pkt.UDP.Payload...), addr: cloneMediaUDPAddr(pkt.UDP.Src)}:
+	case <-t.done:
+	default:
+	}
+	return true
+}
+
+func (t *tunnelMediaTransport) nextMediaCountLocked(rtcp bool, inbound bool) int {
+	if inbound {
+		if rtcp {
+			t.inRTCP++
+			return t.inRTCP
+		}
+		t.inRTP++
+		return t.inRTP
+	}
+	if rtcp {
+		t.outRTCP++
+		return t.outRTCP
+	}
+	t.outRTP++
+	return t.outRTP
+}
+
+func (t *tunnelMediaTransport) logMediaPacket(direction string, rtcp bool, count int, local *net.UDPAddr, peer *net.UDPAddr, payloadLen int) {
+	if count != 1 && count%100 != 0 {
+		return
+	}
+	kind := "rtp"
+	if rtcp {
+		kind = "rtcp"
+	}
+	t.logger.Debug("call media packet", "direction", direction, "kind", kind, "count", count, "local_addr", local, "peer_addr", peer, "payload_len", payloadLen)
+}
+
+func (t *tunnelMediaTransport) notifyPacket(rtcp bool, payload []byte) {
+	t.mu.Lock()
+	onPacket := t.onPacket
+	t.mu.Unlock()
+	if onPacket != nil {
+		onPacket(imscall.MediaPacket{RTCP: rtcp, RTCPBye: rtcp && hasRTCPBye(payload)})
+	}
+}
+
+func hasRTCPBye(payload []byte) bool {
+	for len(payload) >= 4 {
+		if payload[0]>>6 != 2 {
+			return false
+		}
+		packetLen := int(binary.BigEndian.Uint16(payload[2:4])+1) * 4
+		if packetLen < 4 || packetLen > len(payload) {
+			return false
+		}
+		if payload[1] == 203 {
+			return true
+		}
+		payload = payload[packetLen:]
+	}
+	return false
+}
+
+func (t *tunnelMediaTransport) HandleError(err error) {
+	t.closeWithError(fmt.Errorf("reading call media packet: %w", err))
+}
+
+func (t *tunnelMediaTransport) closeWithError(err error) {
+	t.closeOnce.Do(func() {
+		t.mu.Lock()
+		t.closed = true
+		t.terminalErr = err
+		attachment := t.attachment
+		t.mu.Unlock()
+		if attachment != nil {
+			_ = attachment.Close()
+		}
+		close(t.done)
+	})
+}
+
+func (t *tunnelMediaTransport) closedErr() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.terminalErr != nil {
+		return t.terminalErr
+	}
+	return errors.New("reading call media packet: transport is closed")
+}
+
+func mediaPortAddr(addr *net.UDPAddr, rtcp bool) *net.UDPAddr {
+	cloned := cloneMediaUDPAddr(addr)
+	if cloned == nil || !rtcp {
+		return cloned
+	}
+	cloned.Port++
+	return cloned
+}
+
+func mediaAddrMatches(got, want *net.UDPAddr) bool {
+	if got == nil || want == nil {
+		return false
+	}
+	return got.Port == want.Port && got.IP.Equal(want.IP)
+}
+
+func cloneMediaUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	return &net.UDPAddr{IP: append(net.IP(nil), addr.IP...), Port: addr.Port, Zone: addr.Zone}
+}

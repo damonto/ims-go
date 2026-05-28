@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	imscall "github.com/damonto/ims-client/ims/call"
 	swutunnel "github.com/damonto/ims-client/swu/tunnel"
 	"github.com/damonto/ims-client/usim"
 )
@@ -105,7 +106,23 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "imsSIPTimerD": "10s",
     "imsSIPTimerF": "11s",
     "imsSIPTimerH": "12s",
-    "imsSIPTimerJ": "13s"
+    "imsSIPTimerJ": "13s",
+    "imsVoice": {
+      "rtpProfile": "RTP/AVP",
+      "ptime": "20ms",
+      "maxptime": "240ms",
+      "qosPreconditionsSupported": true,
+      "reliableProvisionalSupported": true,
+      "sessionTimer": true,
+      "rtpInactivityTimeout": "20s",
+      "localRTPPortMin": 41000,
+      "localRTPPortMax": 41020,
+      "codecs": [
+        {"name": "AMR-WB", "payloadTypes": [104], "clockRate": 16000},
+        {"name": "AMR", "payloadTypes": [102], "clockRate": 8000, "modeSet": "0,2,4,7"},
+        {"name": "telephone-event", "payloadTypes": [101], "clockRate": 8000}
+      ]
+    }
   }
 ]`)
 	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
@@ -162,6 +179,21 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.SIPTimers.T1 != 3*time.Second || got.IMS.SIPTimers.TJ != 13*time.Second {
 					t.Fatalf("IMS SIP timers T1/TJ = %v/%v, want profile values", got.IMS.SIPTimers.T1, got.IMS.SIPTimers.TJ)
 				}
+				if got.IMS.Voice.PTime != 20*time.Millisecond || got.IMS.Voice.MaxPTime != 240*time.Millisecond {
+					t.Fatalf("IMS voice ptime/maxptime = %v/%v, want profile values", got.IMS.Voice.PTime, got.IMS.Voice.MaxPTime)
+				}
+				if got.IMS.Voice.Preconditions || got.IMS.Voice.ReliableProvisional {
+					t.Fatalf("IMS voice unsupported features = preconditions:%v reliableProvisional:%v, want disabled", got.IMS.Voice.Preconditions, got.IMS.Voice.ReliableProvisional)
+				}
+				if !got.IMS.Voice.SessionTimer {
+					t.Fatal("IMS voice session timer = false, want profile value")
+				}
+				if got.IMS.Voice.LocalRTPPortMin != 41000 || got.IMS.Voice.LocalRTPPortMax != 41020 {
+					t.Fatalf("IMS voice ports = %d/%d, want profile values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
+				}
+				if len(got.IMS.Voice.Codecs) != 3 || got.IMS.Voice.Codecs[0].Name != imscall.CodecAMRWB || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 104 {
+					t.Fatalf("IMS voice codecs = %+v, want profile codecs", got.IMS.Voice.Codecs)
+				}
 			},
 		},
 		{
@@ -178,6 +210,13 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 					UserAgent:       "explicit-agent",
 					RegisterExpires: 30 * time.Second,
 					SIPServerPort:   5090,
+					Voice: imscall.Config{
+						LocalRTPPortMin: 42000,
+						LocalRTPPortMax: 42010,
+						Codecs: []imscall.AudioCodecConfig{
+							{Name: imscall.CodecEVS, PayloadTypes: []int{110}, ClockRate: 16000},
+						},
+					},
 				},
 			},
 			check: func(t *testing.T, got Config) {
@@ -199,6 +238,12 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				}
 				if got.IMS.UserAgent != "explicit-agent" || got.IMS.RegisterExpires != 30*time.Second || got.IMS.SIPServerPort != 5090 {
 					t.Fatalf("IMS user agent/expires/port = %q/%v/%d, want explicit values", got.IMS.UserAgent, got.IMS.RegisterExpires, got.IMS.SIPServerPort)
+				}
+				if got.IMS.Voice.LocalRTPPortMin != 42000 || got.IMS.Voice.LocalRTPPortMax != 42010 {
+					t.Fatalf("IMS voice ports = %d/%d, want explicit values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
+				}
+				if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imscall.CodecEVS {
+					t.Fatalf("IMS voice codecs = %+v, want explicit codecs", got.IMS.Voice.Codecs)
 				}
 			},
 		},
@@ -389,6 +434,54 @@ func TestEmbeddedWFCConfigATTUsesConfiguredIMSIdentities(t *testing.T) {
 	}
 	if got.IMS.PublicIdentity != "sip:3102800123456789@one.att.net" {
 		t.Fatalf("PublicIdentity = %q, want AT&T public identity", got.IMS.PublicIdentity)
+	}
+}
+
+func TestWFCProfileAppliesATTVoiceInterop(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "310",
+    "mnc": "410",
+    "epdg": "epdg.epc.att.net",
+    "imsHomeDomain": "one.att.net",
+    "imsVoice": {
+      "codecs": [
+        {"name": "AMR", "payloadTypes": [102], "clockRate": 8000}
+      ]
+    }
+  }
+]`)
+	profile, ok, err := parseWFCProfile(data, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	if err != nil {
+		t.Fatalf("parseWFCProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("parseWFCProfile() ok = false, want true")
+	}
+
+	cfg := Config{
+		IMEI: testIMEI,
+		IMS: IMSConfig{
+			Voice: imscall.Config{
+				Codecs: []imscall.AudioCodecConfig{
+					{Name: imscall.CodecAMR, PayloadTypes: []int{102}, ClockRate: 8000},
+					{Name: imscall.CodecPCMU, PayloadTypes: []int{0}, ClockRate: 8000},
+				},
+			},
+		},
+	}
+	got := cfg.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	if len(got.IMS.Voice.Codecs) != 3 {
+		t.Fatalf("Voice codecs = %+v, want AMR, PCMU, and DTMF", got.IMS.Voice.Codecs)
+	}
+	if got.IMS.Voice.Codecs[0].Name != imscall.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 110 {
+		t.Fatalf("Voice speech codec = %+v, want AT&T AMR payload 110", got.IMS.Voice.Codecs[0])
+	}
+	if got.IMS.Voice.Codecs[1].Name != imscall.CodecPCMU || got.IMS.Voice.Codecs[1].PayloadTypes[0] != 0 {
+		t.Fatalf("Voice PCMU codec = %+v, want static payload 0", got.IMS.Voice.Codecs[1])
+	}
+	if got.IMS.Voice.Codecs[2].Name != imscall.CodecTelephoneEvent || got.IMS.Voice.Codecs[2].PayloadTypes[0] != 97 {
+		t.Fatalf("Voice DTMF codec = %+v, want AT&T DTMF payload 97", got.IMS.Voice.Codecs[2])
 	}
 }
 

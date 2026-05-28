@@ -55,9 +55,6 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) CloseContext(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	_ = s.sendDeleteRequest(ctx)
 	if s.closeCancel != nil {
 		s.closeCancel()

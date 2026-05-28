@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	imscall "github.com/damonto/ims-client/ims/call"
 	imssession "github.com/damonto/ims-client/ims/session"
 	imsussd "github.com/damonto/ims-client/ims/ussd"
 	swutunnel "github.com/damonto/ims-client/swu/tunnel"
@@ -42,6 +43,7 @@ type IMSConfig struct {
 	SIPServerPort          int
 	SIPTimers              imssession.TransactionTimers
 	SMSSubmitReportTimeout time.Duration
+	Voice                  imscall.Config
 
 	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
 	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
@@ -193,6 +195,25 @@ func (e *USSDEvents) Close() {
 	})
 }
 
+type VoiceEvents struct {
+	Incoming <-chan IncomingCall
+	Events   <-chan CallEvent
+
+	closeOnce sync.Once
+	closeFn   func()
+}
+
+func (e *VoiceEvents) Close() {
+	if e == nil {
+		return
+	}
+	e.closeOnce.Do(func() {
+		if e.closeFn != nil {
+			e.closeFn()
+		}
+	})
+}
+
 type Client struct {
 	cfg    Config
 	card   Card
@@ -213,6 +234,7 @@ type Client struct {
 	events       eventHub
 	sms          SMSService
 	ussd         USSDService
+	voice        VoiceService
 	smsSeq       atomic.Uint64
 	ussdSessions map[*imsussd.Session]*Session
 }
@@ -222,6 +244,10 @@ type SMSService struct {
 }
 
 type USSDService struct {
+	client *Client
+}
+
+type VoiceService struct {
 	client *Client
 }
 
@@ -274,6 +300,7 @@ func newClient(cfg Config) *Client {
 	}
 	client.sms.client = client
 	client.ussd.client = client
+	client.voice.client = client
 	return client
 }
 
@@ -283,4 +310,8 @@ func (c *Client) SMS() *SMSService {
 
 func (c *Client) USSD() *USSDService {
 	return &c.ussd
+}
+
+func (c *Client) Voice() *VoiceService {
+	return &c.voice
 }

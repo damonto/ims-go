@@ -55,6 +55,7 @@ type State struct {
 	PrivateIdentity   string
 	HomeDomain        string
 	RegisterURI       string
+	SIPPublicID       string
 	TelPublicID       string
 	Flow              Flow
 	ServiceRoutes     []string
@@ -146,7 +147,6 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 }
 
 func (s *Service) Register(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	challengeMsg, err := s.awaitRegisterChallenge(ctx)
 	if err != nil {
 		return err
@@ -166,7 +166,6 @@ func (s *Service) Register(ctx context.Context) error {
 }
 
 func (s *Service) Subscribe(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	msg := s.buildSubscribe()
 	resp, err := s.sess.Exchange(ctx, msg)
 	if err != nil {
@@ -187,7 +186,6 @@ func (s *Service) Establish(ctx context.Context) error {
 }
 
 func (s *Service) Refresh(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	state := refreshRegisterState{}
 	for range 6 {
 		req, err := s.buildRefreshRegister(ctx)
@@ -210,7 +208,6 @@ func (s *Service) Refresh(ctx context.Context) error {
 }
 
 func (s *Service) Maintain(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	timer := time.NewTimer(s.refreshInterval())
 	defer timer.Stop()
 	for {
@@ -227,7 +224,6 @@ func (s *Service) Maintain(ctx context.Context) error {
 }
 
 func (s *Service) Deregister(ctx context.Context) error {
-	ctx = normalizeContext(ctx)
 	if !s.isRegistered() {
 		return nil
 	}
@@ -293,90 +289,6 @@ func (s *Service) DialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
 	return state.Flow.DialogRequestPolicy(routes, state.UserAgent, state.AccessNetworkInfo)
 }
 
-func splitHeaderList(value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	parts := make([]string, 0, 1)
-	start := 0
-	inQuote := false
-	angleDepth := 0
-	for i := 0; i < len(value); i++ {
-		switch value[i] {
-		case '"':
-			inQuote = !inQuote
-		case '<':
-			if !inQuote {
-				angleDepth++
-			}
-		case '>':
-			if !inQuote && angleDepth > 0 {
-				angleDepth--
-			}
-		case ',':
-			if !inQuote && angleDepth == 0 {
-				part := strings.TrimSpace(value[start:i])
-				if part != "" {
-					parts = append(parts, part)
-				}
-				start = i + 1
-			}
-		}
-	}
-	if tail := strings.TrimSpace(value[start:]); tail != "" {
-		parts = append(parts, tail)
-	}
-	return parts
-}
-
-func headerAddressURI(value string) string {
-	uri := sip.AddressURI(value)
-	if uri == "" {
-		return ""
-	}
-	if before, _, ok := strings.Cut(uri, ";"); ok {
-		return strings.TrimSpace(before)
-	}
-	return strings.TrimSpace(uri)
-}
-
-func contactURIAndParams(value string) (string, string) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", ""
-	}
-	if left := strings.IndexByte(value, '<'); left >= 0 {
-		right := strings.IndexByte(value[left+1:], '>')
-		if right >= 0 {
-			uri := strings.TrimSpace(value[left+1 : left+1+right])
-			if semi := strings.IndexByte(uri, ';'); semi >= 0 {
-				uri = strings.TrimSpace(uri[:semi])
-			}
-			return uri, value[left+1+right+1:]
-		}
-	}
-	if semi := strings.IndexByte(value, ';'); semi >= 0 {
-		return strings.TrimSpace(value[:semi]), value[semi:]
-	}
-	return value, ""
-}
-
-func headerParamValue(params, name string) string {
-	for _, part := range strings.Split(params, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		key, value, ok := strings.Cut(part, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(key), name) {
-			continue
-		}
-		return strings.Trim(strings.TrimSpace(value), `"`)
-	}
-	return ""
-}
-
 func parsePositiveSeconds(value string) (time.Duration, bool) {
 	seconds, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || seconds <= 0 {
@@ -388,8 +300,8 @@ func parsePositiveSeconds(value string) (time.Duration, bool) {
 func associatedURIsFromMessage(msg sip.Message) []string {
 	uris := make([]string, 0)
 	for _, value := range msg.HeadersByName("P-Associated-URI") {
-		for _, part := range splitHeaderList(value) {
-			if uri := headerAddressURI(part); uri != "" {
+		for _, part := range sip.SplitHeaderList(value) {
+			if uri := strings.TrimSpace(sip.AddressURI(part)); uri != "" {
 				uris = append(uris, uri)
 			}
 		}
@@ -399,12 +311,12 @@ func associatedURIsFromMessage(msg sip.Message) []string {
 
 func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration, bool) {
 	for _, value := range msg.HeadersByName("Contact") {
-		for _, part := range splitHeaderList(value) {
-			uri, params := contactURIAndParams(part)
+		for _, part := range sip.SplitHeaderList(value) {
+			uri, params := sip.AddressURIAndParams(part)
 			if uri == "" || !sameContactURI(uri, contactURI) {
 				continue
 			}
-			if expires, ok := parsePositiveSeconds(headerParamValue(params, "expires")); ok {
+			if expires, ok := parsePositiveSeconds(sip.HeaderParam(params, "expires")); ok {
 				return expires, true
 			}
 		}
@@ -548,11 +460,15 @@ func (s *Service) applyAssociatedURI(msg sip.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.DefaultPublicID = uris[0]
+	s.state.SIPPublicID = ""
 	s.state.TelPublicID = ""
 	for _, uri := range uris {
-		if strings.HasPrefix(strings.ToLower(uri), "tel:") {
+		lower := strings.ToLower(uri)
+		if (strings.HasPrefix(lower, "sip:") || strings.HasPrefix(lower, "sips:")) && s.state.SIPPublicID == "" {
+			s.state.SIPPublicID = uri
+		}
+		if strings.HasPrefix(lower, "tel:") && s.state.TelPublicID == "" {
 			s.state.TelPublicID = uri
-			break
 		}
 	}
 }
@@ -1272,11 +1188,4 @@ func randomIMSPort() int {
 	const base = 10000
 	const span = 55535
 	return base + int(sip.RandomUint32()%span)
-}
-
-func normalizeContext(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
 }

@@ -50,7 +50,6 @@ type inboundPacket struct {
 }
 
 func DialSecureUDP(ctx context.Context, s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
-	ctx = normalizeContext(ctx)
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -107,14 +106,22 @@ func (t *UDPConn) RemoteAddr() net.Addr {
 }
 
 func (t *UDPConn) WritePacket(ctx context.Context, data []byte) error {
-	return t.writePacket(normalizeContext(ctx), data, t.remote)
+	return t.writePacket(ctx, data, t.remote)
 }
 
 func (t *UDPConn) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
-	ctx = normalizeContext(ctx)
 	remote, ok := addr.(*net.UDPAddr)
 	if !ok || remote == nil {
 		return t.WritePacket(ctx, data)
+	}
+	t.mu.Lock()
+	configuredRemote := cloneUDPAddr(t.remote)
+	t.mu.Unlock()
+	if remote.IP.Equal(configuredRemote.IP) {
+		// The protected UDP flow is bound to the peer's IPsec port-c/port-s
+		// tuple. SIP Via may advertise 5060/6000, but sending outside the
+		// established protected flow makes networks retransmit the request.
+		remote.Port = configuredRemote.Port
 	}
 	return t.writePacket(ctx, data, cloneUDPAddr(remote))
 }
@@ -156,7 +163,6 @@ func (t *UDPConn) writePacket(ctx context.Context, data []byte, remote *net.UDPA
 }
 
 func (t *UDPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	ctx = normalizeContext(ctx)
 	for {
 		select {
 		case <-ctx.Done():
