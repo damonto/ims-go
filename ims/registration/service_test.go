@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"slices"
 	"strconv"
@@ -21,6 +23,10 @@ import (
 )
 
 const testNonce = "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 type stubTransport struct {
 	local  net.Addr
@@ -1707,6 +1713,7 @@ func TestRefreshIntervalFollowsIMSRegistrationExpiryRules(t *testing.T) {
 
 func newTestService(t *testing.T, cfg Config, transport *stubTransport, card Card) *Service {
 	t.Helper()
+	cfg.Logger = testLogger()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)

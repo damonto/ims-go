@@ -79,6 +79,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("connecting client: %w", ErrClientClosed)
 	}
 
+	c.logger.Info("connecting client")
 	active, err := c.connectOnce(ctx, false)
 	if err != nil {
 		done()
@@ -127,7 +128,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 
 	imsSession, err := imssession.Open(imssession.Config{
 		Transport:         setup.imsCfg.Transport,
-		Logger:            c.logger,
+		Logger:            c.cfg.Logger,
 		TransactionTimers: setup.imsCfg.SIPTimers,
 	}, transport)
 	if err != nil {
@@ -145,7 +146,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	}
 	setup.reg = reg
 
-	c.logger.Debug("registering IMS")
+	c.logger.Info("registering IMS")
 	if err := reg.Establish(setup.setupCtx); err != nil {
 		wrapped := fmt.Errorf("establishing IMS registration: %w", err)
 		c.emitConnectFailure(ctx, wrapped)
@@ -163,6 +164,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		OnIncoming:          c.handleSMS,
 		OnStatusReport:      c.handleSMSStatusReport,
 		OnError:             c.emitError,
+		Logger:              c.cfg.Logger,
 	}, imsSession, reg, c.card)
 	if err != nil {
 		wrapped := fmt.Errorf("creating SMS service: %w", err)
@@ -175,6 +177,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		Language:           setup.imsCfg.USSDLanguage,
 		PhoneContextDomain: setup.imsCfg.PhoneContextDomain,
 		OnIncoming:         c.handleUSSD,
+		Logger:             c.cfg.Logger,
 	}, imsSession, reg)
 	if err != nil {
 		wrapped := fmt.Errorf("creating USSD service: %w", err)
@@ -193,6 +196,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	voiceCfg.OnIncomingCall = c.handleIncomingVoice
 	voiceCfg.OnCallEvent = c.handleVoiceEvent
 	voiceCfg.OnError = c.emitError
+	voiceCfg.Logger = c.cfg.Logger
 	voice, err := imsvoice.New(voiceCfg, imsSession, reg)
 	if err != nil {
 		wrapped := fmt.Errorf("creating voice service: %w", err)
@@ -207,7 +211,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		return nil, err
 	}
 
-	c.logger.Debug("ims registered")
+	c.logger.Info("IMS registered")
 	c.emitState(StateRegistered)
 	return active, nil
 }
@@ -327,13 +331,13 @@ func (c *Client) openTunnel(setup *connectSetup) (swutunnel.Info, error) {
 	setup.session = session
 
 	c.emitState(StateAuthenticating)
-	c.logger.Debug("starting client connection", "tunnel_remote_addr", setup.tunnelCfg.RemoteAddr)
+	c.logger.Info("connecting SWu tunnel", "tunnel_remote_addr", setup.tunnelCfg.RemoteAddr)
 
 	if err := session.Connect(setup.setupCtx, c.cfg.IMEI, c.card); err != nil {
 		return swutunnel.Info{}, fmt.Errorf("connecting swu: %w", err)
 	}
 	tunnelInfo := session.Info()
-	c.logger.Debug("swu tunnel established", "inner_ip", tunnelInfo.InnerIP, "pcscf_ip", tunnelInfo.PCSCFIP, "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
+	c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.InnerIP, "pcscf_ip", tunnelInfo.PCSCFIP, "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
 	return tunnelInfo, nil
 }
 
@@ -444,6 +448,7 @@ func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 		GeolocationPIDFRegister: cfg.GeolocationPIDFRegister,
 		GeolocationCountry:      cfg.GeolocationCountry,
 		UseTelURIForPIDFXML:     cfg.UseTelURIForPIDFXML,
+		Logger:                  c.cfg.Logger,
 		DialSecureTCP:           cfg.dialSecureTCP,
 		DialSecureUDP:           cfg.dialSecureUDP,
 		ListenSecureTCP:         cfg.listenSecureTCP,
@@ -631,11 +636,16 @@ func (c *Client) runIMSLoop(active *activeConn, done func()) {
 		if !c.startReconnect() {
 			return
 		}
+		c.logger.Info("reconnecting client", "delay", c.cfg.ReconnectDelay)
 		next, reconnectErr := c.reconnect()
 		c.finishReconnect()
 		if reconnectErr != nil {
+			if !errors.Is(reconnectErr, context.Canceled) {
+				c.logger.Error("reconnecting client", "err", reconnectErr)
+			}
 			return
 		}
+		c.logger.Info("client reconnected")
 		active = next
 	}
 }
@@ -707,6 +717,7 @@ func (c *Client) reconnect() (*activeConn, error) {
 		if c.lifecycleCtx.Err() != nil {
 			return nil, c.lifecycleCtx.Err()
 		}
+		c.logger.Warn("reconnect attempt", "err", err, "next_delay", c.cfg.ReconnectDelay)
 		if err := sleepContext(c.lifecycleCtx, c.cfg.ReconnectDelay); err != nil {
 			return nil, err
 		}
@@ -767,6 +778,9 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		err = errors.Join(err, c.closeActive(ctx, active))
 		if reader != nil {
 			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
+		}
+		if err != nil {
+			c.logger.Error("closing client", "err", err)
 		}
 		c.emitState(StateClosed)
 		c.events.close()

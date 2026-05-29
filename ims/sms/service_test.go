@@ -3,6 +3,8 @@ package sms
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -23,6 +25,11 @@ type serviceStubTransport struct {
 }
 
 type serviceStubCard struct{}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 type serviceCentreStubCard struct {
 	serviceStubCard
 	centre usim.ServiceCentre
@@ -89,7 +96,7 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -142,7 +149,7 @@ func TestSendUsesServiceCentrePSIForSIPTargetAndAddressForRP(t *testing.T) {
 		Address: "+15550000000",
 		PSI:     "sip:smsc@example.com",
 	}}
-	svc, err := New(Config{}, sess, reg, card)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, card)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -173,7 +180,7 @@ func TestSendUsesServiceCentrePSIForSIPTargetAndAddressForRP(t *testing.T) {
 func TestSendPrefersDefaultPublicIdentityWhenNoTelURI(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredServiceWithAssociatedURIs(t, transport, "<sip:alice@example.com>", "<sip:alias@example.com>")
-	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -200,7 +207,7 @@ func TestSendPrefersDefaultPublicIdentityWhenNoTelURI(t *testing.T) {
 func TestHandleMalformedInboundSMSReturns200(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -227,7 +234,7 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	gotCh := make(chan Incoming, 1)
-	svc, err := New(Config{OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -269,7 +276,7 @@ func TestHandleInboundSMSPPDataDownloadUsesUICCResponseInRPACK(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	card := &smsppDownloadStubCard{resp: usim.SMSPPDownloadResponse{SW1: 0x90, SW2: 0x00, Data: []byte{0xAA, 0xBB}}}
-	svc, err := New(Config{}, sess, reg, card)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, card)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -332,7 +339,7 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 	callbackStarted := make(chan struct{})
 	callbackRelease := make(chan struct{})
 	reportCh := make(chan sip.Message, 1)
-	svc, err := New(Config{
+	svc, err := New(Config{Logger: testLogger(),
 		OnIncoming: func(in Incoming) {
 			close(callbackStarted)
 			<-callbackRelease
@@ -416,7 +423,7 @@ func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	errCh := make(chan error, 1)
-	svc, err := New(Config{OnError: func(err error) { errCh <- err }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger(), OnError: func(err error) { errCh <- err }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -464,7 +471,7 @@ func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
 func TestHandleInboundReservedRPDirectionReturnsRPError97(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -540,7 +547,7 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -573,7 +580,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
-	"log/slog"
 	"strings"
 )
 
@@ -26,7 +25,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		cfg:       normalized,
 		sess:      sess,
 		reg:       reg,
-		logger:    slog.Default().With("component", "ims-voice"),
+		logger:    normalized.Logger.With("component", "ims-voice"),
 		timers:    sess.TransactionTimers(),
 		nextPort:  normalized.LocalRTPPortMin,
 		calls:     make(map[string]*Call),

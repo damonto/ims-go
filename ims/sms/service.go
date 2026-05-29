@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
-	"log/slog"
 	"mime"
 	"strings"
 	"time"
@@ -32,7 +31,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 		sess:          sess,
 		reg:           reg,
 		card:          card,
-		logger:        slog.Default().With("component", "ims-sms"),
+		logger:        normalized.Logger.With("component", "ims-sms"),
 		cleanupCtx:    cleanupCtx,
 		cleanupCancel: cleanupCancel,
 		rpRefs:        make(map[byte]struct{}),

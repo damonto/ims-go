@@ -33,6 +33,7 @@ type Config struct {
 	GeolocationPIDFRegister []int
 	GeolocationCountry      string
 	UseTelURIForPIDFXML     bool
+	Logger                  *slog.Logger
 
 	DialSecureTCP   func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
 	DialSecureUDP   func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
@@ -151,7 +152,7 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 		cfg:    cfg,
 		sess:   sess,
 		card:   card,
-		logger: slog.Default().With("component", "ims-registration"),
+		logger: cfg.Logger.With("component", "ims-registration"),
 		state: State{
 			PublicIdentity:      identity.publicIdentity,
 			DefaultPublicID:     identity.publicIdentity,
@@ -186,6 +187,7 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 }
 
 func (s *Service) Register(ctx context.Context) error {
+	s.logger.Info("registering IMS", "public_identity", s.State().PublicIdentity)
 	challengeMsg, err := s.awaitRegisterChallenge(ctx)
 	if err != nil {
 		return err
@@ -201,7 +203,12 @@ func (s *Service) Register(ctx context.Context) error {
 	if err := s.upgradeSecureTransport(ctx); err != nil {
 		return fmt.Errorf("registering IMS: %w", err)
 	}
-	return s.completeRegistration(ctx, challenge, initialAuth)
+	if err := s.completeRegistration(ctx, challenge, initialAuth); err != nil {
+		return err
+	}
+	state := s.State()
+	s.logger.Info("IMS registration established", "public_identity", state.PublicIdentity, "register_expires", state.RegisterExpires, "service_routes", len(state.ServiceRoutes))
+	return nil
 }
 
 func (s *Service) Subscribe(ctx context.Context) error {
@@ -228,7 +235,7 @@ func (s *Service) subscribe(ctx context.Context, retried bool) error {
 	if resp.StatusCode() == 489 {
 		s.setSubscribeUnsupported(true)
 		s.resetSubscription()
-		s.logger.Debug("registration event subscription unavailable", "status", resp.StatusCode())
+		s.logger.Info("registration event subscription unavailable", "status", resp.StatusCode())
 		return nil
 	}
 	if subscription.active && resp.StatusCode() == 481 && !retried {
@@ -242,6 +249,7 @@ func (s *Service) subscribe(ctx context.Context, retried bool) error {
 	s.setSubscribeUnsupported(false)
 	s.applySubscribeExpires(resp)
 	s.applySubscribeDialog(msg, resp)
+	s.logger.Info("registration event subscription active", "expires", s.currentSubscribeExpires())
 	return nil
 }
 
@@ -289,6 +297,7 @@ func (s *Service) Maintain(ctx context.Context) error {
 			if err := s.Refresh(ctx); err != nil {
 				return err
 			}
+			s.logger.Info("IMS registration refreshed", "next_refresh", s.refreshInterval())
 			registerTimer.Reset(s.refreshInterval())
 		case <-subscribeTimer.C:
 			s.refreshSubscription(ctx)
@@ -319,6 +328,7 @@ func (s *Service) Deregister(ctx context.Context) error {
 		}
 		if done {
 			s.setRegistered(false)
+			s.logger.Info("IMS deregistered")
 			return nil
 		}
 	}
@@ -462,7 +472,7 @@ func (s *Service) HandleError(err error) {
 	if err == nil {
 		return
 	}
-	s.logger.Debug("session error", "err", err)
+	s.logger.Warn("IMS registration session error", "err", err)
 }
 
 type refreshRegisterState struct {
@@ -729,7 +739,7 @@ func (s *Service) refreshSubscription(ctx context.Context) {
 		return
 	}
 	if err := s.Subscribe(ctx); err != nil {
-		s.logger.Debug("refreshing registration event subscription failed", "err", err)
+		s.logger.Warn("refreshing registration event subscription", "err", err)
 	}
 }
 

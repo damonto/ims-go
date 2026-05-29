@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"slices"
@@ -24,6 +25,10 @@ import (
 )
 
 type stubCard struct{}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func (stubCard) ICCID() string { return "8986000000000000000" }
 func (stubCard) IMSI() string  { return "001010123456789" }
@@ -636,7 +641,7 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{}, sess, stubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger()}, sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -722,7 +727,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{RegisterExpires: 2 * time.Second}, sess, stubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), RegisterExpires: 2 * time.Second}, sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -798,7 +803,7 @@ func TestRunActiveIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) 
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{RegisterExpires: 2 * time.Second}, sess, stubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), RegisterExpires: 2 * time.Second}, sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -860,7 +865,7 @@ func TestRunActiveIMSReturnsRegistrationEventTermination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{}, sess, stubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger()}, sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}

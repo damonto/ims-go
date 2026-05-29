@@ -14,9 +14,11 @@ func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, 
 		return SMSSubmission{}, fmt.Errorf("sending SMS: %w", err)
 	}
 
+	s.client.logger.Info("sending SMS", "to", to)
 	submittedAt := time.Now()
 	segments, err := low.Send(ctx, to, text)
 	if err != nil {
+		s.client.logger.Error("sending SMS", "to", to, "err", err)
 		return SMSSubmission{}, err
 	}
 
@@ -37,6 +39,7 @@ func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, 
 			TPReference: segment.TPReference,
 		})
 	}
+	s.client.logger.Info("SMS submitted", "id", submission.ID, "to", submission.To, "segments", submission.SegmentCount)
 	return submission, nil
 }
 

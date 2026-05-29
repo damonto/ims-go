@@ -24,6 +24,7 @@ type Config struct {
 	Language           string
 	PhoneContextDomain string
 	OnIncoming         func(*Session, Message)
+	Logger             *slog.Logger
 }
 
 type Message struct {

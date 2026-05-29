@@ -18,6 +18,7 @@ type Config struct {
 	OnIncoming          func(Incoming)
 	OnStatusReport      func(StatusReport)
 	OnError             func(error)
+	Logger              *slog.Logger
 }
 
 type Card interface {

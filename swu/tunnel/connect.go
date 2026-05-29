@@ -47,14 +47,19 @@ func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	defer finish()
+	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote)
 	if err := s.exchangeIKESAInit(ctx, state); err != nil {
+		s.logger.Error("IKE_SA_INIT exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
+	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI)
 	if err := s.exchangeIKEAuth(ctx, state); err != nil {
+		s.logger.Error("IKE_AUTH exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	s.commitConnect(state)
 	s.startBackgroundLoops()
+	s.logger.Info("SWu security associations established", "inner_ip", state.tunnel.InnerIP, "pcscf_ip", state.tunnel.PCSCFIP, "esp_initiator_spi", state.tunnel.ESPInitiatorSPI, "esp_responder_spi", state.tunnel.ESPResponderSPI)
 	return nil
 }
 
@@ -264,6 +269,7 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 			if cookieRetries > 4 {
 				return errors.New("parsing ike_sa_init response: too many COOKIE retries")
 			}
+			s.logger.Info("retrying IKE_SA_INIT with COOKIE", "attempt", cookieRetries)
 			state.ikeInitCookie = cookie
 			continue
 		}
@@ -280,6 +286,7 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 		if _, ok := triedGroups[group]; ok {
 			return fmt.Errorf("parsing ike_sa_init response: repeated INVALID_KE_PAYLOAD group %d", group)
 		}
+		s.logger.Info("retrying IKE_SA_INIT with responder DH group", "dh_group", group)
 		if err := state.resetDHGroup(group); err != nil {
 			return fmt.Errorf("updating ike_sa_init dh group: %w", err)
 		}

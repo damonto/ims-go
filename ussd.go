@@ -30,8 +30,10 @@ func (s *Session) Send(ctx context.Context, code string) (USSDResult, error) {
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 
+	s.client.logger.Info("sending USSD", "code", code)
 	low, err := service.Start(ctx, code)
 	if err != nil {
+		s.client.logger.Error("sending USSD", "code", code, "err", err)
 		return USSDResult{}, err
 	}
 	if err := s.attachLowSession(low, false); err != nil {
@@ -40,8 +42,10 @@ func (s *Session) Send(ctx context.Context, code string) (USSDResult, error) {
 
 	result, err := s.awaitResult(ctx, "sending USSD")
 	if err != nil {
+		s.client.logger.Error("waiting for USSD result", "code", code, "err", err)
 		return USSDResult{}, err
 	}
+	s.client.logger.Info("USSD result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
 	return result, nil
 }
 
@@ -53,13 +57,16 @@ func (s *Session) Reply(ctx context.Context, text string) (USSDResult, error) {
 	defer s.finishOperation()
 
 	if err := low.Reply(ctx, text); err != nil {
+		s.client.logger.Error("replying USSD", "err", err)
 		return USSDResult{}, err
 	}
 
 	result, err := s.awaitResult(ctx, "replying USSD")
 	if err != nil {
+		s.client.logger.Error("waiting for USSD reply result", "err", err)
 		return USSDResult{}, err
 	}
+	s.client.logger.Info("USSD reply result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
 	return result, nil
 }
 
@@ -73,14 +80,17 @@ func (s *Session) Close(ctx context.Context) (USSDResult, error) {
 	receivedAt := time.Now()
 	if !started {
 		s.markClosed(nil)
+		s.client.logger.Info("USSD closed")
 		return USSDResult{Closed: true, ReceivedAt: receivedAt}, nil
 	}
 
 	if err := low.End(ctx, ""); err != nil {
+		s.client.logger.Error("closing USSD", "err", err)
 		return USSDResult{}, err
 	}
 
 	s.markClosed(low)
+	s.client.logger.Info("USSD closed")
 	return USSDResult{Closed: true, ReceivedAt: receivedAt}, nil
 }
 

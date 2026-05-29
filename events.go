@@ -235,6 +235,7 @@ func runSubscription[T any](client *Client, name string, ch <-chan T, fn func(T)
 }
 
 func (c *Client) emitState(state RegistrationState) {
+	c.logger.Info("registration state", "state", state)
 	c.events.state.publish(state, func() {
 		c.logger.Debug("dropping state event", "state", state)
 	})
@@ -244,36 +245,42 @@ func (c *Client) emitError(err error) {
 	if err == nil {
 		return
 	}
+	c.logger.Error("client error", "err", err)
 	c.events.errors.publish(err, func() {
 		c.logger.Debug("dropping error event", "err", err)
 	})
 }
 
 func (c *Client) emitSMS(msg SMS) {
+	c.logger.Info("incoming SMS", "from", msg.From, "to", msg.To, "service_center", msg.ServiceCenter)
 	c.events.smsIncoming.publish(msg, func() {
 		c.logger.Debug("dropping sms event", "from", msg.From, "to", msg.To, "service_center", msg.ServiceCenter)
 	})
 }
 
 func (c *Client) emitSMSReport(report SMSReport) {
+	c.logger.Info("SMS status report", "recipient", report.Recipient, "service_center", report.ServiceCenter, "message_reference", report.MessageReference, "status", report.Status)
 	c.events.smsReports.publish(report, func() {
 		c.logger.Debug("dropping sms status report event", "recipient", report.Recipient, "service_center", report.ServiceCenter, "message_reference", report.MessageReference, "status", report.Status)
 	})
 }
 
 func (c *Client) emitIncomingUSSD(event IncomingUSSD) {
+	c.logger.Info("incoming USSD", "request", event.Message.Request, "notify", event.Message.Notify, "final", event.Message.Final, "error_code", event.Message.ErrorCode)
 	c.events.ussd.publish(event, func() {
 		c.logger.Debug("dropping ussd event", "text", event.Message.Text, "request", event.Message.Request, "notify", event.Message.Notify, "final", event.Message.Final)
 	})
 }
 
 func (c *Client) emitIncomingCall(event IncomingCall) {
+	c.logger.Info("incoming call", "from", event.From, "from_number", event.FromNumber)
 	c.events.voiceIn.publish(event, func() {
 		c.logger.Debug("dropping incoming call event", "from", event.From)
 	})
 }
 
 func (c *Client) emitCallEvent(event CallEvent) {
+	c.logger.Info("call event", "call_id", event.CallID, "state", event.State, "cause", event.Cause)
 	c.events.voiceEvents.publish(event, func() {
 		c.logger.Debug("dropping call event", "call_id", event.CallID, "state", event.State)
 	})

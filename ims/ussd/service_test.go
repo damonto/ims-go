@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"net/textproto"
 	"strings"
@@ -25,6 +27,10 @@ type stubTransport struct {
 }
 
 type stubCard struct{}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
@@ -265,7 +271,7 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTransport()
 			sess, reg := registeredService(t, transport)
-			svc, err := New(Config{}, sess, reg)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -334,7 +340,7 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -433,7 +439,7 @@ func TestValidateInviteOKDoesNotRequireAccept(t *testing.T) {
 func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -479,7 +485,7 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -510,7 +516,7 @@ func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
 func TestUSSDTargetURIUsesConfiguredPhoneContext(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{PhoneContextDomain: "wifi.example"}, sess, reg)
+	svc, err := New(Config{Logger: testLogger(), PhoneContextDomain: "wifi.example"}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -523,7 +529,7 @@ func TestUSSDTargetURIUsesConfiguredPhoneContext(t *testing.T) {
 func TestLookupIncomingInviteSessionMatchesServerTransaction(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -589,7 +595,7 @@ func TestLookupIncomingInviteSessionMatchesServerTransaction(t *testing.T) {
 func TestLookupIncomingInviteSessionMatchesLegacyServerTransaction(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -656,7 +662,7 @@ func TestLookupIncomingInviteSessionMatchesLegacyServerTransaction(t *testing.T)
 func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredServiceWithAssociatedURIs(t, transport, "<sip:alice@example.com>", "<tel:+15551234567>")
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -706,7 +712,7 @@ func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
 func TestStartUSSDSessionINFOGate(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -761,7 +767,7 @@ func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	callbackCh := make(chan Message, 1)
-	svc, err := New(Config{OnIncoming: func(session *Session, msg Message) { callbackCh <- msg }}, sess, reg)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(session *Session, msg Message) { callbackCh <- msg }}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -820,7 +826,7 @@ func TestNetworkInitiatedUSSDWaitsForCallbackBefore200OK(t *testing.T) {
 	callbackStarted := make(chan struct{})
 	callbackRelease := make(chan struct{})
 	writeCh := make(chan sip.Message, 1)
-	svc, err := New(Config{
+	svc, err := New(Config{Logger: testLogger(),
 		OnIncoming: func(session *Session, msg Message) {
 			close(callbackStarted)
 			<-callbackRelease
@@ -886,7 +892,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 	sess, reg := registeredService(t, transport)
 	callbackReturned := make(chan struct{})
 	writeCh := make(chan sip.Message, 5)
-	svc, err := New(Config{
+	svc, err := New(Config{Logger: testLogger(),
 		OnIncoming: func(session *Session, msg Message) {
 			replyCtx, cancel := context.WithCancel(context.Background())
 			if err := session.Reply(replyCtx, "1"); err != nil {
@@ -1007,7 +1013,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 func TestUnknownDialogGets481(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{}, sess, reg)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1045,7 +1051,7 @@ func registeredService(t *testing.T, transport *stubTransport) (*session.Session
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -1075,7 +1081,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}

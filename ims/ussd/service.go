@@ -7,7 +7,6 @@ import (
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
-	"log/slog"
 	"strings"
 )
 
@@ -24,7 +23,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		cfg:           cfg,
 		sess:          sess,
 		reg:           reg,
-		logger:        slog.Default().With("component", "ims-ussd"),
+		logger:        cfg.Logger.With("component", "ims-ussd"),
 		sessions:      make(map[string]*Session),
 		incomingIndex: make(map[string]string),
 		cleanupCtx:    cleanupCtx,

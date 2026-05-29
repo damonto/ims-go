@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -18,6 +20,10 @@ import (
 )
 
 type voiceStubCard struct{}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 type voiceStubTransport struct {
 	local  net.Addr
@@ -271,7 +277,7 @@ func TestTargetURI(t *testing.T) {
 	defer func() {
 		_ = sess.Close()
 	}()
-	reg, err := registration.New(registration.Config{
+	reg, err := registration.New(registration.Config{Logger: testLogger(),
 		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -382,7 +388,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -414,7 +420,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				t.Fatalf("Register() error = %v", err)
 			}
 
-			svc, err := New(Config{}, sess, reg)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -506,7 +512,7 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -516,7 +522,9 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(tt.cfg, sess, reg)
+			cfg := tt.cfg
+			cfg.Logger = testLogger()
+			svc, err := New(cfg, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -594,7 +602,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -604,7 +612,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{}, sess, reg)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -666,7 +674,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 			defer func() {
 				_ = sess.Close()
 			}()
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:    "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:        "ims.mnc001.mcc001.3gppnetwork.org",
@@ -676,7 +684,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{}, sess, reg)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -725,7 +733,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -734,7 +742,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{}, sess, reg)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -799,7 +807,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -809,7 +817,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			prepared := false
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.LocalPort != 40000 {
 						t.Fatalf("PrepareMedia LocalPort = %d, want 40000", cfg.LocalPort)
@@ -910,7 +918,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -920,7 +928,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			events := make(chan CallEvent, 8)
-			svc, err := New(Config{OnCallEvent: func(event CallEvent) { events <- event }}, sess, reg)
+			svc, err := New(Config{Logger: testLogger(), OnCallEvent: func(event CallEvent) { events <- event }}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1108,7 +1116,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1117,7 +1125,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{SessionTimer: true}, sess, reg)
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1188,7 +1196,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1197,7 +1205,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{SessionTimer: true}, sess, reg)
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1262,7 +1270,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1275,7 +1283,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			timeout := 80 * time.Millisecond
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  timeout,
 				RTCPInactivityTimeout: time.Second,
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -1391,7 +1399,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1403,7 +1411,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: time.Second,
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -1486,7 +1494,7 @@ func TestIncomingCancelEndsRingingCall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 			}, sess, voiceStubCard{})
@@ -1494,7 +1502,7 @@ func TestIncomingCancelEndsRingingCall(t *testing.T) {
 				t.Fatalf("registration New() error = %v", err)
 			}
 			events := make(chan CallEvent, 4)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				OnCallEvent: func(event CallEvent) {
 					events <- event
 				},
@@ -1539,7 +1547,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1567,7 +1575,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			if err := reg.Register(context.Background()); err != nil {
 				t.Fatalf("Register() error = %v", err)
 			}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
 				},
@@ -1649,7 +1657,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1657,7 +1665,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				MOCallRequestTimeout: 50 * time.Millisecond,
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
@@ -1717,7 +1725,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1725,7 +1733,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{MOCallRequestTimeout: 40 * time.Millisecond}, sess, reg)
+			svc, err := New(Config{Logger: testLogger(), MOCallRequestTimeout: 40 * time.Millisecond}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1767,7 +1775,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1776,7 +1784,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			events := make(chan CallEvent, 8)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RingbackTimeout: 50 * time.Millisecond,
 				OnCallEvent:     func(event CallEvent) { events <- event },
 			}, sess, reg)
@@ -1841,7 +1849,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1850,7 +1858,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			events := make(chan CallEvent, 8)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RingingTimeout: 50 * time.Millisecond,
 				OnCallEvent:    func(event CallEvent) { events <- event },
 			}, sess, reg)
@@ -1902,7 +1910,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1913,7 +1921,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			incoming := make(chan IncomingCall, 1)
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
@@ -2059,7 +2067,7 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2068,7 +2076,7 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			media := &voiceMediaTransport{}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
@@ -2152,7 +2160,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2161,7 +2169,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			opened := make(chan MediaConfig, 2)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					opened <- cfg
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: cfg.LocalPort}}, nil
@@ -2250,7 +2258,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2260,7 +2268,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			}
 			events := make(chan CallEvent, 16)
 			opened := make(chan MediaConfig, 2)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
 						t.Fatal("OpenMedia OnPacket is nil")
@@ -2342,7 +2350,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2353,7 +2361,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 			prepareStarted := make(chan struct{}, 1)
 			releasePrepare := make(chan struct{})
 			incoming := make(chan IncomingCall, 1)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					prepareStarted <- struct{}{}
 					select {
@@ -2449,7 +2457,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2462,7 +2470,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			incoming := make(chan IncomingCall, 1)
 			events := make(chan CallEvent, 8)
 			media := &voiceMediaTransport{}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					prepareStarted <- struct{}{}
@@ -2632,7 +2640,7 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2648,7 +2656,7 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 					progressCh <- msg
 				}
 			}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				ReliableProvisional: true,
 				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
 					return &voiceMediaTransport{}, nil
@@ -2729,7 +2737,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2738,7 +2746,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			events := make(chan CallEvent, 8)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				OnCallEvent: func(event CallEvent) {
 					events <- event
 				},
@@ -2803,7 +2811,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2813,7 +2821,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 			events := make(chan CallEvent, 8)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				OnCallEvent: func(event CallEvent) {
 					events <- event
 				},
@@ -2875,7 +2883,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2890,7 +2898,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 				local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 				rtcpCh: rtcpCh,
 			}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: time.Second,
 				RTCPSendInterval:      20 * time.Millisecond,
@@ -2971,7 +2979,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2986,7 +2994,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 				local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 				rtcpCh: rtcpCh,
 			}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: 40 * time.Millisecond,
 				RTCPSendInterval:      20 * time.Millisecond,
@@ -3059,7 +3067,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3074,7 +3082,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 				local:   &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
 				writeCh: rtpWrites,
 			}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: time.Second,
 				RTCPSendInterval:      20 * time.Millisecond,
@@ -3145,7 +3153,7 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3158,7 +3166,7 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 			timeout := 80 * time.Millisecond
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
 				RTCPInactivityTimeout: timeout,
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -3246,7 +3254,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3255,7 +3263,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{}, sess, reg)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -3346,7 +3354,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3359,7 +3367,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			incoming := make(chan IncomingCall, 1)
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.RemotePort != 0 || len(cfg.RemoteIP) != 0 {
 						t.Fatalf("PrepareMedia remote = %v:%d, want empty", cfg.RemoteIP, cfg.RemotePort)
@@ -3447,7 +3455,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -3459,7 +3467,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 			}
 
 			incoming := make(chan IncomingCall, 1)
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				GeolocationPIDFInvite: []int{GeolocationPIDFNonEmergencyWiFi},
 				GeolocationCountry:    "US",
 				OnIncomingCall:        func(event IncomingCall) { incoming <- event },
@@ -3555,7 +3563,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3567,7 +3575,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			incoming := make(chan IncomingCall, 1)
 			events := make(chan CallEvent, 8)
 			media := &voiceMediaTransport{}
-			svc, err := New(Config{
+			svc, err := New(Config{Logger: testLogger(),
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket

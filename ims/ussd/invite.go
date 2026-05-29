@@ -108,7 +108,7 @@ func (s *Service) startSession(ctx context.Context, start startRequest, invite, 
 		ussdSession.closeEvents()
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
-	s.logger.Debug("started USSD session", "code", start.code, "call_id", start.callID, "target_uri", ussdSession.targetURI)
+	s.logger.Info("started USSD session", "code", start.code, "call_id", start.callID, "target_uri", ussdSession.targetURI)
 	return ussdSession, nil
 }
 
@@ -144,7 +144,7 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		ussdSession.finish(false)
 		return fmt.Errorf("handling USSD INVITE: sending 200 OK: %w", err)
 	}
-	s.logger.Debug("accepted network-initiated USSD", "call_id", ussdSession.callID, "target_uri", ussdSession.targetURI)
+	s.logger.Info("accepted network-initiated USSD", "call_id", ussdSession.callID, "target_uri", ussdSession.targetURI)
 	return nil
 }
 

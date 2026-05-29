@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/pidf"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -49,6 +50,7 @@ type Config struct {
 	OnIncomingCall        func(IncomingCall)
 	OnCallEvent           func(CallEvent)
 	OnError               func(error)
+	Logger                *slog.Logger
 }
 
 type AudioCodecConfig struct {
