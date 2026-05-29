@@ -95,11 +95,8 @@ func (c *Call) handleResponse(ctx context.Context, msg sip.Message) error {
 			return fmt.Errorf("acknowledging forked call 2xx: %w", err)
 		}
 		resp, err := c.service.sess.Exchange(ctx, bye)
-		if err != nil {
-			return fmt.Errorf("releasing forked call 2xx: %w", err)
-		}
-		if resp.StatusCode() != 200 {
-			return fmt.Errorf("releasing forked call 2xx: expected 200, got %w", sip.NewResponseError(resp))
+		if !byeReleaseCompleted(resp, err) {
+			return byeReleaseError("releasing forked call 2xx", resp, err)
 		}
 		return nil
 	}
@@ -283,11 +280,8 @@ func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) 
 		return fmt.Errorf("acknowledging cancelled call 2xx: %w", err)
 	}
 	resp, err := c.service.sess.Exchange(ctx, bye)
-	if err != nil {
-		return fmt.Errorf("releasing cancelled call 2xx: %w", err)
-	}
-	if resp.StatusCode() != 200 {
-		return fmt.Errorf("releasing cancelled call 2xx: expected 200, got %w", sip.NewResponseError(resp))
+	if !byeReleaseCompleted(resp, err) {
+		return byeReleaseError("releasing cancelled call 2xx", resp, err)
 	}
 	return nil
 }

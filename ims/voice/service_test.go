@@ -1388,9 +1388,15 @@ func TestOpenMediaRequiresTransport(t *testing.T) {
 
 func TestDialEndsAfterRTCPBye(t *testing.T) {
 	tests := []struct {
-		name string
+		name      string
+		byeStatus int
+		byeReason string
+		wantError bool
 	}{
-		{name: "rtcp bye releases dialog"},
+		{name: "rtcp bye releases dialog", byeStatus: 200, byeReason: "OK"},
+		{name: "rtcp bye accepts missing dialog response", byeStatus: 481, byeReason: "Call/Transaction Does Not Exist"},
+		{name: "rtcp bye accepts request timeout response", byeStatus: 408, byeReason: "Request Timeout"},
+		{name: "rtcp bye reports non-terminating response", byeStatus: 500, byeReason: "Server Internal Error", wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1410,6 +1416,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 			}
 
 			events := make(chan CallEvent, 16)
+			errCh := make(chan error, 1)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
@@ -1420,6 +1427,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 					return media, nil
 				},
 				OnCallEvent: func(event CallEvent) { events <- event },
+				OnError:     func(err error) { errCh <- err },
 			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
@@ -1448,7 +1456,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 					transport.queue(callOK(msg))
 				case "BYE":
 					mediaClosedBeforeBYE <- media.isClosed()
-					transport.queue(callStatus(msg, 200, "OK"))
+					transport.queue(callStatus(msg, tt.byeStatus, tt.byeReason))
 				}
 			}
 			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
@@ -1474,6 +1482,22 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 			}
 			if got := byes[0].Header("Reason"); got != reasonMediaBearerReleased {
 				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaBearerReleased)
+			}
+			if tt.wantError {
+				select {
+				case err := <-errCh:
+					if !strings.Contains(err.Error(), tt.byeReason) {
+						t.Fatalf("OnError() = %v, want %q", err, tt.byeReason)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("OnError() was not called")
+				}
+			} else {
+				select {
+				case err := <-errCh:
+					t.Fatalf("OnError() = %v, want none", err)
+				default:
+				}
 			}
 		})
 	}
@@ -2871,6 +2895,87 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 			}
 			if got := call.State(); got != CallStateEnded {
 				t.Fatalf("call.State() = %q, want %q", got, CallStateEnded)
+			}
+		})
+	}
+}
+
+func TestHangupAcceptsBYETerminationResponses(t *testing.T) {
+	tests := []struct {
+		name       string
+		byeStatus  int
+		byeReason  string
+		noResponse bool
+	}{
+		{name: "ok", byeStatus: 200, byeReason: "OK"},
+		{name: "accepted", byeStatus: 202, byeReason: "Accepted"},
+		{name: "missing dialog", byeStatus: 481, byeReason: "Call/Transaction Does Not Exist"},
+		{name: "request timeout", byeStatus: 408, byeReason: "Request Timeout"},
+		{name: "no response", noResponse: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "BYE":
+					if !tt.noResponse {
+						transport.queue(callStatus(msg, tt.byeStatus, tt.byeReason))
+					}
+				}
+			}
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+
+			hangupCtx := context.Background()
+			hangupCancel := func() {}
+			if tt.noResponse {
+				hangupCtx, hangupCancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+			}
+			defer hangupCancel()
+			if err := call.Hangup(hangupCtx); err != nil {
+				t.Fatalf("Hangup() error = %v", err)
+			}
+			if got := call.State(); got != CallStateEnded {
+				t.Fatalf("call.State() = %s, want %s", got, CallStateEnded)
 			}
 		})
 	}

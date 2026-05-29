@@ -138,17 +138,28 @@ func (c *Call) Hangup(ctx context.Context) error {
 	c.setState(CallStateEnding, "")
 	_ = c.closeMedia()
 	resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reasonUserTriggered))
-	if err != nil {
-		c.finish(CallStateFailed, err.Error())
-		return fmt.Errorf("hanging up call: %w", err)
-	}
-	if resp.StatusCode() != 200 {
-		err := fmt.Errorf("hanging up call: expected 200, got %w", sip.NewResponseError(resp))
+	if !byeReleaseCompleted(resp, err) {
+		err := byeReleaseError("hanging up call", resp, err)
 		c.finish(CallStateFailed, err.Error())
 		return err
 	}
 	c.finish(CallStateEnded, "")
 	return nil
+}
+
+func byeReleaseCompleted(resp sip.Message, err error) bool {
+	if err != nil {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
+	code := resp.StatusCode()
+	return (code >= 200 && code < 300) || code == 408 || code == 481
+}
+
+func byeReleaseError(action string, resp sip.Message, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	return fmt.Errorf("%s: expected BYE termination response, got %w", action, sip.NewResponseError(resp))
 }
 
 func (c *Call) cancelOutgoingInvite(ctx context.Context) error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/sip"
 	"net"
 	"time"
 )
@@ -261,10 +260,8 @@ func (c *Call) endAfterMediaEvent(cause string) {
 		ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
 		resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reasonMediaBearerReleased))
 		cancel()
-		if err != nil {
-			c.service.emitError(fmt.Errorf("ending call after media event: %w", err))
-		} else if resp.StatusCode() != 200 {
-			c.service.emitError(fmt.Errorf("ending call after media event: expected 200, got %w", sip.NewResponseError(resp)))
+		if !byeReleaseCompleted(resp, err) {
+			c.service.emitError(byeReleaseError("ending call after media event", resp, err))
 		}
 	}
 	c.finish(CallStateEnded, cause)
