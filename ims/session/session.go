@@ -467,6 +467,9 @@ func (s *Session) readFinalTransportResponse(ctx context.Context, transport Tran
 			return sip.Message{}, err
 		}
 		if inbound.msg.IsRequest() {
+			if err := s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport}); err != nil {
+				return sip.Message{}, err
+			}
 			continue
 		}
 		s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))

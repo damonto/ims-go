@@ -97,9 +97,34 @@ type Service struct {
 	sessionID      string
 	tag            string
 	cseq           int64
+
+	subscribeExpires     time.Duration
+	subscribeUnsupported bool
+	subscription         subscriptionDialog
+	regInfoVersion       int
+	regInfoVersionSet    bool
+
+	registrationEvents       chan error
+	subscribeRefreshRequests chan struct{}
 }
 
 const defaultUserAgent = "Google_Pixel 3XLAndroid12SQ3A.220705.004"
+const defaultIMSExpires = 600000 * time.Second
+
+var errNetworkDeregistered = errors.New("ims registration terminated by network")
+
+type subscriptionDialog struct {
+	active       bool
+	callID       string
+	sessionID    string
+	cseq         int64
+	localHeader  string
+	remoteHeader string
+	localTag     string
+	remoteTag    string
+	targetURI    string
+	routeSet     []string
+}
 
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	if sess == nil {
@@ -146,9 +171,11 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 			MessagePort:    port,
 			SecurityClient: newSecurityClient(port),
 		},
-		callID:    callID,
-		sessionID: sessionID,
-		tag:       tag,
+		callID:                   callID,
+		sessionID:                sessionID,
+		tag:                      tag,
+		registrationEvents:       make(chan error, 1),
+		subscribeRefreshRequests: make(chan struct{}, 1),
 	}
 	attachment, err := sess.Attach(svc)
 	if err != nil {
@@ -178,18 +205,43 @@ func (s *Service) Register(ctx context.Context) error {
 }
 
 func (s *Service) Subscribe(ctx context.Context) error {
-	msg := s.buildSubscribe()
+	return s.subscribe(ctx, false)
+}
+
+func (s *Service) subscribe(ctx context.Context, retried bool) error {
+	if s.isSubscribeUnsupported() {
+		return nil
+	}
+	subscription := s.currentSubscription()
+	msg := s.buildSubscribeWithDialog(subscription)
 	resp, err := s.sess.Exchange(ctx, msg)
 	if err != nil {
+		if subscription.active {
+			s.resetSubscription()
+			s.resetRegInfoVersion()
+		}
 		return fmt.Errorf("subscribing IMS registration: %w", err)
 	}
+	if subscription.active && resp.StatusCode() != 481 {
+		s.applySubscribeRequestCSeq(msg)
+	}
 	if resp.StatusCode() == 489 {
+		s.setSubscribeUnsupported(true)
+		s.resetSubscription()
 		s.logger.Debug("registration event subscription unavailable", "status", resp.StatusCode())
 		return nil
+	}
+	if subscription.active && resp.StatusCode() == 481 && !retried {
+		s.resetSubscription()
+		s.resetRegInfoVersion()
+		return s.subscribe(ctx, true)
 	}
 	if resp.StatusCode() != 200 {
 		return fmt.Errorf("subscribing IMS registration: expected 200, got %w", sip.NewResponseError(resp))
 	}
+	s.setSubscribeUnsupported(false)
+	s.applySubscribeExpires(resp)
+	s.applySubscribeDialog(msg, resp)
 	return nil
 }
 
@@ -220,17 +272,27 @@ func (s *Service) Refresh(ctx context.Context) error {
 }
 
 func (s *Service) Maintain(ctx context.Context) error {
-	timer := time.NewTimer(s.refreshInterval())
-	defer timer.Stop()
+	registerTimer := time.NewTimer(s.refreshInterval())
+	defer registerTimer.Stop()
+	subscribeTimer := time.NewTimer(s.subscribeRefreshInterval())
+	defer subscribeTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timer.C:
+		case err := <-s.registrationEvents:
+			return err
+		case <-s.subscribeRefreshRequests:
+			s.refreshSubscription(ctx)
+			resetTimer(subscribeTimer, s.subscribeRefreshInterval())
+		case <-registerTimer.C:
 			if err := s.Refresh(ctx); err != nil {
 				return err
 			}
-			timer.Reset(s.refreshInterval())
+			registerTimer.Reset(s.refreshInterval())
+		case <-subscribeTimer.C:
+			s.refreshSubscription(ctx)
+			subscribeTimer.Reset(s.subscribeRefreshInterval())
 		}
 	}
 }
@@ -299,6 +361,11 @@ func (s *Service) RequestPolicy() sip.ClientRequestPolicy {
 func (s *Service) DialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
 	state := s.State()
 	return state.Flow.DialogRequestPolicy(routes, state.UserAgent, state.AccessNetworkInfo)
+}
+
+func (s *Service) StrictDialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
+	state := s.State()
+	return state.Flow.StrictDialogRequestPolicy(routes, state.UserAgent, state.AccessNetworkInfo)
 }
 
 func parsePositiveSeconds(value string) (time.Duration, bool) {
@@ -377,7 +444,18 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 	if !strings.EqualFold(req.Message.Method(), "NOTIFY") {
 		return false, nil
 	}
-	return true, s.sess.WriteStatus(ctx, req, 200, "OK")
+	if !s.notifyMatchesSubscription(req.Message) {
+		return true, s.sess.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+	}
+	s.applySubscriptionStateFromNotify(req.Message)
+	notifyErr := s.applyRegInfoNotify(req.Message)
+	if err := s.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
+		return true, err
+	}
+	if notifyErr != nil {
+		s.publishRegistrationEvent(notifyErr)
+	}
+	return true, nil
 }
 
 func (s *Service) HandleError(err error) {
@@ -390,7 +468,6 @@ func (s *Service) HandleError(err error) {
 type refreshRegisterState struct {
 	adjustedExpires bool
 	challenged      bool
-	restarted       bool
 }
 
 type clientIdentity struct {
@@ -511,7 +588,11 @@ func (s *Service) setRegisterExpires(expires time.Duration) {
 }
 
 func (s *Service) registerExpiresSeconds() int {
-	seconds := int(s.currentRegisterExpires() / time.Second)
+	return expiresSeconds(s.currentRegisterExpires())
+}
+
+func expiresSeconds(expires time.Duration) int {
+	seconds := int(expires / time.Second)
 	if seconds < 1 {
 		return 1
 	}
@@ -519,7 +600,154 @@ func (s *Service) registerExpiresSeconds() int {
 }
 
 func (s *Service) refreshInterval() time.Duration {
-	interval := s.currentRegisterExpires() / 2
+	return refreshIntervalFor(s.currentRegisterExpires())
+}
+
+func (s *Service) currentSubscribeExpires() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subscribeExpires > 0 {
+		return s.subscribeExpires
+	}
+	return defaultIMSExpires
+}
+
+func (s *Service) setSubscribeExpires(expires time.Duration) {
+	if expires <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.subscribeExpires = expires
+	s.mu.Unlock()
+}
+
+func (s *Service) subscribeRefreshInterval() time.Duration {
+	return refreshIntervalFor(s.currentSubscribeExpires())
+}
+
+func (s *Service) setSubscribeUnsupported(unsupported bool) {
+	s.mu.Lock()
+	s.subscribeUnsupported = unsupported
+	s.mu.Unlock()
+}
+
+func (s *Service) isSubscribeUnsupported() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subscribeUnsupported
+}
+
+func (s *Service) currentSubscription() subscriptionDialog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	subscription := s.subscription
+	subscription.routeSet = append([]string(nil), subscription.routeSet...)
+	return subscription
+}
+
+func (s *Service) resetSubscription() {
+	s.mu.Lock()
+	s.subscription = subscriptionDialog{}
+	s.mu.Unlock()
+}
+
+func (s *Service) resetRegInfoVersion() {
+	s.mu.Lock()
+	s.regInfoVersion = 0
+	s.regInfoVersionSet = false
+	s.mu.Unlock()
+}
+
+func (s *Service) applySubscribeRequestCSeq(req sip.Message) {
+	cseq := sip.CSeqNumber(req.Header("CSeq"))
+	if cseq <= 0 {
+		return
+	}
+	localTag := sip.HeaderTag(req.Header("From"))
+	remoteTag := sip.HeaderTag(req.Header("To"))
+	s.mu.Lock()
+	if s.subscription.active &&
+		s.subscription.callID == req.Header("Call-ID") &&
+		s.subscription.localTag == localTag &&
+		s.subscription.remoteTag == remoteTag {
+		s.subscription.cseq = cseq
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) applySubscribeDialog(req, resp sip.Message) {
+	localHeader := req.Header("From")
+	remoteHeader := resp.Header("To")
+	remoteTag := sip.HeaderTag(remoteHeader)
+	if remoteTag == "" {
+		s.resetSubscription()
+		s.logger.Debug("registration event subscription response missing remote tag")
+		return
+	}
+	targetURI := firstAddressURI(resp.HeadersByName("Contact"))
+	if targetURI == "" {
+		targetURI = sip.AddressURI(remoteHeader)
+	}
+	if targetURI == "" {
+		targetURI = sip.RequestURI(req)
+	}
+	s.mu.Lock()
+	s.subscription = subscriptionDialog{
+		active:       true,
+		callID:       req.Header("Call-ID"),
+		sessionID:    req.Header("Session-ID"),
+		cseq:         sip.CSeqNumber(req.Header("CSeq")),
+		localHeader:  localHeader,
+		remoteHeader: remoteHeader,
+		localTag:     sip.HeaderTag(localHeader),
+		remoteTag:    remoteTag,
+		targetURI:    targetURI,
+		routeSet:     reverseHeaderValues(resp.HeadersByName("Record-Route")),
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) publishRegistrationEvent(err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case s.registrationEvents <- err:
+	default:
+	}
+}
+
+func (s *Service) requestSubscribeRefresh() {
+	select {
+	case s.subscribeRefreshRequests <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) refreshSubscription(ctx context.Context) {
+	if s.isSubscribeUnsupported() {
+		return
+	}
+	if err := s.Subscribe(ctx); err != nil {
+		s.logger.Debug("refreshing registration event subscription failed", "err", err)
+	}
+}
+
+func resetTimer(timer *time.Timer, next time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(next)
+}
+
+func refreshIntervalFor(expires time.Duration) time.Duration {
+	interval := expires / 2
+	if expires > 1200*time.Second {
+		interval = expires - 600*time.Second
+	}
 	if interval < time.Second {
 		return time.Second
 	}
@@ -580,6 +808,166 @@ func (s *Service) applyRegisterExpires(msg sip.Message) {
 		return
 	}
 	s.setRegisterExpires(expires)
+}
+
+func (s *Service) applySubscribeExpires(msg sip.Message) {
+	expires, ok := parsePositiveSeconds(msg.Header("Expires"))
+	if !ok {
+		return
+	}
+	s.setSubscribeExpires(expires)
+}
+
+func (s *Service) notifyMatchesSubscription(msg sip.Message) bool {
+	subscription := s.currentSubscription()
+	if !subscription.active {
+		return true
+	}
+	return sip.DialogID{
+		CallID:    subscription.callID,
+		LocalTag:  subscription.localTag,
+		RemoteTag: subscription.remoteTag,
+	}.Matches(msg)
+}
+
+func (s *Service) applySubscriptionStateFromNotify(msg sip.Message) {
+	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), "reg") {
+		return
+	}
+	state, expires, ok := subscriptionState(msg.Header("Subscription-State"))
+	if !ok {
+		return
+	}
+	if expires > 0 {
+		s.setSubscribeExpires(expires)
+	}
+	if strings.EqualFold(state, "terminated") {
+		s.resetSubscription()
+		s.resetRegInfoVersion()
+		s.requestSubscribeRefresh()
+	}
+}
+
+func subscriptionState(value string) (state string, expires time.Duration, ok bool) {
+	state, params, _ := strings.Cut(strings.TrimSpace(value), ";")
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return "", 0, false
+	}
+	expires, _ = parsePositiveSeconds(sip.HeaderParam(params, "expires"))
+	return state, expires, true
+}
+
+func (s *Service) applyRegInfoNotify(msg sip.Message) error {
+	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), "reg") {
+		return nil
+	}
+	contentType := strings.TrimSpace(msg.Header("Content-Type"))
+	if contentType != "" && !strings.EqualFold(strings.TrimSpace(strings.Split(contentType, ";")[0]), "application/reginfo+xml") {
+		return nil
+	}
+	info, ok, err := parseRegInfo(msg.Body)
+	if err != nil {
+		s.logger.Debug("parsing registration event body failed", "err", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	apply, refresh := s.shouldApplyRegInfo(info)
+	if refresh {
+		s.requestSubscribeRefresh()
+	}
+	if !apply {
+		return nil
+	}
+	return s.applyRegInfo(info)
+}
+
+func (s *Service) shouldApplyRegInfo(info regInfo) (apply bool, refresh bool) {
+	version, ok := info.version()
+	if !ok {
+		return true, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.regInfoVersionSet {
+		s.regInfoVersion = version
+		s.regInfoVersionSet = true
+		return true, false
+	}
+	if version <= s.regInfoVersion {
+		return false, false
+	}
+	refresh = version > s.regInfoVersion+1
+	if version > s.regInfoVersion+1 {
+		s.logger.Debug("registration event version gap", "current", s.regInfoVersion, "received", version)
+	}
+	s.regInfoVersion = version
+	return true, refresh
+}
+
+func (s *Service) applyRegInfo(info regInfo) error {
+	state := s.State()
+	contactURI := s.currentRegisterContactURI()
+	foundRegistration := false
+	foundActiveContact := false
+
+	for _, reg := range info.Registration {
+		if !samePublicIdentity(reg.AOR, state) {
+			continue
+		}
+		foundRegistration = true
+		for _, contact := range reg.Contact {
+			if !sameContactURI(contact.URI, contactURI) {
+				continue
+			}
+			if contact.active() {
+				foundActiveContact = true
+				s.setRegistered(true)
+				if expires, ok := contact.expiresDuration(); ok {
+					s.setRegisterExpires(expires)
+				}
+				continue
+			}
+			if contact.terminated() {
+				s.setRegistered(false)
+				return networkDeregisteredError(contact.Event)
+			}
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(info.State), "full") {
+		if !foundRegistration || !foundActiveContact {
+			s.setRegistered(false)
+			return errNetworkDeregistered
+		}
+	}
+	return nil
+}
+
+func networkDeregisteredError(event string) error {
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return errNetworkDeregistered
+	}
+	return fmt.Errorf("%w: %s", errNetworkDeregistered, event)
+}
+
+func samePublicIdentity(aor string, state State) bool {
+	aor = strings.TrimSpace(aor)
+	if aor == "" {
+		return false
+	}
+	identities := []string{
+		state.PublicIdentity,
+		state.DefaultPublicID,
+		state.SIPPublicID,
+		state.TelPublicID,
+	}
+	return slices.ContainsFunc(identities, func(identity string) bool {
+		return strings.EqualFold(strings.TrimSpace(identity), aor)
+	})
 }
 
 func (s *Service) applyRegisterSuccess(msg sip.Message) {
@@ -716,26 +1104,10 @@ func (s *Service) handleRefreshRegistration(resp sip.Message, state *refreshRegi
 		}
 		return false, nil
 	case 403, 408, 500, 504:
-		if state.restarted {
-			return false, fmt.Errorf("refreshing IMS registration: repeated restart status %d", resp.StatusCode())
-		}
-		s.resetAuthStateForRefresh()
-		state.challenged = false
-		state.adjustedExpires = false
-		state.restarted = true
-		return false, nil
+		return false, fmt.Errorf("refreshing IMS registration: initial registration required after %w", sip.NewResponseError(resp))
 	default:
 		return false, fmt.Errorf("refreshing IMS registration: unexpected response: %w", sip.NewResponseError(resp))
 	}
-}
-
-func (s *Service) resetAuthStateForRefresh() {
-	s.mu.Lock()
-	s.authNonce = ""
-	s.authRealm = strings.TrimPrefix(s.state.RegisterURI, "sip:")
-	s.authQOP = ""
-	s.authNonceCount = 0
-	s.mu.Unlock()
 }
 
 func (s *Service) buildDeregisterMessage(ctx context.Context, verify *security.Param, realm, nonce, qop string) (sip.Message, error) {
@@ -961,20 +1333,51 @@ func registerPIDFEntityURI(state State) string {
 }
 
 func (s *Service) buildSubscribe() sip.Message {
+	return s.buildSubscribeWithDialog(subscriptionDialog{})
+}
+
+func (s *Service) buildSubscribeWithDialog(subscription subscriptionDialog) sip.Message {
 	state := s.State()
 	publicID := subscribePublicIdentity(state)
-	callID, sessionID, tag, branch := sip.NewTransaction()
-	msg := sip.NewRequest("SUBSCRIBE", publicID)
-	msg.Headers.Add("Expires", strconv.Itoa(s.registerExpiresSeconds()))
+	callID := subscription.callID
+	sessionID := subscription.sessionID
+	localTag := subscription.localTag
+	newCallID, newSessionID, newTag, branch := sip.NewTransaction()
+	if callID == "" {
+		callID = newCallID
+	}
+	if sessionID == "" {
+		sessionID = newSessionID
+	}
+	if localTag == "" {
+		localTag = newTag
+	}
+	cseq := subscription.cseq
+	if cseq > 0 {
+		cseq++
+	} else {
+		cseq = atomic.AddInt64(&s.cseq, 1)
+	}
+	requestURI := publicID
+	if subscription.active && strings.TrimSpace(subscription.targetURI) != "" {
+		requestURI = subscription.targetURI
+	}
+	msg := sip.NewRequest("SUBSCRIBE", requestURI)
+	msg.Headers.Add("Accept", "application/reginfo+xml")
+	msg.Headers.Add("Expires", strconv.Itoa(expiresSeconds(s.currentSubscribeExpires())))
 	msg.Headers.Add("Event", "reg")
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", publicID, tag))
-	msg.Headers.Add("To", fmt.Sprintf("<%s>", publicID))
+	msg.Headers.Add("From", subscribeHeaderWithTag(subscription.localHeader, publicID, localTag))
+	msg.Headers.Add("To", subscribeHeaderWithTag(subscription.remoteHeader, publicID, subscription.remoteTag))
 	msg.Headers.Add("Call-ID", callID)
 	msg.Headers.Add("Session-ID", sessionID)
 	msg.Headers.Add("Contact", s.subscribeContactValue(s.messagePort()))
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d SUBSCRIBE", atomic.AddInt64(&s.cseq, 1)))
+	msg.Headers.Add("CSeq", fmt.Sprintf("%d SUBSCRIBE", cseq))
 	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, s.messagePort(), branch))
-	s.RequestPolicy().Apply(&msg)
+	if subscription.active {
+		s.StrictDialogRequestPolicy(subscription.routeSet).Apply(&msg)
+	} else {
+		s.RequestPolicy().Apply(&msg)
+	}
 	return msg
 }
 
@@ -983,6 +1386,16 @@ func subscribePublicIdentity(state State) string {
 		return state.DefaultPublicID
 	}
 	return state.PublicIdentity
+}
+
+func subscribeHeaderWithTag(headerValue, fallbackURI, tag string) string {
+	if strings.TrimSpace(tag) == "" {
+		if strings.TrimSpace(headerValue) != "" {
+			return headerValue
+		}
+		return fmt.Sprintf("<%s>", fallbackURI)
+	}
+	return sip.WithTag(headerValue, fallbackURI, tag)
 }
 
 func (s *Service) messagePort() int {
@@ -999,6 +1412,28 @@ func (s *Service) subscribeContactValue(port int) string {
 		params = append([]string{fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, s.cfg.IMEI)}, params...)
 	}
 	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
+}
+
+func firstAddressURI(values []string) string {
+	for _, value := range values {
+		if uri := strings.TrimSpace(sip.AddressURI(value)); uri != "" {
+			return uri
+		}
+	}
+	return ""
+}
+
+func reverseHeaderValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for i := len(values) - 1; i >= 0; i-- {
+		if value := strings.TrimSpace(values[i]); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (s *Service) registerContactValue(port int) string {
@@ -1106,7 +1541,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		cfg.UserAgent = defaultUserAgent
 	}
 	if cfg.RegisterExpires == 0 {
-		cfg.RegisterExpires = 600000 * time.Second
+		cfg.RegisterExpires = defaultIMSExpires
 	}
 	return cfg, nil
 }

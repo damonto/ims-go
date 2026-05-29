@@ -48,6 +48,10 @@ func (f Flow) DialogRequestPolicy(routes []string, userAgent, accessNetworkInfo 
 	return f.requestPolicy(routes, userAgent, accessNetworkInfo)
 }
 
+func (f Flow) StrictDialogRequestPolicy(routes []string, userAgent, accessNetworkInfo string) sip.ClientRequestPolicy {
+	return f.requestPolicy(routes, userAgent, accessNetworkInfo)
+}
+
 func (f Flow) requestPolicy(routes []string, userAgent, accessNetworkInfo string) sip.ClientRequestPolicy {
 	verify := f.SecurityVerifyValue()
 	return sip.ClientRequestPolicy{

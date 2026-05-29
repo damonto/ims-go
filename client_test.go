@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -687,6 +688,233 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	}
 	if got := transport.writeCount(); got != 4 {
 		t.Fatalf("write count after cleanup = %d, want 4", got)
+	}
+	if reg.State().Registered {
+		t.Fatal("Registered = true, want false")
+	}
+}
+
+func TestIMSRunnerMaintainsRegistration(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	refreshed := make(chan struct{}, 1)
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch transport.writeCount() {
+		case 1:
+			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		default:
+			if req.Method() == "REGISTER" && req.Header("Expires") != "0" && transport.writeCount() >= 3 {
+				select {
+				case refreshed <- struct{}{}:
+				default:
+				}
+			}
+			transport.queueRead(newIMSResponse(req, 200, "OK"))
+		}
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{RegisterExpires: 2 * time.Second}, sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	client := newReadyClient(t, Config{IMEI: testIMEI})
+	defer client.Close()
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	active := &activeConn{
+		runCtx:     runCtx,
+		cancel:     cancelRun,
+		imsSession: sess,
+		reg:        reg,
+	}
+	client.mu.Lock()
+	client.active = active
+	client.mu.Unlock()
+
+	done, ok := client.reserveCloseTask()
+	if !ok {
+		t.Fatal("reserveCloseTask() = false, want true")
+	}
+	runDone := client.startIMSRunner(active, done)
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	select {
+	case <-refreshed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiting for registration refresh")
+	}
+
+	cancelRun()
+	close(transport.cancelReadRelease)
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("IMS runner did not stop")
+	}
+}
+
+func TestRunActiveIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	released := make(chan struct{})
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch transport.writeCount() {
+		case 1:
+			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			transport.queueRead(newIMSResponse(req, 200, "OK"))
+		default:
+			transport.queueRead(newIMSResponse(req, 500, "Server Internal Error"))
+			select {
+			case <-released:
+			default:
+				close(released)
+				close(transport.cancelReadRelease)
+			}
+		}
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{RegisterExpires: 2 * time.Second}, sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	active := &activeConn{
+		runCtx:     runCtx,
+		cancel:     cancelRun,
+		imsSession: sess,
+		reg:        reg,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runActiveIMS(active)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("runActiveIMS() error = nil, want refresh error")
+		}
+		if !strings.Contains(err.Error(), "maintaining IMS registration") {
+			t.Fatalf("runActiveIMS() error = %v, want maintaining IMS registration", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waiting for runActiveIMS refresh error")
+	}
+	if runCtx.Err() != nil {
+		t.Fatalf("runCtx.Err() = %v, want nil", runCtx.Err())
+	}
+}
+
+func TestRunActiveIMSReturnsRegistrationEventTermination(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		if !req.IsRequest() || req.Method() != "REGISTER" {
+			return
+		}
+		switch transport.writeCount() {
+		case 1:
+			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			transport.queueRead(newIMSResponse(req, 200, "OK"))
+		}
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{}, sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	active := &activeConn{
+		runCtx:     runCtx,
+		cancel:     cancelRun,
+		imsSession: sess,
+		reg:        reg,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runActiveIMS(active)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	state := reg.State()
+	contactURI := "sip:" + net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort))
+	notify := imssip.NewRequest("NOTIFY", "sip:user@example.com")
+	notify.Headers.Add("Event", "reg")
+	notify.Headers.Add("Content-Type", "application/reginfo+xml")
+	notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="%s" id="reg-1" state="terminated">
+    <contact id="contact-1" state="terminated" event="deactivated">
+      <uri>%s</uri>
+    </contact>
+  </registration>
+</reginfo>`, state.PublicIdentity, contactURI))
+	transport.queueRead(notify)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("runActiveIMS() error = nil, want registration event termination")
+		}
+		if !strings.Contains(err.Error(), "ims registration terminated by network") {
+			t.Fatalf("runActiveIMS() error = %v, want network deregistration", err)
+		}
+	case <-time.After(time.Second):
+		cancelRun()
+		close(transport.cancelReadRelease)
+		t.Fatal("waiting for runActiveIMS registration event termination")
+	}
+	if runCtx.Err() != nil {
+		t.Fatalf("runCtx.Err() = %v, want nil", runCtx.Err())
 	}
 	if reg.State().Registered {
 		t.Fatal("Registered = true, want false")

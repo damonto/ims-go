@@ -182,11 +182,19 @@ func (h *requestHandler) HandleError(err error) {
 	h.errs = append(h.errs, err)
 }
 
-func TestExchangeBeforeRunSkipsRequestsAndProvisionalResponses(t *testing.T) {
+func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
 	sess, err := Open(Config{}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
+	}
+	handler := &requestHandler{
+		handle: func(context.Context, Request) (bool, error) {
+			return true, nil
+		},
+	}
+	if _, err := sess.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
 	}
 
 	req := newRequest("MESSAGE", "call-1", "1 MESSAGE")
@@ -206,6 +214,9 @@ func TestExchangeBeforeRunSkipsRequestsAndProvisionalResponses(t *testing.T) {
 	}
 	if got := transport.writeCount(); got != 1 {
 		t.Fatalf("len(writes) = %d, want 1", got)
+	}
+	if len(handler.requests) != 1 {
+		t.Fatalf("len(handler.requests) = %d, want 1", len(handler.requests))
 	}
 }
 

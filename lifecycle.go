@@ -151,6 +151,11 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		c.emitConnectFailure(ctx, wrapped)
 		return nil, wrapped
 	}
+	if err := reg.Subscribe(setup.setupCtx); err != nil {
+		wrapped := fmt.Errorf("subscribing IMS registration: %w", err)
+		c.emitConnectFailure(ctx, wrapped)
+		return nil, wrapped
+	}
 
 	sms, err := imssms.New(imssms.Config{
 		ServiceCenter:       setup.imsCfg.ServiceCenter,
@@ -607,7 +612,7 @@ func (c *Client) startIMSRunner(active *activeConn, done func()) <-chan struct{}
 func (c *Client) runIMSLoop(active *activeConn, done func()) {
 	defer done()
 	for {
-		err := active.imsSession.Run(active.runCtx)
+		err := runActiveIMS(active)
 		if err == nil || active.runCtx.Err() != nil {
 			return
 		}
@@ -633,6 +638,35 @@ func (c *Client) runIMSLoop(active *activeConn, done func()) {
 		}
 		active = next
 	}
+}
+
+type imsRuntimeResult struct {
+	action string
+	err    error
+}
+
+func runActiveIMS(active *activeConn) error {
+	runCtx, cancel := context.WithCancel(active.runCtx)
+	defer cancel()
+
+	results := make(chan imsRuntimeResult, 2)
+	go func() {
+		results <- imsRuntimeResult{action: "running IMS session", err: active.imsSession.Run(runCtx)}
+	}()
+	go func() {
+		results <- imsRuntimeResult{action: "maintaining IMS registration", err: active.reg.Maintain(runCtx)}
+	}()
+
+	first := <-results
+	cancel()
+	second := <-results
+
+	for _, result := range []imsRuntimeResult{first, second} {
+		if result.err != nil && !errors.Is(result.err, context.Canceled) {
+			return fmt.Errorf("%s: %w", result.action, result.err)
+		}
+	}
+	return nil
 }
 
 func (c *Client) detachActive(active *activeConn) bool {
