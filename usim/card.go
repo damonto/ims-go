@@ -89,11 +89,12 @@ func (u *Card) AKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
 		return AKAResult{}, errors.New("authenticating USIM: rand and autn must be 16 bytes")
 	}
 
-	result, err := u.authenticateAKA(ctx, u.aid, rand, autn)
+	result, err := u.authenticate3G(ctx, u.aid, rand, autn, false)
 	if err == nil || len(u.isimAID) == 0 {
 		return result, err
 	}
-	result, isimErr := u.authenticateAKA(ctx, u.isimAID, rand, autn)
+
+	result, isimErr := u.authenticate3G(ctx, u.isimAID, rand, autn, false)
 	if isimErr == nil {
 		return result, nil
 	}
@@ -101,11 +102,29 @@ func (u *Card) AKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
 	return AKAResult{}, err
 }
 
-func (u *Card) authenticateAKA(ctx context.Context, aid, rand, autn []byte) (AKAResult, error) {
+func (u *Card) EAPAKA(ctx context.Context, rand, autn []byte) (AKAResult, error) {
+	if len(rand) != 16 || len(autn) != 16 {
+		return AKAResult{}, errors.New("authenticating USIM: rand and autn must be 16 bytes")
+	}
+	result, err := u.authenticate3G(ctx, u.aid, rand, autn, true)
+	if err == nil {
+		return result, err
+	}
+	if len(u.isimAID) != 0 {
+		result, isimErr := u.authenticate3G(ctx, u.isimAID, rand, autn, true)
+		if isimErr == nil {
+			return result, nil
+		}
+	}
+	return u.AKA(ctx, rand, autn)
+}
+
+func (u *Card) authenticate3G(ctx context.Context, aid, rand, autn []byte, eapAKA bool) (AKAResult, error) {
 	payload, err := u.tx.Authenticate3G(ctx, usimreader.AuthenticateRequest{
-		AID:  aid,
-		Rand: rand,
-		AUTN: autn,
+		AID:    aid,
+		Rand:   rand,
+		AUTN:   autn,
+		EAPAKA: eapAKA,
 	})
 	if err != nil {
 		return AKAResult{}, fmt.Errorf("authenticating USIM: %w", err)

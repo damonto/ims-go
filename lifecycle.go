@@ -333,7 +333,7 @@ func (c *Client) openTunnel(setup *connectSetup) (swutunnel.Info, error) {
 	c.emitState(StateAuthenticating)
 	c.logger.Info("connecting SWu tunnel", "tunnel_remote_addr", setup.tunnelCfg.RemoteAddr)
 
-	if err := session.Connect(setup.setupCtx, c.cfg.IMEI, c.card); err != nil {
+	if err := session.Connect(setup.setupCtx, c.cfg.Terminal.ID, c.card); err != nil {
 		return swutunnel.Info{}, fmt.Errorf("connecting swu: %w", err)
 	}
 	tunnelInfo := session.Info()

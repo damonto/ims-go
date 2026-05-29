@@ -147,13 +147,23 @@ func BuildAKAAuthorization(ctx context.Context, card AKAProvider, id Identity, c
 func authenticateDigestAKA(ctx context.Context, card AKAProvider, nonce []byte) (usim.AKAResult, error) {
 	aka, err := card.AKA(ctx, nonce[:16], nonce[16:32])
 	if err == nil {
-		return aka, nil
+		if digestAKAUsable(aka) {
+			return aka, nil
+		}
+		err = errors.New("standard nonce order response missing RES, CK, or IK")
 	}
 	reversed, reverseErr := card.AKA(ctx, nonce[16:32], nonce[:16])
 	if reverseErr == nil {
-		return reversed, nil
+		if digestAKAUsable(reversed) {
+			return reversed, nil
+		}
+		reverseErr = errors.New("reversed nonce order response missing RES, CK, or IK")
 	}
-	return usim.AKAResult{}, err
+	return usim.AKAResult{}, errors.Join(err, reverseErr)
+}
+
+func digestAKAUsable(aka usim.AKAResult) bool {
+	return len(aka.RES) != 0 && len(aka.CK) != 0 && len(aka.IK) != 0
 }
 
 func (p Param) MarshalText() ([]byte, error) {

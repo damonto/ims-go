@@ -6,23 +6,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	ts43http "github.com/damonto/ts43-go/http"
 	"github.com/damonto/ts43-go/sim"
+	"github.com/damonto/ts43-go/ts43"
 	"github.com/damonto/vowifi-go/usim"
 )
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
 
 func TestCheckWFCEntitlement(t *testing.T) {
 	tests := []struct {
@@ -54,33 +50,44 @@ func TestCheckWFCEntitlement(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			httpClient := &http.Client{
-				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					if got := req.URL.Query().Get("app"); got != "ap2004" {
-						t.Fatalf("app = %q, want ap2004", got)
-					}
-					if got := req.Header.Get("User-Agent"); !strings.Contains(got, "client-IMS-Entitlement") {
-						t.Fatalf("User-Agent = %q, want WFC entitlement marker", got)
-					}
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader(tt.body)),
-						Header:     make(http.Header),
-					}, nil
-				}),
-			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if got := req.URL.Query().Get("app"); got != "ap2004" {
+					t.Fatalf("app = %q, want ap2004", got)
+				}
+				if got := req.URL.Query().Get("terminal_id"); got != "111122223333444" {
+					t.Fatalf("terminal_id = %q, want configured terminal ID", got)
+				}
+				if got := req.URL.Query().Get("terminal_vendor"); got != "Goog" {
+					t.Fatalf("terminal_vendor = %q, want truncated vendor", got)
+				}
+				if got := req.URL.Query().Get("terminal_model"); got != "Pixel" {
+					t.Fatalf("terminal_model = %q, want Pixel", got)
+				}
+				if got := req.URL.Query().Get("terminal_sw_version"); got != "16" {
+					t.Fatalf("terminal_sw_version = %q, want 16", got)
+				}
+				if got := req.Header.Get("User-Agent"); !strings.Contains(got, "client-IMS-Entitlement") {
+					t.Fatalf("User-Agent = %q, want WFC entitlement marker", got)
+				}
+				w.Header().Set("Content-Type", "text/vnd.wap.connectivity-xml")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
 			cfg := Config{
-				IMEI:   testIMEI,
 				Logger: slog.Default(),
-				WFCEntitlement: WFCEntitlementConfig{
-					HTTPClient:       httpClient,
-					TerminalVendor:   "Google",
-					TerminalModel:    "Pixel",
-					TerminalSoftware: "16",
+				Terminal: TerminalInfo{
+					ID:              "111122223333444",
+					Vendor:          "Google",
+					Model:           "Pixel",
+					SoftwareVersion: "16",
 				},
 			}
 			client := newClient(cfg)
-			err := client.checkWFCEntitlement(context.Background(), &cfg, plmnWFCCard{mcc: "208", mnc: "01"})
+			err := client.checkTS43WFCEntitlement(context.Background(), &cfg, plmnWFCCard{mcc: "208", mnc: "01"}, ts43.WFCConfig{
+				Server: server.URL,
+				App:    ts43.AppVoWiFi,
+			})
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("checkWFCEntitlement() error = %v, want %v", err, tt.wantErr)
@@ -98,23 +105,125 @@ func TestCheckWFCEntitlement(t *testing.T) {
 }
 
 func TestCheckWFCEntitlementSkipsMissingConfig(t *testing.T) {
-	httpClient := &http.Client{
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			t.Fatal("HTTP request was not expected")
-			return nil, nil
-		}),
-	}
 	cfg := Config{
-		IMEI:   testIMEI,
-		Logger: slog.Default(),
-		WFCEntitlement: WFCEntitlementConfig{
-			HTTPClient: httpClient,
-		},
+		Terminal: TerminalInfo{ID: testIMEI},
+		Logger:   slog.Default(),
 	}
 	client := newClient(cfg)
 	err := client.checkWFCEntitlement(context.Background(), &cfg, plmnWFCCard{mcc: "999", mnc: "99"})
 	if err != nil {
 		t.Fatalf("checkWFCEntitlement() error = %v", err)
+	}
+}
+
+func TestCheckTS43WFCEntitlementHonorsSkipActivation(t *testing.T) {
+	cfg := Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Logger:   slog.Default(),
+	}
+	client := newClient(cfg)
+	err := client.checkWFCEntitlement(context.Background(), &cfg, plmnWFCCard{
+		mcc:       "310",
+		mnc:       "240",
+		mncLength: 3,
+	})
+	if err != nil {
+		t.Fatalf("checkWFCEntitlement() error = %v", err)
+	}
+}
+
+func TestTS43RetryAfterError(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantOK  bool
+		wantErr error
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{
+			name: "service unavailable with retry-after seconds",
+			err: &ts43http.HTTPError{
+				StatusCode: http.StatusServiceUnavailable,
+				Header: http.Header{
+					"Retry-After": {"30"},
+				},
+			},
+			wantOK:  true,
+			wantErr: ErrWFCEntitlementPending,
+			wantMin: 30 * time.Second,
+			wantMax: 30 * time.Second,
+		},
+		{
+			name: "other status",
+			err:  &ts43http.HTTPError{StatusCode: http.StatusBadRequest},
+		},
+		{
+			name: "plain error",
+			err:  errors.New("boom"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ts43RetryAfterError(ts43.WFCConfig{}, tt.err)
+			if ok != tt.wantOK {
+				t.Fatalf("ts43RetryAfterError() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if !errors.Is(got, tt.wantErr) {
+				t.Fatalf("ts43RetryAfterError() error = %v, want %v", got, tt.wantErr)
+			}
+			if got.RetryAfter < tt.wantMin || got.RetryAfter > tt.wantMax {
+				t.Fatalf("RetryAfter = %s, want between %s and %s", got.RetryAfter, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestRetryAfterDurationAt(t *testing.T) {
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		header http.Header
+		want   time.Duration
+	}{
+		{
+			name: "seconds",
+			header: http.Header{
+				"Retry-After": {"30"},
+			},
+			want: 30 * time.Second,
+		},
+		{
+			name: "http date",
+			header: http.Header{
+				"Retry-After": {now.Add(2 * time.Minute).Format(http.TimeFormat)},
+			},
+			want: 2 * time.Minute,
+		},
+		{
+			name: "past date",
+			header: http.Header{
+				"Retry-After": {now.Add(-time.Second).Format(http.TimeFormat)},
+			},
+		},
+		{
+			name: "invalid",
+			header: http.Header{
+				"Retry-After": {"soon"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retryAfterDurationAt(tt.header, now); got != tt.want {
+				t.Fatalf("retryAfterDurationAt() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -215,15 +324,14 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 			defer server.Close()
 
 			cfg := Config{
-				IMEI:   testIMEI,
 				Logger: slog.Default(),
+				Terminal: TerminalInfo{
+					ID:              testIMEI,
+					Model:           "Pixel",
+					SoftwareVersion: "13",
+				},
 				IMS: IMSConfig{
 					HomeDomain: "ims.mnc030.mcc310.3gppnetwork.org",
-				},
-				WFCEntitlement: WFCEntitlementConfig{
-					HTTPClient:       server.Client(),
-					TerminalModel:    "Pixel",
-					TerminalSoftware: "13",
 				},
 			}
 			client := newClient(cfg)

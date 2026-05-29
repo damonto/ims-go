@@ -230,7 +230,7 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 	if err != nil {
 		return nil, err
 	}
-	authContext := authenticateContextForAID(req.AID)
+	authContext := authenticateContext(req)
 	response, err := r.withSessions(ctx, sessions, func(ctx context.Context, session sessionRequest) (protocol.Response, error) {
 		return r.authenticateResponse(ctx, session, authContext, packAuthenticateRequest(req))
 	})
@@ -243,6 +243,13 @@ func (r *Reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 		return nil, errors.New("authenticating USIM: authenticate result TLV missing")
 	}
 	return decodeLengthPrefixedBytes(value)
+}
+
+func authenticateContext(req usimreader.AuthenticateRequest) byte {
+	if req.EAPAKA {
+		return authenticateIMSAKAContext
+	}
+	return authenticateContextForAID(req.AID)
 }
 
 func authenticateContextForAID(aid []byte) byte {

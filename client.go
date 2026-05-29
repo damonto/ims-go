@@ -18,13 +18,22 @@ import (
 )
 
 type Config struct {
-	IMEI           string
 	EPDG           string
 	Logger         *slog.Logger
 	ReconnectDelay time.Duration
+	Terminal       TerminalInfo
 	Tunnel         swutunnel.Config
 	IMS            IMSConfig
-	WFCEntitlement WFCEntitlementConfig
+}
+
+type TerminalInfo struct {
+	ID              string
+	Vendor          string
+	Model           string
+	SoftwareVersion string
+	Build           string
+	Type            string
+	HardwareSKU     string
 }
 
 type IMSConfig struct {
@@ -283,8 +292,9 @@ func New(reader usimreader.Reader, cfg *Config) (*Client, error) {
 	if err := raw.validate(); err != nil {
 		return nil, errors.Join(fmt.Errorf("creating client: %w", err), wrapCloseError("closing reader", reader.Close()))
 	}
-	if raw.IMEI == "" {
-		return nil, errors.Join(errors.New("creating client: imei is empty"), wrapCloseError("closing reader", reader.Close()))
+	raw.Terminal = raw.Terminal.trimmed()
+	if raw.Terminal.ID == "" {
+		return nil, errors.Join(errors.New("creating client: terminal id is empty"), wrapCloseError("closing reader", reader.Close()))
 	}
 	client := newClient(raw)
 	client.reader = reader

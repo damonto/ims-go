@@ -158,7 +158,15 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 		{
 			name: "profile fills empty client ims and ike config",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{
+					ID:              testIMEI,
+					Vendor:          "Google",
+					Model:           "Pixel 10 Pro",
+					SoftwareVersion: "16",
+					Build:           "BD1A.250702.001",
+					Type:            "Smartphone",
+					HardwareSKU:     "Pixel 10 Pro",
+				},
 			},
 			check: func(t *testing.T, got Config) {
 				t.Helper()
@@ -186,7 +194,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.PrivateIdentity != "530240123456789@private.example" || got.IMS.PublicIdentity != "sip:530240123456789@ims.mnc024.mcc530.3gppnetwork.org" {
 					t.Fatalf("IMS identities = %q/%q, want profile values", got.IMS.PrivateIdentity, got.IMS.PublicIdentity)
 				}
-				wantUserAgent := "PRD-IR92/15 Google/Pixel 3XL-SQ3A.220705.004 device-type/Smartphone mno-custom/53024 imeisv/3567890123456700 op/2degrees sku/Pixel 3XL"
+				wantUserAgent := "PRD-IR92/15 Google/Pixel 10 Pro-BD1A.250702.001 device-type/Smartphone mno-custom/53024 imeisv/3567890123456700 op/2degrees sku/Pixel 10 Pro"
 				if got.IMS.UserAgent != wantUserAgent || got.IMS.AccessNetworkInfo != "IEEE-802.11;utran-cell-id-3gpp=00000000" {
 					t.Fatalf("IMS user agent/access = %q/%q, want profile values", got.IMS.UserAgent, got.IMS.AccessNetworkInfo)
 				}
@@ -244,9 +252,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 		{
 			name: "explicit config overrides profile",
 			cfg: Config{
-				IMEI:   testIMEI,
-				EPDG:   "epdg.example.com",
-				Tunnel: tunnelConfigForWFCOverride(),
+				Terminal: TerminalInfo{ID: testIMEI},
+				EPDG:     "epdg.example.com",
+				Tunnel:   tunnelConfigForWFCOverride(),
 				IMS: IMSConfig{
 					Transport:       "udp",
 					HomeDomain:      "ims.example.com",
@@ -375,7 +383,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		{
 			name: "embedded profile fills epdg",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 			},
 			card:     wfcTestCard{},
 			wantEPDG: "epdg.ims.2degrees.net.nz",
@@ -383,8 +391,8 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		{
 			name: "explicit epdg still wins",
 			cfg: Config{
-				IMEI: testIMEI,
-				EPDG: "epdg.example.com",
+				Terminal: TerminalInfo{ID: testIMEI},
+				EPDG:     "epdg.example.com",
 			},
 			card:     wfcTestCard{},
 			wantEPDG: "epdg.example.com",
@@ -392,7 +400,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		{
 			name: "embedded two digit mnc profile matches padded card mnc",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 			},
 			card:     paddedTwoDigitMNCCard{},
 			wantEPDG: "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org",
@@ -400,7 +408,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		{
 			name: "embedded gid profile wins over base profile",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 			},
 			card:     paddedTwoDigitGID1Card{gid1: "547275554B3030656EFFFF"},
 			wantEPDG: "epdg.eps.truphone.net",
@@ -455,7 +463,7 @@ func TestEmbeddedWFCConfigHonorEPDG(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{IMEI: testIMEI}.normalized(tt.card)
+			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
@@ -467,7 +475,7 @@ func TestEmbeddedWFCConfigHonorEPDG(t *testing.T) {
 }
 
 func TestEmbeddedWFCConfigATTUsesConfiguredIMSIdentities(t *testing.T) {
-	got, err := Config{IMEI: testIMEI}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
+	got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
@@ -514,7 +522,7 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 	}
 
 	cfg := Config{
-		IMEI: testIMEI,
+		Terminal: TerminalInfo{ID: testIMEI},
 		IMS: IMSConfig{
 			Voice: imsvoice.Config{
 				Codecs: []imsvoice.AudioCodecConfig{
@@ -535,7 +543,7 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 		t.Fatalf("Voice PCMU codec = %+v, want explicit static payload 0", got.IMS.Voice.Codecs[1])
 	}
 
-	got = Config{IMEI: testIMEI}.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	got = Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
 	if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imsvoice.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
 		t.Fatalf("Voice codecs = %+v, want profile JSON codecs without carrier fallback", got.IMS.Voice.Codecs)
 	}
@@ -605,7 +613,7 @@ func testIntPtr(v int) *int {
 }
 
 func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
-	got, err := Config{IMEI: testIMEI}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
+	got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
@@ -648,7 +656,7 @@ func TestEmbeddedWFCConfigMatchesNSDSProfiles(t *testing.T) {
 				mnc:       profile.MNC,
 				mncLength: len(profile.MNC),
 			}
-			got, err := Config{IMEI: testIMEI}.normalized(card)
+			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}

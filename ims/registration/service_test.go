@@ -419,18 +419,17 @@ func TestAccessNetworkInfo(t *testing.T) {
 	}
 }
 
-func TestDefaultUserAgent(t *testing.T) {
+func TestUserAgent(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  Config
 		want string
 	}{
 		{
-			name: "default",
-			want: defaultUserAgent,
+			name: "empty by default",
 		},
 		{
-			name: "explicit value wins",
+			name: "explicit value",
 			cfg:  Config{UserAgent: "custom-agent"},
 			want: "custom-agent",
 		},

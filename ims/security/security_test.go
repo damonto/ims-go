@@ -22,11 +22,13 @@ func (stubAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 type orderAKAProvider struct {
 	firstRAND []byte
 	firstAUTN []byte
+	first     usim.AKAResult
+	firstErr  error
 }
 
 func (p orderAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
 	if bytes.Equal(rand, p.firstRAND) && bytes.Equal(autn, p.firstAUTN) {
-		return usim.AKAResult{}, errors.New("authentication rejected")
+		return p.first, p.firstErr
 	}
 	return usim.AKAResult{
 		RES: []byte("password"),
@@ -275,24 +277,50 @@ func TestBuildAKAAuthorization(t *testing.T) {
 }
 
 func TestBuildAKAAuthorizationRetriesReversedNonceOrder(t *testing.T) {
-	challenge := Challenge{
-		Realm: "one.att.net",
-		Nonce: "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",
-		QOP:   "auth",
+	tests := []struct {
+		name     string
+		first    usim.AKAResult
+		firstErr error
+	}{
+		{
+			name:     "first order returns error",
+			firstErr: errors.New("authentication rejected"),
+		},
+		{
+			name: "first order returns incomplete security material",
+			first: usim.AKAResult{
+				RES: []byte("password"),
+			},
+		},
 	}
 
-	got, err := BuildAKAAuthorization(context.Background(), orderAKAProvider{
-		firstRAND: bytes.Repeat([]byte{0x01}, 16),
-		firstAUTN: bytes.Repeat([]byte{0x02}, 16),
-	}, Identity{
-		PrivateIdentity: "310280123456789@private.att.net",
-		RegisterURI:     "sip:one.att.net",
-		Realm:           "one.att.net",
-	}, challenge, 1)
-	if err != nil {
-		t.Fatalf("BuildAKAAuthorization() error = %v", err)
-	}
-	if got.Authorization.Response == "" {
-		t.Fatal("Authorization.Response = empty, want non-empty")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			challenge := Challenge{
+				Realm: "one.att.net",
+				Nonce: "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",
+				QOP:   "auth",
+			}
+
+			got, err := BuildAKAAuthorization(context.Background(), orderAKAProvider{
+				firstRAND: bytes.Repeat([]byte{0x01}, 16),
+				firstAUTN: bytes.Repeat([]byte{0x02}, 16),
+				first:     tt.first,
+				firstErr:  tt.firstErr,
+			}, Identity{
+				PrivateIdentity: "310280123456789@private.att.net",
+				RegisterURI:     "sip:one.att.net",
+				Realm:           "one.att.net",
+			}, challenge, 1)
+			if err != nil {
+				t.Fatalf("BuildAKAAuthorization() error = %v", err)
+			}
+			if got.Authorization.Response == "" {
+				t.Fatal("Authorization.Response = empty, want non-empty")
+			}
+			if len(got.EncryptionKey) == 0 || len(got.IntegrityKey) == 0 {
+				t.Fatalf("security keys = CK:%X IK:%X, want non-empty", got.EncryptionKey, got.IntegrityKey)
+			}
+		})
 	}
 }

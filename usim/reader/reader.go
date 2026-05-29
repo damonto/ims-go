@@ -33,9 +33,10 @@ type RecordRead struct {
 }
 
 type AuthenticateRequest struct {
-	AID  []byte
-	Rand []byte
-	AUTN []byte
+	AID    []byte
+	Rand   []byte
+	AUTN   []byte
+	EAPAKA bool
 }
 
 type SMSPPDownloadRequest struct {

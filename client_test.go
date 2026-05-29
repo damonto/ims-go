@@ -36,7 +36,11 @@ func (stubCard) MCC() string   { return "001" }
 func (stubCard) MNC() string   { return "001" }
 func (stubCard) SMSC() string  { return "+8613800000000" }
 func (stubCard) AKA(_ context.Context, _, _ []byte) (usim.AKAResult, error) {
-	return usim.AKAResult{RES: []byte("12345678")}, nil
+	return usim.AKAResult{
+		RES: []byte("12345678"),
+		CK:  []byte("client-test-ck"),
+		IK:  []byte("client-test-ik"),
+	}, nil
 }
 
 type readerStub struct {
@@ -178,7 +182,7 @@ const (
 func newStandaloneClient(t *testing.T) *Client {
 	t.Helper()
 	return newReadyClient(t, Config{
-		IMEI: testIMEI,
+		Terminal: TerminalInfo{ID: testIMEI},
 		IMS: IMSConfig{
 			RegisterExpires: time.Minute,
 		},
@@ -456,7 +460,7 @@ func TestConnectReportsUSIMLoadError(t *testing.T) {
 		},
 	}
 
-	client, err := New(reader, &Config{IMEI: testIMEI})
+	client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -499,7 +503,7 @@ func TestConnectUsesContextForUSIMLoad(t *testing.T) {
 					return nil, ctx.Err()
 				},
 			}
-			client, err := New(reader, &Config{IMEI: testIMEI})
+			client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -521,7 +525,7 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	}
-	client, err := New(reader, &Config{IMEI: testIMEI})
+	client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -564,7 +568,7 @@ func TestConnectLeavesReaderOwnedAfterUSIMLoadError(t *testing.T) {
 		},
 	}
 
-	client, err := New(reader, &Config{IMEI: testIMEI})
+	client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -650,7 +654,7 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	}
 
 	client := newReadyClient(t, Config{
-		IMEI: testIMEI,
+		Terminal: TerminalInfo{ID: testIMEI},
 		IMS: IMSConfig{
 			RegisterExpires: time.Minute,
 		},
@@ -735,7 +739,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	client := newReadyClient(t, Config{IMEI: testIMEI})
+	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
 	defer client.Close()
 
 	runCtx, cancelRun := context.WithCancel(context.Background())

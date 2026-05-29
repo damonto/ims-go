@@ -56,7 +56,11 @@ func (stubCard) IMSI() string { return "001010123456789" }
 func (stubCard) MCC() string  { return "001" }
 func (stubCard) MNC() string  { return "001" }
 func (stubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
-	return usim.AKAResult{RES: []byte("password"), IK: []byte("client-test-ik")}, nil
+	return usim.AKAResult{
+		RES: []byte("password"),
+		CK:  []byte("client-test-ck"),
+		IK:  []byte("client-test-ik"),
+	}, nil
 }
 
 func TestUSSDXMLRoundTrip(t *testing.T) {

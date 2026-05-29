@@ -1551,6 +1551,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration New() error = %v", err)
@@ -1661,6 +1662,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
@@ -1729,6 +1731,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
@@ -1779,6 +1782,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
@@ -1853,6 +1857,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
@@ -1914,6 +1919,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)

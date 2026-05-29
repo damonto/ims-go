@@ -67,6 +67,7 @@ func (serviceStubCard) SMSC() string { return "+15550000000" }
 func (serviceStubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{
 		RES: []byte("password"),
+		CK:  []byte("client-test-ck"),
 		IK:  []byte("client-test-ik"),
 	}, nil
 }
@@ -547,7 +548,7 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), UserAgent: "test-agent", AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -580,7 +581,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	reg, err := registration.New(registration.Config{Logger: testLogger(), UserAgent: "test-agent", AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}

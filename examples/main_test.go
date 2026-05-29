@@ -189,47 +189,6 @@ func TestWFCUserActionFromError(t *testing.T) {
 	}
 }
 
-func TestWFCUserActionURL(t *testing.T) {
-	tests := []struct {
-		name string
-		url  string
-		data string
-		want string
-	}{
-		{
-			name: "adds data as query",
-			url:  "https://example.test/e911",
-			data: "token=abc",
-			want: "https://example.test/e911?token=abc",
-		},
-		{
-			name: "preserves existing query",
-			url:  "https://example.test/e911?lang=en",
-			data: "token=abc&return=a%2Fb",
-			want: "https://example.test/e911?lang=en&return=a%2Fb&token=abc",
-		},
-		{
-			name: "trims leading query marker",
-			url:  "https://example.test/e911",
-			data: "?token=abc",
-			want: "https://example.test/e911?token=abc",
-		},
-		{
-			name: "empty data",
-			url:  "https://example.test/e911",
-			want: "https://example.test/e911",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := wfcUserActionURL(tt.url, tt.data); got != tt.want {
-				t.Fatalf("wfcUserActionURL() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestConnectWithWFCUserActionPolling(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -246,6 +205,17 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 			wantCalls: 2,
 		},
 		{
+			name: "polls after pending retry",
+			errors: []error{
+				&vowifi.WFCEntitlementError{
+					Err:        vowifi.ErrWFCEntitlementPending,
+					RetryAfter: time.Nanosecond,
+				},
+				nil,
+			},
+			wantCalls: 2,
+		},
+		{
 			name:      "returns non user action error",
 			errors:    []error{errors.New("boom")},
 			wantCalls: 1,
@@ -256,14 +226,16 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var calls int
-			err := connectWithWFCUserActionPolling(context.Background(), func(context.Context) error {
+			err := connectWithWFCServiceFlow(context.Background(), func(context.Context) error {
 				if calls >= len(tt.errors) {
 					t.Fatalf("connect calls = %d, want at most %d", calls+1, len(tt.errors))
 				}
 				err := tt.errors[calls]
 				calls++
 				return err
-			}, time.Nanosecond)
+			}, time.Nanosecond, func(context.Context, wfcUserAction) error {
+				return nil
+			})
 			if calls != tt.wantCalls {
 				t.Fatalf("connect calls = %d, want %d", calls, tt.wantCalls)
 			}
@@ -278,6 +250,62 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("connectWithWFCUserActionPolling() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParseWFCServiceFlowCallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    bool
+		wantErr bool
+	}{
+		{
+			name: "done command",
+			line: "DONE",
+			want: true,
+		},
+		{
+			name: "dismiss command",
+			line: "DISMISS",
+		},
+		{
+			name: "javascript entitlement changed",
+			line: "VoWiFiWebServiceFlow.entitlementChanged()",
+			want: true,
+		},
+		{
+			name: "javascript dismiss",
+			line: "VoWiFiWebServiceFlow.dismissFlow()",
+		},
+		{
+			name: "adapter json",
+			line: `TS43_VOWIFI_CALLBACK {"event":"entitlementChanged","href":"https://example.test"}`,
+			want: true,
+		},
+		{
+			name:    "unknown",
+			line:    "status",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseWFCServiceFlowCallback(tt.line)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("parseWFCServiceFlowCallback() error = nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseWFCServiceFlowCallback() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseWFCServiceFlowCallback() = %v, want %v", got, tt.want)
 			}
 		})
 	}

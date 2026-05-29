@@ -33,8 +33,9 @@ func (cfg Config) normalized(card Card) (Config, error) {
 		cfg.ReconnectDelay = defaultReconnectDelay
 	}
 
-	if cfg.IMEI == "" {
-		return Config{}, errors.New("normalizing client config: imei is empty")
+	cfg.Terminal = cfg.Terminal.trimmed()
+	if cfg.Terminal.ID == "" {
+		return Config{}, errors.New("normalizing client config: terminal id is empty")
 	}
 	profile, ok, err := loadWFCProfile(card)
 	if err != nil {
@@ -67,8 +68,8 @@ func (cfg Config) normalized(card Card) (Config, error) {
 }
 
 func (cfg Config) trimmed() Config {
-	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
 	cfg.EPDG = strings.TrimSpace(cfg.EPDG)
+	cfg.Terminal = cfg.Terminal.trimmed()
 	return cfg
 }
 
@@ -97,7 +98,7 @@ func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
 func (cfg Config) normalizedIMS() (IMSConfig, error) {
 	imsCfg := cfg.IMS
 	if imsCfg.IMEI == "" {
-		imsCfg.IMEI = cfg.IMEI
+		imsCfg.IMEI = cfg.Terminal.trimmed().ID
 	}
 	// Over ePDG/SWu we default to TCP for SIP, matching the pre-refactor
 	// behavior and avoiding large initial REGISTER requests over UDP.
@@ -158,9 +159,6 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	case "udp", "tcp":
 	default:
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported transport %q", cfg.Transport)
-	}
-	if cfg.UserAgent == "" {
-		cfg.UserAgent = defaultUserAgent()
 	}
 	if cfg.RegisterExpires < 0 {
 		return IMSConfig{}, errors.New("normalizing ims config: register expires must be >= 0")

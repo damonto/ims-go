@@ -10,20 +10,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	ts43http "github.com/damonto/ts43-go/http"
 	"github.com/damonto/ts43-go/sim"
 	"github.com/damonto/ts43-go/ts43"
+	"github.com/damonto/vowifi-go/usim"
 )
 
-type WFCEntitlementConfig struct {
-	Timeout          time.Duration
-	HTTPClient       *http.Client
-	TerminalVendor   string
-	TerminalModel    string
-	TerminalSoftware string
-}
+const defaultWFCEntitlementTimeout = 30 * time.Second
 
 var (
 	ErrWFCEntitlementUserActionRequired = errors.New("wfc entitlement requires user action")
@@ -32,9 +29,10 @@ var (
 )
 
 type WFCEntitlementError struct {
-	Err    error
-	Config ts43.WFCConfig
-	Status ts43.WFCStatus
+	Err        error
+	Config     ts43.WFCConfig
+	Status     ts43.WFCStatus
+	RetryAfter time.Duration
 }
 
 type WFCWebsheet struct {
@@ -103,20 +101,31 @@ func (c *Client) checkWFCEntitlement(ctx context.Context, cfg *Config, card Card
 		return fmt.Errorf("discovering wfc entitlement: %w", err)
 	}
 
+	if wfc.SkipActivation {
+		c.logger.Debug("skipping wfc activation entitlement", "carrier", wfc.CarrierName)
+		return nil
+	}
+
+	return c.checkTS43WFCEntitlement(ctx, cfg, card, wfc)
+}
+
+func (c *Client) checkTS43WFCEntitlement(ctx context.Context, cfg *Config, card Card, wfc ts43.WFCConfig) error {
+	identity := ts43Identity(card)
+	terminal := cfg.Terminal.trimmed()
 	status, err := ts43.CheckWFCEntitlement(ctx, ts43.Config{
-		Logger:     cfg.Logger,
-		HTTPClient: cfg.WFCEntitlement.HTTPClient,
-		Entitlement: ts43.Entitlement{
-			Timeout: cfg.WFCEntitlement.timeout(),
-		},
+		Logger: cfg.Logger,
 		Source: ts43.Endpoint{Channel: ts43Channel{card: card, identity: identity}},
 	}, identity, ts43.Device{
-		IMEI:            cfg.IMEI,
-		Vendor:          cfg.WFCEntitlement.TerminalVendor,
-		Model:           cfg.WFCEntitlement.TerminalModel,
-		SoftwareVersion: cfg.WFCEntitlement.TerminalSoftware,
+		IMEI:            terminal.ID,
+		Vendor:          terminal.Vendor,
+		Model:           terminal.Model,
+		SoftwareVersion: terminal.SoftwareVersion,
 	}, wfc)
 	if err != nil {
+		if pending, ok := ts43RetryAfterError(wfc, err); ok {
+			c.logger.Info("wfc entitlement pending", "retry_after", pending.RetryAfter)
+			return fmt.Errorf("checking wfc entitlement: %w", pending)
+		}
 		return fmt.Errorf("checking wfc entitlement: %w", err)
 	}
 	if status.Entitled() {
@@ -127,11 +136,43 @@ func (c *Client) checkWFCEntitlement(ctx context.Context, cfg *Config, card Card
 	return fmt.Errorf("checking wfc entitlement: %w", wfcEntitlementError(wfc, status))
 }
 
-func (cfg WFCEntitlementConfig) timeout() time.Duration {
-	if cfg.Timeout != 0 {
-		return cfg.Timeout
+func ts43RetryAfterError(wfc ts43.WFCConfig, err error) (*WFCEntitlementError, bool) {
+	var httpErr *ts43http.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
+		return nil, false
 	}
-	return 30 * time.Second
+	return &WFCEntitlementError{
+		Err:        ErrWFCEntitlementPending,
+		Config:     wfc,
+		RetryAfter: retryAfterDuration(httpErr.Header),
+	}, true
+}
+
+func retryAfterDuration(header http.Header) time.Duration {
+	return retryAfterDurationAt(header, time.Now())
+}
+
+func retryAfterDurationAt(header http.Header, now time.Time) time.Duration {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(value)
+	if err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	delay := when.Sub(now)
+	if delay <= 0 {
+		return 0
+	}
+	return delay
 }
 
 func wfcEntitlementError(cfg ts43.WFCConfig, status ts43.WFCStatus) error {
@@ -154,13 +195,17 @@ type ts43Channel struct {
 	identity sim.Identity
 }
 
+type eapAKACard interface {
+	EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error)
+}
+
 func (c ts43Channel) Identity(context.Context) (*sim.Identity, error) {
 	identity := c.identity
 	return &identity, nil
 }
 
 func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *sim.AKARequest) (*sim.AKAResponse, error) {
-	result, err := c.card.AKA(ctx, req.Rand, req.Autn)
+	result, err := c.authenticateAKA(ctx, req.Rand, req.Autn)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +218,13 @@ func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *sim.AKARequest) (
 		IK:   result.IK,
 		Auts: result.AUTS,
 	}, nil
+}
+
+func (c ts43Channel) authenticateAKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	if card, ok := c.card.(eapAKACard); ok {
+		return card.EAPAKA(ctx, rand, autn)
+	}
+	return c.card.AKA(ctx, rand, autn)
 }
 
 func ts43Identity(card Card) sim.Identity {
@@ -222,15 +274,14 @@ func nsdsWFCProfileForCard(card Card) (nsdsWFCProfile, bool) {
 
 func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, cfg *Config, card Card, profile nsdsWFCProfile) error {
 	client := nsdsWFCClient{
-		httpClient: cfg.WFCEntitlement.HTTPClient,
 		serverURL:  profile.ServerURL,
-		deviceID:   base64.StdEncoding.EncodeToString([]byte(cfg.IMEI)),
+		deviceID:   base64.StdEncoding.EncodeToString([]byte(cfg.Terminal.trimmed().ID)),
 		deviceName: nsdsWFCDeviceName(*cfg),
 		imsiEAP:    nsdsWFCIMSIEAP(card),
 		userAgent:  nsdsWFCUserAgent(*cfg),
 	}
 
-	checkCtx, cancel := context.WithTimeout(ctx, cfg.WFCEntitlement.timeout())
+	checkCtx, cancel := context.WithTimeout(ctx, defaultWFCEntitlementTimeout)
 	defer cancel()
 
 	status, err := client.checkLocationAndTC(checkCtx, card)
@@ -264,17 +315,15 @@ func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, cfg *Config, card 
 }
 
 func nsdsWFCDeviceName(cfg Config) string {
-	if cfg.WFCEntitlement.TerminalModel != "" {
-		return cfg.WFCEntitlement.TerminalModel
-	}
-	return "Android"
+	return cfg.Terminal.trimmed().Model
 }
 
 func nsdsWFCUserAgent(cfg Config) string {
-	if cfg.WFCEntitlement.TerminalSoftware != "" || cfg.WFCEntitlement.TerminalModel != "" {
-		return "Dalvik/2.1.0 (Linux; U; Android " + firstNonEmpty(cfg.WFCEntitlement.TerminalSoftware, "13") + "; " + nsdsWFCDeviceName(cfg) + ")"
+	terminal := cfg.Terminal.trimmed()
+	if terminal.SoftwareVersion == "" && terminal.Model == "" {
+		return ""
 	}
-	return "Dalvik/2.1.0 (Linux; U; Android 13)"
+	return "Dalvik/2.1.0 (Linux; U; Android " + terminal.SoftwareVersion + "; " + terminal.Model + ")"
 }
 
 func nsdsWFCIMSIEAP(card Card) string {
@@ -311,7 +360,6 @@ func nsdsWFCPublicMSISDN(msisdn string) string {
 }
 
 type nsdsWFCClient struct {
-	httpClient *http.Client
 	serverURL  string
 	deviceID   string
 	deviceName string
@@ -457,8 +505,8 @@ func (c nsdsWFCClient) authenticationRequest(messageID int, challengeResponse, t
 		MessageID:       messageID,
 		Method:          "3gppAuthentication",
 		DeviceID:        c.deviceID,
-		DeviceType:      intPtr(0),
-		OSType:          intPtr(0),
+		DeviceType:      new(int),
+		OSType:          new(int),
 		DeviceName:      c.deviceName,
 		IMSIEAP:         c.imsiEAP,
 		AKAChallengeRsp: challengeResponse,
@@ -525,14 +573,12 @@ func (c nsdsWFCClient) post(ctx context.Context, payload []nsdsRequest) (nsdsRes
 	req.Header.Set("x-generic-protocol-version", "1.0")
 	req.Header.Set("x-generic-version", "1.0")
 	req.Header.Set("x-protocol-version", "1")
-	req.Header.Set("User-Agent", c.userAgent)
+	if c.userAgent != "" {
+		req.Header.Set("User-Agent", c.userAgent)
+	}
 	req.Header.Set("Connection", "Keep-Alive")
 
-	httpClient := c.httpClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("posting nsds request: %w", err)
 	}
@@ -620,8 +666,4 @@ func (response nsdsResponse) LocationTCOK() bool {
 
 func nsdsBoolOK(value *bool) bool {
 	return value == nil || *value
-}
-
-func intPtr(value int) *int {
-	return &value
 }

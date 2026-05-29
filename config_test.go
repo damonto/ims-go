@@ -14,7 +14,7 @@ func TestConfigNormalized(t *testing.T) {
 		name            string
 		cfg             Config
 		wantErr         bool
-		wantIMEI        string
+		wantTerminalID  string
 		wantEPDG        string
 		wantTransport   string
 		wantIMSIMEI     string
@@ -30,11 +30,11 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "defaults build epdg from card",
 			cfg: Config{
-				Logger: logger,
-				IMEI:   " 12345 ",
-				IMS:    IMSConfig{},
+				Logger:   logger,
+				Terminal: TerminalInfo{ID: " 12345 "},
+				IMS:      IMSConfig{},
 			},
-			wantIMEI:        "12345",
+			wantTerminalID:  "12345",
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     "12345",
@@ -49,10 +49,10 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "explicit epdg wins over automatic default",
 			cfg: Config{
-				IMEI: "root-imei",
-				EPDG: " epdg.example.com ",
+				Terminal: TerminalInfo{ID: "root-imei"},
+				EPDG:     " epdg.example.com ",
 			},
-			wantIMEI:        "root-imei",
+			wantTerminalID:  "root-imei",
 			wantEPDG:        "epdg.example.com",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     "root-imei",
@@ -68,10 +68,10 @@ func TestConfigNormalized(t *testing.T) {
 			name: "cfg nil clone still normalizes as zero config",
 			cfg: func() Config {
 				cfg := cloneConfig(nil)
-				cfg.IMEI = testIMEI
+				cfg.Terminal.ID = testIMEI
 				return cfg
 			}(),
-			wantIMEI:        testIMEI,
+			wantTerminalID:  testIMEI,
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     testIMEI,
@@ -86,12 +86,12 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "explicit ims transport is preserved",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
 					Transport: "udp",
 				},
 			},
-			wantIMEI:        testIMEI,
+			wantTerminalID:  testIMEI,
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "udp",
 			wantIMSIMEI:     testIMEI,
@@ -106,7 +106,7 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "explicit ims profile values are preserved",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
 					AccessNetworkInfo:      "IEEE-802.11ac;i-wlan-node-id=aabbcc",
 					PhoneContextDomain:     "ims.example",
@@ -115,7 +115,7 @@ func TestConfigNormalized(t *testing.T) {
 					SMSSubmitReportTimeout: 45 * time.Second,
 				},
 			},
-			wantIMEI:        testIMEI,
+			wantTerminalID:  testIMEI,
 			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
 			wantTransport:   "tcp",
 			wantIMSIMEI:     testIMEI,
@@ -129,7 +129,7 @@ func TestConfigNormalized(t *testing.T) {
 			wantSMSTR1:      45 * time.Second,
 		},
 		{
-			name: "missing imei fails",
+			name: "missing terminal id fails",
 			cfg: Config{
 				Logger: logger,
 			},
@@ -138,7 +138,7 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "negative reconnect delay fails",
 			cfg: Config{
-				IMEI:           testIMEI,
+				Terminal:       TerminalInfo{ID: testIMEI},
 				ReconnectDelay: -time.Second,
 			},
 			wantErr: true,
@@ -146,7 +146,7 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "negative sip timer fails",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
 					SIPTimers: imssession.TransactionTimers{T1: -time.Second},
 				},
@@ -156,7 +156,7 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "negative sms submit report timeout fails",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
 					SMSSubmitReportTimeout: -time.Second,
 				},
@@ -166,7 +166,7 @@ func TestConfigNormalized(t *testing.T) {
 		{
 			name: "invalid sip server port fails",
 			cfg: Config{
-				IMEI: testIMEI,
+				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
 					SIPServerPort: 70000,
 				},
@@ -190,8 +190,8 @@ func TestConfigNormalized(t *testing.T) {
 			if got.Logger == nil {
 				t.Fatal("Logger = nil, want non-nil")
 			}
-			if got.IMEI != tt.wantIMEI {
-				t.Fatalf("IMEI = %q, want %q", got.IMEI, tt.wantIMEI)
+			if got.Terminal.ID != tt.wantTerminalID {
+				t.Fatalf("Terminal.ID = %q, want %q", got.Terminal.ID, tt.wantTerminalID)
 			}
 			if got.EPDG != tt.wantEPDG {
 				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)

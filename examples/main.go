@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -36,6 +36,8 @@ const (
 	defaultAPDUTimeout    = 30 * time.Second
 	maxTCPAPDUFrameLength = 64 * 1024
 	wfcUserActionPoll     = 10 * time.Second
+	wfcFlowRecheckDelay   = 5 * time.Second
+	wfcFlowRecheckMax     = 6
 )
 
 type options struct {
@@ -61,6 +63,7 @@ type options struct {
 	terminalVendor string
 	terminalModel  string
 	terminalSW     string
+	terminalBuild  string
 	sipPort        int
 	sipT1          time.Duration
 	sipT2          time.Duration
@@ -115,9 +118,10 @@ func parseFlags() options {
 	flag.StringVar(&opt.userAgent, "user-agent", "", "IMS User-Agent override")
 	flag.StringVar(&opt.pani, "pani", "", "P-Access-Network-Info override")
 	flag.StringVar(&opt.wlanNodeID, "wlan-node-id", "", "WLAN AP MAC for i-wlan-node-id")
-	flag.StringVar(&opt.terminalVendor, "terminal-vendor", "", "TS.43 terminal_vendor for Wi-Fi Calling entitlement")
-	flag.StringVar(&opt.terminalModel, "terminal-model", "", "TS.43 terminal_model for Wi-Fi Calling entitlement")
-	flag.StringVar(&opt.terminalSW, "terminal-sw-version", "", "TS.43 terminal_sw_version for Wi-Fi Calling entitlement")
+	flag.StringVar(&opt.terminalVendor, "terminal-vendor", "", "terminal vendor for TS.43 and generated IMS User-Agent")
+	flag.StringVar(&opt.terminalModel, "terminal-model", "", "terminal model for TS.43 and generated IMS User-Agent")
+	flag.StringVar(&opt.terminalSW, "terminal-sw-version", "", "terminal software version for TS.43 and generated IMS User-Agent")
+	flag.StringVar(&opt.terminalBuild, "terminal-build", "", "terminal build string for generated IMS User-Agent")
 	flag.IntVar(&opt.sipPort, "sip-port", 0, "IMS SIP server port override, maps ims.sip_server_port_number_int")
 	flag.DurationVar(&opt.sipT1, "sip-timer-t1", 0, "SIP timer T1 override, for example 500ms or 2s")
 	flag.DurationVar(&opt.sipT2, "sip-timer-t2", 0, "SIP timer T2 override")
@@ -206,9 +210,15 @@ func run(opt options) error {
 	}
 
 	cfg := &vowifi.Config{
-		IMEI:   opt.imei,
 		EPDG:   opt.epdgAddr,
 		Logger: slog.Default(),
+		Terminal: vowifi.TerminalInfo{
+			ID:              opt.imei,
+			Vendor:          opt.terminalVendor,
+			Model:           opt.terminalModel,
+			SoftwareVersion: opt.terminalSW,
+			Build:           opt.terminalBuild,
+		},
 		Tunnel: tunnel.Config{
 			SIPPort:              opt.sipPort,
 			NATKeepaliveInterval: opt.nattKeepalive,
@@ -227,11 +237,6 @@ func run(opt options) error {
 			SIPServerPort:          opt.sipPort,
 			SIPTimers:              sipTimersFromOptions(opt),
 			SMSSubmitReportTimeout: opt.smsTR1,
-		},
-		WFCEntitlement: vowifi.WFCEntitlementConfig{
-			TerminalVendor:   opt.terminalVendor,
-			TerminalModel:    opt.terminalModel,
-			TerminalSoftware: opt.terminalSW,
 		},
 	}
 
@@ -282,36 +287,157 @@ func run(opt options) error {
 }
 
 func connectWithWFCUserActionPolling(ctx context.Context, connect func(context.Context) error, interval time.Duration) error {
+	return connectWithWFCServiceFlow(ctx, connect, interval, consoleWFCServiceFlow)
+}
+
+func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context) error, interval time.Duration, serviceFlow func(context.Context, wfcUserAction) error) error {
 	if interval <= 0 {
 		interval = wfcUserActionPoll
 	}
 
 	var lastAction wfcUserAction
 	var logged bool
+	var completedFlow bool
+	var rechecks int
 	for {
 		err := connect(ctx)
 		if err == nil {
 			return nil
 		}
 
+		if errors.Is(err, vowifi.ErrWFCEntitlementPending) {
+			retryAfter := wfcRetryAfter(err, interval)
+			slog.Info("wfc entitlement pending", "retry_after", retryAfter)
+			if err := waitForWFCRetry(ctx, retryAfter); err != nil {
+				return err
+			}
+			continue
+		}
+
 		action, ok := wfcUserActionFromError(err)
 		if !ok {
 			return err
 		}
-		if !logged || action != lastAction {
+		if completedFlow {
+			if rechecks >= wfcFlowRecheckMax {
+				return fmt.Errorf("waiting for wfc entitlement update: %w", vowifi.ErrWFCEntitlementPending)
+			}
+			rechecks++
+			if err := waitForWFCRetry(ctx, wfcFlowRecheckDelay); err != nil {
+				return err
+			}
+			slog.Info("rechecking wfc entitlement after service flow", "attempt", rechecks, "max", wfcFlowRecheckMax)
+			continue
+		}
+		if (!logged || action != lastAction) && serviceFlow == nil {
 			logWFCUserAction(action)
 			lastAction = action
 			logged = true
 		}
-
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("waiting for wfc user action: %w", ctx.Err())
-		case <-timer.C:
-			slog.Info("polling wfc entitlement after user action", "interval", interval)
+		if serviceFlow != nil {
+			if err := serviceFlow(ctx, action); err != nil {
+				return err
+			}
+			completedFlow = true
+			rechecks = 0
+			continue
 		}
+		if err := waitForWFCRetry(ctx, interval); err != nil {
+			return err
+		}
+		slog.Info("polling wfc entitlement after user action", "interval", interval)
+	}
+}
+
+func wfcRetryAfter(err error, fallback time.Duration) time.Duration {
+	var entitlementErr *vowifi.WFCEntitlementError
+	if errors.As(err, &entitlementErr) && entitlementErr.RetryAfter > 0 {
+		return entitlementErr.RetryAfter
+	}
+	return fallback
+}
+
+func waitForWFCRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for wfc entitlement: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
+}
+
+func consoleWFCServiceFlow(ctx context.Context, action wfcUserAction) error {
+	logWFCUserAction(action)
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("waiting for wfc service flow callback: %w", err)
+		}
+		fmt.Fprint(os.Stdout, "wfc-flow> ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("reading wfc service flow callback: %w", err)
+		}
+		done, err := parseWFCServiceFlowCallback(line)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "invalid wfc callback: %v\n", err)
+			continue
+		}
+		if !done {
+			return errors.New("wfc service flow dismissed")
+		}
+		slog.Info("wfc service flow completed; rechecking entitlement")
+		return nil
+	}
+}
+
+type wfcServiceFlowCallback struct {
+	Event string `json:"event"`
+}
+
+func parseWFCServiceFlowCallback(line string) (bool, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false, errors.New("wfc service flow callback is required")
+	}
+	line = trimWFCServiceFlowPrefix(line)
+	if strings.HasPrefix(line, "{") {
+		var payload wfcServiceFlowCallback
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			return false, fmt.Errorf("parse wfc service flow JSON callback: %w", err)
+		}
+		return wfcServiceFlowDone(payload.Event)
+	}
+	if strings.Contains(line, "VoWiFiWebServiceFlow.") {
+		_, after, _ := strings.Cut(line, "VoWiFiWebServiceFlow.")
+		name, _, ok := strings.Cut(after, "(")
+		if !ok {
+			return false, errors.New("wfc service flow callback argument list is required")
+		}
+		return wfcServiceFlowDone(name)
+	}
+	return wfcServiceFlowDone(line)
+}
+
+func trimWFCServiceFlowPrefix(line string) string {
+	const prefix = "TS43_VOWIFI_CALLBACK"
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, prefix) {
+		return line
+	}
+	return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+}
+
+func wfcServiceFlowDone(event string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case "done", "entitlementchanged":
+		return true, nil
+	case "dismiss", "dismissflow":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown wfc service flow callback %q", event)
 	}
 }
 
@@ -325,51 +451,22 @@ type wfcUserAction struct {
 }
 
 func logWFCUserAction(action wfcUserAction) {
+	method := "GET"
+	if action.Data != "" {
+		method = "POST"
+	}
 	slog.Error(
 		"wfc entitlement requires user action",
 		"source", action.Source,
 		"carrier", action.Carrier,
+		"method", method,
 		"url", action.URL,
-		"data", action.Data,
-		"open_url", wfcUserActionURL(action.URL, action.Data),
+		"post_data", action.Data,
 		"title", action.Title,
 		"client", action.ClientName,
-		"next", "complete the web flow; this process will keep polling",
+		"adapter", "examples/vowifi_service_flow.js",
+		"next", "open the URL with the shown method; paste DONE or the VoWiFiWebServiceFlow callback when the page completes",
 	)
-}
-
-func wfcUserActionURL(rawURL, rawData string) string {
-	rawURL = strings.TrimSpace(rawURL)
-	rawData = strings.TrimSpace(rawData)
-	if rawURL == "" || rawData == "" {
-		return rawURL
-	}
-
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return appendRawQuery(rawURL, rawData)
-	}
-	data := strings.TrimLeft(rawData, "?&")
-	values, err := url.ParseQuery(data)
-	if err != nil {
-		return appendRawQuery(rawURL, data)
-	}
-	query := parsed.Query()
-	for key, items := range values {
-		for _, item := range items {
-			query.Add(key, item)
-		}
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
-
-func appendRawQuery(rawURL, data string) string {
-	separator := "?"
-	if strings.Contains(rawURL, "?") {
-		separator = "&"
-	}
-	return rawURL + separator + data
 }
 
 func wfcUserActionFromError(err error) (wfcUserAction, bool) {

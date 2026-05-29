@@ -2,32 +2,32 @@ package vowifi
 
 import "strings"
 
-const (
-	defaultUserAgentManufacturer   = "Google"
-	defaultUserAgentModel          = "Pixel 3XL"
-	defaultUserAgentAndroidVersion = "12"
-	defaultUserAgentBuild          = "SQ3A.220705.004"
-	defaultUserAgentDeviceType     = "Smartphone"
-)
-
-func defaultUserAgent() string {
-	return defaultUserAgentManufacturer + "_" + defaultUserAgentModel + "Android" + defaultUserAgentAndroidVersion + defaultUserAgentBuild
-}
-
 func renderWFCUserAgent(template string, cfg Config, profile wfcProfile) string {
+	terminal := cfg.Terminal.trimmed()
 	replacer := strings.NewReplacer(
-		"#MANUFACTURE#", defaultUserAgentManufacturer,
-		"#MANUFACTURER#", defaultUserAgentManufacturer,
-		"#MODEL#", defaultUserAgentModel,
-		"#AV#", defaultUserAgentAndroidVersion,
-		"#BUILD#", defaultUserAgentBuild,
-		"#TYPE#", defaultUserAgentDeviceType,
+		"#MANUFACTURE#", terminal.Vendor,
+		"#MANUFACTURER#", terminal.Vendor,
+		"#MODEL#", terminal.Model,
+		"#AV#", terminal.SoftwareVersion,
+		"#BUILD#", terminal.Build,
+		"#TYPE#", terminal.Type,
 		"#MCCMNC#", strings.TrimSpace(profile.MCC)+strings.TrimSpace(profile.MNC),
-		"#IMEISV#", imeisvFromIMEI(cfg.IMEI),
+		"#IMEISV#", imeisvFromIMEI(terminal.ID),
 		"#OPERATOR#", strings.TrimSpace(profile.WFCSPN),
-		"#HWSKU#", defaultUserAgentModel,
+		"#HWSKU#", terminal.HardwareSKU,
 	)
 	return replacer.Replace(template)
+}
+
+func (terminal TerminalInfo) trimmed() TerminalInfo {
+	terminal.ID = strings.TrimSpace(terminal.ID)
+	terminal.Vendor = strings.TrimSpace(terminal.Vendor)
+	terminal.Model = strings.TrimSpace(terminal.Model)
+	terminal.SoftwareVersion = strings.TrimSpace(terminal.SoftwareVersion)
+	terminal.Build = strings.TrimSpace(terminal.Build)
+	terminal.Type = strings.TrimSpace(terminal.Type)
+	terminal.HardwareSKU = strings.TrimSpace(terminal.HardwareSKU)
+	return terminal
 }
 
 func imeisvFromIMEI(imei string) string {

@@ -109,7 +109,6 @@ type Service struct {
 	subscribeRefreshRequests chan struct{}
 }
 
-const defaultUserAgent = "Google_Pixel 3XLAndroid12SQ3A.220705.004"
 const defaultIMSExpires = 600000 * time.Second
 
 var errNetworkDeregistered = errors.New("ims registration terminated by network")
@@ -1546,9 +1545,6 @@ func normalizeConfig(cfg Config) (Config, error) {
 	}
 	if cfg.GeolocationCountry != "" && len(cfg.GeolocationCountry) != 2 {
 		return Config{}, errors.New("normalizing registration config: geolocation country must be two letters")
-	}
-	if cfg.UserAgent == "" {
-		cfg.UserAgent = defaultUserAgent
 	}
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = defaultIMSExpires
