@@ -19,6 +19,36 @@ const (
 const (
 	mmtelICSI        = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
 	mmtelICSIEncoded = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+
+	emergencyServiceURNSOS = "urn:service:sos"
+
+	currentLocationDiscoveryInfoPackage = "g.3gpp.current-location-discovery"
+	currentLocationDiscoveryContentType = "application/vnd.3gpp.current-location-discovery+xml"
+	currentLocationDiscoveryDisposition = "info-package"
+	presenceEventPackage                = "presence"
+
+	reliableProvisionalOption = "100rel"
+)
+
+const (
+	sipStatusTrying                      = 100
+	sipStatusRinging                     = 180
+	sipStatusSessionProgress             = 183
+	sipStatusEarlyDialogTerminated       = 199
+	sipStatusOK                          = 200
+	sipStatusMultipleChoices             = 300
+	sipStatusBadRequest                  = 400
+	sipStatusRequestTimeout              = 408
+	sipStatusUnsupportedMediaType        = 415
+	sipStatusBadExtension                = 420
+	sipStatusSessionIntervalTooSmall     = 422
+	sipStatusBadInfoPackage              = 469
+	sipStatusCallTransactionDoesNotExist = 481
+	sipStatusBusyHere                    = 486
+	sipStatusRequestTerminated           = 487
+	sipStatusNotAcceptableHere           = 488
+	sipStatusRequestPending              = 491
+	sipStatusServerInternalError         = 500
 )
 
 type CallState string
@@ -36,9 +66,10 @@ const (
 )
 
 type DialRequest struct {
-	To        string
-	Media     MediaOffer
-	Emergency bool
+	To           string
+	Media        MediaOffer
+	Emergency    bool
+	EmergencyURN string
 }
 
 type IncomingCall struct {
@@ -77,52 +108,68 @@ type Service struct {
 type Call struct {
 	service *Service
 
-	mu                 sync.Mutex
-	id                 string
-	sessionID          string
-	direction          CallDirection
-	state              CallState
-	localURI           string
-	localTag           string
-	remoteURI          string
-	remoteTag          string
-	remoteTo           string
-	targetURI          string
-	routeSet           []string
-	inviteSeq          int64
-	inviteRequest      sip.Message
-	inviteResponse     bool
-	cancelOnResponse   bool
-	cancelSent         bool
-	localPort          int
-	incomingRequest    *session.Request
-	remoteOffer        sdpOffer
-	earlyDialogs       map[string]earlyDialog
-	inviteOK           sip.Message
-	inviteOKStop       chan struct{}
-	ringbackStop       chan struct{}
-	ringingStop        chan struct{}
-	inviteACK          sip.Message
-	prackedRSeq        map[string]struct{}
-	nextRSeq           int64
-	pendingReliable    reliableProvisional
-	provisionalReady   chan struct{}
-	delayedOffer       bool
-	prackAnsweredOffer bool
-	provisionalAnswer  bool
-	mediaActivity      chan MediaPacket
-	mediaWatchStop     chan struct{}
-	dialogAttachment   session.Attachment
-	media              NegotiatedMedia
-	transport          MediaTransport
-	rtcpSSRC           uint32
-	closed             bool
+	mu                  sync.Mutex
+	id                  string
+	sessionID           string
+	direction           CallDirection
+	state               CallState
+	localURI            string
+	localTag            string
+	remoteURI           string
+	remoteTag           string
+	remoteTo            string
+	remoteAllow         string
+	targetURI           string
+	routeSet            []string
+	inviteSeq           int64
+	localCSeq           int64
+	inviteRequest       sip.Message
+	localSDP            []byte
+	inviteResponse      bool
+	cancelOnResponse    bool
+	cancelSent          bool
+	localINVITEPending  bool
+	remoteINVITEPending bool
+	remoteINVITECSeq    int64
+	remoteCSeq          int64
+	localPort           int
+	incomingRequest     *session.Request
+	remoteOffer         sdpOffer
+	earlyDialogs        map[string]earlyDialog
+	inviteOK            sip.Message
+	inviteOKStop        chan struct{}
+	inviteOKCSeq        int64
+	ringbackStop        chan struct{}
+	ringingStop         chan struct{}
+	inviteACK           sip.Message
+	reliableRSeq        map[string]int64
+	reliableStop        chan struct{}
+	nextRSeq            int64
+	pendingReliable     reliableProvisional
+	reliableResponse    sip.Message
+	provisionalReady    chan struct{}
+	delayedOffer        bool
+	prackAnsweredOffer  bool
+	provisionalAnswer   bool
+	mediaActivity       chan MediaPacket
+	mediaWatchStop      chan struct{}
+	sessionTimer        sessionTimerState
+	sessionTimerStop    chan struct{}
+	dialogAttachment    session.Attachment
+	media               NegotiatedMedia
+	transport           MediaTransport
+	rtcpSSRC            uint32
+	emergency           bool
+	currentLocation     bool
+	closed              bool
 }
 
 type earlyDialog struct {
 	answer               sdpOffer
 	hasAnswer            bool
 	earlyMediaAuthorized bool
+	remoteTarget         string
+	routeSet             []string
 }
 
 type reliableProvisional struct {
@@ -132,6 +179,13 @@ type reliableProvisional struct {
 	status int
 }
 
+type sessionTimerState struct {
+	active         bool
+	interval       time.Duration
+	minSE          int
+	localRefresher bool
+}
+
 const (
 	inviteOKWriteTimeout = 5 * time.Second
 	callReleaseTimeout   = 5 * time.Second
@@ -139,8 +193,41 @@ const (
 
 const (
 	reasonUserTriggered       = `RELEASE_CAUSE;cause=1;text="User ends call"`
+	reasonMediaTimeout        = `RELEASE_CAUSE;cause=2;text="RTP/RTCP time-out"`
 	reasonMediaBearerReleased = `RELEASE_CAUSE;cause=3;text="Media bearer loss"`
 )
+
+type mediaReleaseReason int
+
+const (
+	mediaReleaseRTPTimeout mediaReleaseReason = iota
+	mediaReleaseRTCPTimeout
+	mediaReleaseRTCPBye
+)
+
+func (r mediaReleaseReason) cause() string {
+	switch r {
+	case mediaReleaseRTPTimeout:
+		return "rtp inactivity timeout"
+	case mediaReleaseRTCPTimeout:
+		return "rtcp inactivity timeout"
+	case mediaReleaseRTCPBye:
+		return "rtcp bye"
+	default:
+		return "media release"
+	}
+}
+
+func (r mediaReleaseReason) sipReason() string {
+	switch r {
+	case mediaReleaseRTPTimeout, mediaReleaseRTCPTimeout:
+		return reasonMediaTimeout
+	case mediaReleaseRTCPBye:
+		return reasonMediaBearerReleased
+	default:
+		return reasonMediaBearerReleased
+	}
+}
 
 func (c *Call) Direction() CallDirection {
 	c.mu.Lock()

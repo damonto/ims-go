@@ -8,10 +8,12 @@ import (
 )
 
 const (
-	ikeVersion20 byte = 0x20
+	ikeVersion20     byte = 0x20
+	ikeMajorVersion2      = 2
 
 	exchangeTypeIKESAInit     byte = 34
 	exchangeTypeIKEAuth       byte = 35
+	exchangeTypeCreateChildSA byte = 36
 	exchangeTypeInformational byte = 37
 )
 
@@ -109,7 +111,16 @@ func (p *IKEPacket) UnmarshalBinary(data []byte) error {
 	if err := header.UnmarshalBinary(data); err != nil {
 		return err
 	}
-	if int(header.Length) < ikeHeaderSize || int(header.Length) > len(data) {
+	if header.Version>>4 != ikeMajorVersion2 {
+		return fmt.Errorf("parse ike packet: invalid major version %d", header.Version>>4)
+	}
+	if !validExchangeType(header.ExchangeType) {
+		return fmt.Errorf("parse ike packet: invalid exchange type %d", header.ExchangeType)
+	}
+	if header.Length != uint32(len(data)) {
+		return fmt.Errorf("parse ike packet: invalid packet length %d", header.Length)
+	}
+	if header.Length <= ikeHeaderSize {
 		return fmt.Errorf("parse ike packet: invalid packet length %d", header.Length)
 	}
 	payloads, err := DecodePayloadChain(header.NextPayload, data[ikeHeaderSize:header.Length])
@@ -118,4 +129,13 @@ func (p *IKEPacket) UnmarshalBinary(data []byte) error {
 	}
 	*p = IKEPacket{Header: header, Payloads: payloads, Raw: append([]byte(nil), data[:header.Length]...)}
 	return nil
+}
+
+func validExchangeType(exchangeType byte) bool {
+	switch exchangeType {
+	case exchangeTypeIKESAInit, exchangeTypeIKEAuth, exchangeTypeCreateChildSA, exchangeTypeInformational:
+		return true
+	default:
+		return false
+	}
 }

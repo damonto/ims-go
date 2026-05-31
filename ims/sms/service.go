@@ -2,7 +2,6 @@ package sms
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
@@ -12,15 +11,6 @@ import (
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Service, card Card) (*Service, error) {
-	if sess == nil {
-		return nil, errors.New("creating sms service: session is nil")
-	}
-	if reg == nil {
-		return nil, errors.New("creating sms service: registration service is nil")
-	}
-	if card == nil {
-		return nil, errors.New("creating sms service: card is nil")
-	}
 	normalized, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -73,8 +63,12 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 	if !strings.EqualFold(req.Message.Method(), "MESSAGE") {
 		return false, nil
 	}
-	if mediaType, _, err := mime.ParseMediaType(req.Message.Header("Content-Type")); err != nil || !strings.EqualFold(mediaType, "application/vnd.3gpp.sms") {
-		return false, nil
+	mediaType, _, err := mime.ParseMediaType(req.Message.Header("Content-Type"))
+	if err != nil {
+		return true, s.writeMessageStatus(ctx, req, sipStatusUnsupportedMediaType, "Unsupported Media Type")
+	}
+	if !strings.EqualFold(mediaType, smsContentType) && !strings.EqualFold(mediaType, mixedMultipartType) {
+		return true, s.writeMessageStatus(ctx, req, sipStatusUnsupportedMediaType, "Unsupported Media Type")
 	}
 	return true, s.handleMessageRequest(ctx, req)
 }

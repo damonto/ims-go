@@ -48,6 +48,14 @@ type Request struct {
 	Transport Transport
 }
 
+const (
+	sipStatusOK                          = 200
+	sipStatusTrying                      = 100
+	sipStatusMethodNotAllowed            = 405
+	sipStatusCallTransactionDoesNotExist = 481
+	sipStatusRequestTerminated           = 487
+)
+
 type Handler interface {
 	HandleRequest(ctx context.Context, req Request) (bool, error)
 	HandleError(err error)
@@ -58,11 +66,18 @@ type ResponseHandler interface {
 }
 
 type ExchangeOptions struct {
-	OnProvisional func(sip.Message)
+	OnProvisional           func(sip.Message)
+	AcceptResponseTransport func(Transport) bool
+	ResponseTransports      []Transport
 }
 
 type Attachment interface {
 	Close() error
+}
+
+type TransportAttachment interface {
+	Attachment
+	Transport() Transport
 }
 
 type Session struct {
@@ -74,9 +89,13 @@ type Session struct {
 	readWG       sync.WaitGroup
 	primary      Transport
 	aux          []Transport
+	active       map[Transport]struct{}
+	runCtx       context.Context
+	inboundCh    chan<- inboundMessage
 	dialogs      map[string][]*dialogEntry
 	transactions map[string]*clientTransaction
 	serverTxs    map[string]*serverTransaction
+	txChanged    chan struct{}
 	handlers     []*handlerEntry
 	startedCh    chan struct{}
 	closedCh     chan struct{}
@@ -123,9 +142,11 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		cfg:          cfg,
 		logger:       cfg.Logger.With("component", "ims-session"),
 		primary:      primary,
+		active:       map[Transport]struct{}{primary: {}},
 		dialogs:      make(map[string][]*dialogEntry),
 		transactions: make(map[string]*clientTransaction),
 		serverTxs:    make(map[string]*serverTransaction),
+		txChanged:    make(chan struct{}),
 		startedCh:    make(chan struct{}),
 		closedCh:     make(chan struct{}),
 	}, nil
@@ -167,6 +188,35 @@ func (s *Session) TransactionTimers() TransactionTimers {
 	return s.cfg.TransactionTimers
 }
 
+func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transport) error {
+	watched := transportSet(transports)
+	if len(watched) == 0 {
+		return nil
+	}
+	for {
+		s.mu.Lock()
+		if s.transportsIdleLocked(watched) {
+			s.mu.Unlock()
+			return nil
+		}
+		if s.closed {
+			s.mu.Unlock()
+			return errors.New("waiting for transport transactions: session is closed")
+		}
+		changed := s.txChanged
+		closed := s.closedCh
+		s.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-closed:
+			return errors.New("waiting for transport transactions: session is closed")
+		case <-changed:
+		}
+	}
+}
+
 func (s *Session) Attach(h Handler) (Attachment, error) {
 	if h == nil {
 		return nil, errors.New("attaching handler: handler is nil")
@@ -186,14 +236,24 @@ func (s *Session) AddTransport(t Transport) (Attachment, error) {
 		return nil, errors.New("adding transport: transport is nil")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil, errors.New("adding transport: session is closed")
 	}
-	if s.started {
-		return nil, errors.New("adding transport: session has already started")
+	if s.started && !s.running {
+		s.mu.Unlock()
+		return nil, errors.New("adding transport: session has stopped")
 	}
 	s.aux = append(s.aux, t)
+	s.active[t] = struct{}{}
+	runCtx := s.runCtx
+	inboundCh := s.inboundCh
+	running := s.running
+	s.mu.Unlock()
+
+	if running {
+		s.startReadLoop(runCtx, t, inboundCh)
+	}
 	return &transportAttachment{session: s, transport: t}, nil
 }
 
@@ -212,6 +272,8 @@ func (s *Session) ReplacePrimary(t Transport) error {
 	}
 	old := s.primary
 	s.primary = t
+	delete(s.active, old)
+	s.active[t] = struct{}{}
 	s.mu.Unlock()
 	if old != nil && old != t {
 		if err := old.Close(); err != nil {
@@ -221,29 +283,106 @@ func (s *Session) ReplacePrimary(t Transport) error {
 	return nil
 }
 
+func (s *Session) PromotePrimary(t Transport) (Attachment, error) {
+	if t == nil {
+		return nil, errors.New("promoting primary transport: transport is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("promoting primary transport: session is closed")
+	}
+	if s.started && !s.running {
+		return nil, errors.New("promoting primary transport: session has stopped")
+	}
+	if _, ok := s.active[t]; !ok {
+		return nil, errors.New("promoting primary transport: transport is not active")
+	}
+	old := s.primary
+	if old == t {
+		return nil, nil
+	}
+	s.primary = t
+	s.aux = removeTransport(s.aux, t)
+	if old != nil {
+		s.aux = append(s.aux, old)
+	}
+	return &transportAttachment{session: s, transport: old}, nil
+}
+
 func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, error) {
 	return s.ExchangeWithOptions(ctx, req, ExchangeOptions{})
 }
 
 func (s *Session) ExchangeWithOptions(ctx context.Context, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
+	return s.ExchangeWithTransport(ctx, s.primaryTransport(), req, opts)
+}
+
+func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
 	if err := s.ensureOpen("exchanging request"); err != nil {
 		return sip.Message{}, err
 	}
-	if !s.isRunning() {
-		if err := s.writeRequest(ctx, s.primaryTransport(), req); err != nil {
+	if err := s.ensureActiveTransport("exchanging request", transport); err != nil {
+		return sip.Message{}, err
+	}
+	for _, responseTransport := range opts.ResponseTransports {
+		if err := s.ensureActiveTransport("exchanging request", responseTransport); err != nil {
 			return sip.Message{}, err
 		}
-		resp, err := s.readFinalTransportResponse(ctx, s.primaryTransport(), opts)
-		if err != nil {
-			return sip.Message{}, fmt.Errorf("receiving %s response: %w", req.Method(), err)
-		}
-		return resp, nil
 	}
-	tx := newClientTransaction(s, s.primaryTransport(), req, opts)
+	tx := newClientTransaction(s, transport, req, opts)
+	if !s.isRunning() {
+		return s.exchangeWithBootstrapReader(ctx, tx)
+	}
 	if err := tx.start(ctx); err != nil {
 		return sip.Message{}, err
 	}
 	return tx.await(ctx)
+}
+
+func (s *Session) exchangeWithBootstrapReader(ctx context.Context, tx *clientTransaction) (sip.Message, error) {
+	if err := tx.start(ctx); err != nil {
+		return sip.Message{}, err
+	}
+
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	readTransports := exchangeReadTransports(tx.transport, tx.opts.ResponseTransports)
+	inboundCh := make(chan inboundMessage, len(readTransports))
+	for _, transport := range readTransports {
+		s.startBootstrapReadLoop(readCtx, transport, inboundCh)
+	}
+
+	resultCh := make(chan transactionResult, 1)
+	go func() {
+		msg, err := tx.await(ctx)
+		resultCh <- transactionResult{msg: msg, err: err}
+	}()
+
+	for {
+		select {
+		case result := <-resultCh:
+			if result.err != nil {
+				return sip.Message{}, result.err
+			}
+			return result.msg, nil
+		case inbound := <-inboundCh:
+			if inbound.err != nil {
+				if ctx.Err() != nil {
+					tx.abort(ctx.Err())
+					continue
+				}
+				err := fmt.Errorf("receiving %s response: %w", tx.method, inbound.err)
+				tx.abort(err)
+				return sip.Message{}, err
+			}
+			if err := s.dispatchBootstrapInbound(readCtx, inbound); err != nil {
+				tx.abort(err)
+				return sip.Message{}, err
+			}
+		}
+	}
 }
 
 func (s *Session) Send(ctx context.Context, req sip.Message) error {
@@ -303,10 +442,12 @@ func (s *Session) Run(ctx context.Context) error {
 	s.running = true
 	primary := s.primary
 	aux := append([]Transport(nil), s.aux...)
-	s.mu.Unlock()
-	defer s.setRunning(false)
-
 	inboundCh := make(chan inboundMessage, 16)
+	s.runCtx = ctx
+	s.inboundCh = inboundCh
+	s.mu.Unlock()
+	defer s.finishRunning()
+
 	s.startReadLoop(ctx, primary, inboundCh)
 	for _, transport := range aux {
 		s.startReadLoop(ctx, transport, inboundCh)
@@ -322,6 +463,14 @@ func (s *Session) Run(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				if inbound.transport != nil && !s.isTransportActive(inbound.transport) {
+					continue
+				}
+				if inbound.transport != nil && s.removeFailedAuxTransport(inbound.transport) {
+					s.logger.Warn("removed failed auxiliary SIP transport", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
+					s.abortTransportTransactions(inbound.transport, inbound.err)
+					continue
+				}
 				return inbound.err
 			}
 			s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
@@ -331,7 +480,7 @@ func (s *Session) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			if !s.dispatchResponse(inbound.msg) {
+			if !s.dispatchResponse(inbound) {
 				if err := s.handleInboundResponse(ctx, inbound.msg); err != nil {
 					return err
 				}
@@ -381,7 +530,6 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) CloseContext(ctx context.Context) error {
-
 	var closeErr error
 	s.mu.Lock()
 	if s.closed {
@@ -391,15 +539,14 @@ func (s *Session) CloseContext(ctx context.Context) error {
 	s.closed = true
 	primary := s.primary
 	aux := append([]Transport(nil), s.aux...)
+	transports := uniqueTransports(append(aux, primary))
 	handlers := s.handlerSnapshotLocked()
 	closedCh := s.closedCh
+	s.active = make(map[Transport]struct{})
 	s.mu.Unlock()
 	close(closedCh)
 
-	if primary != nil {
-		closeErr = errors.Join(closeErr, primary.Close())
-	}
-	for _, transport := range aux {
+	for _, transport := range transports {
 		closeErr = errors.Join(closeErr, transport.Close())
 	}
 	notifyErr := closeErr
@@ -436,6 +583,18 @@ func (s *Session) ensureOpen(action string) error {
 	return nil
 }
 
+func (s *Session) ensureActiveTransport(action string, transport Transport) error {
+	if transport == nil {
+		return fmt.Errorf("%s: transport is nil", action)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.active[transport]; !ok {
+		return fmt.Errorf("%s: transport is not active", action)
+	}
+	return nil
+}
+
 func (s *Session) isRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -460,27 +619,15 @@ func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip
 	return nil
 }
 
-func (s *Session) readFinalTransportResponse(ctx context.Context, transport Transport, opts ExchangeOptions) (sip.Message, error) {
-	for {
-		inbound, err := readTransportMessage(ctx, transport)
-		if err != nil {
-			return sip.Message{}, err
-		}
-		if inbound.msg.IsRequest() {
-			if err := s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport}); err != nil {
-				return sip.Message{}, err
-			}
-			continue
-		}
-		s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
-		if isProvisionalResponse(inbound.msg) {
-			if opts.OnProvisional != nil {
-				opts.OnProvisional(inbound.msg)
-			}
-			continue
-		}
-		return inbound.msg, nil
+func responseMatchesRequestTransaction(req, resp sip.Message) bool {
+	if got, want := sip.PendingKey(resp), sip.PendingKey(req); want != "" && got != want {
+		return false
 	}
+	if want := strings.TrimSpace(sip.TopViaSentBy(req.Header("Via"))); want != "" {
+		got := strings.TrimSpace(sip.TopViaSentBy(resp.Header("Via")))
+		return strings.EqualFold(got, want)
+	}
+	return true
 }
 
 func readTransportMessage(ctx context.Context, transport Transport) (inboundMessage, error) {
@@ -495,6 +642,43 @@ func readTransportMessage(ctx context.Context, transport Transport) (inboundMess
 	return inboundMessage{msg: msg, transport: transport}, nil
 }
 
+func exchangeReadTransports(requestTransport Transport, responseTransports []Transport) []Transport {
+	if len(responseTransports) == 0 {
+		return []Transport{requestTransport}
+	}
+	return uniqueTransports(responseTransports)
+}
+
+func (s *Session) startBootstrapReadLoop(ctx context.Context, transport Transport, out chan<- inboundMessage) {
+	go func() {
+		for {
+			inbound, err := readTransportMessage(ctx, transport)
+			if err != nil {
+				inbound = inboundMessage{transport: transport, err: err}
+			}
+			select {
+			case out <- inbound:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func (s *Session) dispatchBootstrapInbound(ctx context.Context, inbound inboundMessage) error {
+	s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
+	if inbound.msg.IsRequest() {
+		return s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport})
+	}
+	if !s.dispatchResponse(inbound) {
+		return s.handleInboundResponse(ctx, inbound.msg)
+	}
+	return nil
+}
+
 func (s *Session) startReadLoop(ctx context.Context, transport Transport, out chan<- inboundMessage) {
 	s.readWG.Add(1)
 	go func() {
@@ -503,7 +687,7 @@ func (s *Session) startReadLoop(ctx context.Context, transport Transport, out ch
 			inbound, err := readTransportMessage(ctx, transport)
 			if err != nil {
 				select {
-				case out <- inboundMessage{err: err}:
+				case out <- inboundMessage{transport: transport, err: err}:
 				case <-ctx.Done():
 				}
 				return
@@ -529,9 +713,12 @@ func (s *Session) handleRequest(ctx context.Context, req Request) error {
 		return nil
 	}
 	if strings.EqualFold(req.Message.Method(), "BYE") {
-		return s.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+		return s.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
 	}
-	return s.WriteStatus(ctx, req, 405, "Method Not Allowed")
+	resp := sip.NewResponse(sipStatusMethodNotAllowed, "Method Not Allowed")
+	resp.Headers = sip.ResponseHeaders(req.Message, sipStatusMethodNotAllowed)
+	resp.Headers.Add("Allow", sip.DefaultClientAllow)
+	return s.WriteResponse(ctx, req, resp)
 }
 
 func (s *Session) dispatchRequest(ctx context.Context, req Request) (bool, error) {
@@ -592,7 +779,9 @@ func (s *Session) writeResponse(ctx context.Context, transport Transport, req si
 	if err != nil {
 		return fmt.Errorf("encoding %d response: %w", resp.StatusCode(), err)
 	}
-	return s.writePacketTo(ctx, transport, data, responseDestination(transport.RemoteAddr(), req.Header("Via")))
+	target := responseDestination(transport.RemoteAddr(), req.Header("Via"))
+	s.logger.Debug("sip message", "direction", "send", "start_line", resp.StartLine, "sip_message", string(data), "target_addr", target)
+	return s.writePacketTo(ctx, transport, data, target)
 }
 
 func messagePacket(msg sip.Message) ([]byte, error) {
@@ -623,15 +812,18 @@ func responseDestination(remote net.Addr, via string) net.Addr {
 	return target
 }
 
-func (s *Session) dispatchResponse(msg sip.Message) bool {
-	key := sip.PendingKey(msg)
+func (s *Session) dispatchResponse(inbound inboundMessage) bool {
+	key := sip.PendingKey(inbound.msg)
 	s.mu.Lock()
 	tx, ok := s.transactions[key]
 	s.mu.Unlock()
 	if !ok {
 		return false
 	}
-	tx.handleResponse(msg)
+	if !tx.acceptsResponse(inbound.msg) {
+		return true
+	}
+	tx.handleResponse(inbound)
 	return true
 }
 
@@ -716,10 +908,93 @@ func (s *Session) markReady() {
 	close(startedCh)
 }
 
-func (s *Session) setRunning(running bool) {
+func (s *Session) finishRunning() {
 	s.mu.Lock()
-	s.running = running
+	s.running = false
+	s.runCtx = nil
+	s.inboundCh = nil
 	s.mu.Unlock()
+}
+
+func (s *Session) isTransportActive(transport Transport) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.active[transport]
+	return ok
+}
+
+func (s *Session) removeFailedAuxTransport(transport Transport) bool {
+	s.mu.Lock()
+	if s.closed || transport == nil || transport == s.primary {
+		s.mu.Unlock()
+		return false
+	}
+	if _, ok := s.active[transport]; !ok {
+		s.mu.Unlock()
+		return true
+	}
+	delete(s.active, transport)
+	s.aux = removeTransport(s.aux, transport)
+	s.notifyTransactionsChangedLocked()
+	s.mu.Unlock()
+	_ = transport.Close()
+	return true
+}
+
+func (s *Session) transportsIdleLocked(transports map[Transport]struct{}) bool {
+	for _, tx := range s.transactions {
+		if _, ok := transports[tx.transport]; ok {
+			return false
+		}
+	}
+	for _, tx := range s.serverTxs {
+		if _, ok := transports[tx.transport]; ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Session) notifyTransactionsChangedLocked() {
+	close(s.txChanged)
+	s.txChanged = make(chan struct{})
+}
+
+func transportSet(transports []Transport) map[Transport]struct{} {
+	set := make(map[Transport]struct{}, len(transports))
+	for _, transport := range transports {
+		if transport != nil {
+			set[transport] = struct{}{}
+		}
+	}
+	return set
+}
+
+func removeTransport(transports []Transport, target Transport) []Transport {
+	next := transports[:0]
+	for _, transport := range transports {
+		if transport == target {
+			continue
+		}
+		next = append(next, transport)
+	}
+	return next
+}
+
+func uniqueTransports(transports []Transport) []Transport {
+	seen := make(map[Transport]struct{}, len(transports))
+	unique := make([]Transport, 0, len(transports))
+	for _, transport := range transports {
+		if transport == nil {
+			continue
+		}
+		if _, ok := seen[transport]; ok {
+			continue
+		}
+		seen[transport] = struct{}{}
+		unique = append(unique, transport)
+	}
+	return unique
 }
 
 func isProvisionalResponse(msg sip.Message) bool {
@@ -736,21 +1011,17 @@ func (a *handlerEntry) Close() error {
 
 func (a *transportAttachment) Close() error {
 	a.session.mu.Lock()
-	defer a.session.mu.Unlock()
 	if a.closed {
+		a.session.mu.Unlock()
 		return nil
 	}
-	if a.session.started {
-		return errors.New("closing transport attachment: session has already started")
-	}
 	a.closed = true
-	filtered := a.session.aux[:0]
-	for _, transport := range a.session.aux {
-		if transport == a.transport {
-			continue
-		}
-		filtered = append(filtered, transport)
-	}
-	a.session.aux = filtered
+	delete(a.session.active, a.transport)
+	a.session.aux = removeTransport(a.session.aux, a.transport)
+	a.session.mu.Unlock()
 	return a.transport.Close()
+}
+
+func (a *transportAttachment) Transport() Transport {
+	return a.transport
 }

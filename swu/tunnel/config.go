@@ -10,30 +10,59 @@ import (
 
 var (
 	defaultDHGroups          = []uint16{transformDH2048MODP}
-	defaultEncryptionKeyLens = []uint16{128, 256}
+	defaultEncryptionKeyLens = []uint16{transformKeyLenAES128, transformKeyLenAES256}
 	defaultIKEIntegrity      = []uint16{transformINTEGHMACSHA256}
 	defaultIKEPRF            = []uint16{transformPRFHMACSHA1, transformPRFHMACSHA256}
 	defaultChildIntegrity    = []uint16{transformINTEGHMACSHA256}
 )
 
+const (
+	DefaultAPN                   = "ims"
+	defaultAKAPrimeNetworkName   = "WLAN"
+	defaultIKEPort               = 500
+	defaultNATTPort              = 4500
+	defaultLocalSIPPort          = 5062
+	defaultSIPPort               = 5060
+	defaultNATKeepaliveInterval  = 20 * time.Second
+	defaultLivenessTimeout       = 120 * time.Second
+	defaultIKESARekeySoftTimer   = 7200 * time.Second
+	defaultIKESARekeyHardTimer   = 14400 * time.Second
+	defaultChildSARekeySoftTimer = 3600 * time.Second
+	defaultChildSARekeyHardTimer = 7200 * time.Second
+)
+
+const (
+	transformKeyLenAES128 uint16 = 128
+	transformKeyLenAES192 uint16 = 192
+	transformKeyLenAES256 uint16 = 256
+)
+
 func (cfg Config) Normalized() (Config, error) {
 	cfg.LocalAddr = strings.TrimSpace(cfg.LocalAddr)
 	cfg.RemoteAddr = strings.TrimSpace(cfg.RemoteAddr)
+	cfg.APN = strings.TrimSpace(cfg.APN)
+	cfg.AKAPrimeNetworkName = strings.TrimSpace(cfg.AKAPrimeNetworkName)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.APN == "" {
+		cfg.APN = DefaultAPN
+	}
+	if cfg.AKAPrimeNetworkName == "" {
+		cfg.AKAPrimeNetworkName = defaultAKAPrimeNetworkName
 	}
 
 	if err := validatePortRange("initial port", cfg.InitialPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	if cfg.NATTPort == 0 {
-		cfg.NATTPort = 4500
+		cfg.NATTPort = defaultNATTPort
 	}
 	if cfg.LocalSIPPort == 0 {
-		cfg.LocalSIPPort = 5062
+		cfg.LocalSIPPort = defaultLocalSIPPort
 	}
 	if cfg.SIPPort == 0 {
-		cfg.SIPPort = 5060
+		cfg.SIPPort = defaultSIPPort
 	}
 	if len(cfg.DHGroups) == 0 {
 		cfg.DHGroups = append([]uint16(nil), defaultDHGroups...)
@@ -92,10 +121,16 @@ func (cfg Config) Normalized() (Config, error) {
 		cfg.PCSCFIPv6ConfigAttribute = configAttrPCSCFIPv6Address
 	}
 	if cfg.NATKeepaliveInterval == 0 {
-		cfg.NATKeepaliveInterval = 20 * time.Second
+		cfg.NATKeepaliveInterval = defaultNATKeepaliveInterval
 	}
 	if cfg.NATKeepaliveInterval < 0 {
 		return Config{}, errors.New("normalizing swu config: natt keepalive interval must be >= 0")
+	}
+	if cfg.LivenessTimeout < 0 {
+		return Config{}, errors.New("normalizing swu config: liveness timeout must be >= 0")
+	}
+	if cfg.LivenessTimeout == 0 {
+		cfg.LivenessTimeout = defaultLivenessTimeout
 	}
 	if len(cfg.IKERetransmitDelays) == 0 {
 		cfg.IKERetransmitDelays = append([]time.Duration(nil), defaultIKERetransmitDelays...)
@@ -103,6 +138,18 @@ func (cfg Config) Normalized() (Config, error) {
 		cfg.IKERetransmitDelays = append([]time.Duration(nil), cfg.IKERetransmitDelays...)
 	}
 	if err := validateRetransmitDelays("ike retransmit delays", cfg.IKERetransmitDelays); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
+	if err := normalizeSALifetime("ike sa", &cfg.IKESALifetime, &cfg.IKESARekeyMargin, defaultIKESARekeyHardTimer, defaultIKESARekeyHardTimer-defaultIKESARekeySoftTimer); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
+	if err := normalizeSAByteLifetime("ike sa", &cfg.IKESAByteLifetime, &cfg.IKESAByteRekeyMargin); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
+	if err := normalizeSALifetime("child sa", &cfg.ChildSALifetime, &cfg.ChildSARekeyMargin, defaultChildSARekeyHardTimer, defaultChildSARekeyHardTimer-defaultChildSARekeySoftTimer); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
+	if err := normalizeSAByteLifetime("child sa", &cfg.ChildSAByteLifetime, &cfg.ChildSAByteRekeyMargin); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	if err := validatePortRange("natt port", cfg.NATTPort); err != nil {
@@ -115,6 +162,62 @@ func (cfg Config) Normalized() (Config, error) {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	return cfg, nil
+}
+
+func normalizeSALifetime(name string, lifetime, rekeyMargin *time.Duration, defaultLifetime, defaultRekeyMargin time.Duration) error {
+	if *lifetime < 0 {
+		return fmt.Errorf("%s lifetime must be >= 0", name)
+	}
+	if *rekeyMargin < 0 {
+		return fmt.Errorf("%s rekey margin must be >= 0", name)
+	}
+	if *lifetime == 0 {
+		if *rekeyMargin != 0 {
+			return fmt.Errorf("%s rekey margin requires %s lifetime", name, name)
+		}
+		*lifetime = defaultLifetime
+		*rekeyMargin = defaultRekeyMargin
+		return nil
+	}
+	if *rekeyMargin == 0 {
+		*rekeyMargin = defaultSARekeyMargin(*lifetime)
+	}
+	if *rekeyMargin >= *lifetime {
+		return fmt.Errorf("%s rekey margin must be shorter than %s lifetime", name, name)
+	}
+	return nil
+}
+
+func normalizeSAByteLifetime(name string, lifetime, rekeyMargin *uint64) error {
+	if *lifetime == 0 && *rekeyMargin != 0 {
+		return fmt.Errorf("%s byte rekey margin requires %s byte lifetime", name, name)
+	}
+	if *lifetime > 0 && *rekeyMargin == 0 {
+		*rekeyMargin = defaultSAByteRekeyMargin(*lifetime)
+	}
+	if *lifetime > 0 && *rekeyMargin >= *lifetime {
+		return fmt.Errorf("%s byte rekey margin must be shorter than %s byte lifetime", name, name)
+	}
+	return nil
+}
+
+func defaultSARekeyMargin(lifetime time.Duration) time.Duration {
+	margin := lifetime / 10
+	if margin > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	if margin <= 0 {
+		return lifetime / 2
+	}
+	return margin
+}
+
+func defaultSAByteRekeyMargin(lifetime uint64) uint64 {
+	margin := lifetime / 10
+	if margin == 0 {
+		return 1
+	}
+	return margin
 }
 
 func validatePortRange(name string, port int) error {
@@ -139,7 +242,7 @@ func validateEncryptionKeyLens(name string, values []uint16) error {
 	}
 	for _, value := range values {
 		switch value {
-		case 128, 192, 256:
+		case transformKeyLenAES128, transformKeyLenAES192, transformKeyLenAES256:
 		default:
 			return fmt.Errorf("%s value %d is unsupported", name, value)
 		}
@@ -176,12 +279,19 @@ func validatePRFTransforms(name string, values []uint16) error {
 }
 
 func validateRetransmitDelays(name string, delays []time.Duration) error {
-	if len(delays) == 0 || len(delays) > 10 {
-		return fmt.Errorf("%s must contain 1 to 10 entries", name)
+	if len(delays) == 0 || len(delays) > 12 {
+		return fmt.Errorf("%s must contain 1 to 12 entries", name)
 	}
-	for _, delay := range delays {
+	for i, delay := range delays {
 		if delay < 500*time.Millisecond || delay > 30*time.Minute {
 			return fmt.Errorf("%s entry %s must be between 500ms and 30m", name, delay)
+		}
+		if i == 0 {
+			continue
+		}
+		minDelay := delays[i-1] * 2
+		if delay < minDelay {
+			return fmt.Errorf("%s entry %s must be at least double previous entry %s", name, delay, delays[i-1])
 		}
 	}
 	return nil

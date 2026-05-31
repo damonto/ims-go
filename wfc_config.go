@@ -3,7 +3,6 @@ package vowifi
 import (
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -33,7 +32,22 @@ type wfcProfile struct {
 	PCSCFIPv4ConfigAttribute   uint16           `json:"pcscfIPv4ConfigAttribute"`
 	PCSCFIPv6ConfigAttribute   uint16           `json:"pcscfIPv6ConfigAttribute"`
 	NATKeepaliveInterval       *wfcDuration     `json:"natKeepaliveInterval"`
+	AndroidDPDSeconds          *int             `json:"iwlan.dpd_timer_sec_int"`
+	AndroidNATKeepaliveSeconds *int             `json:"iwlan.natt_keep_alive_timer_sec_int"`
 	IKERetransmitDelays        []wfcDuration    `json:"ikeRetransmitDelays"`
+	AndroidIKERetransmitMS     []int            `json:"iwlan.retransmit_timer_sec_int_array"`
+	IKESARekeySoftTime         *wfcDuration     `json:"ikeSARekeySoftTime"`
+	IKESARekeyHardTime         *wfcDuration     `json:"ikeSARekeyHardTime"`
+	IKESARekeyTime             *wfcDuration     `json:"ikeSARekeyTime"`
+	AndroidIKESARekeySoftSecs  *int             `json:"iwlan.ike_rekey_soft_timer_sec_int"`
+	AndroidIKESARekeyHardSecs  *int             `json:"iwlan.ike_rekey_hard_timer_in_sec"`
+	ChildSARekeySoftTime       *wfcDuration     `json:"childSARekeySoftTime"`
+	ChildSARekeyHardTime       *wfcDuration     `json:"childSARekeyHardTime"`
+	ChildSARekeyTime           *wfcDuration     `json:"childSARekeyTime"`
+	AndroidChildSARekeySoftSec *int             `json:"iwlan.child_sa_rekey_soft_timer_sec_int"`
+	AndroidChildSARekeyHardSec *int             `json:"iwlan.child_sa_rekey_hard_timer_sec_int"`
+	AddKEToChildSARekey        *bool            `json:"addKEToChildSARekey"`
+	AndroidAddKEToChildRekey   *bool            `json:"iwlan.add_ke_to_child_session_rekey_bool"`
 	IMSTransport               string           `json:"imsTransport"`
 	IMSHomeDomain              string           `json:"imsHomeDomain"`
 	IMSPrivateIdentity         string           `json:"imsPrivateIdentity"`
@@ -42,6 +56,10 @@ type wfcProfile struct {
 	IMSAccessNetworkInfo       string           `json:"imsAccessNetworkInfo"`
 	IMSUserAgent               string           `json:"imsUserAgent"`
 	IMSRegisterExpires         *wfcDuration     `json:"imsRegisterExpires"`
+	IMSRegistrationRetryBase   *wfcDuration     `json:"imsRegistrationRetryBase"`
+	IMSRegistrationRetryMax    *wfcDuration     `json:"imsRegistrationRetryMax"`
+	AndroidIMSRetryBaseMS      *int             `json:"ims.registration_retry_base_timer_millis_int"`
+	AndroidIMSRetryMaxMS       *int             `json:"ims.registration_retry_max_timer_millis_int"`
 	IMSGeolocationPIDFInvite   []int            `json:"imsGeolocationPIDFInSIPInviteSupport"`
 	IMSGeolocationPIDFRegister []int            `json:"imsGeolocationPIDFInSIPRegisterSupport"`
 	IMSUseTelURIForPIDFXML     *bool            `json:"imsUseTelURIForPIDFXML"`
@@ -54,32 +72,35 @@ type wfcProfile struct {
 	IMSSIPTimerF               *wfcDuration     `json:"imsSIPTimerF"`
 	IMSSIPTimerH               *wfcDuration     `json:"imsSIPTimerH"`
 	IMSSIPTimerJ               *wfcDuration     `json:"imsSIPTimerJ"`
+	EnableSMSDeliveryReports   *bool            `json:"enableSMSDeliveryReports"`
 	IMSVoice                   *wfcVoiceProfile `json:"imsVoice"`
 	WFCSPN                     string           `json:"wfcSPN"`
 }
 
 type wfcVoiceProfile struct {
-	RTPProfile                   string                              `json:"rtpProfile"`
-	PTime                        *wfcDuration                        `json:"ptime"`
-	MaxPTime                     *wfcDuration                        `json:"maxptime"`
-	GeolocationCountry           string                              `json:"geolocationCountry"`
-	PIDFShortCodes               []string                            `json:"pidfShortCodes"`
-	QoSPreconditionsSupported    *bool                               `json:"qosPreconditionsSupported"`
-	ReliableProvisionalSupported *bool                               `json:"reliableProvisionalSupported"`
-	SessionTimer                 *bool                               `json:"sessionTimer"`
-	SessionExpires               *wfcDuration                        `json:"sessionExpires"`
-	MinimumSessionExpires        *wfcDuration                        `json:"minimumSessionExpires"`
-	MOCallRequestTimeout         *wfcDuration                        `json:"moCallRequestTimeout"`
-	RingbackTimer                *wfcDuration                        `json:"ringbackTimer"`
-	RingingTimer                 *wfcDuration                        `json:"ringingTimer"`
-	AudioASBandwidthKbps         int                                 `json:"audioASBandwidthKbps"`
-	RTPInactivityTimeout         *wfcDuration                        `json:"rtpInactivityTimeout"`
-	RTCPInactivityTimeout        *wfcDuration                        `json:"rtcpInactivityTimeout"`
-	RTCPSendInterval             *wfcDuration                        `json:"rtcpSendInterval"`
-	LocalRTPPortMin              int                                 `json:"localRTPPortMin"`
-	LocalRTPPortMax              int                                 `json:"localRTPPortMax"`
-	Codecs                       []wfcVoiceCodecProfile              `json:"codecs"`
-	EVSPayloadDescriptions       map[string]wfcEVSPayloadDescription `json:"evsPayloadDescriptions"`
+	RTPProfile                    string                                  `json:"rtpProfile"`
+	PTime                         *wfcDuration                            `json:"ptime"`
+	MaxPTime                      *wfcDuration                            `json:"maxptime"`
+	GeolocationCountry            string                                  `json:"geolocationCountry"`
+	PIDFShortCodes                []string                                `json:"pidfShortCodes"`
+	QoSPreconditionsSupported     *bool                                   `json:"qosPreconditionsSupported"`
+	ReliableProvisionalSupported  *bool                                   `json:"reliableProvisionalSupported"`
+	SessionTimer                  *bool                                   `json:"sessionTimer"`
+	SessionExpires                *wfcDuration                            `json:"sessionExpires"`
+	MinimumSessionExpires         *wfcDuration                            `json:"minimumSessionExpires"`
+	SessionRefresher              string                                  `json:"sessionRefresher"`
+	MOCallRequestTimeout          *wfcDuration                            `json:"moCallRequestTimeout"`
+	RingbackTimer                 *wfcDuration                            `json:"ringbackTimer"`
+	RingingTimer                  *wfcDuration                            `json:"ringingTimer"`
+	AudioASBandwidthKbps          int                                     `json:"audioASBandwidthKbps"`
+	RTPInactivityTimeout          *wfcDuration                            `json:"rtpInactivityTimeout"`
+	RTCPInactivityTimeout         *wfcDuration                            `json:"rtcpInactivityTimeout"`
+	AudioInactivityCallEndReasons []imsvoice.AudioInactivityCallEndReason `json:"audioInactivityCallEndReasons"`
+	RTCPSendInterval              *wfcDuration                            `json:"rtcpSendInterval"`
+	LocalRTPPortMin               int                                     `json:"localRTPPortMin"`
+	LocalRTPPortMax               int                                     `json:"localRTPPortMax"`
+	Codecs                        []wfcVoiceCodecProfile                  `json:"codecs"`
+	EVSPayloadDescriptions        map[string]wfcEVSPayloadDescription     `json:"evsPayloadDescriptions"`
 }
 
 type wfcVoiceCodecProfile struct {
@@ -131,10 +152,6 @@ func loadWFCProfile(card Card) (wfcProfile, bool, error) {
 }
 
 func parseWFCProfile(raw []byte, card Card) (wfcProfile, bool, error) {
-	if card == nil {
-		return wfcProfile{}, false, errors.New("loading wfc config: card is nil")
-	}
-
 	var profiles []wfcProfile
 	if err := json.Unmarshal(raw, &profiles); err != nil {
 		return wfcProfile{}, false, fmt.Errorf("loading wfc config: decode json: %w", err)
@@ -261,11 +278,37 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 	if cfg.Tunnel.PCSCFIPv6ConfigAttribute == 0 {
 		cfg.Tunnel.PCSCFIPv6ConfigAttribute = profile.PCSCFIPv6ConfigAttribute
 	}
-	if cfg.Tunnel.NATKeepaliveInterval == 0 && profile.NATKeepaliveInterval != nil {
-		cfg.Tunnel.NATKeepaliveInterval = profile.NATKeepaliveInterval.Duration
+	if cfg.Tunnel.NATKeepaliveInterval == 0 {
+		cfg.Tunnel.NATKeepaliveInterval = wfcProfileDuration(profile.NATKeepaliveInterval, profile.AndroidNATKeepaliveSeconds)
+	}
+	if cfg.Tunnel.LivenessTimeout == 0 {
+		cfg.Tunnel.LivenessTimeout = wfcSecondsDuration(profile.AndroidDPDSeconds)
 	}
 	if len(cfg.Tunnel.IKERetransmitDelays) == 0 {
-		cfg.Tunnel.IKERetransmitDelays = wfcDurations(profile.IKERetransmitDelays)
+		cfg.Tunnel.IKERetransmitDelays = wfcIKEReTransmitDelays(profile)
+	}
+	if cfg.Tunnel.IKESALifetime == 0 {
+		cfg.Tunnel.IKESALifetime, cfg.Tunnel.IKESARekeyMargin = saLifetimeFromWFCRekeyTimers(
+			profile.IKESARekeySoftTime,
+			profile.IKESARekeyHardTime,
+			profile.IKESARekeyTime,
+			profile.AndroidIKESARekeySoftSecs,
+			profile.AndroidIKESARekeyHardSecs,
+		)
+	}
+	if cfg.Tunnel.ChildSALifetime == 0 {
+		cfg.Tunnel.ChildSALifetime, cfg.Tunnel.ChildSARekeyMargin = saLifetimeFromWFCRekeyTimers(
+			profile.ChildSARekeySoftTime,
+			profile.ChildSARekeyHardTime,
+			profile.ChildSARekeyTime,
+			profile.AndroidChildSARekeySoftSec,
+			profile.AndroidChildSARekeyHardSec,
+		)
+	}
+	if !cfg.Tunnel.AddKEToChildSARekey {
+		if addKE, ok := wfcAddKEToChildSARekey(profile); ok {
+			cfg.Tunnel.AddKEToChildSARekey = addKE
+		}
 	}
 
 	if strings.TrimSpace(cfg.IMS.Transport) == "" {
@@ -291,6 +334,12 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 	}
 	if cfg.IMS.RegisterExpires == 0 && profile.IMSRegisterExpires != nil {
 		cfg.IMS.RegisterExpires = profile.IMSRegisterExpires.Duration
+	}
+	if cfg.IMS.RegistrationRetryBase == 0 {
+		cfg.IMS.RegistrationRetryBase = wfcProfileMillisDuration(profile.IMSRegistrationRetryBase, profile.AndroidIMSRetryBaseMS)
+	}
+	if cfg.IMS.RegistrationRetryMax == 0 {
+		cfg.IMS.RegistrationRetryMax = wfcProfileMillisDuration(profile.IMSRegistrationRetryMax, profile.AndroidIMSRetryMaxMS)
 	}
 	if len(cfg.IMS.Voice.GeolocationPIDFInvite) == 0 {
 		cfg.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)
@@ -328,8 +377,16 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 	if cfg.IMS.SIPTimers.TJ == 0 && profile.IMSSIPTimerJ != nil {
 		cfg.IMS.SIPTimers.TJ = profile.IMSSIPTimerJ.Duration
 	}
+	cfg.smsRequestStatusReport = wfcSMSDeliveryReports(profile)
 	cfg = cfg.withWFCVoiceProfile(profile.IMSVoice)
 	return cfg
+}
+
+func wfcSMSDeliveryReports(profile wfcProfile) bool {
+	if profile.EnableSMSDeliveryReports == nil {
+		return true
+	}
+	return *profile.EnableSMSDeliveryReports
 }
 
 func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
@@ -363,6 +420,9 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	if cfg.IMS.Voice.MinSessionExpires == 0 && profile.MinimumSessionExpires != nil {
 		cfg.IMS.Voice.MinSessionExpires = profile.MinimumSessionExpires.Duration
 	}
+	if strings.TrimSpace(cfg.IMS.Voice.SessionRefresher) == "" {
+		cfg.IMS.Voice.SessionRefresher = profile.SessionRefresher
+	}
 	if cfg.IMS.Voice.MOCallRequestTimeout == 0 && profile.MOCallRequestTimeout != nil {
 		cfg.IMS.Voice.MOCallRequestTimeout = profile.MOCallRequestTimeout.Duration
 	}
@@ -380,6 +440,9 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	}
 	if cfg.IMS.Voice.RTCPInactivityTimeout == 0 && profile.RTCPInactivityTimeout != nil {
 		cfg.IMS.Voice.RTCPInactivityTimeout = profile.RTCPInactivityTimeout.Duration
+	}
+	if cfg.IMS.Voice.AudioInactivityCallEndReasons == nil && profile.AudioInactivityCallEndReasons != nil {
+		cfg.IMS.Voice.AudioInactivityCallEndReasons = append([]imsvoice.AudioInactivityCallEndReason(nil), profile.AudioInactivityCallEndReasons...)
 	}
 	if cfg.IMS.Voice.RTCPSendInterval == 0 && profile.RTCPSendInterval != nil {
 		cfg.IMS.Voice.RTCPSendInterval = profile.RTCPSendInterval.Duration
@@ -514,4 +577,93 @@ func wfcDurations(values []wfcDuration) []time.Duration {
 		durations = append(durations, value.Duration)
 	}
 	return durations
+}
+
+func wfcIKEReTransmitDelays(profile wfcProfile) []time.Duration {
+	if len(profile.IKERetransmitDelays) != 0 {
+		return wfcDurations(profile.IKERetransmitDelays)
+	}
+	if len(profile.AndroidIKERetransmitMS) == 0 {
+		return nil
+	}
+	delays := make([]time.Duration, 0, len(profile.AndroidIKERetransmitMS))
+	for _, ms := range profile.AndroidIKERetransmitMS {
+		delays = append(delays, time.Duration(ms)*time.Millisecond)
+	}
+	return delays
+}
+
+func saLifetimeFromWFCRekeyTimers(soft, hard, legacySoft *wfcDuration, androidSoft, androidHard *int) (time.Duration, time.Duration) {
+	softTime := firstPositiveDuration(
+		wfcDurationValue(soft),
+		wfcDurationValue(legacySoft),
+		wfcSecondsDuration(androidSoft),
+	)
+	if softTime <= 0 {
+		return 0, 0
+	}
+	hardTime := firstPositiveDuration(wfcDurationValue(hard), wfcSecondsDuration(androidHard))
+	if hardTime <= softTime {
+		hardTime = softTime + swuSARekeyMargin(softTime)
+	}
+	return hardTime, hardTime - softTime
+}
+
+func wfcProfileDuration(normalized *wfcDuration, androidSeconds *int) time.Duration {
+	return firstPositiveDuration(wfcDurationValue(normalized), wfcSecondsDuration(androidSeconds))
+}
+
+func wfcProfileMillisDuration(normalized *wfcDuration, androidMillis *int) time.Duration {
+	return firstPositiveDuration(wfcDurationValue(normalized), wfcMillisDuration(androidMillis))
+}
+
+func wfcDurationValue(value *wfcDuration) time.Duration {
+	if value == nil {
+		return 0
+	}
+	return value.Duration
+}
+
+func wfcSecondsDuration(seconds *int) time.Duration {
+	if seconds == nil || *seconds <= 0 {
+		return 0
+	}
+	return time.Duration(*seconds) * time.Second
+}
+
+func wfcMillisDuration(millis *int) time.Duration {
+	if millis == nil || *millis <= 0 {
+		return 0
+	}
+	return time.Duration(*millis) * time.Millisecond
+}
+
+func firstPositiveDuration(values ...time.Duration) time.Duration {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func wfcAddKEToChildSARekey(profile wfcProfile) (bool, bool) {
+	if profile.AddKEToChildSARekey != nil {
+		return *profile.AddKEToChildSARekey, true
+	}
+	if profile.AndroidAddKEToChildRekey != nil {
+		return *profile.AndroidAddKEToChildRekey, true
+	}
+	return false, false
+}
+
+func swuSARekeyMargin(rekeyTime time.Duration) time.Duration {
+	margin := rekeyTime / 10
+	if margin > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	if margin <= 0 {
+		return rekeyTime / 2
+	}
+	return margin
 }

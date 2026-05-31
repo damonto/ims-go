@@ -6,26 +6,31 @@ import (
 	"time"
 
 	imssession "github.com/damonto/vowifi-go/ims/session"
+	imssms "github.com/damonto/vowifi-go/ims/sms"
 )
 
 func TestConfigNormalized(t *testing.T) {
 	logger := slog.Default()
 	tests := []struct {
-		name            string
-		cfg             Config
-		wantErr         bool
-		wantTerminalID  string
-		wantEPDG        string
-		wantTransport   string
-		wantIMSIMEI     string
-		wantPhoneCtx    string
-		wantAccessInfo  string
-		wantReconnect   time.Duration
-		wantRegisterExp time.Duration
-		wantSIPPort     int
-		wantSIPT1       time.Duration
-		wantSIPTF       time.Duration
-		wantSMSTR1      time.Duration
+		name             string
+		cfg              Config
+		wantErr          bool
+		wantTerminalID   string
+		wantEPDG         string
+		wantTransport    string
+		wantIMSIMEI      string
+		wantPhoneCtx     string
+		wantAccessInfo   string
+		wantReconnect    time.Duration
+		wantReconnectMax time.Duration
+		wantRegisterExp  time.Duration
+		wantIMSRetryBase time.Duration
+		wantIMSRetryMax  time.Duration
+		wantSIPPort      int
+		wantSIPT1        time.Duration
+		wantSIPTF        time.Duration
+		wantSMSTR1       time.Duration
+		wantSMSTR2       time.Duration
 	}{
 		{
 			name: "defaults build epdg from card",
@@ -34,17 +39,21 @@ func TestConfigNormalized(t *testing.T) {
 				Terminal: TerminalInfo{ID: " 12345 "},
 				IMS:      IMSConfig{},
 			},
-			wantTerminalID:  "12345",
-			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantTransport:   "tcp",
-			wantIMSIMEI:     "12345",
-			wantAccessInfo:  "IEEE-802.11",
-			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 600000 * time.Second,
-			wantSIPPort:     5060,
-			wantSIPT1:       2 * time.Second,
-			wantSIPTF:       128 * time.Second,
-			wantSMSTR1:      130 * time.Second,
+			wantTerminalID:   "12345",
+			wantEPDG:         "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:    "tcp",
+			wantIMSIMEI:      "12345",
+			wantAccessInfo:   "IEEE-802.11",
+			wantReconnect:    defaultReconnectDelay,
+			wantReconnectMax: defaultReconnectMaxDelay,
+			wantRegisterExp:  600000 * time.Second,
+			wantIMSRetryBase: defaultIMSRegistrationRetryBase,
+			wantIMSRetryMax:  defaultIMSRegistrationRetryMax,
+			wantSIPPort:      5060,
+			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
+			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
+			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
+			wantSMSTR2:       15 * time.Second,
 		},
 		{
 			name: "explicit epdg wins over automatic default",
@@ -52,17 +61,21 @@ func TestConfigNormalized(t *testing.T) {
 				Terminal: TerminalInfo{ID: "root-imei"},
 				EPDG:     " epdg.example.com ",
 			},
-			wantTerminalID:  "root-imei",
-			wantEPDG:        "epdg.example.com",
-			wantTransport:   "tcp",
-			wantIMSIMEI:     "root-imei",
-			wantAccessInfo:  "IEEE-802.11",
-			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 600000 * time.Second,
-			wantSIPPort:     5060,
-			wantSIPT1:       2 * time.Second,
-			wantSIPTF:       128 * time.Second,
-			wantSMSTR1:      130 * time.Second,
+			wantTerminalID:   "root-imei",
+			wantEPDG:         "epdg.example.com",
+			wantTransport:    "tcp",
+			wantIMSIMEI:      "root-imei",
+			wantAccessInfo:   "IEEE-802.11",
+			wantReconnect:    defaultReconnectDelay,
+			wantReconnectMax: defaultReconnectMaxDelay,
+			wantRegisterExp:  600000 * time.Second,
+			wantIMSRetryBase: defaultIMSRegistrationRetryBase,
+			wantIMSRetryMax:  defaultIMSRegistrationRetryMax,
+			wantSIPPort:      5060,
+			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
+			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
+			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
+			wantSMSTR2:       15 * time.Second,
 		},
 		{
 			name: "cfg nil clone still normalizes as zero config",
@@ -71,17 +84,21 @@ func TestConfigNormalized(t *testing.T) {
 				cfg.Terminal.ID = testIMEI
 				return cfg
 			}(),
-			wantTerminalID:  testIMEI,
-			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantTransport:   "tcp",
-			wantIMSIMEI:     testIMEI,
-			wantAccessInfo:  "IEEE-802.11",
-			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 600000 * time.Second,
-			wantSIPPort:     5060,
-			wantSIPT1:       2 * time.Second,
-			wantSIPTF:       128 * time.Second,
-			wantSMSTR1:      130 * time.Second,
+			wantTerminalID:   testIMEI,
+			wantEPDG:         "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:    "tcp",
+			wantIMSIMEI:      testIMEI,
+			wantAccessInfo:   "IEEE-802.11",
+			wantReconnect:    defaultReconnectDelay,
+			wantReconnectMax: defaultReconnectMaxDelay,
+			wantRegisterExp:  600000 * time.Second,
+			wantIMSRetryBase: defaultIMSRegistrationRetryBase,
+			wantIMSRetryMax:  defaultIMSRegistrationRetryMax,
+			wantSIPPort:      5060,
+			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
+			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
+			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
+			wantSMSTR2:       15 * time.Second,
 		},
 		{
 			name: "explicit ims transport is preserved",
@@ -91,42 +108,53 @@ func TestConfigNormalized(t *testing.T) {
 					Transport: "udp",
 				},
 			},
-			wantTerminalID:  testIMEI,
-			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantTransport:   "udp",
-			wantIMSIMEI:     testIMEI,
-			wantAccessInfo:  "IEEE-802.11",
-			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 600000 * time.Second,
-			wantSIPPort:     5060,
-			wantSIPT1:       2 * time.Second,
-			wantSIPTF:       128 * time.Second,
-			wantSMSTR1:      130 * time.Second,
+			wantTerminalID:   testIMEI,
+			wantEPDG:         "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:    "udp",
+			wantIMSIMEI:      testIMEI,
+			wantAccessInfo:   "IEEE-802.11",
+			wantReconnect:    defaultReconnectDelay,
+			wantReconnectMax: defaultReconnectMaxDelay,
+			wantRegisterExp:  600000 * time.Second,
+			wantIMSRetryBase: defaultIMSRegistrationRetryBase,
+			wantIMSRetryMax:  defaultIMSRegistrationRetryMax,
+			wantSIPPort:      5060,
+			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
+			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
+			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
+			wantSMSTR2:       15 * time.Second,
 		},
 		{
 			name: "explicit ims profile values are preserved",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
-					AccessNetworkInfo:      "IEEE-802.11ac;i-wlan-node-id=aabbcc",
-					PhoneContextDomain:     "ims.example",
-					SIPServerPort:          5070,
-					SIPTimers:              imssession.TransactionTimers{T1: time.Second, TF: 45 * time.Second},
-					SMSSubmitReportTimeout: 45 * time.Second,
+					AccessNetworkInfo:        "IEEE-802.11ac;i-wlan-node-id=aabbcc",
+					PhoneContextDomain:       "ims.example",
+					SIPServerPort:            5070,
+					RegistrationRetryBase:    10 * time.Second,
+					RegistrationRetryMax:     20 * time.Second,
+					SIPTimers:                imssession.TransactionTimers{T1: time.Second, TF: 45 * time.Second},
+					SMSSubmitReportTimeout:   45 * time.Second,
+					SMSDeliveryReportTimeout: 17 * time.Second,
 				},
 			},
-			wantTerminalID:  testIMEI,
-			wantEPDG:        "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
-			wantTransport:   "tcp",
-			wantIMSIMEI:     testIMEI,
-			wantPhoneCtx:    "ims.example",
-			wantAccessInfo:  "IEEE-802.11ac;i-wlan-node-id=aabbcc",
-			wantReconnect:   defaultReconnectDelay,
-			wantRegisterExp: 600000 * time.Second,
-			wantSIPPort:     5070,
-			wantSIPT1:       time.Second,
-			wantSIPTF:       45 * time.Second,
-			wantSMSTR1:      45 * time.Second,
+			wantTerminalID:   testIMEI,
+			wantEPDG:         "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
+			wantTransport:    "tcp",
+			wantIMSIMEI:      testIMEI,
+			wantPhoneCtx:     "ims.example",
+			wantAccessInfo:   "IEEE-802.11ac;i-wlan-node-id=aabbcc",
+			wantReconnect:    defaultReconnectDelay,
+			wantReconnectMax: defaultReconnectMaxDelay,
+			wantRegisterExp:  600000 * time.Second,
+			wantIMSRetryBase: 10 * time.Second,
+			wantIMSRetryMax:  20 * time.Second,
+			wantSIPPort:      5070,
+			wantSIPT1:        time.Second,
+			wantSIPTF:        45 * time.Second,
+			wantSMSTR1:       45 * time.Second,
+			wantSMSTR2:       17 * time.Second,
 		},
 		{
 			name: "missing terminal id fails",
@@ -144,6 +172,23 @@ func TestConfigNormalized(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "negative reconnect max delay fails",
+			cfg: Config{
+				Terminal:          TerminalInfo{ID: testIMEI},
+				ReconnectMaxDelay: -time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "reconnect max delay before initial delay fails",
+			cfg: Config{
+				Terminal:          TerminalInfo{ID: testIMEI},
+				ReconnectDelay:    10 * time.Second,
+				ReconnectMaxDelay: 5 * time.Second,
+			},
+			wantErr: true,
+		},
+		{
 			name: "negative sip timer fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
@@ -154,11 +199,52 @@ func TestConfigNormalized(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "negative ims registration retry base fails",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				IMS: IMSConfig{
+					RegistrationRetryBase: -time.Second,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative ims registration retry max fails",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				IMS: IMSConfig{
+					RegistrationRetryMax: -time.Second,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "ims registration retry max before base fails",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				IMS: IMSConfig{
+					RegistrationRetryBase: 10 * time.Second,
+					RegistrationRetryMax:  5 * time.Second,
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name: "negative sms submit report timeout fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				IMS: IMSConfig{
 					SMSSubmitReportTimeout: -time.Second,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative sms delivery report timeout fails",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				IMS: IMSConfig{
+					SMSDeliveryReportTimeout: -time.Second,
 				},
 			},
 			wantErr: true,
@@ -211,8 +297,17 @@ func TestConfigNormalized(t *testing.T) {
 			if got.ReconnectDelay != tt.wantReconnect {
 				t.Fatalf("ReconnectDelay = %v, want %v", got.ReconnectDelay, tt.wantReconnect)
 			}
+			if got.ReconnectMaxDelay != tt.wantReconnectMax {
+				t.Fatalf("ReconnectMaxDelay = %v, want %v", got.ReconnectMaxDelay, tt.wantReconnectMax)
+			}
 			if got.IMS.RegisterExpires != tt.wantRegisterExp {
 				t.Fatalf("IMS.RegisterExpires = %v, want %v", got.IMS.RegisterExpires, tt.wantRegisterExp)
+			}
+			if got.IMS.RegistrationRetryBase != tt.wantIMSRetryBase {
+				t.Fatalf("IMS.RegistrationRetryBase = %v, want %v", got.IMS.RegistrationRetryBase, tt.wantIMSRetryBase)
+			}
+			if got.IMS.RegistrationRetryMax != tt.wantIMSRetryMax {
+				t.Fatalf("IMS.RegistrationRetryMax = %v, want %v", got.IMS.RegistrationRetryMax, tt.wantIMSRetryMax)
 			}
 			if got.Tunnel.SIPPort != tt.wantSIPPort {
 				t.Fatalf("Tunnel.SIPPort = %d, want %d", got.Tunnel.SIPPort, tt.wantSIPPort)
@@ -228,6 +323,9 @@ func TestConfigNormalized(t *testing.T) {
 			}
 			if got.IMS.SMSSubmitReportTimeout != tt.wantSMSTR1 {
 				t.Fatalf("IMS.SMSSubmitReportTimeout = %v, want %v", got.IMS.SMSSubmitReportTimeout, tt.wantSMSTR1)
+			}
+			if got.IMS.SMSDeliveryReportTimeout != tt.wantSMSTR2 {
+				t.Fatalf("IMS.SMSDeliveryReportTimeout = %v, want %v", got.IMS.SMSDeliveryReportTimeout, tt.wantSMSTR2)
 			}
 		})
 	}

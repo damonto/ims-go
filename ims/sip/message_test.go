@@ -45,6 +45,36 @@ func TestParseMessage(t *testing.T) {
 	}
 }
 
+func TestParseMessageIgnoresLeadingCRLF(t *testing.T) {
+	data := []byte("\r\n\r\nMESSAGE sip:+123@example.com SIP/2.0\r\nContent-Length: 5\r\n\r\nhello")
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if msg.StartLine != "MESSAGE sip:+123@example.com SIP/2.0" {
+		t.Fatalf("StartLine = %q, want MESSAGE", msg.StartLine)
+	}
+	if string(msg.Body) != "hello" {
+		t.Fatalf("Body = %q, want hello", string(msg.Body))
+	}
+}
+
+func TestReadFromIgnoresLeadingCRLF(t *testing.T) {
+	var msg Message
+
+	n, err := msg.ReadFrom(strings.NewReader("\r\nSIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\nnext"))
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	if msg.StartLine != "SIP/2.0 200 OK" {
+		t.Fatalf("StartLine = %q, want response", msg.StartLine)
+	}
+	if n != int64(len("\r\nSIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n")) {
+		t.Fatalf("ReadFrom() n = %d, want counted SIP message only", n)
+	}
+}
+
 func TestResponseError(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -110,6 +140,65 @@ func TestResponseError(t *testing.T) {
 	}
 }
 
+func TestWarningValueText(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    WarningValue
+		wantOut string
+		wantErr bool
+	}{
+		{
+			name:    "valid",
+			value:   `399 anonymous.invalid "Credit limit reached"`,
+			want:    WarningValue{Code: 399, Agent: "anonymous.invalid", Text: "Credit limit reached"},
+			wantOut: `399 anonymous.invalid "Credit limit reached"`,
+		},
+		{
+			name:    "escaped text",
+			value:   `301 ims.example "Codec \"AMR\" rejected"`,
+			want:    WarningValue{Code: 301, Agent: "ims.example", Text: `Codec "AMR" rejected`},
+			wantOut: `301 ims.example "Codec \"AMR\" rejected"`,
+		},
+		{
+			name:    "short code",
+			value:   `99 ims.example "bad"`,
+			wantErr: true,
+		},
+		{
+			name:    "unquoted text",
+			value:   `399 ims.example bad`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got WarningValue
+			err := got.UnmarshalText([]byte(tt.value))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalText() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("UnmarshalText() = %#v, want %#v", got, tt.want)
+			}
+			out, err := got.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if string(out) != tt.wantOut {
+				t.Fatalf("MarshalText() = %q, want %q", out, tt.wantOut)
+			}
+		})
+	}
+}
+
 func TestParseMessageFoldedHeader(t *testing.T) {
 	data := []byte("SIP/2.0 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"ims.example\",\r\n nonce=\"abc\",\r\n algorithm=AKAv1-MD5\r\nContent-Length: 0\r\n\r\n")
 
@@ -162,6 +251,82 @@ func TestParseMessageCompactHeaders(t *testing.T) {
 	}
 	if string(msg.Body) != "hello" {
 		t.Fatalf("Body = %q, want hello", string(msg.Body))
+	}
+}
+
+func TestParseMessageUsesContentLengthForBody(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     string
+		wantBody string
+		wantErr  bool
+	}{
+		{
+			name:     "truncates trailing bytes after counted body",
+			data:     "MESSAGE sip:+123@example.com SIP/2.0\r\nContent-Length: 5\r\n\r\nhelloSIP/2.0 200 OK\r\n\r\n",
+			wantBody: "hello",
+		},
+		{
+			name:     "compact content length",
+			data:     "MESSAGE sip:+123@example.com SIP/2.0\r\nl: 5\r\n\r\nhelloextra",
+			wantBody: "hello",
+		},
+		{
+			name:    "body shorter than content length",
+			data:    "MESSAGE sip:+123@example.com SIP/2.0\r\nContent-Length: 6\r\n\r\nhello",
+			wantErr: true,
+		},
+		{
+			name:    "invalid content length",
+			data:    "MESSAGE sip:+123@example.com SIP/2.0\r\nContent-Length: bad\r\n\r\nhello",
+			wantErr: true,
+		},
+		{
+			name:    "empty content length",
+			data:    "MESSAGE sip:+123@example.com SIP/2.0\r\nContent-Length: \r\n\r\nhello",
+			wantErr: true,
+		},
+		{
+			name:    "duplicate content length",
+			data:    "MESSAGE sip:+123@example.com SIP/2.0\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, err := ParseMessage([]byte(tt.data))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseMessage() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseMessage() error = %v", err)
+			}
+			if got := string(msg.Body); got != tt.wantBody {
+				t.Fatalf("Body = %q, want %q", got, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestMessageBytesRecognizesCompactContentLength(t *testing.T) {
+	msg := Message{
+		StartLine: "MESSAGE sip:+123@example.com SIP/2.0",
+		Headers: Headers{
+			{Name: "l", Value: "5"},
+		},
+		Body: []byte("hello"),
+	}
+
+	got := string(msg.Bytes())
+	if strings.Count(got, "Content-Length:") != 0 {
+		t.Fatalf("Bytes() emitted long Content-Length despite compact l: %q", got)
+	}
+	if strings.Count(got, "\r\nl: 5\r\n") != 1 {
+		t.Fatalf("Bytes() = %q, want one compact l header", got)
 	}
 }
 

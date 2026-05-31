@@ -88,9 +88,14 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "childIntegrity": [2],
     "pcscfIPv4ConfigAttribute": 16384,
     "pcscfIPv6ConfigAttribute": 16386,
-    "natKeepaliveInterval": "60s",
-    "ikeRetransmitDelays": ["1s", "2s", "4s"],
-    "imsTransport": "tcp",
+	    "natKeepaliveInterval": "60s",
+	    "ikeRetransmitDelays": ["1s", "2s", "4s"],
+	    "ikeSARekeySoftTime": "3600s",
+	    "ikeSARekeyHardTime": "3900s",
+	    "childSARekeySoftTime": "1800s",
+	    "childSARekeyHardTime": "1980s",
+	    "addKEToChildSARekey": true,
+	    "imsTransport": "tcp",
     "imsHomeDomain": "ims.mnc024.mcc530.3gppnetwork.org",
     "imsPrivateIdentity": "#IMSI#@private.example",
     "imsPublicIdentity": "sip:#IMSI#@#HOME_DOMAIN#",
@@ -99,6 +104,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "imsUserAgent": "PRD-IR92/15 #MANUFACTURE#/#MODEL#-#BUILD# device-type/#TYPE# mno-custom/#MCCMNC# imeisv/#IMEISV# op/#OPERATOR# sku/#HWSKU#",
     "wfcSPN": "2degrees",
     "imsRegisterExpires": "7200s",
+    "ims.registration_retry_base_timer_millis_int": 120000,
+    "ims.registration_retry_max_timer_millis_int": 300000,
     "imsGeolocationPIDFInSIPInviteSupport": [4, 2],
     "imsGeolocationPIDFInSIPRegisterSupport": [4, 2],
     "imsUseTelURIForPIDFXML": true,
@@ -121,12 +128,14 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
       "sessionTimer": true,
       "sessionExpires": "3600s",
       "minimumSessionExpires": "600s",
+      "sessionRefresher": "uas",
       "moCallRequestTimeout": "30s",
       "ringbackTimer": "180s",
       "ringingTimer": "45s",
       "audioASBandwidthKbps": 49,
       "rtpInactivityTimeout": "20s",
       "rtcpInactivityTimeout": "21s",
+      "audioInactivityCallEndReasons": [0, 1, 2],
       "rtcpSendInterval": "5s",
       "localRTPPortMin": 41000,
       "localRTPPortMax": 41020,
@@ -188,6 +197,15 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if len(got.Tunnel.IKERetransmitDelays) != 3 || got.Tunnel.IKERetransmitDelays[2] != 4*time.Second {
 					t.Fatalf("Tunnel.IKERetransmitDelays = %v, want [1s 2s 4s]", got.Tunnel.IKERetransmitDelays)
 				}
+				if got.Tunnel.IKESALifetime != 3900*time.Second || got.Tunnel.IKESARekeyMargin != 300*time.Second {
+					t.Fatalf("Tunnel IKE SA lifetime = %v/%v, want 3900s/300s", got.Tunnel.IKESALifetime, got.Tunnel.IKESARekeyMargin)
+				}
+				if got.Tunnel.ChildSALifetime != 1980*time.Second || got.Tunnel.ChildSARekeyMargin != 180*time.Second {
+					t.Fatalf("Tunnel Child SA lifetime = %v/%v, want 1980s/180s", got.Tunnel.ChildSALifetime, got.Tunnel.ChildSARekeyMargin)
+				}
+				if !got.Tunnel.AddKEToChildSARekey {
+					t.Fatal("Tunnel AddKEToChildSARekey = false, want profile value")
+				}
 				if got.IMS.Transport != "tcp" || got.IMS.HomeDomain != "ims.mnc024.mcc530.3gppnetwork.org" {
 					t.Fatalf("IMS transport/domain = %q/%q, want profile values", got.IMS.Transport, got.IMS.HomeDomain)
 				}
@@ -200,6 +218,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				}
 				if got.IMS.RegisterExpires != 7200*time.Second || got.IMS.SIPServerPort != 5080 {
 					t.Fatalf("IMS expires/port = %v/%d, want profile values", got.IMS.RegisterExpires, got.IMS.SIPServerPort)
+				}
+				if got.IMS.RegistrationRetryBase != 120*time.Second || got.IMS.RegistrationRetryMax != 300*time.Second {
+					t.Fatalf("IMS registration retry timers = %v/%v, want 120s/300s", got.IMS.RegistrationRetryBase, got.IMS.RegistrationRetryMax)
 				}
 				if got.IMS.SIPTimers.T1 != 3*time.Second || got.IMS.SIPTimers.TJ != 13*time.Second {
 					t.Fatalf("IMS SIP timers T1/TJ = %v/%v, want profile values", got.IMS.SIPTimers.T1, got.IMS.SIPTimers.TJ)
@@ -228,6 +249,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.SessionExpires != 3600*time.Second || got.IMS.Voice.MinSessionExpires != 600*time.Second {
 					t.Fatalf("IMS voice session timers = %v/%v, want profile values", got.IMS.Voice.SessionExpires, got.IMS.Voice.MinSessionExpires)
 				}
+				if got.IMS.Voice.SessionRefresher != "uas" {
+					t.Fatalf("IMS voice session refresher = %q, want uas", got.IMS.Voice.SessionRefresher)
+				}
 				if got.IMS.Voice.MOCallRequestTimeout != 30*time.Second || got.IMS.Voice.RingbackTimeout != 180*time.Second || got.IMS.Voice.RingingTimeout != 45*time.Second {
 					t.Fatalf("IMS voice timers = %v/%v/%v, want profile values", got.IMS.Voice.MOCallRequestTimeout, got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
 				}
@@ -236,6 +260,14 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				}
 				if got.IMS.Voice.RTPInactivityTimeout != 20*time.Second || got.IMS.Voice.RTCPInactivityTimeout != 21*time.Second || got.IMS.Voice.RTCPSendInterval != 5*time.Second {
 					t.Fatalf("IMS voice media timers = %v/%v/%v, want profile values", got.IMS.Voice.RTPInactivityTimeout, got.IMS.Voice.RTCPInactivityTimeout, got.IMS.Voice.RTCPSendInterval)
+				}
+				wantReasons := []imsvoice.AudioInactivityCallEndReason{
+					imsvoice.AudioInactivityRTCPOnHold,
+					imsvoice.AudioInactivityRTCPOnConnected,
+					imsvoice.AudioInactivityRTPOnConnected,
+				}
+				if !slices.Equal(got.IMS.Voice.AudioInactivityCallEndReasons, wantReasons) {
+					t.Fatalf("IMS voice audio inactivity call end reasons = %v, want %v", got.IMS.Voice.AudioInactivityCallEndReasons, wantReasons)
 				}
 				if got.IMS.Voice.LocalRTPPortMin != 41000 || got.IMS.Voice.LocalRTPPortMax != 41020 {
 					t.Fatalf("IMS voice ports = %d/%d, want profile values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
@@ -256,16 +288,21 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				EPDG:     "epdg.example.com",
 				Tunnel:   tunnelConfigForWFCOverride(),
 				IMS: IMSConfig{
-					Transport:       "udp",
-					HomeDomain:      "ims.example.com",
-					PrivateIdentity: "private@example.com",
-					PublicIdentity:  "sip:public@example.com",
-					UserAgent:       "explicit-agent",
-					RegisterExpires: 30 * time.Second,
-					SIPServerPort:   5090,
+					Transport:             "udp",
+					HomeDomain:            "ims.example.com",
+					PrivateIdentity:       "private@example.com",
+					PublicIdentity:        "sip:public@example.com",
+					UserAgent:             "explicit-agent",
+					RegisterExpires:       30 * time.Second,
+					RegistrationRetryBase: 11 * time.Second,
+					RegistrationRetryMax:  22 * time.Second,
+					SIPServerPort:         5090,
 					Voice: imsvoice.Config{
 						LocalRTPPortMin: 42000,
 						LocalRTPPortMax: 42010,
+						AudioInactivityCallEndReasons: []imsvoice.AudioInactivityCallEndReason{
+							imsvoice.AudioInactivityRTPOnConnected,
+						},
 						Codecs: []imsvoice.AudioCodecConfig{
 							{Name: imsvoice.CodecEVS, PayloadTypes: []int{110}, ClockRate: 16000},
 						},
@@ -292,8 +329,15 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.UserAgent != "explicit-agent" || got.IMS.RegisterExpires != 30*time.Second || got.IMS.SIPServerPort != 5090 {
 					t.Fatalf("IMS user agent/expires/port = %q/%v/%d, want explicit values", got.IMS.UserAgent, got.IMS.RegisterExpires, got.IMS.SIPServerPort)
 				}
+				if got.IMS.RegistrationRetryBase != 11*time.Second || got.IMS.RegistrationRetryMax != 22*time.Second {
+					t.Fatalf("IMS registration retry timers = %v/%v, want explicit values", got.IMS.RegistrationRetryBase, got.IMS.RegistrationRetryMax)
+				}
 				if got.IMS.Voice.LocalRTPPortMin != 42000 || got.IMS.Voice.LocalRTPPortMax != 42010 {
 					t.Fatalf("IMS voice ports = %d/%d, want explicit values", got.IMS.Voice.LocalRTPPortMin, got.IMS.Voice.LocalRTPPortMax)
+				}
+				wantReasons := []imsvoice.AudioInactivityCallEndReason{imsvoice.AudioInactivityRTPOnConnected}
+				if !slices.Equal(got.IMS.Voice.AudioInactivityCallEndReasons, wantReasons) {
+					t.Fatalf("IMS voice audio inactivity call end reasons = %v, want explicit value %v", got.IMS.Voice.AudioInactivityCallEndReasons, wantReasons)
 				}
 				if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imsvoice.CodecEVS {
 					t.Fatalf("IMS voice codecs = %+v, want explicit codecs", got.IMS.Voice.Codecs)
@@ -317,6 +361,271 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 			got.Tunnel = tunnelCfg
 			tt.check(t, got)
 		})
+	}
+}
+
+func TestConfigNormalizedWFCProfileMapsAndroidRetransmitTimers(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz",
+    "iwlan.retransmit_timer_sec_int_array": [1000, 2000, 4000, 8000]
+  }
+]`)
+	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	if err != nil {
+		t.Fatalf("parseWFCProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("parseWFCProfile() ok = false, want true")
+	}
+
+	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+	tunnelCfg, err := got.normalizedTunnel()
+	if err != nil {
+		t.Fatalf("normalizedTunnel() error = %v", err)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+	if !slices.Equal(tunnelCfg.IKERetransmitDelays, want) {
+		t.Fatalf("IKERetransmitDelays = %v, want %v", tunnelCfg.IKERetransmitDelays, want)
+	}
+}
+
+func TestConfigNormalizedWFCProfilePrefersNormalizedRetransmitTimers(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz",
+    "ikeRetransmitDelays": ["1s", "2s"],
+    "iwlan.retransmit_timer_sec_int_array": [1000, 2000, 4000, 8000]
+  }
+]`)
+	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	if err != nil {
+		t.Fatalf("parseWFCProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("parseWFCProfile() ok = false, want true")
+	}
+
+	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+	tunnelCfg, err := got.normalizedTunnel()
+	if err != nil {
+		t.Fatalf("normalizedTunnel() error = %v", err)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second}
+	if !slices.Equal(tunnelCfg.IKERetransmitDelays, want) {
+		t.Fatalf("IKERetransmitDelays = %v, want %v", tunnelCfg.IKERetransmitDelays, want)
+	}
+}
+
+func TestConfigNormalizedWFCProfileMapsIMSRegistrationRetryTimers(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantBase time.Duration
+		wantMax  time.Duration
+	}{
+		{
+			name: "android carrier config millis",
+			body: `
+    "ims.registration_retry_base_timer_millis_int": 120000,
+    "ims.registration_retry_max_timer_millis_int": 300000`,
+			wantBase: 120 * time.Second,
+			wantMax:  300 * time.Second,
+		},
+		{
+			name: "normalized duration fields win",
+			body: `
+    "imsRegistrationRetryBase": "45s",
+    "imsRegistrationRetryMax": "90s",
+    "ims.registration_retry_base_timer_millis_int": 120000,
+    "ims.registration_retry_max_timer_millis_int": 300000`,
+			wantBase: 45 * time.Second,
+			wantMax:  90 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz",` + tt.body + `
+  }
+]`)
+			profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+			if err != nil {
+				t.Fatalf("parseWFCProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseWFCProfile() ok = false, want true")
+			}
+
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+			imsCfg, err := got.normalizedIMS()
+			if err != nil {
+				t.Fatalf("normalizedIMS() error = %v", err)
+			}
+			if imsCfg.RegistrationRetryBase != tt.wantBase || imsCfg.RegistrationRetryMax != tt.wantMax {
+				t.Fatalf("registration retry timers = %v/%v, want %v/%v", imsCfg.RegistrationRetryBase, imsCfg.RegistrationRetryMax, tt.wantBase, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestConfigNormalizedWFCProfileMapsSMSDeliveryReports(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantFlag bool
+	}{
+		{
+			name:     "carrier enables status reports",
+			body:     `"enableSMSDeliveryReports": true`,
+			wantFlag: true,
+		},
+		{
+			name: "carrier disables status reports",
+			body: `"enableSMSDeliveryReports": false`,
+		},
+		{
+			name:     "missing carrier setting defaults status reports on",
+			wantFlag: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := tt.body
+			if body != "" {
+				body = "," + body
+			}
+			data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz"` + body + `
+  }
+]`)
+			profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+			if err != nil {
+				t.Fatalf("parseWFCProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseWFCProfile() ok = false, want true")
+			}
+
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+			_, err = got.normalizedIMS()
+			if err != nil {
+				t.Fatalf("normalizedIMS() error = %v", err)
+			}
+			if got.smsRequestStatusReport != tt.wantFlag {
+				t.Fatalf("smsRequestStatusReport = %t, want %t", got.smsRequestStatusReport, tt.wantFlag)
+			}
+		})
+	}
+}
+
+func TestConfigNormalizedWFCProfileMapsAndroidTunnelTimers(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz",
+    "iwlan.dpd_timer_sec_int": 900,
+    "iwlan.natt_keep_alive_timer_sec_int": 30,
+    "iwlan.ike_rekey_soft_timer_sec_int": 86400,
+    "iwlan.ike_rekey_hard_timer_in_sec": 86500,
+    "iwlan.child_sa_rekey_soft_timer_sec_int": 3000,
+    "iwlan.child_sa_rekey_hard_timer_sec_int": 3600,
+    "iwlan.add_ke_to_child_session_rekey_bool": true
+  }
+]`)
+	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	if err != nil {
+		t.Fatalf("parseWFCProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("parseWFCProfile() ok = false, want true")
+	}
+
+	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+	tunnelCfg, err := got.normalizedTunnel()
+	if err != nil {
+		t.Fatalf("normalizedTunnel() error = %v", err)
+	}
+	if tunnelCfg.LivenessTimeout != 900*time.Second {
+		t.Fatalf("LivenessTimeout = %v, want 900s", tunnelCfg.LivenessTimeout)
+	}
+	if tunnelCfg.NATKeepaliveInterval != 30*time.Second {
+		t.Fatalf("NATKeepaliveInterval = %v, want 30s", tunnelCfg.NATKeepaliveInterval)
+	}
+	if tunnelCfg.IKESALifetime != 86500*time.Second || tunnelCfg.IKESARekeyMargin != 100*time.Second {
+		t.Fatalf("IKE SA lifetime = %v/%v, want 86500s/100s", tunnelCfg.IKESALifetime, tunnelCfg.IKESARekeyMargin)
+	}
+	if tunnelCfg.ChildSALifetime != 3600*time.Second || tunnelCfg.ChildSARekeyMargin != 600*time.Second {
+		t.Fatalf("Child SA lifetime = %v/%v, want 3600s/600s", tunnelCfg.ChildSALifetime, tunnelCfg.ChildSARekeyMargin)
+	}
+	if !tunnelCfg.AddKEToChildSARekey {
+		t.Fatal("AddKEToChildSARekey = false, want true")
+	}
+}
+
+func TestConfigNormalizedWFCProfilePrefersNormalizedTunnelTimers(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz",
+    "natKeepaliveInterval": "60s",
+    "iwlan.natt_keep_alive_timer_sec_int": 30,
+    "ikeSARekeySoftTime": "3600s",
+    "ikeSARekeyHardTime": "3900s",
+    "iwlan.ike_rekey_soft_timer_sec_int": 86400,
+    "iwlan.ike_rekey_hard_timer_in_sec": 86500,
+    "childSARekeySoftTime": "1800s",
+    "childSARekeyHardTime": "1980s",
+    "iwlan.child_sa_rekey_soft_timer_sec_int": 3000,
+    "iwlan.child_sa_rekey_hard_timer_sec_int": 3600,
+    "addKEToChildSARekey": false,
+    "iwlan.add_ke_to_child_session_rekey_bool": true
+  }
+]`)
+	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	if err != nil {
+		t.Fatalf("parseWFCProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("parseWFCProfile() ok = false, want true")
+	}
+
+	got := Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Tunnel: swutunnel.Config{
+			LivenessTimeout: 75 * time.Second,
+		},
+	}.withWFCProfile(profile, wfcTestCard{})
+	tunnelCfg, err := got.normalizedTunnel()
+	if err != nil {
+		t.Fatalf("normalizedTunnel() error = %v", err)
+	}
+	if tunnelCfg.LivenessTimeout != 75*time.Second {
+		t.Fatalf("LivenessTimeout = %v, want explicit 75s", tunnelCfg.LivenessTimeout)
+	}
+	if tunnelCfg.NATKeepaliveInterval != 60*time.Second {
+		t.Fatalf("NATKeepaliveInterval = %v, want normalized profile 60s", tunnelCfg.NATKeepaliveInterval)
+	}
+	if tunnelCfg.IKESALifetime != 3900*time.Second || tunnelCfg.IKESARekeyMargin != 300*time.Second {
+		t.Fatalf("IKE SA lifetime = %v/%v, want normalized profile 3900s/300s", tunnelCfg.IKESALifetime, tunnelCfg.IKESARekeyMargin)
+	}
+	if tunnelCfg.ChildSALifetime != 1980*time.Second || tunnelCfg.ChildSARekeyMargin != 180*time.Second {
+		t.Fatalf("Child SA lifetime = %v/%v, want normalized profile 1980s/180s", tunnelCfg.ChildSALifetime, tunnelCfg.ChildSARekeyMargin)
+	}
+	if tunnelCfg.AddKEToChildSARekey {
+		t.Fatal("AddKEToChildSARekey = true, want normalized profile false")
 	}
 }
 
@@ -560,10 +869,10 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 	}{
 		{
 			name:     "direct payload description",
-			desc:     wfcEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb", ChannelAwareReceive: testIntPtr(2)},
+			desc:     wfcEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb", ChannelAwareReceive: new(2)},
 			wantBR:   "5.9-13.2",
 			wantBW:   "nb-swb",
-			wantChAw: testIntPtr(2),
+			wantChAw: new(2),
 		},
 		{
 			name:   "codec fields override payload description",
@@ -574,7 +883,7 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 		},
 		{
 			name:   "invalid channel aware sentinel",
-			desc:   wfcEVSPayloadDescription{Bitrate: "5.9-24.4", Bandwidth: "nb-swb", ChannelAwareReceive: testIntPtr(255)},
+			desc:   wfcEVSPayloadDescription{Bitrate: "5.9-24.4", Bandwidth: "nb-swb", ChannelAwareReceive: new(255)},
 			wantBR: "5.9-24.4",
 			wantBW: "nb-swb",
 		},
@@ -606,10 +915,6 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 			}
 		})
 	}
-}
-
-func testIntPtr(v int) *int {
-	return &v
 }
 
 func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
@@ -645,6 +950,53 @@ func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
 	evs := got.IMS.Voice.Codecs[2]
 	if evs.Bitrate != "5.9-13.2" || evs.Bandwidth != "nb-swb" || evs.ChAwRecv == nil || *evs.ChAwRecv != 2 {
 		t.Fatalf("EVS codec = %+v, want Pixel payload description", evs)
+	}
+}
+
+func TestEmbeddedWFCConfigUsesAudioInactivityCallEndReasons(t *testing.T) {
+	tests := []struct {
+		name string
+		card plmnWFCCard
+		want []imsvoice.AudioInactivityCallEndReason
+	}{
+		{
+			name: "default test profile",
+			card: plmnWFCCard{mcc: "000", mnc: "000", mncLength: 3},
+			want: []imsvoice.AudioInactivityCallEndReason{
+				imsvoice.AudioInactivityRTCPOnHold,
+				imsvoice.AudioInactivityRTPOnConnected,
+				imsvoice.AudioInactivityE911RTP,
+			},
+		},
+		{
+			name: "gid profile",
+			card: plmnWFCCard{mcc: "001", mnc: "01", mncLength: 2, gid1: "ABCD2025"},
+			want: []imsvoice.AudioInactivityCallEndReason{
+				imsvoice.AudioInactivityRTCPOnHold,
+				imsvoice.AudioInactivityRTCPOnConnected,
+				imsvoice.AudioInactivityRTPOnConnected,
+			},
+		},
+		{
+			name: "new zealand profile uses pixel default carrier value",
+			card: plmnWFCCard{mcc: "530", mnc: "01", mncLength: 2},
+			want: []imsvoice.AudioInactivityCallEndReason{
+				imsvoice.AudioInactivityRTCPOnHold,
+				imsvoice.AudioInactivityRTPOnConnected,
+				imsvoice.AudioInactivityE911RTP,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+			if !slices.Equal(got.IMS.Voice.AudioInactivityCallEndReasons, tt.want) {
+				t.Fatalf("AudioInactivityCallEndReasons = %v, want %v", got.IMS.Voice.AudioInactivityCallEndReasons, tt.want)
+			}
+		})
 	}
 }
 

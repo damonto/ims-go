@@ -5,10 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 )
 
 const (
+	payloadHeaderSize        = 4
+	payloadHeaderCriticalBit = 0x80
+
 	payloadTypeNone      byte = 0
 	payloadTypeProposal  byte = 2
 	payloadTypeTransform byte = 3
@@ -29,23 +33,134 @@ const (
 )
 
 const (
+	deviceIdentityAuto   byte = 0x00
 	deviceIdentityIMEI   byte = 0x01
 	deviceIdentityIMEISV byte = 0x02
+
+	deviceIdentityRequestLen     = 1
+	deviceIdentityLengthFieldLen = 2
+	deviceIdentityTypeLen        = 1
+	deviceIdentityValueLen       = 8
 )
 
 const (
 	trafficSelectorIPv4Range byte = 7
 	trafficSelectorIPv6Range byte = 8
+
+	trafficSelectorHeaderLen = 4
+	trafficSelectorPortsLen  = 4
+	trafficSelectorIPv4Len   = trafficSelectorHeaderLen + trafficSelectorPortsLen + net.IPv4len*2
+	trafficSelectorIPv6Len   = trafficSelectorHeaderLen + trafficSelectorPortsLen + net.IPv6len*2
+)
+
+const (
+	ipProtocolAny  byte = 0
+	ipProtocolICMP byte = 1
+	ipProtocolTCP  byte = 6
+	ipProtocolUDP  byte = 17
+)
+
+const (
+	protocolIDIKE byte = 1
+	protocolIDAH  byte = 2
+	protocolIDESP byte = 3
+
+	deleteProtocolIDIKE = protocolIDIKE
+	deleteProtocolIDAH  = protocolIDAH
+	deleteProtocolIDESP = protocolIDESP
+)
+
+const (
+	proposalSPISizeNone  = 0
+	proposalSPISizeIPsec = 4
+	proposalSPISizeIKE   = 8
+)
+
+const (
+	notifySPISizeNone  = 0
+	notifySPISizeIPsec = 4
+)
+
+const (
+	notifyTypeInvalidSelectors uint16 = 39
+	notifyTypeChildSANotFound  uint16 = 44
+	notifyTypeRekeySA          uint16 = 16393
 )
 
 const (
 	attributeFormatTLV byte = 0
 	attributeFormatTV  byte = 1
+
+	transformAttrKeyLength uint16 = 14
+)
+
+const (
+	configTypeRequest byte = 1
+	configTypeReply   byte = 2
+	configTypeSet     byte = 3
+	configTypeAck     byte = 4
+)
+
+const (
+	configAttrInternalIPv4Address uint16 = 1
+	configAttrInternalIPv4Netmask uint16 = 2
+	configAttrInternalIPv4DNS     uint16 = 3
+	configAttrInternalIPv4NBNS    uint16 = 4
+	configAttrInternalIPv4DHCP    uint16 = 6
+	configAttrApplicationVersion  uint16 = 7
+	configAttrInternalIPv6Address uint16 = 8
+	configAttrInternalIPv6DNS     uint16 = 10
+	configAttrInternalIPv6DHCP    uint16 = 12
+	configAttrInternalIPv4Subnet  uint16 = 13
+	configAttrSupportedAttributes uint16 = 14
+	configAttrInternalIPv6Subnet  uint16 = 15
+	configAttrIPv4PCSCF           uint16 = 20
+	configAttrIPv6PCSCF           uint16 = 21
+	configAttrLivenessTimeout     uint16 = 24
+)
+
+const (
+	dhGroup1024MODP uint16 = 2
+	dhGroup2048MODP uint16 = 14
+)
+
+const (
+	keyExchangeBodyHeaderLen      = 4
+	keyExchange1024MODPDataLength = 128
+	keyExchange2048MODPDataLength = 256
 )
 
 type Payload interface {
 	encoding.BinaryMarshaler
 	Type() byte
+}
+
+var (
+	_ encoding.BinaryMarshaler   = DeviceIdentity{}
+	_ encoding.BinaryUnmarshaler = (*DeviceIdentity)(nil)
+)
+
+type UnsupportedCriticalPayloadError struct {
+	PayloadType byte
+}
+
+func (e UnsupportedCriticalPayloadError) Error() string {
+	return fmt.Sprintf("parsing payload chain: unsupported critical payload type %d", e.PayloadType)
+}
+
+type InvalidSyntaxError struct {
+	Err error
+}
+
+func (e InvalidSyntaxError) Error() string {
+	if e.Err == nil {
+		return "parsing payload chain: invalid syntax"
+	}
+	return "parsing payload chain: invalid syntax: " + e.Err.Error()
+}
+
+func (e InvalidSyntaxError) Unwrap() error {
+	return e.Err
 }
 
 type Attribute struct {
@@ -131,6 +246,9 @@ type Transform struct {
 }
 
 func (t Transform) MarshalBinary() ([]byte, error) {
+	if err := validateTransformAttributes(t.Attributes); err != nil {
+		return nil, err
+	}
 	body := make([]byte, 4)
 	body[0] = t.TransformType
 	binary.BigEndian.PutUint16(body[2:4], t.ID)
@@ -149,7 +267,7 @@ func (t Transform) marshalBinary(next byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return marshalPayloadBlock(next, body), nil
+	return marshalPayloadBlock(next, body)
 }
 
 func (t *Transform) UnmarshalBinary(data []byte) error {
@@ -160,7 +278,24 @@ func (t *Transform) UnmarshalBinary(data []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := validateTransformAttributes(attrs); err != nil {
+		return err
+	}
 	*t = Transform{TransformType: data[0], ID: binary.BigEndian.Uint16(data[2:4]), Attributes: attrs}
+	return nil
+}
+
+func validateTransformAttributes(attrs []Attribute) error {
+	seen := make(map[uint16]struct{}, len(attrs))
+	for _, attr := range attrs {
+		if _, ok := seen[attr.Type]; ok {
+			return fmt.Errorf("parsing transform: duplicate attribute %d", attr.Type)
+		}
+		seen[attr.Type] = struct{}{}
+		if attr.Type == transformAttrKeyLength && attr.Format != attributeFormatTV {
+			return errors.New("parsing transform: key length attribute must use TV format")
+		}
+	}
 	return nil
 }
 
@@ -181,6 +316,9 @@ type Proposal struct {
 }
 
 func (p Proposal) MarshalBinary() ([]byte, error) {
+	if err := validateProposalShape(len(p.SPI), len(p.Transforms)); err != nil {
+		return nil, err
+	}
 	body := []byte{p.Number, p.ProtocolID, byte(len(p.SPI)), byte(len(p.Transforms))}
 	body = append(body, p.SPI...)
 	for i, transform := range p.Transforms {
@@ -202,12 +340,15 @@ func (p Proposal) marshalBinary(next byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return marshalPayloadBlock(next, body), nil
+	return marshalPayloadBlock(next, body)
 }
 
 func (p *Proposal) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
 		return errors.New("parsing proposal: truncated body")
+	}
+	if err := validateProposalShape(int(data[2]), int(data[3])); err != nil {
+		return err
 	}
 	proposal := Proposal{
 		Number:     data[0],
@@ -224,6 +365,9 @@ func (p *Proposal) UnmarshalBinary(data []byte) error {
 			return errors.New("parsing proposal: truncated transform")
 		}
 		next := remaining[0]
+		if next != payloadTypeNone && next != payloadTypeTransform {
+			return fmt.Errorf("parsing proposal: invalid transform substructure tag %d", next)
+		}
 		length := int(binary.BigEndian.Uint16(remaining[2:4]))
 		if length < 4 {
 			return fmt.Errorf("parsing proposal: invalid transform length %d", length)
@@ -240,6 +384,9 @@ func (p *Proposal) UnmarshalBinary(data []byte) error {
 		}
 		proposal.Transforms = append(proposal.Transforms, transform)
 		remaining = remaining[length:]
+		if next == payloadTypeTransform && len(remaining) == 0 {
+			return errors.New("parsing proposal: transform substructure chain is truncated")
+		}
 		if next == payloadTypeNone {
 			break
 		}
@@ -255,6 +402,21 @@ func (p *Proposal) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+func validateProposalShape(spiSize, transformCount int) error {
+	switch spiSize {
+	case proposalSPISizeNone, proposalSPISizeIPsec, proposalSPISizeIKE:
+	default:
+		return fmt.Errorf("parsing proposal: invalid spi size %d", spiSize)
+	}
+	if transformCount == 0 {
+		return errors.New("parsing proposal: transform count is zero")
+	}
+	if transformCount > math.MaxUint8 {
+		return fmt.Errorf("parsing proposal: transform count %d exceeds 255", transformCount)
+	}
+	return nil
+}
+
 type SecurityAssociationPayload struct {
 	Proposals []Proposal
 }
@@ -262,9 +424,20 @@ type SecurityAssociationPayload struct {
 func (p *SecurityAssociationPayload) Type() byte { return payloadTypeSA }
 
 func (p *SecurityAssociationPayload) MarshalBinary() ([]byte, error) {
+	if len(p.Proposals) == 0 {
+		return nil, errors.New("marshalling security association: proposal count is zero")
+	}
+	if len(p.Proposals) > math.MaxUint8 {
+		return nil, fmt.Errorf("marshalling security association: proposal count %d exceeds 255", len(p.Proposals))
+	}
 	body := make([]byte, 0)
 	for i, proposal := range p.Proposals {
-		proposal.Number = byte(i + 1)
+		if proposal.Number == 0 {
+			proposal.Number = byte(i + 1)
+		}
+		if len(p.Proposals) > 1 && proposal.Number != byte(i+1) {
+			return nil, fmt.Errorf("marshalling security association: proposal number = %d, want %d", proposal.Number, i+1)
+		}
 		nextType := payloadTypeNone
 		if i+1 < len(p.Proposals) {
 			nextType = payloadTypeProposal
@@ -279,6 +452,9 @@ func (p *SecurityAssociationPayload) MarshalBinary() ([]byte, error) {
 }
 
 func (p *SecurityAssociationPayload) UnmarshalBinary(data []byte) error {
+	if len(data) == 0 {
+		return errors.New("parsing security association: proposal count is zero")
+	}
 	payload := SecurityAssociationPayload{Proposals: make([]Proposal, 0)}
 	remaining := data
 	proposalType := payloadTypeProposal
@@ -287,6 +463,9 @@ func (p *SecurityAssociationPayload) UnmarshalBinary(data []byte) error {
 			return errors.New("parsing security association: truncated proposal")
 		}
 		next := remaining[0]
+		if next != payloadTypeNone && next != payloadTypeProposal {
+			return fmt.Errorf("parsing security association: invalid proposal substructure tag %d", next)
+		}
 		length := int(binary.BigEndian.Uint16(remaining[2:4]))
 		if length < 4 {
 			return fmt.Errorf("parsing security association: invalid proposal length %d", length)
@@ -303,6 +482,9 @@ func (p *SecurityAssociationPayload) UnmarshalBinary(data []byte) error {
 		}
 		payload.Proposals = append(payload.Proposals, proposal)
 		remaining = remaining[length:]
+		if next == payloadTypeProposal && len(remaining) == 0 {
+			return errors.New("parsing security association: proposal substructure chain is truncated")
+		}
 		if next == payloadTypeNone {
 			break
 		}
@@ -331,18 +513,24 @@ type KeyExchangePayload struct {
 func (p *KeyExchangePayload) Type() byte { return payloadTypeKE }
 
 func (p *KeyExchangePayload) MarshalBinary() ([]byte, error) {
-	body := make([]byte, 4)
+	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data), "marshalling key exchange"); err != nil {
+		return nil, err
+	}
+	body := make([]byte, keyExchangeBodyHeaderLen)
 	binary.BigEndian.PutUint16(body[0:2], p.DHGroup)
 	body = append(body, p.Data...)
 	return body, nil
 }
 
 func (p *KeyExchangePayload) UnmarshalBinary(data []byte) error {
-	if len(data) < 4 {
+	if len(data) < keyExchangeBodyHeaderLen {
 		return errors.New("parsing key exchange: truncated body")
 	}
 	p.DHGroup = binary.BigEndian.Uint16(data[0:2])
-	p.Data = append([]byte(nil), data[4:]...)
+	p.Data = append([]byte(nil), data[keyExchangeBodyHeaderLen:]...)
+	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data), "parsing key exchange"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -354,18 +542,54 @@ func decodeKeyExchangePayload(data []byte) (*KeyExchangePayload, error) {
 	return payload, nil
 }
 
+func keyExchangeDataLength(group uint16) (int, bool) {
+	switch group {
+	case dhGroup1024MODP:
+		return keyExchange1024MODPDataLength, true
+	case dhGroup2048MODP:
+		return keyExchange2048MODPDataLength, true
+	default:
+		return 0, false
+	}
+}
+
+func validateKeyExchangeDataLength(group uint16, length int, action string) error {
+	if want, ok := keyExchangeDataLength(group); ok && length != want {
+		return fmt.Errorf("%s: invalid data length %d for dh group %d", action, length, group)
+	}
+	return nil
+}
+
 type NoncePayload struct {
 	Data []byte
 }
 
+const (
+	nonceDataMinLen = 16
+	nonceDataMaxLen = 256
+)
+
 func (p *NoncePayload) Type() byte { return payloadTypeNonce }
 
 func (p *NoncePayload) MarshalBinary() ([]byte, error) {
+	if err := validateNonceDataLen(len(p.Data)); err != nil {
+		return nil, err
+	}
 	return append([]byte(nil), p.Data...), nil
 }
 
 func (p *NoncePayload) UnmarshalBinary(data []byte) error {
+	if err := validateNonceDataLen(len(data)); err != nil {
+		return err
+	}
 	p.Data = append([]byte(nil), data...)
+	return nil
+}
+
+func validateNonceDataLen(length int) error {
+	if length < nonceDataMinLen || length > nonceDataMaxLen {
+		return fmt.Errorf("nonce payload: invalid data length %d", length)
+	}
 	return nil
 }
 
@@ -387,6 +611,12 @@ type NotifyPayload struct {
 func (p *NotifyPayload) Type() byte { return payloadTypeNotify }
 
 func (p *NotifyPayload) MarshalBinary() ([]byte, error) {
+	if len(p.SPI) > math.MaxUint8 {
+		return nil, fmt.Errorf("marshalling notify payload: spi size %d exceeds 255", len(p.SPI))
+	}
+	if err := validateNotifyPayloadSPIShape(p.ProtocolID, p.NotifyType, len(p.SPI), false); err != nil {
+		return nil, fmt.Errorf("marshalling notify payload: %w", err)
+	}
 	body := []byte{p.ProtocolID, byte(len(p.SPI)), 0x00, 0x00}
 	binary.BigEndian.PutUint16(body[2:4], p.NotifyType)
 	body = append(body, p.SPI...)
@@ -402,11 +632,52 @@ func (p *NotifyPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4+spiLen {
 		return fmt.Errorf("parsing notify: invalid spi length %d", spiLen)
 	}
-	p.ProtocolID = data[0]
-	p.NotifyType = binary.BigEndian.Uint16(data[2:4])
-	p.SPI = append([]byte(nil), data[4:4+spiLen]...)
-	p.Data = append([]byte(nil), data[4+spiLen:]...)
+	notifyType := binary.BigEndian.Uint16(data[2:4])
+	if err := validateNotifyPayloadSPIShape(data[0], notifyType, spiLen, true); err != nil {
+		return fmt.Errorf("parsing notify: %w", err)
+	}
+	payload := NotifyPayload{
+		ProtocolID: data[0],
+		NotifyType: notifyType,
+		SPI:        append([]byte(nil), data[4:4+spiLen]...),
+		Data:       append([]byte(nil), data[4+spiLen:]...),
+	}
+	if spiLen == notifySPISizeNone {
+		payload.ProtocolID = 0
+	}
+	*p = payload
 	return nil
+}
+
+func validateNotifyPayloadSPIShape(protocolID byte, notifyType uint16, spiSize int, received bool) error {
+	switch spiSize {
+	case notifySPISizeNone:
+		if !received && protocolID != 0 {
+			return fmt.Errorf("notify payload without spi requires protocol id 0, got %d", protocolID)
+		}
+		if notifyTypeForExistingChildSA(notifyType) {
+			return fmt.Errorf("notify payload type %d requires child sa spi", notifyType)
+		}
+	case notifySPISizeIPsec:
+		if protocolID != protocolIDAH && protocolID != protocolIDESP {
+			return fmt.Errorf("notify payload with spi requires protocol AH or ESP, got %d", protocolID)
+		}
+		if !notifyTypeForExistingChildSA(notifyType) {
+			return fmt.Errorf("notify payload with spi requires existing child sa notify type, got %d", notifyType)
+		}
+	default:
+		return fmt.Errorf("invalid spi size %d", spiSize)
+	}
+	return nil
+}
+
+func notifyTypeForExistingChildSA(notifyType uint16) bool {
+	switch notifyType {
+	case notifyTypeInvalidSelectors, notifyTypeChildSANotFound, notifyTypeRekeySA:
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeNotifyPayload(data []byte) (*NotifyPayload, error) {
@@ -437,6 +708,9 @@ func (p *DeletePayload) MarshalBinary() ([]byte, error) {
 	if spiSize > 0xff {
 		return nil, fmt.Errorf("marshalling delete payload: spi size %d exceeds 255", spiSize)
 	}
+	if err := validateDeletePayloadSPIShape(p.ProtocolID, spiSize, len(p.SPIs)); err != nil {
+		return nil, fmt.Errorf("marshalling delete payload: %w", err)
+	}
 	body := []byte{p.ProtocolID, byte(spiSize), 0x00, 0x00}
 	binary.BigEndian.PutUint16(body[2:4], uint16(len(p.SPIs)))
 	for _, spi := range p.SPIs {
@@ -451,6 +725,9 @@ func (p *DeletePayload) UnmarshalBinary(data []byte) error {
 	}
 	spiSize := int(data[1])
 	count := int(binary.BigEndian.Uint16(data[2:4]))
+	if err := validateDeletePayloadSPIShape(data[0], spiSize, count); err != nil {
+		return err
+	}
 	if spiSize == 0 && count != 0 {
 		return fmt.Errorf("parsing delete payload: invalid spi size %d for %d spis", spiSize, count)
 	}
@@ -463,6 +740,22 @@ func (p *DeletePayload) UnmarshalBinary(data []byte) error {
 		payload.SPIs = append(payload.SPIs, append([]byte(nil), data[offset:offset+spiSize]...))
 	}
 	*p = payload
+	return nil
+}
+
+func validateDeletePayloadSPIShape(protocolID byte, spiSize, count int) error {
+	switch protocolID {
+	case deleteProtocolIDIKE:
+		if spiSize != 0 || count != 0 {
+			return fmt.Errorf("delete payload protocol IKE requires zero spi size and count, got size %d count %d", spiSize, count)
+		}
+	case deleteProtocolIDAH, deleteProtocolIDESP:
+		if spiSize != 4 || count == 0 {
+			return fmt.Errorf("delete payload protocol %d requires 4-byte spi and at least one spi, got size %d count %d", protocolID, spiSize, count)
+		}
+	default:
+		return fmt.Errorf("delete payload protocol id %d is unsupported", protocolID)
+	}
 	return nil
 }
 
@@ -483,6 +776,9 @@ type IDPayload struct {
 func (p *IDPayload) Type() byte { return p.Tag }
 
 func (p *IDPayload) MarshalBinary() ([]byte, error) {
+	if len(p.Data) == 0 {
+		return nil, errors.New("marshalling identification: data is empty")
+	}
 	body := []byte{p.IDType, 0x00, 0x00, 0x00}
 	body = append(body, p.Data...)
 	return body, nil
@@ -492,14 +788,16 @@ func (p *IDPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
 		return errors.New("parsing identification: truncated body")
 	}
+	if len(data) == 4 {
+		return errors.New("parsing identification: data is empty")
+	}
 	p.IDType = data[0]
 	p.Data = append([]byte(nil), data[4:]...)
 	return nil
 }
 
-func (p *IDPayload) RawData() []byte {
-	body, _ := p.MarshalBinary()
-	return body
+func (p *IDPayload) RawData() ([]byte, error) {
+	return p.MarshalBinary()
 }
 
 func decodeIDPayload(tag byte, data []byte) (*IDPayload, error) {
@@ -548,9 +846,15 @@ type ConfigPayload struct {
 func (p *ConfigPayload) Type() byte { return payloadTypeCP }
 
 func (p *ConfigPayload) MarshalBinary() ([]byte, error) {
+	if err := validateConfigType(p.ConfigType); err != nil {
+		return nil, fmt.Errorf("marshalling configuration: %w", err)
+	}
+	if err := validateConfigAttributes(p.ConfigType, p.Attributes); err != nil {
+		return nil, err
+	}
 	body := []byte{p.ConfigType, 0x00, 0x00, 0x00}
 	for _, attr := range p.Attributes {
-		encoded, err := attr.MarshalBinary()
+		encoded, err := marshalConfigAttribute(attr)
 		if err != nil {
 			return nil, fmt.Errorf("marshalling config attribute: %w", err)
 		}
@@ -563,8 +867,11 @@ func (p *ConfigPayload) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
 		return errors.New("parsing configuration: truncated body")
 	}
-	attrs, err := decodeAttributes(data[4:])
+	attrs, err := decodeConfigAttributes(data[4:])
 	if err != nil {
+		return err
+	}
+	if err := validateConfigAttributes(data[0], attrs); err != nil {
 		return err
 	}
 	p.ConfigType = data[0]
@@ -580,6 +887,143 @@ func decodeConfigPayload(data []byte) (*ConfigPayload, error) {
 	return payload, nil
 }
 
+func validateConfigType(configType byte) error {
+	switch configType {
+	case configTypeRequest, configTypeReply, configTypeSet, configTypeAck:
+		return nil
+	default:
+		return fmt.Errorf("invalid config type %d", configType)
+	}
+}
+
+func marshalConfigAttribute(attr Attribute) ([]byte, error) {
+	if len(attr.Value) > math.MaxUint16 {
+		return nil, fmt.Errorf("configuration attribute %d length %d exceeds uint16", attr.Type, len(attr.Value))
+	}
+	if err := validateConfigAttributeLength(attr.Type, len(attr.Value)); err != nil {
+		return nil, err
+	}
+	if err := validateConfigAttributeValue(attr.Type, attr.Value); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint16(buf[0:2], attr.Type&0x7fff)
+	binary.BigEndian.PutUint16(buf[2:4], uint16(len(attr.Value)))
+	return append(buf, attr.Value...), nil
+}
+
+func decodeConfigAttributes(data []byte) ([]Attribute, error) {
+	attrs := make([]Attribute, 0)
+	for len(data) > 0 {
+		if len(data) < 4 {
+			return nil, errors.New("parsing configuration attributes: truncated attribute")
+		}
+		rawType := binary.BigEndian.Uint16(data[0:2])
+		attrType := rawType & 0x7fff
+		length := int(binary.BigEndian.Uint16(data[2:4]))
+		if len(data) < 4+length {
+			return nil, fmt.Errorf("parsing configuration attributes: invalid attribute length %d", length)
+		}
+		if err := validateConfigAttributeLength(attrType, length); err != nil {
+			return nil, err
+		}
+		if err := validateConfigAttributeValue(attrType, data[4:4+length]); err != nil {
+			return nil, err
+		}
+		attrs = append(attrs, Attribute{
+			Format: attributeFormatTLV,
+			Type:   attrType,
+			Value:  append([]byte(nil), data[4:4+length]...),
+		})
+		data = data[4+length:]
+	}
+	return attrs, nil
+}
+
+func validateConfigAttributes(configType byte, attrs []Attribute) error {
+	if configType != configTypeReply && configType != configTypeRequest {
+		return nil
+	}
+	hasIPv4Address := false
+	netmaskCount := 0
+	for _, attr := range attrs {
+		switch attr.Type {
+		case configAttrInternalIPv4Address:
+			if len(attr.Value) != 0 {
+				hasIPv4Address = true
+			}
+		case configAttrInternalIPv4Netmask:
+			netmaskCount++
+			if configType == configTypeRequest && len(attr.Value) != 0 {
+				return errors.New("parsing configuration: non-empty internal ipv4 netmask in request")
+			}
+		}
+	}
+	if configType == configTypeReply && !hasIPv4Address && netmaskCount > 0 {
+		return errors.New("parsing configuration: internal ipv4 netmask without internal ipv4 address")
+	}
+	if netmaskCount > 1 {
+		return errors.New("parsing configuration: multiple internal ipv4 netmasks")
+	}
+	return nil
+}
+
+func validateConfigAttributeLength(attrType uint16, length int) error {
+	switch attrType {
+	case configAttrInternalIPv4Address,
+		configAttrInternalIPv4Netmask,
+		configAttrInternalIPv4DNS,
+		configAttrInternalIPv4NBNS,
+		configAttrInternalIPv4DHCP,
+		configAttrIPv4PCSCF:
+		if length == 0 || length == net.IPv4len {
+			return nil
+		}
+	case configAttrApplicationVersion:
+		return nil
+	case configAttrInternalIPv6Address:
+		if length == 0 || length == net.IPv6len+1 {
+			return nil
+		}
+	case configAttrInternalIPv6DNS,
+		configAttrInternalIPv6DHCP,
+		configAttrIPv6PCSCF:
+		if length == 0 || length == net.IPv6len {
+			return nil
+		}
+	case configAttrInternalIPv4Subnet:
+		if length == 0 || length == net.IPv4len*2 {
+			return nil
+		}
+	case configAttrSupportedAttributes:
+		if length%2 == 0 {
+			return nil
+		}
+	case configAttrInternalIPv6Subnet:
+		if length == net.IPv6len+1 {
+			return nil
+		}
+	case configAttrLivenessTimeout:
+		if length == 0 || length == 4 {
+			return nil
+		}
+	default:
+		return nil
+	}
+	return fmt.Errorf("parsing configuration attributes: invalid length %d for attribute %d", length, attrType)
+}
+
+func validateConfigAttributeValue(attrType uint16, value []byte) error {
+	if attrType != configAttrInternalIPv4Netmask || len(value) == 0 {
+		return nil
+	}
+	_, bits := net.IPMask(value).Size()
+	if bits != net.IPv4len*8 {
+		return errors.New("parsing configuration attributes: invalid internal ipv4 netmask")
+	}
+	return nil
+}
+
 type TrafficSelector struct {
 	Type       byte
 	ProtocolID byte
@@ -587,10 +1031,13 @@ type TrafficSelector struct {
 }
 
 func (s TrafficSelector) MarshalBinary() ([]byte, error) {
-	buf := make([]byte, 4)
+	if err := validateTrafficSelector(s); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, trafficSelectorHeaderLen)
 	buf[0] = s.Type
 	buf[1] = s.ProtocolID
-	binary.BigEndian.PutUint16(buf[2:4], uint16(len(s.Data)+4))
+	binary.BigEndian.PutUint16(buf[2:4], uint16(len(s.Data)+trafficSelectorHeaderLen))
 	return append(buf, s.Data...), nil
 }
 
@@ -606,19 +1053,105 @@ func (s *TrafficSelector) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+func (s TrafficSelector) Contains(sub TrafficSelector) bool {
+	if s.Type != sub.Type || s.ProtocolID != sub.ProtocolID {
+		return false
+	}
+	addressLen := trafficSelectorAddressLength(s.Type)
+	if addressLen == 0 || len(s.Data) != trafficSelectorPortsLen+addressLen*2 || len(sub.Data) != trafficSelectorPortsLen+addressLen*2 {
+		return false
+	}
+	startPort := binary.BigEndian.Uint16(s.Data[0:2])
+	endPort := binary.BigEndian.Uint16(s.Data[2:4])
+	subStartPort := binary.BigEndian.Uint16(sub.Data[0:2])
+	subEndPort := binary.BigEndian.Uint16(sub.Data[2:4])
+	if startPort > subStartPort || endPort < subEndPort {
+		return false
+	}
+	startAddress := s.Data[trafficSelectorPortsLen : trafficSelectorPortsLen+addressLen]
+	endAddress := s.Data[trafficSelectorPortsLen+addressLen : trafficSelectorPortsLen+addressLen*2]
+	subStartAddress := sub.Data[trafficSelectorPortsLen : trafficSelectorPortsLen+addressLen]
+	subEndAddress := sub.Data[trafficSelectorPortsLen+addressLen : trafficSelectorPortsLen+addressLen*2]
+	return compareBytes(startAddress, subStartAddress) <= 0 && compareBytes(endAddress, subEndAddress) >= 0
+}
+
 func decodeTrafficSelector(data []byte) (TrafficSelector, int, error) {
 	if len(data) < 4 {
 		return TrafficSelector{}, 0, errors.New("parsing traffic selector: truncated selector")
 	}
 	length := int(binary.BigEndian.Uint16(data[2:4]))
-	if length < 4 {
+	if length < trafficSelectorHeaderLen {
 		return TrafficSelector{}, 0, fmt.Errorf("parsing traffic selector: invalid length %d", length)
 	}
 	if len(data) < length {
 		return TrafficSelector{}, 0, fmt.Errorf("parsing traffic selector: invalid length %d", length)
 	}
 	selector := TrafficSelector{Type: data[0], ProtocolID: data[1], Data: append([]byte(nil), data[4:length]...)}
+	if err := validateTrafficSelector(selector); err != nil {
+		return TrafficSelector{}, 0, err
+	}
 	return selector, length, nil
+}
+
+func validateTrafficSelector(selector TrafficSelector) error {
+	if !validTrafficSelectorProtocol(selector.ProtocolID) {
+		return fmt.Errorf("parsing traffic selector: invalid ip protocol id %d", selector.ProtocolID)
+	}
+
+	addressLen := trafficSelectorAddressLength(selector.Type)
+	if addressLen == 0 {
+		return fmt.Errorf("parsing traffic selector: invalid type %d", selector.Type)
+	}
+	if got, want := len(selector.Data), trafficSelectorPortsLen+addressLen*2; got != want {
+		if selector.Type == trafficSelectorIPv4Range {
+			return fmt.Errorf("parsing traffic selector: invalid ipv4 length %d", got+trafficSelectorHeaderLen)
+		}
+		return fmt.Errorf("parsing traffic selector: invalid ipv6 length %d", got+trafficSelectorHeaderLen)
+	}
+
+	startPort := binary.BigEndian.Uint16(selector.Data[0:2])
+	endPort := binary.BigEndian.Uint16(selector.Data[2:4])
+	if startPort > endPort {
+		return fmt.Errorf("parsing traffic selector: invalid port range %d-%d", startPort, endPort)
+	}
+	startAddress := selector.Data[trafficSelectorPortsLen : trafficSelectorPortsLen+addressLen]
+	endAddress := selector.Data[trafficSelectorPortsLen+addressLen : trafficSelectorPortsLen+addressLen*2]
+	if compareBytes(startAddress, endAddress) > 0 {
+		return errors.New("parsing traffic selector: invalid address range")
+	}
+	return nil
+}
+
+func trafficSelectorAddressLength(selectorType byte) int {
+	switch selectorType {
+	case trafficSelectorIPv4Range:
+		return net.IPv4len
+	case trafficSelectorIPv6Range:
+		return net.IPv6len
+	default:
+		return 0
+	}
+}
+
+func validTrafficSelectorProtocol(protocol byte) bool {
+	switch protocol {
+	case ipProtocolAny, ipProtocolICMP, ipProtocolTCP, ipProtocolUDP:
+		return true
+	default:
+		return false
+	}
+}
+
+func compareBytes(a, b []byte) int {
+	for i := range a {
+		switch {
+		case a[i] < b[i]:
+			return -1
+		case a[i] > b[i]:
+			return 1
+		}
+	}
+	return 0
 }
 
 func decodeTrafficSelectors(data []byte) ([]TrafficSelector, error) {
@@ -642,6 +1175,12 @@ type TrafficSelectorPayload struct {
 func (p *TrafficSelectorPayload) Type() byte { return p.Tag }
 
 func (p *TrafficSelectorPayload) MarshalBinary() ([]byte, error) {
+	if len(p.Selectors) == 0 {
+		return nil, errors.New("marshalling traffic selectors: expected at least one selector")
+	}
+	if len(p.Selectors) > math.MaxUint8 {
+		return nil, fmt.Errorf("marshalling traffic selectors: selector count %d exceeds 255", len(p.Selectors))
+	}
 	body := []byte{byte(len(p.Selectors)), 0x00, 0x00, 0x00}
 	for _, selector := range p.Selectors {
 		encoded, err := selector.MarshalBinary()
@@ -658,6 +1197,9 @@ func (p *TrafficSelectorPayload) UnmarshalBinary(data []byte) error {
 		return errors.New("parsing traffic selectors: truncated body")
 	}
 	count := int(data[0])
+	if count == 0 {
+		return errors.New("parsing traffic selectors: expected at least one selector")
+	}
 	selectors, err := decodeTrafficSelectors(data[4:])
 	if err != nil {
 		return err
@@ -667,6 +1209,24 @@ func (p *TrafficSelectorPayload) UnmarshalBinary(data []byte) error {
 	}
 	p.Selectors = selectors
 	return nil
+}
+
+func (p *TrafficSelectorPayload) Contains(sub *TrafficSelectorPayload) bool {
+	for _, subSelector := range sub.Selectors {
+		if !trafficSelectorsContain(p.Selectors, subSelector) {
+			return false
+		}
+	}
+	return true
+}
+
+func trafficSelectorsContain(selectors []TrafficSelector, sub TrafficSelector) bool {
+	for _, selector := range selectors {
+		if selector.Contains(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeTrafficSelectorPayload(tag byte, data []byte) (*TrafficSelectorPayload, error) {
@@ -681,14 +1241,33 @@ type EAPPayload struct {
 	Data []byte
 }
 
+const eapMessageHeaderLen = 4
+
 func (p *EAPPayload) Type() byte { return payloadTypeEAP }
 
 func (p *EAPPayload) MarshalBinary() ([]byte, error) {
+	if err := validateEAPMessageLength(p.Data); err != nil {
+		return nil, err
+	}
 	return append([]byte(nil), p.Data...), nil
 }
 
 func (p *EAPPayload) UnmarshalBinary(data []byte) error {
+	if err := validateEAPMessageLength(data); err != nil {
+		return err
+	}
 	p.Data = append([]byte(nil), data...)
+	return nil
+}
+
+func validateEAPMessageLength(data []byte) error {
+	if len(data) < eapMessageHeaderLen {
+		return fmt.Errorf("eap payload: message length %d is shorter than header", len(data))
+	}
+	length := int(binary.BigEndian.Uint16(data[2:eapMessageHeaderLen]))
+	if length != len(data) {
+		return fmt.Errorf("eap payload: message length %d does not match payload body length %d", length, len(data))
+	}
 	return nil
 }
 
@@ -731,6 +1310,9 @@ func MarshalPayloadChain(payloads []Payload) (byte, []byte, error) {
 	first := payloads[0].Type()
 	body := make([]byte, 0)
 	for i, payload := range payloads {
+		if payload.Type() == payloadTypeEncrypted && i+1 < len(payloads) {
+			return 0, nil, errors.New("marshalling payload chain: encrypted payload must be last")
+		}
 		next := payloadTypeNone
 		if encrypted, ok := payload.(*EncryptedPayload); ok {
 			next = encrypted.NextPayload
@@ -751,40 +1333,51 @@ func marshalSinglePayload(payload Payload, next byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return marshalPayloadBlock(next, body), nil
+	return marshalPayloadBlock(next, body)
 }
 
-func marshalPayloadBlock(next byte, body []byte) []byte {
-	buf := make([]byte, 4)
+func marshalPayloadBlock(next byte, body []byte) ([]byte, error) {
+	length := len(body) + payloadHeaderSize
+	if length > math.MaxUint16 {
+		return nil, fmt.Errorf("marshalling payload: payload length %d exceeds uint16", length)
+	}
+	buf := make([]byte, payloadHeaderSize)
 	buf[0] = next
-	binary.BigEndian.PutUint16(buf[2:4], uint16(len(body)+4))
+	binary.BigEndian.PutUint16(buf[2:4], uint16(length))
 	buf = append(buf, body...)
-	return buf
+	return buf, nil
 }
 
 func DecodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 	payloads := make([]Payload, 0)
 	nextType := firstType
 	remaining := data
+	seen := make(map[byte]struct{})
 	for nextType != payloadTypeNone {
-		if len(remaining) < 4 {
+		if len(remaining) < payloadHeaderSize {
 			return nil, errors.New("parsing payload chain: truncated payload")
 		}
 		next := remaining[0]
-		critical := remaining[1]&0x80 != 0
+		critical := remaining[1]&payloadHeaderCriticalBit != 0
 		length := int(binary.BigEndian.Uint16(remaining[2:4]))
-		if length < 4 {
+		if length < payloadHeaderSize {
 			return nil, fmt.Errorf("parsing payload chain: invalid payload length %d", length)
 		}
 		if len(remaining) < length {
 			return nil, fmt.Errorf("parsing payload chain: invalid payload length %d", length)
 		}
-		body := remaining[4:length]
+		body := remaining[payloadHeaderSize:length]
 		payload, err := decodePayload(nextType, next, body, critical)
 		if err != nil {
 			return nil, err
 		}
 		if payload != nil {
+			if !repeatablePayloadType(payload.Type()) {
+				if _, ok := seen[payload.Type()]; ok {
+					return nil, fmt.Errorf("parsing payload chain: duplicate payload type %d", payload.Type())
+				}
+				seen[payload.Type()] = struct{}{}
+			}
 			payloads = append(payloads, payload)
 		}
 		remaining = remaining[length:]
@@ -797,6 +1390,15 @@ func DecodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 		return nil, fmt.Errorf("parsing payload chain: %d trailing bytes", len(remaining))
 	}
 	return payloads, nil
+}
+
+func repeatablePayloadType(payloadType byte) bool {
+	switch payloadType {
+	case payloadTypeNotify, payloadTypeDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func decodePayload(payloadType, next byte, body []byte, critical bool) (Payload, error) {
@@ -827,7 +1429,7 @@ func decodePayload(payloadType, next byte, body []byte, critical bool) (Payload,
 		if !critical {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("parsing payload chain: unsupported critical payload type %d", payloadType)
+		return nil, UnsupportedCriticalPayloadError{PayloadType: payloadType}
 	}
 }
 
@@ -880,6 +1482,16 @@ func FindEAPPayload(payloads []Payload) *EAPPayload {
 	return nil
 }
 
+func FindTrafficSelectorPayload(payloads []Payload, tag byte) *TrafficSelectorPayload {
+	for _, payload := range payloads {
+		selectorPayload, ok := payload.(*TrafficSelectorPayload)
+		if ok && selectorPayload.Tag == tag {
+			return selectorPayload
+		}
+	}
+	return nil
+}
+
 func FindIDPayload(payloads []Payload, tag byte) *IDPayload {
 	for _, payload := range payloads {
 		idPayload, ok := payload.(*IDPayload)
@@ -910,39 +1522,24 @@ func FindDeletePayload(payloads []Payload) *DeletePayload {
 	return nil
 }
 
-func DecodeDeviceIdentity(data []byte) (byte, []byte, error) {
-	if len(data) < 3 {
-		return 0, nil, errors.New("parsing device identity: data too short")
-	}
-	length := int(binary.BigEndian.Uint16(data[:2]))
-	if length < 1 {
-		return 0, nil, fmt.Errorf("parsing device identity: invalid length %d", length)
-	}
-	if len(data) != 2+length {
-		return 0, nil, fmt.Errorf("parsing device identity: data length %d does not match %d", len(data), 2+length)
-	}
-	identityType := data[2]
-	switch identityType {
-	case deviceIdentityIMEI, deviceIdentityIMEISV:
-	default:
-		return 0, nil, fmt.Errorf("parsing device identity: unsupported type %d", identityType)
-	}
-	return identityType, append([]byte(nil), data[3:]...), nil
+type DeviceIdentity struct {
+	Type  byte
+	Value []byte
 }
 
-func EncodeDeviceIdentityForType(identity string, requestedType byte) ([]byte, error) {
+func NewDeviceIdentity(identity string, requestedType byte) (DeviceIdentity, error) {
 	if identity == "" {
-		return nil, errors.New("encoding device identity: identity is empty")
+		return DeviceIdentity{}, errors.New("encoding device identity: identity is empty")
 	}
 	digits := []byte(identity)
 	for _, digit := range digits {
 		if digit < '0' || digit > '9' {
-			return nil, fmt.Errorf("encoding device identity: invalid digit %q", digit)
+			return DeviceIdentity{}, fmt.Errorf("encoding device identity: invalid digit %q", digit)
 		}
 	}
 	identityType, err := deviceIdentityType(len(digits), requestedType)
 	if err != nil {
-		return nil, err
+		return DeviceIdentity{}, err
 	}
 	if len(digits)%2 != 0 {
 		digits = append(digits, 'f')
@@ -953,11 +1550,63 @@ func EncodeDeviceIdentityForType(identity string, requestedType byte) ([]byte, e
 		low := digits[i+1]
 		encoded[i/2] = bcdSwapByte(high, low)
 	}
-	data := make([]byte, 3+len(encoded))
-	binary.BigEndian.PutUint16(data[0:2], uint16(len(encoded)+1))
-	data[2] = identityType
-	copy(data[3:], encoded)
+	return DeviceIdentity{Type: identityType, Value: encoded}, nil
+}
+
+func (d DeviceIdentity) MarshalBinary() ([]byte, error) {
+	if err := validateDeviceIdentityType(d.Type); err != nil {
+		return nil, err
+	}
+	if len(d.Value) != deviceIdentityValueLen {
+		if len(d.Value) != 0 {
+			return nil, fmt.Errorf("encoding device identity: value length %d does not match %d", len(d.Value), deviceIdentityValueLen)
+		}
+	}
+	data := make([]byte, deviceIdentityLengthFieldLen+deviceIdentityTypeLen+len(d.Value))
+	binary.BigEndian.PutUint16(data[:deviceIdentityLengthFieldLen], uint16(deviceIdentityTypeLen+len(d.Value)))
+	data[deviceIdentityLengthFieldLen] = d.Type
+	copy(data[deviceIdentityLengthFieldLen+deviceIdentityTypeLen:], d.Value)
 	return data, nil
+}
+
+func (d *DeviceIdentity) UnmarshalBinary(data []byte) error {
+	if len(data) == deviceIdentityRequestLen {
+		identity := DeviceIdentity{Type: data[0]}
+		if err := validateDeviceIdentityType(identity.Type); err != nil {
+			return err
+		}
+		*d = identity
+		return nil
+	}
+	if len(data) < deviceIdentityLengthFieldLen+deviceIdentityTypeLen {
+		return errors.New("parsing device identity: data too short")
+	}
+	length := int(binary.BigEndian.Uint16(data[:deviceIdentityLengthFieldLen]))
+	if length < deviceIdentityTypeLen {
+		return fmt.Errorf("parsing device identity: invalid length %d", length)
+	}
+	wireLen := deviceIdentityLengthFieldLen + length
+	if len(data) != wireLen {
+		return fmt.Errorf("parsing device identity: data length %d does not match %d", len(data), wireLen)
+	}
+	identity := DeviceIdentity{Type: data[deviceIdentityLengthFieldLen], Value: append([]byte(nil), data[deviceIdentityLengthFieldLen+deviceIdentityTypeLen:]...)}
+	if err := validateDeviceIdentityType(identity.Type); err != nil {
+		return err
+	}
+	if len(identity.Value) != 0 && len(identity.Value) != deviceIdentityValueLen {
+		return fmt.Errorf("parsing device identity: value length %d does not match %d", len(identity.Value), deviceIdentityValueLen)
+	}
+	*d = identity
+	return nil
+}
+
+func validateDeviceIdentityType(identityType byte) error {
+	switch identityType {
+	case deviceIdentityIMEI, deviceIdentityIMEISV:
+		return nil
+	default:
+		return fmt.Errorf("parsing device identity: unsupported type %d", identityType)
+	}
 }
 
 func deviceIdentityType(length int, requestedType byte) (byte, error) {
@@ -967,7 +1616,7 @@ func deviceIdentityType(length int, requestedType byte) (byte, error) {
 		return 0, fmt.Errorf("encoding device identity: unsupported length %d", length)
 	}
 	switch requestedType {
-	case 0:
+	case deviceIdentityAuto:
 		if hasIMEISV {
 			return deviceIdentityIMEISV, nil
 		}

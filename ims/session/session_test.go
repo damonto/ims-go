@@ -28,6 +28,11 @@ type stubTransport struct {
 
 type basicTransport struct{ stub *stubTransport }
 
+type readErrorTransport struct {
+	*stubTransport
+	errCh chan error
+}
+
 type blockingWriteTransport struct {
 	local      net.Addr
 	remote     net.Addr
@@ -39,6 +44,7 @@ type blockingWriteTransport struct {
 }
 
 type requestHandler struct {
+	mu       sync.Mutex
 	requests []string
 	errs     []error
 	handle   func(context.Context, Request) (bool, error)
@@ -59,6 +65,13 @@ func newBlockingWriteTransport() *blockingWriteTransport {
 		remote:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 		entered: make(chan struct{}, 2),
 		release: make(chan struct{}),
+	}
+}
+
+func newReadErrorTransport(localPort, remotePort int) *readErrorTransport {
+	return &readErrorTransport{
+		stubTransport: newStubTransport(localPort, remotePort),
+		errCh:         make(chan error, 1),
 	}
 }
 
@@ -170,8 +183,23 @@ func (t *basicTransport) WritePacket(ctx context.Context, data []byte) error {
 }
 func (t *basicTransport) Close() error { return t.stub.Close() }
 
+func (t *readErrorTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case err := <-t.errCh:
+		return nil, nil, err
+	}
+}
+
+func (t *readErrorTransport) fail(err error) {
+	t.errCh <- err
+}
+
 func (h *requestHandler) HandleRequest(ctx context.Context, req Request) (bool, error) {
+	h.mu.Lock()
 	h.requests = append(h.requests, req.Message.Method())
+	h.mu.Unlock()
 	if h.handle != nil {
 		return h.handle(ctx, req)
 	}
@@ -179,7 +207,21 @@ func (h *requestHandler) HandleRequest(ctx context.Context, req Request) (bool, 
 }
 
 func (h *requestHandler) HandleError(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.errs = append(h.errs, err)
+}
+
+func (h *requestHandler) requestCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.requests)
+}
+
+func (h *requestHandler) requestList() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return strings.Join(h.requests, ",")
 }
 
 func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing.T) {
@@ -215,8 +257,136 @@ func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing
 	if got := transport.writeCount(); got != 1 {
 		t.Fatalf("len(writes) = %d, want 1", got)
 	}
-	if len(handler.requests) != 1 {
-		t.Fatalf("len(handler.requests) = %d, want 1", len(handler.requests))
+	if got := handler.requestCount(); got != 1 {
+		t.Fatalf("len(handler.requests) = %d, want 1", got)
+	}
+}
+
+func TestExchangeBeforeRunIgnoresMismatchedResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		resp sip.Message
+	}{
+		{
+			name: "transaction key mismatch",
+			resp: func() sip.Message {
+				req := newRequest("MESSAGE", "call-other", "2 MESSAGE")
+				req.Headers.Set("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-other")
+				return newResponse(req, 200, "OK")
+			}(),
+		},
+		{
+			name: "top via sent-by mismatch",
+			resp: func() sip.Message {
+				req := newRequest("MESSAGE", "call-1", "1 MESSAGE")
+				resp := newResponse(req, 200, "OK")
+				resp.Headers.Set("Via", "SIP/2.0/UDP 127.0.0.2:5060;branch=z9hG4bK-1")
+				return resp
+			}(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			req := newRequest("MESSAGE", "call-1", "1 MESSAGE")
+			transport.queueRead(tt.resp)
+			transport.queueRead(newResponse(req, 200, "OK"))
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			resp, err := sess.Exchange(ctx, req)
+			if err != nil {
+				t.Fatalf("Exchange() error = %v", err)
+			}
+			if resp.Header("Call-ID") != "call-1" || resp.StatusCode() != 200 {
+				t.Fatalf("response = %s %q, want call-1 200", resp.StartLine, resp.Header("Call-ID"))
+			}
+		})
+	}
+}
+
+func TestExchangeBeforeRunCanReceiveFromResponseTransport(t *testing.T) {
+	outbound := newStubTransport(5062, 5060)
+	inbound := newStubTransport(5063, 45000)
+	sess, err := Open(Config{}, outbound)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if _, err := sess.AddTransport(inbound); err != nil {
+		t.Fatalf("AddTransport(inbound) error = %v", err)
+	}
+
+	req := newRequest("REGISTER", "call-1", "1 REGISTER")
+	outbound.onWrite = func(_ []byte) {
+		inbound.queueRead(newResponse(req, 200, "OK"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := sess.ExchangeWithTransport(ctx, outbound, req, ExchangeOptions{
+		AcceptResponseTransport: func(transport Transport) bool {
+			return transport == inbound
+		},
+		ResponseTransports: []Transport{inbound},
+	})
+	if err != nil {
+		t.Fatalf("ExchangeWithTransport() error = %v", err)
+	}
+	if resp.StatusCode() != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+	if got := outbound.writeCount(); got != 1 {
+		t.Fatalf("outbound write count = %d, want 1", got)
+	}
+}
+
+func TestExchangeBeforeRunUsesClientTransactionRetransmission(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		cseq   string
+	}{
+		{name: "non invite", method: "MESSAGE", cseq: "1 MESSAGE"},
+		{name: "invite", method: "INVITE", cseq: "1 INVITE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{
+				T1: 10 * time.Millisecond,
+				T2: 20 * time.Millisecond,
+				TB: 200 * time.Millisecond,
+				TF: 200 * time.Millisecond,
+			}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			req := newRequest(tt.method, "call-1", tt.cseq)
+			var writes atomic.Int32
+			transport.onWrite = func(_ []byte) {
+				if writes.Add(1) == 2 {
+					transport.queueRead(newResponse(req, 200, "OK"))
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			resp, err := sess.Exchange(ctx, req)
+			if err != nil {
+				t.Fatalf("Exchange() error = %v", err)
+			}
+			if resp.StatusCode() != 200 {
+				t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+			}
+			if got := transport.writeCount(); got < 2 {
+				t.Fatalf("write count = %d, want retransmission", got)
+			}
+		})
 	}
 }
 
@@ -243,14 +413,27 @@ func TestExchangeAfterRunUsesPendingCorrelation(t *testing.T) {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
+	provisional := make(chan sip.Message, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	resp, err := sess.Exchange(ctx, req)
+	resp, err := sess.ExchangeWithOptions(ctx, req, ExchangeOptions{
+		OnProvisional: func(msg sip.Message) {
+			provisional <- msg
+		},
+	})
 	if err != nil {
 		t.Fatalf("Exchange() error = %v", err)
 	}
 	if resp.StatusCode() != 200 {
 		t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+	select {
+	case msg := <-provisional:
+		if msg.StatusCode() != 100 {
+			t.Fatalf("provisional status = %d, want 100", msg.StatusCode())
+		}
+	default:
+		t.Fatal("provisional response was not delivered")
 	}
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
@@ -365,6 +548,113 @@ func TestRunFansInMultipleTransports(t *testing.T) {
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunRemovesFailedAuxTransportWithoutStoppingSession(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "auxiliary transport read failure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			aux := newReadErrorTransport(15062, 15060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if _, err := sess.AddTransport(aux); err != nil {
+				t.Fatalf("AddTransport(aux) error = %v", err)
+			}
+
+			handledCh := make(chan string, 1)
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					handledCh <- req.Transport.LocalAddr().String()
+					return true, nil
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			auxReq := newRequest("MESSAGE", "aux-pending", "1 MESSAGE")
+			auxErrCh := make(chan error, 1)
+			go func() {
+				_, err := sess.ExchangeWithTransport(context.Background(), aux, auxReq, ExchangeOptions{})
+				auxErrCh <- err
+			}()
+			waitForWriteCount(t, aux.stubTransport, 1)
+
+			cause := errors.New("aux transport lost")
+			aux.fail(cause)
+			waitForTransportInactive(t, sess, aux)
+			if err := <-auxErrCh; !errors.Is(err, cause) {
+				t.Fatalf("aux ExchangeWithTransport() error = %v, want %v", err, cause)
+			}
+
+			primary.queueRead(newInboundRequest("MESSAGE", "primary-after-aux-failure", "1 MESSAGE"))
+			select {
+			case got := <-handledCh:
+				if got != primary.LocalAddr().String() {
+					t.Fatalf("handled transport = %q, want %q", got, primary.LocalAddr().String())
+				}
+			case err := <-errCh:
+				t.Fatalf("Run() returned after aux failure: %v", err)
+			case <-time.After(time.Second):
+				t.Fatal("waiting for primary request after aux failure")
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestRunReturnsPrimaryTransportReadError(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "primary transport read failure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newReadErrorTransport(5062, 5060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			cause := errors.New("primary transport lost")
+			primary.fail(cause)
+			err = <-errCh
+			if !errors.Is(err, cause) {
+				t.Fatalf("Run() error = %v, want %v", err, cause)
+			}
+		})
 	}
 }
 
@@ -515,10 +805,11 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 		msg        sip.Message
 		wantWrites int
 		wantStatus int
+		wantAllow  string
 	}{
 		{name: "ack ignored", msg: newInboundRequest("ACK", "ack-1", "1 ACK"), wantWrites: 0},
 		{name: "unmatched bye gets 481", msg: newInboundRequest("BYE", "bye-1", "1 BYE"), wantWrites: 1, wantStatus: 481},
-		{name: "unhandled request gets 405", msg: newInboundRequest("OPTIONS", "options-1", "1 OPTIONS"), wantWrites: 1, wantStatus: 405},
+		{name: "unhandled request gets 405", msg: newInboundRequest("OPTIONS", "options-1", "1 OPTIONS"), wantWrites: 1, wantStatus: 405, wantAllow: sip.DefaultClientAllow},
 	}
 
 	for _, tt := range tests {
@@ -564,16 +855,30 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 				if got := resp.StatusCode(); got != tt.wantStatus {
 					t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
 				}
+				if got := resp.Header("Allow"); got != tt.wantAllow {
+					t.Fatalf("Allow = %q, want %q", got, tt.wantAllow)
+				}
 			}
 		})
 	}
 }
 
-func TestAddTransportAndReplacePrimaryRequirePreRun(t *testing.T) {
+func TestAddTransportCanJoinRunningSession(t *testing.T) {
 	primary := newStubTransport(5062, 5060)
 	sess, err := Open(Config{}, primary)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
+	}
+
+	handledCh := make(chan string, 1)
+	handler := &requestHandler{
+		handle: func(ctx context.Context, req Request) (bool, error) {
+			handledCh <- req.Transport.LocalAddr().String()
+			return true, nil
+		},
+	}
+	if _, err := sess.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
 	}
 
 	runCtx, runCancel := context.WithCancel(context.Background())
@@ -586,11 +891,35 @@ func TestAddTransportAndReplacePrimaryRequirePreRun(t *testing.T) {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
-	if _, err := sess.AddTransport(newStubTransport(15062, 15060)); err == nil {
-		t.Fatal("AddTransport() error = nil, want non-nil")
+	aux := newStubTransport(15062, 15060)
+	attachment, err := sess.AddTransport(aux)
+	if err != nil {
+		t.Fatalf("AddTransport() error = %v", err)
 	}
 	if err := sess.ReplacePrimary(newStubTransport(25062, 25060)); err == nil {
 		t.Fatal("ReplacePrimary() error = nil, want non-nil")
+	}
+
+	aux.queueRead(newInboundRequest("NOTIFY", "runtime-add", "1 NOTIFY"))
+	select {
+	case got := <-handledCh:
+		if got != aux.LocalAddr().String() {
+			t.Fatalf("handled transport = %q, want %q", got, aux.LocalAddr().String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for handled request")
+	}
+	if err := attachment.Close(); err != nil {
+		t.Fatalf("attachment.Close() error = %v", err)
+	}
+	primary.queueRead(newInboundRequest("MESSAGE", "primary-still-running", "1 MESSAGE"))
+	select {
+	case got := <-handledCh:
+		if got != primary.LocalAddr().String() {
+			t.Fatalf("handled transport = %q, want %q", got, primary.LocalAddr().String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for handled request after closing aux")
 	}
 
 	runCancel()
@@ -602,6 +931,168 @@ func TestAddTransportAndReplacePrimaryRequirePreRun(t *testing.T) {
 	}
 	if err := sess.ReplacePrimary(newStubTransport(45062, 45060)); err == nil {
 		t.Fatal("ReplacePrimary() after Run() error = nil, want non-nil")
+	}
+}
+
+func TestPromotePrimaryUsesNewTransportAndKeepsOldTransportActive(t *testing.T) {
+	old := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, old)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	handledCh := make(chan string, 1)
+	handler := &requestHandler{
+		handle: func(ctx context.Context, req Request) (bool, error) {
+			handledCh <- req.Transport.LocalAddr().String()
+			return true, nil
+		},
+	}
+	if _, err := sess.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	pending := newRequest("MESSAGE", "old-pending", "1 MESSAGE")
+	respCh := make(chan sip.Message, 1)
+	exchangeErrCh := make(chan error, 1)
+	go func() {
+		resp, err := sess.Exchange(context.Background(), pending)
+		if err != nil {
+			exchangeErrCh <- err
+			return
+		}
+		respCh <- resp
+	}()
+	waitForWriteCount(t, old, 1)
+
+	next := newStubTransport(15062, 15060)
+	if _, err := sess.AddTransport(next); err != nil {
+		t.Fatalf("AddTransport() error = %v", err)
+	}
+	oldAttachment, err := sess.PromotePrimary(next)
+	if err != nil {
+		t.Fatalf("PromotePrimary() error = %v", err)
+	}
+	if oldAttachment == nil {
+		t.Fatal("PromotePrimary() old attachment = nil, want non-nil")
+	}
+
+	if err := sess.Send(context.Background(), newRequest("MESSAGE", "new-outbound", "1 MESSAGE")); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if got := old.writeCount(); got != 1 {
+		t.Fatalf("old write count = %d, want 1", got)
+	}
+	if got := next.writeCount(); got != 1 {
+		t.Fatalf("new write count = %d, want 1", got)
+	}
+
+	old.queueRead(newResponse(pending, 200, "OK"))
+	select {
+	case err := <-exchangeErrCh:
+		t.Fatalf("Exchange() error = %v", err)
+	case resp := <-respCh:
+		if resp.StatusCode() != 200 {
+			t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for old pending transaction")
+	}
+
+	old.queueRead(newInboundRequestWithBranch("NOTIFY", "old-inbound", "1 NOTIFY", "z9hG4bK-old-inbound"))
+	select {
+	case got := <-handledCh:
+		if got != old.LocalAddr().String() {
+			t.Fatalf("handled transport = %q, want %q", got, old.LocalAddr().String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for old inbound request")
+	}
+
+	if err := oldAttachment.Close(); err != nil {
+		t.Fatalf("oldAttachment.Close() error = %v", err)
+	}
+	if !sess.isTransportActive(next) {
+		t.Fatal("new transport inactive after old attachment close")
+	}
+	next.queueRead(newInboundRequestWithBranch("NOTIFY", "new-inbound", "1 NOTIFY", "z9hG4bK-new-inbound"))
+	select {
+	case got := <-handledCh:
+		if got != next.LocalAddr().String() {
+			t.Fatalf("handled transport = %q, want %q", got, next.LocalAddr().String())
+		}
+	case err := <-errCh:
+		t.Fatalf("Run() ended before new inbound request: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("waiting for new inbound request")
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWaitTransportsIdleWaitsForClientTransactions(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "old transport is idle after pending exchange completes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			old := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, old)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			req := newRequest("MESSAGE", "wait-idle", "1 MESSAGE")
+			respCh := make(chan error, 1)
+			go func() {
+				_, err := sess.Exchange(context.Background(), req)
+				respCh <- err
+			}()
+			waitForWriteCount(t, old, 1)
+
+			idleCtx, idleCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			if err := sess.WaitTransportsIdle(idleCtx, old); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("WaitTransportsIdle() before response error = %v, want deadline", err)
+			}
+			idleCancel()
+
+			old.queueRead(newResponse(req, 200, "OK"))
+			if err := <-respCh; err != nil {
+				t.Fatalf("Exchange() error = %v", err)
+			}
+			if err := sess.WaitTransportsIdle(context.Background(), old); err != nil {
+				t.Fatalf("WaitTransportsIdle() after response error = %v", err)
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
 
@@ -739,7 +1230,7 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 	if got := len(handled); got != 1 {
 		t.Fatalf("handler count = %d, want 1", got)
 	}
-	if got, want := strings.Join(handler.requests, ","), "INVITE,CANCEL"; got != want {
+	if got, want := handler.requestList(), "INVITE,CANCEL"; got != want {
 		t.Fatalf("handler requests = %q, want %q", got, want)
 	}
 	writes := transport.snapshotWrites()
@@ -777,6 +1268,92 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "invite proceeding for more than 200ms"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{
+				ResponseDecorator: func(resp *sip.Message) {
+					resp.Headers.Set("Server", "test-agent")
+				},
+			}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			handled := make(chan Request, 1)
+			release := make(chan struct{})
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					if req.Message.Method() != "INVITE" {
+						return false, nil
+					}
+					handled <- req
+					<-release
+					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			transport.queueRead(newInboundRequest("INVITE", "call-auto-trying", "1 INVITE"))
+			select {
+			case <-handled:
+			case <-time.After(time.Second):
+				t.Fatal("handler did not receive INVITE")
+			}
+			waitForWriteCount(t, transport, 1)
+
+			writes := transport.snapshotWrites()
+			trying, err := sip.ParseMessage(writes[0])
+			if err != nil {
+				t.Fatalf("ParseMessage(trying) error = %v", err)
+			}
+			if trying.StatusCode() != 100 {
+				t.Fatalf("automatic response status = %d, want 100", trying.StatusCode())
+			}
+			if got := trying.Header("Server"); got != "test-agent" {
+				t.Fatalf("automatic trying Server = %q, want test-agent", got)
+			}
+			if strings.Contains(strings.ToLower(trying.Header("To")), ";tag=") {
+				t.Fatalf("automatic trying To = %q, want no tag", trying.Header("To"))
+			}
+
+			close(release)
+			waitForWriteCount(t, transport, 2)
+			writes = transport.snapshotWrites()
+			final, err := sip.ParseMessage(writes[1])
+			if err != nil {
+				t.Fatalf("ParseMessage(final) error = %v", err)
+			}
+			if final.StatusCode() != 486 {
+				t.Fatalf("final response status = %d, want 486", final.StatusCode())
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
 
@@ -823,7 +1400,7 @@ func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
 	transport.queueRead(options)
 	waitForWriteCount(t, transport, 4)
 
-	if got, want := strings.Join(handler.requests, ","), "INVITE,CANCEL,OPTIONS"; got != want {
+	if got, want := handler.requestList(), "INVITE,CANCEL,OPTIONS"; got != want {
 		t.Fatalf("handler requests = %q, want %q", got, want)
 	}
 	if writes := transport.snapshotWrites(); len(writes) != 4 {
@@ -833,6 +1410,283 @@ func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInviteServerTransactionRetransmitsFinalResponseOverUDP(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "timer g retransmits 3xx-6xx final response"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useTransactionTimers(t, TransactionTimers{
+				T1: 10 * time.Millisecond,
+				T2: 20 * time.Millisecond,
+				T4: 10 * time.Millisecond,
+				TH: 80 * time.Millisecond,
+			})
+
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			handled := make(chan string, 2)
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					handled <- req.Message.Method()
+					if req.Message.Method() != "INVITE" {
+						return false, nil
+					}
+					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			transport.queueRead(newInboundRequest("INVITE", "call-server-final-retry", "1 INVITE"))
+			waitForWriteCount(t, transport, 2)
+
+			if got := <-handled; got != "INVITE" {
+				t.Fatalf("handled request = %q, want INVITE", got)
+			}
+			if got := len(handled); got != 0 {
+				t.Fatalf("extra handled requests = %d, want 0", got)
+			}
+			for _, data := range transport.snapshotWrites() {
+				resp, err := sip.ParseMessage(data)
+				if err != nil {
+					t.Fatalf("ParseMessage() error = %v", err)
+				}
+				if resp.StatusCode() != 486 {
+					t.Fatalf("StatusCode() = %d, want 486", resp.StatusCode())
+				}
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestInviteServerTransactionAbsorbsDuplicateACKDuringTimerI(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "duplicate ack is consumed until timer i fires"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useTransactionTimers(t, TransactionTimers{
+				T1: 100 * time.Millisecond,
+				T2: 100 * time.Millisecond,
+				T4: 50 * time.Millisecond,
+				TH: 200 * time.Millisecond,
+			})
+
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			handled := make(chan string, 4)
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					handled <- req.Message.Method()
+					if req.Message.Method() != "INVITE" {
+						return false, nil
+					}
+					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			transport.queueRead(newInboundRequest("INVITE", "call-server-ack-drain", "1 INVITE"))
+			waitForWriteCount(t, transport, 1)
+
+			for _, method := range []string{"ACK", "ACK", "OPTIONS"} {
+				transport.queueRead(newInboundRequest(method, "call-server-ack-drain", "1 "+method))
+			}
+
+			got := collectHandledMethods(t, handled, "OPTIONS")
+			if want := "INVITE,OPTIONS"; strings.Join(got, ",") != want {
+				t.Fatalf("handled requests = %q, want %q", strings.Join(got, ","), want)
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestInviteServerTransactionMatchesLegacyACK(t *testing.T) {
+	tests := []struct {
+		name   string
+		branch string
+	}{
+		{name: "RFC2543 branch uses response To tag", branch: "legacy-branch"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			handled := make(chan string, 4)
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					handled <- req.Message.Method()
+					if req.Message.Method() != "INVITE" {
+						return false, nil
+					}
+					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			invite := newInboundRequestWithBranch("INVITE", "call-legacy-ack", "1 INVITE", tt.branch)
+			transport.queueRead(invite)
+			waitForWriteCount(t, transport, 1)
+			final, err := sip.ParseMessage(transport.snapshotWrites()[0])
+			if err != nil {
+				t.Fatalf("ParseMessage(final) error = %v", err)
+			}
+
+			ack := newInboundRequestWithBranch("ACK", "call-legacy-ack", "1 ACK", tt.branch)
+			ack.Headers.Set("To", final.Header("To"))
+			transport.queueRead(ack)
+			transport.queueRead(newInboundRequest("OPTIONS", "after-legacy-ack", "1 OPTIONS"))
+
+			got := collectHandledMethods(t, handled, "OPTIONS")
+			if want := "INVITE,OPTIONS"; strings.Join(got, ",") != want {
+				t.Fatalf("handled requests = %q, want %q", strings.Join(got, ","), want)
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestInviteServerTransactionTerminatesAfter2xxOverUDP(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "2xx is not retained by server transaction"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useTransactionTimers(t, TransactionTimers{
+				T1: 100 * time.Millisecond,
+				T2: 100 * time.Millisecond,
+				T4: 50 * time.Millisecond,
+				TJ: 200 * time.Millisecond,
+			})
+
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			handled := make(chan string, 2)
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					handled <- req.Message.Method()
+					if req.Message.Method() != "INVITE" {
+						return false, nil
+					}
+					return true, sess.WriteStatus(ctx, req, 200, "OK")
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			invite := newInboundRequest("INVITE", "call-server-2xx", "1 INVITE")
+			transport.queueRead(invite)
+			waitForWriteCount(t, transport, 1)
+			transport.queueRead(invite)
+			waitForWriteCount(t, transport, 2)
+
+			if got := collectHandledMethods(t, handled, "INVITE"); strings.Join(got, ",") != "INVITE" {
+				t.Fatalf("first handled requests = %q, want INVITE", strings.Join(got, ","))
+			}
+			select {
+			case got := <-handled:
+				if got != "INVITE" {
+					t.Fatalf("second handled request = %q, want INVITE", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for retransmitted invite to reach TU")
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
 
@@ -853,6 +1707,12 @@ func newInboundRequest(method, callID, cseq string) sip.Message {
 	return newRequest(method, callID, cseq)
 }
 
+func newInboundRequestWithBranch(method, callID, cseq, branch string) sip.Message {
+	msg := newInboundRequest(method, callID, cseq)
+	msg.Headers.Set("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch="+branch)
+	return msg
+}
+
 func newResponse(req sip.Message, code int, reason string) sip.Message {
 	resp := sip.NewResponse(code, reason)
 	resp.Headers = sip.ResponseHeaders(req, code)
@@ -870,6 +1730,37 @@ func waitForWriteCount(t *testing.T, transport *stubTransport, want int) {
 			t.Fatalf("waiting for writes: got %d, want at least %d", transport.writeCount(), want)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForTransportInactive(t *testing.T, sess *Session, transport Transport) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if !sess.isTransportActive(transport) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("transport is still active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func collectHandledMethods(t *testing.T, ch <-chan string, until string) []string {
+	t.Helper()
+	deadline := time.After(time.Second)
+	var got []string
+	for {
+		select {
+		case method := <-ch:
+			got = append(got, method)
+			if method == until {
+				return got
+			}
+		case <-deadline:
+			t.Fatalf("waiting for %s: got %q", until, strings.Join(got, ","))
+		}
 	}
 }
 
@@ -902,6 +1793,37 @@ func useTransactionTimers(t *testing.T, timers TransactionTimers) {
 	t.Cleanup(func() {
 		defaultTransactionTimers = previous
 	})
+}
+
+func TestTransactionTimersNormalizeDefaults(t *testing.T) {
+	tests := []struct {
+		name  string
+		input TransactionTimers
+		want  TransactionTimers
+	}{
+		{
+			name:  "empty uses Android IMS defaults",
+			input: TransactionTimers{},
+			want:  TransactionTimers{T1: 500 * time.Millisecond, T2: 4 * time.Second, T4: 5 * time.Second, TB: 32 * time.Second, TD: 32 * time.Second, TF: 32 * time.Second, TH: 32 * time.Second, TJ: 32 * time.Second},
+		},
+		{
+			name:  "derived SIP timers scale from custom T1",
+			input: TransactionTimers{T1: 100 * time.Millisecond, T2: 800 * time.Millisecond, T4: 900 * time.Millisecond, TD: 32 * time.Second},
+			want:  TransactionTimers{T1: 100 * time.Millisecond, T2: 800 * time.Millisecond, T4: 900 * time.Millisecond, TB: 6400 * time.Millisecond, TD: 32 * time.Second, TF: 6400 * time.Millisecond, TH: 6400 * time.Millisecond, TJ: 6400 * time.Millisecond},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.input.Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("Normalized() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
@@ -1037,6 +1959,7 @@ func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
 	if resp.StatusCode() != 404 {
 		t.Fatalf("StatusCode() = %d, want 404", resp.StatusCode())
 	}
+	waitForWriteCount(t, transport, 2)
 	writes := transport.snapshotWrites()
 	if len(writes) < 2 {
 		t.Fatalf("len(writes) = %d, want at least 2", len(writes))
@@ -1137,7 +2060,7 @@ func TestInviteTransactionDefaultTimerDUsesIMSProfile(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	tx := newClientTransaction(sess, transport, newRequest("INVITE", "call-d", "1 INVITE"), ExchangeOptions{})
-	if got := tx.timerD(); got != 130*time.Second {
-		t.Fatalf("timerD() = %v, want 130s", got)
+	if got := tx.timerD(); got != 32*time.Second {
+		t.Fatalf("timerD() = %v, want 32s", got)
 	}
 }

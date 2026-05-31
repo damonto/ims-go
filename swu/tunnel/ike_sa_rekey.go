@@ -1,0 +1,658 @@
+package tunnel
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/damonto/vowifi-go/swu/ike"
+)
+
+var (
+	errIKESAExpired         = errors.New("ike sa lifetime expired")
+	errIKESARekeyInProgress = errors.New("ike sa rekey already in progress")
+)
+
+type ikeSARekeyState struct {
+	ike            *ikeCrypto
+	initiatorSPI   uint64
+	responderSPI   uint64
+	peer           *net.UDPAddr
+	localInitiator bool
+}
+
+type ikeSARekeyResult struct {
+	crypto         *ikeCrypto
+	initiatorSPI   uint64
+	responderSPI   uint64
+	nonceI         []byte
+	nonceR         []byte
+	localInitiator bool
+}
+
+func (s *Session) RekeyIKESA(ctx context.Context) error {
+	state, release, err := s.beginIKESARekey()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	result, err := s.initiatedIKESARekeyResult(ctx, state, s.exchangeInitiatedIKESARekey)
+	if err != nil {
+		return fmt.Errorf("rekeying ike sa: %w", err)
+	}
+	decision := s.finishInitiatedIKESARekey(result)
+	if decision.installLocal {
+		if err := s.installInitiatedIKESARekey(ctx, state, result, decision); err != nil {
+			s.logger.Debug("deleting old ike sa failed", "err", err, "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI)
+		}
+		return nil
+	}
+	if err := s.deleteRedundantIKESA(ctx, state.peer, result); err != nil {
+		s.logger.Debug("deleting redundant ike sa failed", "err", err, "initiator_spi", result.initiatorSPI, "responder_spi", result.responderSPI)
+	}
+	return nil
+}
+
+type ikeSARekeyExchange func(context.Context, ikeSARekeyState, *ikeCrypto) ([]ike.Payload, error)
+
+func (s *Session) initiatedIKESARekeyResult(ctx context.Context, state ikeSARekeyState, exchange ikeSARekeyExchange) (ikeSARekeyResult, error) {
+	dhGroup := initialIKESARekeyDHGroup(state.ike)
+	triedGroups := make(map[uint16]struct{})
+	for {
+		if _, ok := triedGroups[dhGroup]; ok {
+			return ikeSARekeyResult{}, fmt.Errorf("repeated INVALID_KE_PAYLOAD group %d", dhGroup)
+		}
+		triedGroups[dhGroup] = struct{}{}
+		next, err := newIKESARekeyCrypto(dhGroup)
+		if err != nil {
+			return ikeSARekeyResult{}, err
+		}
+		payloads, err := exchange(ctx, state, next)
+		if err != nil {
+			return ikeSARekeyResult{}, err
+		}
+		group, retry, err := invalidKEPayloadGroupFor("parsing create_child_sa response", payloads)
+		if err != nil {
+			return ikeSARekeyResult{}, err
+		}
+		if retry {
+			dhGroup = group
+			continue
+		}
+		return state.ikeSARekeyResult(payloads, next)
+	}
+}
+
+func (s *Session) exchangeInitiatedIKESARekey(ctx context.Context, state ikeSARekeyState, next *ikeCrypto) ([]ike.Payload, error) {
+	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying ike sa")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRequest()
+
+	messageID, err := s.allocateMessageID()
+	if err != nil {
+		return nil, fmt.Errorf("rekeying ike sa: %w", err)
+	}
+	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, messageID)
+	waiter := s.registerInformationalWaiter(key)
+	defer s.unregisterInformationalWaiter(key, waiter)
+
+	wire, err := state.sealIKESARekeyRequest(messageID, next)
+	if err != nil {
+		return nil, fmt.Errorf("rekeying ike sa: %w", err)
+	}
+	return s.exchangeProtected(ctx, protectedExchange{
+		action:          "rekeying ike sa",
+		peer:            state.peer,
+		crypto:          state.ike,
+		senderInitiator: !state.localInitiator,
+		messageID:       messageID,
+		exchangeType:    exchangeTypeCreateChildSA,
+		wire:            wire,
+		waiter:          waiter,
+	})
+}
+
+func (s *Session) installInitiatedIKESARekey(ctx context.Context, state ikeSARekeyState, result ikeSARekeyResult, decision ikeSARekeyDecision) error {
+	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying ike sa")
+	if err != nil {
+		return err
+	}
+	defer releaseRequest()
+
+	deleteMessageID, err := s.allocateMessageID()
+	if err != nil {
+		return fmt.Errorf("rekeying ike sa: %w", err)
+	}
+	deleteWire, err := state.sealOldIKESADelete(deleteMessageID)
+	if err != nil {
+		return fmt.Errorf("rekeying ike sa: sealing old delete: %w", err)
+	}
+	s.installSurvivingIKESARekey(result, decision, state.peer)
+	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, deleteMessageID)
+	waiter := s.registerInformationalWaiter(key)
+	defer s.unregisterInformationalWaiter(key, waiter)
+	payloads, err := s.exchangeInformationalRequest(ctx, state.informationalState(), deleteMessageID, deleteWire, waiter, "deleting old ike sa", true)
+	if err != nil {
+		return err
+	}
+	return validateIKEDeleteResponsePayloads("deleting old ike sa", payloads)
+}
+
+func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
+	if s.isClosed() {
+		return ikeSARekeyState{}, nil, errors.New("rekeying ike sa: session is closed")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ikeSARekeying {
+		return ikeSARekeyState{}, nil, errIKESARekeyInProgress
+	}
+	if s.childSARekeying {
+		return ikeSARekeyState{}, nil, errChildSARekeyInProgress
+	}
+	if s.ikeSAExpiredLocked(time.Now()) {
+		return ikeSARekeyState{}, nil, fmt.Errorf("rekeying ike sa: %w", errIKESAExpired)
+	}
+	state := ikeSARekeyState{
+		ike:            s.ike,
+		initiatorSPI:   s.initiatorSPI,
+		responderSPI:   s.responderSPI,
+		peer:           cloneUDPAddr(s.outerNAT),
+		localInitiator: s.ikeLocalInitiator,
+	}
+	if !state.available() {
+		return ikeSARekeyState{}, nil, errors.New("rekeying ike sa: ike state is unavailable")
+	}
+	s.ikeSARekeying = true
+	s.simultaneousIKESA = simultaneousIKESARekey{}
+	return state, func() {
+		s.mu.Lock()
+		s.ikeSARekeying = false
+		s.simultaneousIKESA = simultaneousIKESARekey{}
+		s.mu.Unlock()
+		s.notifyRekeyStateChanged()
+	}, nil
+}
+
+func (state ikeSARekeyState) available() bool {
+	return state.ike != nil && state.peer != nil && state.initiatorSPI != 0 && state.responderSPI != 0
+}
+
+func (state ikeSARekeyState) informationalState() informationalState {
+	return informationalState{
+		ike:            state.ike,
+		localInitiator: state.localInitiator,
+		retiredIKESA:   true,
+		initiatorSPI:   state.initiatorSPI,
+		responderSPI:   state.responderSPI,
+		peer:           cloneUDPAddr(state.peer),
+	}
+}
+
+func initialIKESARekeyDHGroup(current *ikeCrypto) uint16 {
+	return current.dhGroup
+}
+
+func newIKESARekeyCrypto(dhGroup uint16) (*ikeCrypto, error) {
+	crypto, err := newIKECrypto(dhGroup)
+	if err != nil {
+		return nil, err
+	}
+	initiatorSPI, err := randomUint64()
+	if err != nil {
+		return nil, fmt.Errorf("generating initiator spi: %w", err)
+	}
+	nonceI, err := randomBytes(defaultIKENonceLength)
+	if err != nil {
+		return nil, fmt.Errorf("generating nonce: %w", err)
+	}
+	crypto.SetSPIs(initiatorSPI, 0)
+	crypto.SetNonces(nonceI, nil)
+	return crypto, nil
+}
+
+func (state ikeSARekeyState) sealIKESARekeyRequest(messageID uint32, next *ikeCrypto) ([]byte, error) {
+	header := ike.IKEHeader{
+		InitiatorSPI: state.initiatorSPI,
+		ResponderSPI: state.responderSPI,
+		Version:      ikeVersion20,
+		ExchangeType: exchangeTypeCreateChildSA,
+		Flags:        state.initiatorFlag(),
+		MessageID:    messageID,
+	}
+	wire, err := state.ike.SealIKE(header, ikeSARekeyRequestPayloads(state.ike, next), state.localInitiator)
+	if err != nil {
+		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
+	}
+	return wire, nil
+}
+
+func (state ikeSARekeyState) initiatorFlag() byte {
+	if state.localInitiator {
+		return flagInitiator
+	}
+	return 0
+}
+
+func ikeSARekeyRequestPayloads(current, next *ikeCrypto) []ike.Payload {
+	return []ike.Payload{
+		&ike.SecurityAssociationPayload{Proposals: currentIKESARekeyProposals(current, next.dhGroup, next.initiatorSPI)},
+		&ike.NoncePayload{Data: append([]byte(nil), next.nonceI...)},
+		&ike.KeyExchangePayload{DHGroup: next.dhGroup, Data: next.PublicKey()},
+	}
+}
+
+func currentIKESARekeyProposals(current *ikeCrypto, dhGroup uint16, initiatorSPI uint64) []ike.Proposal {
+	return []ike.Proposal{
+		{
+			Number:     1,
+			ProtocolID: proposalProtocolIKE,
+			SPI:        uint64Bytes(initiatorSPI),
+			Transforms: []ike.Transform{
+				{
+					TransformType: transformTypeENCR,
+					ID:            current.encr,
+					Attributes:    []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, current.encrKeyBits)},
+				},
+				{TransformType: transformTypeINTEG, ID: current.integ},
+				{TransformType: transformTypePRF, ID: current.prf},
+				{TransformType: transformTypeDH, ID: dhGroup},
+			},
+		},
+	}
+}
+
+func (state ikeSARekeyState) ikeSARekeyResult(payloads []ike.Payload, next *ikeCrypto) (ikeSARekeyResult, error) {
+	requestProposals := currentIKESARekeyProposals(state.ike, next.dhGroup, next.initiatorSPI)
+	proposal, responderSPI, nonceR, responderKE, err := negotiatedIKESARekeyFromPayloadsWithRequests(payloads, next.dhGroup, requestProposals)
+	if err != nil {
+		return ikeSARekeyResult{}, err
+	}
+	next.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
+	next.SetSPIs(next.initiatorSPI, responderSPI)
+	next.SetNonces(next.nonceI, nonceR)
+	if err := next.DeriveRekeyedIKEKeys(state.ike, responderKE); err != nil {
+		return ikeSARekeyResult{}, fmt.Errorf("deriving ike keys: %w", err)
+	}
+	return ikeSARekeyResult{
+		crypto:         next,
+		initiatorSPI:   next.initiatorSPI,
+		responderSPI:   responderSPI,
+		nonceI:         append([]byte(nil), next.nonceI...),
+		nonceR:         append([]byte(nil), nonceR...),
+		localInitiator: true,
+	}, nil
+}
+
+type ikeSARekeyDecision struct {
+	installLocal              bool
+	retainPeerCreatedLosingSA bool
+	peerCreatedLosingSA       ikeSARekeyResult
+}
+
+func (s *Session) finishInitiatedIKESARekey(result ikeSARekeyResult) ikeSARekeyDecision {
+	s.mu.RLock()
+	simultaneous := s.simultaneousIKESA
+	s.mu.RUnlock()
+	if !simultaneous.ready {
+		return ikeSARekeyDecision{installLocal: true}
+	}
+	if ikeSARekeyLocalCreatedSAWins(result, simultaneous.peer) {
+		return ikeSARekeyDecision{
+			installLocal:              true,
+			retainPeerCreatedLosingSA: true,
+			peerCreatedLosingSA:       simultaneous.peer,
+		}
+	}
+	return ikeSARekeyDecision{}
+}
+
+func ikeSARekeyLocalCreatedSAWins(local, peer ikeSARekeyResult) bool {
+	return lowestNonceBelongsToPeerExchange(local.nonceI, local.nonceR, peer.nonceI, peer.nonceR)
+}
+
+func negotiatedIKESARekeyFromPayloads(payloads []ike.Payload, dhGroup uint16) (negotiatedIKESA, uint64, []byte, []byte, error) {
+	return negotiatedIKESARekeyFromPayloadsWithRequests(payloads, dhGroup, nil)
+}
+
+func negotiatedIKESARekeyFromPayloadsWithRequests(payloads []ike.Payload, dhGroup uint16, requestProposals []ike.Proposal) (negotiatedIKESA, uint64, []byte, []byte, error) {
+	if err := createChildSAResponseNotifyError(payloads); err != nil {
+		return negotiatedIKESA{}, 0, nil, nil, err
+	}
+	nonce := ike.FindNoncePayload(payloads)
+	sa := ike.FindSAPayload(payloads)
+	ke := ike.FindKEPayload(payloads, dhGroup)
+	if nonce == nil || sa == nil || ke == nil {
+		return negotiatedIKESA{}, 0, nil, nil, errors.New("parsing create_child_sa response: required ike sa rekey payload is missing")
+	}
+	if err := validateNonceData("parsing create_child_sa response", nonce.Data); err != nil {
+		return negotiatedIKESA{}, 0, nil, nil, err
+	}
+	if len(sa.Proposals) != 1 {
+		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: negotiated proposal count %d", len(sa.Proposals))
+	}
+	if err := validateNegotiatedProposalFromRequests("parsing create_child_sa response", sa.Proposals[0], requestProposals); err != nil {
+		return negotiatedIKESA{}, 0, nil, nil, err
+	}
+	if len(sa.Proposals[0].SPI) != 8 {
+		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: invalid responder ike spi length %d", len(sa.Proposals[0].SPI))
+	}
+	proposal, err := negotiatedIKESAFromProposal(sa.Proposals[0], dhGroup)
+	if err != nil {
+		return negotiatedIKESA{}, 0, nil, nil, err
+	}
+	return proposal, binary.BigEndian.Uint64(sa.Proposals[0].SPI), append([]byte(nil), nonce.Data...), append([]byte(nil), ke.Data...), nil
+}
+
+func (state ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([]byte, error) {
+	header := ike.IKEHeader{
+		InitiatorSPI: state.initiatorSPI,
+		ResponderSPI: state.responderSPI,
+		Version:      ikeVersion20,
+		ExchangeType: exchangeTypeInformational,
+		Flags:        state.initiatorFlag(),
+		MessageID:    messageID,
+	}
+	wire, err := state.ike.SealIKE(header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, state.localInitiator)
+	if err != nil {
+		return nil, err
+	}
+	return wire, nil
+}
+
+func (result ikeSARekeyResult) sealSelfDelete(messageID uint32) ([]byte, error) {
+	header := ike.IKEHeader{
+		InitiatorSPI: result.initiatorSPI,
+		ResponderSPI: result.responderSPI,
+		Version:      ikeVersion20,
+		ExchangeType: exchangeTypeInformational,
+		Flags:        result.initiatorFlag(),
+		MessageID:    messageID,
+	}
+	wire, err := result.crypto.SealIKE(header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, result.localInitiator)
+	if err != nil {
+		return nil, err
+	}
+	return wire, nil
+}
+
+func (result ikeSARekeyResult) initiatorFlag() byte {
+	if result.localInitiator {
+		return flagInitiator
+	}
+	return 0
+}
+
+func (s *Session) deleteRedundantIKESA(ctx context.Context, peer *net.UDPAddr, result ikeSARekeyResult) error {
+	wire, err := result.sealSelfDelete(0)
+	if err != nil {
+		return fmt.Errorf("sealing redundant ike delete: %w", err)
+	}
+	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying ike sa")
+	if err != nil {
+		return err
+	}
+	defer releaseRequest()
+	state := s.stageRedundantIKESAForDelete(peer, result)
+	defer s.removeRetiredIKESA(state)
+	key := ikeMessageKeyForSPIs(result.initiatorSPI, result.responderSPI, 0)
+	waiter := s.registerInformationalWaiter(key)
+	defer s.unregisterInformationalWaiter(key, waiter)
+	payloads, err := s.exchangeInformationalRequest(ctx, state, 0, wire, waiter, "deleting redundant ike sa", true)
+	if err != nil {
+		return err
+	}
+	return validateIKEDeleteResponsePayloads("deleting redundant ike sa", payloads)
+}
+
+func (s *Session) installIKESecurityAssociation(result ikeSARekeyResult) {
+	now := time.Now()
+	s.mu.Lock()
+	waiters := s.informWaiters
+	s.retireIKESALocked(now)
+	s.ike = result.crypto
+	s.ikeLocalInitiator = result.localInitiator
+	s.initiatorSPI = result.initiatorSPI
+	s.responderSPI = result.responderSPI
+	s.nextMessageID = 0
+	s.nextPeerMessageID = 0
+	s.lastProtectedRx = now
+	s.lastProtectedTx = now
+	s.ikeSAExpiresAt = childSAExpiry(now, s.cfg.IKESALifetime)
+	s.ikeSARekeyAt = childSARekeyTime(now, s.cfg.IKESALifetime, s.cfg.IKESARekeyMargin)
+	s.ikeSAByteExpiresAt = saByteExpiry(s.cfg.IKESAByteLifetime)
+	s.ikeSAByteRekeyAt = saByteRekeyLimit(s.cfg.IKESAByteLifetime, s.cfg.IKESAByteRekeyMargin)
+	s.ikeSAInboundBytes = 0
+	s.ikeSAOutboundBytes = 0
+	s.pendingIKESA = ikeSARekeyResult{}
+	s.pendingIKESAReady = false
+	s.pruneRetiredIKESAsLocked(now)
+	s.informWaiters = make(map[ikeMessageKey]chan inboundIKE)
+	s.informResponses = make(map[uint32][]byte)
+	s.informResponseReqs = make(map[uint32][]byte)
+	s.mu.Unlock()
+	notifyInformationalWaiters(waiters, errIKESASuperseded)
+}
+
+func (s *Session) installSurvivingIKESARekey(result ikeSARekeyResult, decision ikeSARekeyDecision, peer *net.UDPAddr) {
+	s.installIKESecurityAssociation(result)
+	if decision.retainPeerCreatedLosingSA {
+		s.retainPeerCreatedLosingIKESA(peer, decision.peerCreatedLosingSA)
+	}
+}
+
+func (s *Session) stageIKESecurityAssociation(result ikeSARekeyResult) {
+	s.mu.Lock()
+	s.pendingIKESA = result
+	s.pendingIKESAReady = true
+	s.mu.Unlock()
+}
+
+func (s *Session) noteSimultaneousIKESARekey(result ikeSARekeyResult) {
+	s.mu.Lock()
+	if s.ikeSARekeying {
+		s.simultaneousIKESA = simultaneousIKESARekey{ready: true, peer: result}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) promotePendingIKESecurityAssociation() bool {
+	s.mu.RLock()
+	ready := s.pendingIKESAReady
+	result := s.pendingIKESA
+	s.mu.RUnlock()
+	if !ready {
+		return false
+	}
+	s.installIKESecurityAssociation(result)
+	s.mu.Lock()
+	s.pendingIKESA = ikeSARekeyResult{}
+	s.pendingIKESAReady = false
+	s.ikeSARekeying = false
+	s.simultaneousIKESA = simultaneousIKESARekey{}
+	s.mu.Unlock()
+	return true
+}
+
+func (s *Session) retireIKESALocked(now time.Time) {
+	if s.ike == nil || s.initiatorSPI == 0 || s.responderSPI == 0 {
+		return
+	}
+	expiresAt := now.Add(ikeSADrainWindow)
+	if !s.ikeSAExpiresAt.IsZero() && s.ikeSAExpiresAt.Before(expiresAt) {
+		expiresAt = s.ikeSAExpiresAt
+	}
+	s.retiredIKESAs = append(s.retiredIKESAs, retiredIKESA{
+		ike:               s.ike,
+		localInitiator:    s.ikeLocalInitiator,
+		initiatorSPI:      s.initiatorSPI,
+		responderSPI:      s.responderSPI,
+		peer:              cloneUDPAddr(s.outerNAT),
+		nextPeerMessageID: s.nextPeerMessageID,
+		responses:         cloneIKEMessageResponses(s.informResponses),
+		responseReqs:      cloneIKEMessageResponses(s.informResponseReqs),
+		expiresAt:         expiresAt,
+	})
+}
+
+func (s *Session) stageRedundantIKESAForDelete(peer *net.UDPAddr, result ikeSARekeyResult) informationalState {
+	state := informationalState{
+		ike:            result.crypto,
+		localInitiator: result.localInitiator,
+		retiredIKESA:   true,
+		initiatorSPI:   result.initiatorSPI,
+		responderSPI:   result.responderSPI,
+		peer:           cloneUDPAddr(peer),
+	}
+	s.mu.Lock()
+	s.retiredIKESAs = append(s.retiredIKESAs, retiredIKESA{
+		ike:               result.crypto,
+		localInitiator:    result.localInitiator,
+		initiatorSPI:      result.initiatorSPI,
+		responderSPI:      result.responderSPI,
+		peer:              cloneUDPAddr(peer),
+		nextPeerMessageID: 0,
+		expiresAt:         time.Now().Add(ikeSADrainWindow),
+	})
+	s.mu.Unlock()
+	return state
+}
+
+func (s *Session) retainPeerCreatedLosingIKESA(peer *net.UDPAddr, result ikeSARekeyResult) {
+	s.mu.Lock()
+	s.retiredIKESAs = append(s.retiredIKESAs, retiredIKESA{
+		ike:               result.crypto,
+		localInitiator:    result.localInitiator,
+		initiatorSPI:      result.initiatorSPI,
+		responderSPI:      result.responderSPI,
+		peer:              cloneUDPAddr(peer),
+		nextPeerMessageID: 0,
+		expiresAt:         time.Now().Add(ikeSADrainWindow),
+	})
+	s.mu.Unlock()
+}
+
+func (s *Session) removeRetiredIKESA(state informationalState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.retiredIKESAs {
+		if retiredIKESAMatches(s.retiredIKESAs[i], state.initiatorSPI, state.responderSPI) {
+			s.retiredIKESAs = append(s.retiredIKESAs[:i], s.retiredIKESAs[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *Session) pruneRetiredIKESAsLocked(now time.Time) {
+	kept := s.retiredIKESAs[:0]
+	for _, retired := range s.retiredIKESAs {
+		if retired.expiresAt.IsZero() || now.Before(retired.expiresAt) {
+			kept = append(kept, retired)
+		}
+	}
+	s.retiredIKESAs = kept
+}
+
+func cloneIKEMessageResponses(responses map[uint32][]byte) map[uint32][]byte {
+	if len(responses) == 0 {
+		return nil
+	}
+	cloned := make(map[uint32][]byte, len(responses))
+	for messageID, wire := range responses {
+		cloned[messageID] = append([]byte(nil), wire...)
+	}
+	return cloned
+}
+
+func retiredIKESAMatches(retired retiredIKESA, initiatorSPI, responderSPI uint64) bool {
+	return retired.initiatorSPI == initiatorSPI && retired.responderSPI == responderSPI
+}
+
+func (s *Session) ikeSARekeyLoop() {
+	defer s.wg.Done()
+	var temporaryFailure rekeyTemporaryFailureBackoff
+	for {
+		rekeyAt, expiresAt, ok := s.waitForRekeyDeadline(s.ikeSALifetimeState, temporaryFailure)
+		if !ok {
+			return
+		}
+		now := time.Now()
+		if rekeyHardLifetimeExpired(expiresAt, now) {
+			cause := fmt.Errorf("ike sa rekey: %w", errIKESAExpired)
+			s.tryDeliverError(cause)
+			s.failSecurityAssociations(cause)
+			return
+		}
+		if rekeyAt.IsZero() || now.Before(rekeyAt) {
+			continue
+		}
+		if temporaryFailure.waiting(now) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(s.closeCtx, 30*time.Second)
+		err := s.RekeyIKESA(ctx)
+		cancel()
+		if err == nil {
+			temporaryFailure.reset()
+			continue
+		}
+		if errors.Is(err, errIKESARekeyInProgress) || errors.Is(err, errChildSARekeyInProgress) {
+			temporaryFailure.reset()
+			if !s.waitForRekeyStateChange() {
+				return
+			}
+			continue
+		}
+		if errors.Is(err, errIKETemporaryFailure) {
+			if !temporaryFailure.record(now) {
+				cause := fmt.Errorf("ike sa rekey: %w", err)
+				s.tryDeliverError(cause)
+				s.failSecurityAssociations(cause)
+				return
+			}
+			s.logger.Debug("ike sa rekey deferred after temporary failure", "retry_at", temporaryFailure.retryAt, "err", err)
+			continue
+		}
+		if errors.Is(err, errIKERequestIncomplete) {
+			cause := fmt.Errorf("ike sa rekey: %w", err)
+			s.tryDeliverError(cause)
+			s.failSecurityAssociations(cause)
+			return
+		}
+		if rekeyHardLifetimeExpired(expiresAt, time.Now()) {
+			cause := fmt.Errorf("ike sa rekey: %w", err)
+			s.tryDeliverError(cause)
+			s.failSecurityAssociations(cause)
+			return
+		}
+		retryAt := s.deferIKESARekey(time.Now(), expiresAt)
+		s.logger.Debug("ike sa rekey deferred after error", "retry_at", retryAt, "err", err)
+	}
+}
+
+func (s *Session) ikeSALifetimeState() (time.Time, time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.ike == nil {
+		return time.Time{}, time.Time{}
+	}
+	return s.ikeSARekeyAt, s.ikeSAExpiresAt
+}
+
+func (s *Session) ikeSARekeyActive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ikeSARekeying
+}
+
+func uint64Bytes(value uint64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, value)
+	return buf
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ var (
 	_ encoding.TextUnmarshaler   = (*xmlBody)(nil)
 	_ encoding.BinaryMarshaler   = multipartBody{}
 	_ encoding.BinaryUnmarshaler = (*multipartBody)(nil)
+	_ xml.Unmarshaler            = (*xmlPayload)(nil)
 )
 
 type xmlBody struct {
@@ -34,20 +36,20 @@ func (b xmlBody) MarshalText() ([]byte, error) {
 		return nil, err
 	}
 	payload := xmlPayload{
-		Language:  language,
-		String:    b.Message.Text,
-		ErrorCode: normalizeErrorCode(b.Message.ErrorCode),
+		Language: language,
+		String:   b.Message.Text,
 	}
-	if b.Message.ErrorCode == 0 {
-		payload.ErrorCode = 0
+	if b.Message.ErrorCode != 0 {
+		errorCode := normalizeErrorCode(b.Message.ErrorCode)
+		payload.ErrorCode = &errorCode
 	}
 	if b.Message.Request || b.Message.Notify {
 		payload.AnyExt = &anyExt{}
 		if b.Message.Request {
-			payload.AnyExt.Request = &struct{}{}
+			payload.AnyExt.Request = new(struct{})
 		}
 		if b.Message.Notify {
-			payload.AnyExt.Notify = &struct{}{}
+			payload.AnyExt.Notify = new(struct{})
 		}
 	}
 	body, err := xml.Marshal(payload)
@@ -58,23 +60,19 @@ func (b xmlBody) MarshalText() ([]byte, error) {
 }
 
 func (b *xmlBody) UnmarshalText(text []byte) error {
-	if err := validateXMLShape(text); err != nil {
-		return err
-	}
 	var payload xmlPayload
-	if err := xml.Unmarshal(text, &payload); err != nil {
-		return fmt.Errorf("parsing USSD XML: %w", err)
+	if err := xml.Unmarshal(escapeBareAmpersands(text), &payload); err != nil {
+		return err
 	}
 	if err := validateLanguage(payload.Language); err != nil {
 		return err
 	}
 	msg := USSDMessage{
-		Text:      strings.TrimSpace(payload.String),
-		Language:  strings.TrimSpace(payload.Language),
-		ErrorCode: normalizeErrorCode(payload.ErrorCode),
+		Text:     payload.String,
+		Language: strings.TrimSpace(payload.Language),
 	}
-	if payload.ErrorCode == 0 {
-		msg.ErrorCode = 0
+	if payload.ErrorCode != nil {
+		msg.ErrorCode = normalizeErrorCode(*payload.ErrorCode)
 	}
 	if payload.AnyExt != nil {
 		msg.Request = payload.AnyExt.Request != nil
@@ -84,16 +82,64 @@ func (b *xmlBody) UnmarshalText(text []byte) error {
 	return nil
 }
 
-func validateXMLShape(text []byte) error {
-	decoder := xml.NewDecoder(bytes.NewReader(text))
-	depth := 0
-	rootSeen := false
+func escapeBareAmpersands(text []byte) []byte {
+	if !bytes.Contains(text, []byte("&")) {
+		return text
+	}
+	var out []byte
+	for i := 0; i < len(text); i++ {
+		if text[i] != '&' || isXMLReference(text[i:]) {
+			out = append(out, text[i])
+			continue
+		}
+		out = append(out, "&amp;"...)
+	}
+	return out
+}
+
+func isXMLReference(text []byte) bool {
+	semi := bytes.IndexByte(text, ';')
+	if semi < 0 {
+		return false
+	}
+	name := string(text[1:semi])
+	switch name {
+	case "quot", "lt", "gt", "apos", "amp":
+		return true
+	}
+	if strings.HasPrefix(name, "#x") || strings.HasPrefix(name, "#X") {
+		return len(name) > 2 && allASCIIAlphaNum(name[2:])
+	}
+	if strings.HasPrefix(name, "#") {
+		return len(name) > 1 && allASCIIAlphaNum(name[1:])
+	}
+	return false
+}
+
+func allASCIIAlphaNum(value string) bool {
+	for _, r := range value {
+		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	if start.Name.Local != "ussd-data" {
+		return fmt.Errorf("parsing USSD XML: unexpected root element %q", start.Name.Local)
+	}
+	*p = xmlPayload{XMLName: start.Name}
 	counts := map[string]int{
 		"language":    0,
 		"ussd-string": 0,
 		"error-code":  0,
 		"anyExt":      0,
 	}
+	var field string
+	var fieldText strings.Builder
+	depth := 0
+	inAnyExt := false
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -104,36 +150,86 @@ func validateXMLShape(text []byte) error {
 		}
 		switch elem := token.(type) {
 		case xml.StartElement:
-			if depth == 0 {
-				if rootSeen {
-					return errors.New("parsing USSD XML: multiple root elements")
-				}
-				rootSeen = true
-				if elem.Name.Local != "ussd-data" {
-					return fmt.Errorf("parsing USSD XML: unexpected root element %q", elem.Name.Local)
-				}
-			} else if depth == 1 && elem.Name.Space == "" {
-				if _, ok := counts[elem.Name.Local]; ok {
+			if depth == 0 && ussdElementInDocumentNamespace(elem.Name, start.Name.Space) {
+				switch elem.Name.Local {
+				case "language", "ussd-string", "error-code":
 					counts[elem.Name.Local]++
 					if counts[elem.Name.Local] > 1 {
 						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
 					}
+					field = elem.Name.Local
+					fieldText.Reset()
+				case "anyExt":
+					counts[elem.Name.Local]++
+					if counts[elem.Name.Local] > 1 {
+						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
+					}
+					inAnyExt = true
+					p.AnyExt = &anyExt{}
+				case "UnstructuredSS-Request":
+					p.ensureAnyExt().Request = new(struct{})
+				case "UnstructuredSS-Notify":
+					p.ensureAnyExt().Notify = new(struct{})
+				}
+			} else if inAnyExt && depth == 1 && ussdElementInDocumentNamespace(elem.Name, start.Name.Space) {
+				switch elem.Name.Local {
+				case "UnstructuredSS-Request":
+					p.AnyExt.Request = new(struct{})
+				case "UnstructuredSS-Notify":
+					p.AnyExt.Notify = new(struct{})
 				}
 			}
 			depth++
+		case xml.CharData:
+			if field != "" {
+				fieldText.Write([]byte(elem))
+			}
 		case xml.EndElement:
+			if depth == 0 && elem.Name.Local == start.Name.Local {
+				return nil
+			}
 			depth--
+			if field != "" && depth == 0 {
+				value := fieldText.String()
+				switch field {
+				case "language":
+					p.Language = value
+				case "ussd-string":
+					p.String = value
+				case "error-code":
+					code, err := strconv.Atoi(strings.TrimSpace(value))
+					if err != nil {
+						return fmt.Errorf("parsing USSD XML: error-code: %w", err)
+					}
+					p.ErrorCode = &code
+				}
+				field = ""
+			}
+			if inAnyExt && depth == 0 && ussdElementInDocumentNamespace(elem.Name, start.Name.Space) && elem.Name.Local == "anyExt" {
+				inAnyExt = false
+			}
 		}
 	}
-	if !rootSeen {
-		return errors.New("parsing USSD XML: missing ussd-data root element")
+	return errors.New("parsing USSD XML: missing ussd-data root element")
+}
+
+func ussdElementInDocumentNamespace(name xml.Name, documentNamespace string) bool {
+	return name.Space == "" || name.Space == documentNamespace
+}
+
+func (p *xmlPayload) ensureAnyExt() *anyExt {
+	if p.AnyExt == nil {
+		p.AnyExt = &anyExt{}
 	}
-	return nil
+	return p.AnyExt
 }
 
 func validateLanguage(language string) error {
 	language = strings.TrimSpace(language)
 	if language == "" {
+		return nil
+	}
+	if strings.EqualFold(language, androidUndefinedLang) {
 		return nil
 	}
 	if strings.Contains(language, "-") {
@@ -213,13 +309,59 @@ func (b multipartBody) part(mediaType string) (multipartBodyPart, bool) {
 	return multipartBodyPart{}, false
 }
 
+func (b multipartBody) rejectUnsupportedRequiredParts(action string, supportedTypes ...string) error {
+	for _, part := range b.Parts {
+		partType, err := part.mediaType()
+		if err != nil {
+			if part.isOptional() {
+				continue
+			}
+			return fmt.Errorf("%w: %s: multipart part content type: %w", errUnsupportedMediaType, action, err)
+		}
+		if supportedMediaType(partType, supportedTypes) || part.isOptional() {
+			continue
+		}
+		return fmt.Errorf("%w: %s: unsupported multipart part content type %q", errUnsupportedMediaType, action, partType)
+	}
+	return nil
+}
+
+func supportedMediaType(mediaType string, supportedTypes []string) bool {
+	for _, supported := range supportedTypes {
+		if strings.EqualFold(mediaType, supported) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p multipartBodyPart) isOptional() bool {
+	_, params, err := mime.ParseMediaType(p.Header.Get("Content-Disposition"))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(params[handlingDispositionParam], optionalHandlingDisposition)
+}
+
 func (b multipartBody) ussdPayload() (USSDMessage, bool, error) {
-	part, ok := b.part(xmlContentType)
-	if !ok {
+	var payloadPart multipartBodyPart
+	found := false
+	for _, part := range b.Parts {
+		partType, err := part.mediaType()
+		if err != nil || !strings.EqualFold(partType, xmlContentType) {
+			continue
+		}
+		if found {
+			return USSDMessage{}, false, fmt.Errorf("parsing multipart body: multiple %s parts", xmlContentType)
+		}
+		payloadPart = part
+		found = true
+	}
+	if !found {
 		return USSDMessage{}, false, nil
 	}
 	var payload xmlBody
-	if err := payload.UnmarshalText(part.Body); err != nil {
+	if err := payload.UnmarshalText(payloadPart.Body); err != nil {
 		return USSDMessage{}, false, err
 	}
 	return payload.Message, true, nil

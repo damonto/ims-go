@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/sip"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -33,15 +34,75 @@ func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegmen
 			return nil, err
 		}
 		submissions = append(submissions, SubmissionSegment{
-			Index:       segment.index,
-			Count:       segment.count,
-			CallID:      segment.callID,
-			RPReference: segment.rpRef,
-			TPReference: segment.tpRef,
-			SubmittedAt: time.Now(),
+			Index:         segment.index,
+			Count:         segment.count,
+			Recipient:     segment.recipient,
+			ServiceCenter: segment.smscAddress,
+			CallID:        segment.callID,
+			RPReference:   segment.rpRef,
+			TPReference:   segment.tpRef,
+			SubmittedAt:   time.Now(),
 		})
 	}
 	return submissions, nil
+}
+
+func (s *Service) NotifyMemoryAvailable(ctx context.Context, target string) error {
+	if err := s.beginMOTransfer(); err != nil {
+		return err
+	}
+	defer s.finishMOSend()
+
+	rpRef, err := s.reserveReference()
+	if err != nil {
+		return err
+	}
+	rpdu, err := newRPSMMAMessage(rpRef).MarshalBinary()
+	if err != nil {
+		s.releaseReference(rpRef)
+		return fmt.Errorf("notifying SMS memory available: %w", err)
+	}
+	msg := s.buildMessage(strings.TrimSpace(target), rpdu, "")
+	callID := msg.Header("Call-ID")
+	reportCh, err := s.registerPending(callID, rpRef)
+	if err != nil {
+		s.releaseReference(rpRef)
+		return err
+	}
+	defer s.removePending(callID)
+	defer s.releaseReference(rpRef)
+
+	resp, err := s.sess.Exchange(ctx, msg)
+	if err != nil {
+		return fmt.Errorf("notifying SMS memory available: %w", err)
+	}
+	if status := resp.StatusCode(); status != sipStatusOK && status != sipStatusAccepted {
+		return fmt.Errorf("notifying SMS memory available: unexpected response: %w", sip.NewResponseError(resp))
+	}
+	return s.waitMemoryAvailableReport(ctx, rpRef, reportCh)
+}
+
+func (s *Service) waitMemoryAvailableReport(ctx context.Context, rpRef byte, reportCh <-chan rpMessage) error {
+	timer := time.NewTimer(s.cfg.SubmitReportTimeout)
+	defer timer.Stop()
+	select {
+	case report := <-reportCh:
+		if report.Reference != rpRef {
+			return fmt.Errorf("notifying SMS memory available: unexpected rp reference %d", report.Reference)
+		}
+		switch report.Type {
+		case rpAckNetworkToMS:
+			return nil
+		case rpErrorNetworkToMS:
+			return fmt.Errorf("notifying SMS memory available: %w", &RPError{Cause: report.Cause})
+		default:
+			return fmt.Errorf("notifying SMS memory available: unexpected rp type 0x%02X", report.Type)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("notifying SMS memory available: %w", ctx.Err())
+	case <-timer.C:
+		return errors.New("notifying SMS memory available: submit report not received")
+	}
 }
 
 func (s *Service) reserveReference() (byte, error) {
@@ -120,11 +181,20 @@ func (s *Service) newOutboundSegment(to string, sc serviceCentre, part userDataP
 	if err != nil {
 		return outboundSegment{}, err
 	}
-	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, rpRef, 0, false)
+	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, rpRef)
 }
 
-func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part userDataPart, index, count int, rpRef, tpRef byte, retryCount int, rejectDuplicates bool) (outboundSegment, error) {
-	tpdu, err := newSubmitTPDU(tpRef, to, part, rejectDuplicates).MarshalBinary()
+func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part userDataPart, index, count int, rpRef, tpRef byte) (outboundSegment, error) {
+	tpDestination := to
+	if isSIPURI(to) {
+		tpDestination = dummyMSISDN
+	}
+	tpdu, err := newSubmitTPDU(submitTPDUConfig{
+		Reference:           tpRef,
+		Destination:         tpDestination,
+		Part:                part,
+		RequestStatusReport: s.cfg.RequestStatusReport,
+	}).MarshalBinary()
 	if err != nil {
 		s.releaseReference(rpRef)
 		return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
@@ -135,6 +205,16 @@ func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part userDat
 		return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
 	}
 	msg := s.buildMessage(sc.target, rpdu, "")
+	if isSIPURI(to) {
+		body, contentType, err := buildMultipartSMSPayload(smsXMLInfo{To: to}, rpdu)
+		if err != nil {
+			s.releaseReference(rpRef)
+			return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
+		}
+		msg.Body = body
+		msg.Headers.Set("Content-Type", contentType)
+		msg.Headers.Del("Content-Transfer-Encoding")
+	}
 	callID := msg.Header("Call-ID")
 	reportCh, err := s.registerPending(callID, rpRef)
 	if err != nil {
@@ -142,20 +222,27 @@ func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part userDat
 		return outboundSegment{}, err
 	}
 	return outboundSegment{
-		index:            index,
-		count:            count,
-		to:               to,
-		smscAddress:      sc.address,
-		target:           sc.target,
-		part:             part,
-		rpRef:            rpRef,
-		tpRef:            tpRef,
-		retryCount:       retryCount,
-		rejectDuplicates: rejectDuplicates,
-		callID:           callID,
-		msg:              msg,
-		reportCh:         reportCh,
+		index:       index,
+		count:       count,
+		to:          to,
+		recipient:   tpDestination,
+		smscAddress: sc.address,
+		target:      sc.target,
+		part:        part,
+		rpRef:       rpRef,
+		tpRef:       tpRef,
+		callID:      callID,
+		msg:         msg,
+		reportCh:    reportCh,
 	}, nil
+}
+
+func isSIPURI(uri string) bool {
+	scheme, _, ok := strings.Cut(strings.TrimSpace(uri), ":")
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(scheme, "sip") || strings.EqualFold(scheme, "sips")
 }
 
 func (s *Service) sendSegment(ctx context.Context, segment outboundSegment) error {
@@ -165,7 +252,7 @@ func (s *Service) sendSegment(ctx context.Context, segment outboundSegment) erro
 		s.releaseReference(segment.rpRef)
 		return err
 	}
-	if status := resp.StatusCode(); status != 200 && status != 202 {
+	if status := resp.StatusCode(); status != sipStatusOK && status != sipStatusAccepted {
 		s.removePending(segment.callID)
 		s.releaseReference(segment.rpRef)
 		return fmt.Errorf("sending SMS: unexpected response: %w", sip.NewResponseError(resp))

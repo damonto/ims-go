@@ -1,12 +1,18 @@
 package ussd
 
 import (
+	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
+var errSessionActive = errors.New("ussd session is active")
+
 func (s *Service) storeSession(ussdSession *Session) error {
 	key := ussdSession.sessionKey()
+	if s.hasActiveSession() {
+		return fmt.Errorf("storing USSD session: %w", errSessionActive)
+	}
 	attachment, err := s.sess.RegisterDialog(sip.DialogID{
 		CallID:    ussdSession.callID,
 		LocalTag:  ussdSession.localTag,
@@ -18,11 +24,29 @@ func (s *Service) storeSession(ussdSession *Session) error {
 	ussdSession.dialogAttachment = attachment
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.sessions) > 0 {
+		_ = attachment.Close()
+		ussdSession.dialogAttachment = nil
+		return fmt.Errorf("storing USSD session: %w", errSessionActive)
+	}
 	s.sessions[key] = ussdSession
 	if inviteKey := ussdSession.inviteRequestKey(); inviteKey != "" {
 		s.incomingIndex[inviteKey] = key
 	}
 	return nil
+}
+
+func (s *Service) ensureNoActiveSession(action string) error {
+	if s.hasActiveSession() {
+		return fmt.Errorf("%s: %w", action, errSessionActive)
+	}
+	return nil
+}
+
+func (s *Service) hasActiveSession() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sessions) > 0
 }
 
 func (s *Service) lookupSessionByCallID(callID string) *Session {

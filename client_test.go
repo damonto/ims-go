@@ -20,14 +20,79 @@ import (
 	imssip "github.com/damonto/vowifi-go/ims/sip"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 	"github.com/damonto/vowifi-go/usim"
 	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type stubCard struct{}
 
+type plmnTestCard struct {
+	stubCard
+	mcc string
+	mnc string
+}
+
+func (c plmnTestCard) MCC() string { return c.mcc }
+func (c plmnTestCard) MNC() string { return c.mnc }
+
+type testTunnelBackoffError struct {
+	delay       time.Duration
+	deactivated bool
+	scope       swutunnel.BackoffScope
+}
+
+type testTunnelBackoffDeactivatedError struct{}
+
+func (e testTunnelBackoffError) Error() string {
+	return "ePDG backoff"
+}
+
+func (e testTunnelBackoffError) BackoffDelay() time.Duration {
+	return e.delay
+}
+
+func (e testTunnelBackoffError) BackoffDeactivated() bool {
+	return e.deactivated
+}
+
+func (e testTunnelBackoffError) BackoffPolicy() swutunnel.BackoffPolicy {
+	return swutunnel.BackoffPolicy{
+		Delay:       e.delay,
+		Deactivated: e.deactivated,
+		Scope:       e.scope,
+	}
+}
+
+func (testTunnelBackoffDeactivatedError) Error() string {
+	return "ePDG backoff deactivated"
+}
+
+func (testTunnelBackoffDeactivatedError) BackoffDeactivated() bool {
+	return true
+}
+
+func (testTunnelBackoffDeactivatedError) BackoffPolicy() swutunnel.BackoffPolicy {
+	return swutunnel.BackoffPolicy{
+		Deactivated: true,
+		Scope:       swutunnel.BackoffScopeEPDG,
+	}
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func testRegistrationConfig(transport imssession.Transport) registration.Config {
+	return registration.Config{
+		Logger: testLogger(),
+		DialSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
+			return transport, nil
+		},
+		DialSecureTCP: func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
+			return transport, nil
+		},
+	}
 }
 
 func (stubCard) ICCID() string { return "8986000000000000000" }
@@ -109,6 +174,7 @@ type gatedCancelTransport struct {
 	writes            [][]byte
 	onWrite           func([]byte)
 	readCh            chan []byte
+	readErrCh         chan error
 	cancelReadRelease chan struct{}
 	closed            bool
 }
@@ -118,6 +184,7 @@ func newGatedCancelTransport(localPort, remotePort int) *gatedCancelTransport {
 		local:             &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort},
 		remote:            &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: remotePort},
 		readCh:            make(chan []byte, 16),
+		readErrCh:         make(chan error, 1),
 		cancelReadRelease: make(chan struct{}),
 	}
 }
@@ -146,6 +213,8 @@ func (t *gatedCancelTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr
 	select {
 	case pkt := <-t.readCh:
 		return pkt, t.remote, nil
+	case err := <-t.readErrCh:
+		return nil, nil, err
 	case <-ctx.Done():
 		<-t.cancelReadRelease
 		return nil, nil, ctx.Err()
@@ -166,6 +235,10 @@ func (t *gatedCancelTransport) Close() error {
 
 func (t *gatedCancelTransport) queueRead(msg imssip.Message) {
 	t.readCh <- msg.Bytes()
+}
+
+func (t *gatedCancelTransport) failRead(err error) {
+	t.readErrCh <- err
 }
 
 func (t *gatedCancelTransport) writeCount() int {
@@ -220,6 +293,24 @@ func newUnauthorizedRegisterResponse(req imssip.Message, nonce string) imssip.Me
 	res.Headers.Add("WWW-Authenticate", fmt.Sprintf(`Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="%s",algorithm=AKAv1-MD5`, nonce))
 	res.Headers.Add("Security-Server", fakeIMSSecurityServer)
 	return res
+}
+
+func newRegisteredIMSRuntime(t *testing.T, transport *gatedCancelTransport, registerExpires time.Duration) (*imssession.Session, *registration.Service) {
+	t.Helper()
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	cfg := testRegistrationConfig(transport)
+	cfg.RegisterExpires = registerExpires
+	reg, err := registration.New(cfg, sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return sess, reg
 }
 
 func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
@@ -361,6 +452,14 @@ func TestHandleSMSStatusReportEvent(t *testing.T) {
 	client := newStandaloneClient(t)
 	events := client.SMS().Events()
 	defer events.Close()
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-7",
+		SegmentCount: 2,
+		Segments: []SMSSubmissionSegment{
+			{Index: 0, Recipient: "+15550000006", ServiceCenter: "+15550000000", TPReference: 6},
+			{Index: 1, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 7},
+		},
+	})
 
 	report := imssms.StatusReport{
 		ServiceCenter:    "+15550000000",
@@ -372,6 +471,15 @@ func TestHandleSMSStatusReportEvent(t *testing.T) {
 
 	select {
 	case event := <-events.Reports:
+		if event.SubmissionID != "sms-7" {
+			t.Fatalf("event.SubmissionID = %q, want sms-7", event.SubmissionID)
+		}
+		if event.SegmentIndex != 1 {
+			t.Fatalf("event.SegmentIndex = %d, want 1", event.SegmentIndex)
+		}
+		if event.SegmentCount != 2 {
+			t.Fatalf("event.SegmentCount = %d, want 2", event.SegmentCount)
+		}
 		if event.ServiceCenter != report.ServiceCenter {
 			t.Fatalf("event.ServiceCenter = %q, want %q", event.ServiceCenter, report.ServiceCenter)
 		}
@@ -384,8 +492,99 @@ func TestHandleSMSStatusReportEvent(t *testing.T) {
 		if event.Status != report.Status {
 			t.Fatalf("event.Status = 0x%02X, want 0x%02X", event.Status, report.Status)
 		}
+		if !event.Status.Delivered() {
+			t.Fatalf("event.Status.Delivered() = false, want true")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for SMS status report event")
+	}
+}
+
+func TestSMSStatusReportLinkKeepsRetryingReports(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     SMSReportStatus
+		wantLinked bool
+	}{
+		{
+			name:       "temporary retrying keeps link",
+			status:     SMSReportStatusRetryingSMEBusy,
+			wantLinked: true,
+		},
+		{
+			name:       "final delivered removes link after report",
+			status:     SMSReportStatusReceivedBySME,
+			wantLinked: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStandaloneClient(t)
+			client.trackSMSSubmission(SMSSubmission{
+				ID:           "sms-1",
+				SegmentCount: 1,
+				Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 8}},
+			})
+			report := imssms.StatusReport{
+				ServiceCenter:    "+15550000000",
+				Recipient:        "+15551234567",
+				MessageReference: 8,
+				Status:           tt.status,
+			}
+			client.handleSMSStatusReport(report)
+			_, gotLinked := client.smsReportLink(report)
+			if gotLinked != tt.wantLinked {
+				t.Fatalf("smsReportLink() = %t, want %t", gotLinked, tt.wantLinked)
+			}
+		})
+	}
+}
+
+func TestSMSStatusReportLinkMatchesReferenceCollisionsByRoute(t *testing.T) {
+	client := newStandaloneClient(t)
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-1",
+		SegmentCount: 1,
+		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000001", ServiceCenter: "+15550000000", TPReference: 9}},
+	})
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-2",
+		SegmentCount: 1,
+		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000002", ServiceCenter: "+15550000000", TPReference: 9}},
+	})
+
+	link, ok := client.smsReportLink(imssms.StatusReport{
+		ServiceCenter:    "+15550000000",
+		Recipient:        "+15550000002",
+		MessageReference: 9,
+	})
+	if !ok {
+		t.Fatal("smsReportLink() ok = false")
+	}
+	if link.submissionID != "sms-2" {
+		t.Fatalf("submissionID = %q, want sms-2", link.submissionID)
+	}
+}
+
+func TestSMSStatusReportLinkSkipsAmbiguousReferenceCollision(t *testing.T) {
+	client := newStandaloneClient(t)
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-1",
+		SegmentCount: 1,
+		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000001", ServiceCenter: "+15550000000", TPReference: 9}},
+	})
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-2",
+		SegmentCount: 1,
+		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000002", ServiceCenter: "+15550000000", TPReference: 9}},
+	})
+
+	_, ok := client.smsReportLink(imssms.StatusReport{
+		ServiceCenter:    "+15550000000",
+		MessageReference: 9,
+	})
+	if ok {
+		t.Fatal("smsReportLink() ok = true, want false for ambiguous TP-MR collision")
 	}
 }
 
@@ -645,7 +844,7 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger()}, sess, stubCard{})
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -703,6 +902,57 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	}
 }
 
+func TestCloseActiveRuntimeSkipsDeregister(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch transport.writeCount() {
+		case 1:
+			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			transport.queueRead(newIMSResponse(req, 200, "OK"))
+		default:
+			t.Fatalf("unexpected write during runtime cleanup: %s", req.StartLine)
+		}
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	ussdSvc, err := imsussd.New(imsussd.Config{Logger: testLogger()}, sess, reg)
+	if err != nil {
+		t.Fatalf("ussd.New() error = %v", err)
+	}
+
+	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	active := &activeConn{imsSession: sess, reg: reg, ussd: ussdSvc}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.closeActiveRuntime(ctx, active); err != nil {
+		t.Fatalf("closeActiveRuntime() error = %v", err)
+	}
+	if got := transport.writeCount(); got != 2 {
+		t.Fatalf("write count = %d, want registration only", got)
+	}
+	if reg.State().Registered {
+		t.Fatal("Registered = true, want local registration state cleared")
+	}
+}
+
 func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
@@ -731,7 +981,11 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), RegisterExpires: 2 * time.Second}, sess, stubCard{})
+	reg, err := registration.New(func() registration.Config {
+		cfg := testRegistrationConfig(transport)
+		cfg.RegisterExpires = 2 * time.Second
+		return cfg
+	}(), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -777,6 +1031,690 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	}
 }
 
+func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
+	oldTransport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	oldTransport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch oldTransport.writeCount() {
+		case 1:
+			oldTransport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			oldTransport.queueRead(newIMSResponse(req, 200, "OK"))
+		default:
+			t.Fatalf("unexpected old transport write after failure: %s", req.StartLine)
+		}
+	}
+	oldSess, oldReg := newRegisteredIMSRuntime(t, oldTransport, time.Minute)
+
+	newTransport := newGatedCancelTransport(5072, 5060)
+	newTransport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch newTransport.writeCount() {
+		case 1:
+			newTransport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			newTransport.queueRead(newIMSResponse(req, 200, "OK"))
+		default:
+			newTransport.queueRead(newIMSResponse(req, 200, "OK"))
+		}
+	}
+	newSess, newReg := newRegisteredIMSRuntime(t, newTransport, time.Minute)
+
+	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	defer client.Close()
+	events := client.Events()
+	defer events.Close()
+
+	oldRunCtx, oldCancel := context.WithCancel(context.Background())
+	oldActive := &activeConn{runCtx: oldRunCtx, cancel: oldCancel, imsSession: oldSess, reg: oldReg}
+	newRunCtx, newCancel := context.WithCancel(context.Background())
+	newActive := &activeConn{runCtx: newRunCtx, cancel: newCancel, imsSession: newSess, reg: newReg}
+	defer newCancel()
+
+	reconnected := make(chan struct{})
+	client.reconnectFn = func(error) (*activeConn, error) {
+		client.mu.Lock()
+		client.active = newActive
+		client.mu.Unlock()
+		close(reconnected)
+		return newActive, nil
+	}
+	client.mu.Lock()
+	client.active = oldActive
+	client.mu.Unlock()
+
+	done, ok := client.reserveCloseTask()
+	if !ok {
+		t.Fatal("reserveCloseTask() = false, want true")
+	}
+	runDone := client.startIMSRunner(oldActive, done)
+	if err := oldSess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("old WaitStarted() error = %v", err)
+	}
+
+	readErr := errors.New("primary transport read failed")
+	oldTransport.failRead(readErr)
+
+	select {
+	case err := <-events.Errors:
+		if !strings.Contains(err.Error(), "running IMS loop") || !errors.Is(err, readErr) {
+			t.Fatalf("error event = %v, want IMS loop wrapping read failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for IMS loop error event")
+	}
+	select {
+	case state := <-events.State:
+		if state != StateFailed {
+			t.Fatalf("state event = %s, want %s", state, StateFailed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for failed state event")
+	}
+	select {
+	case <-reconnected:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for reconnect")
+	}
+	if err := newSess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("new WaitStarted() error = %v", err)
+	}
+	client.mu.Lock()
+	active := client.active
+	client.mu.Unlock()
+	if active != newActive {
+		t.Fatal("client active connection was not replaced after reconnect")
+	}
+	if oldReg.State().Registered {
+		t.Fatal("old registration state still registered after runtime abort")
+	}
+
+	newCancel()
+	close(newTransport.cancelReadRelease)
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("IMS runner did not stop after replacement context cancellation")
+	}
+}
+
+func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch transport.writeCount() {
+		case 1:
+			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			transport.queueRead(newIMSResponse(req, 200, "OK"))
+		case 3:
+			resp := newIMSResponse(req, 500, "Server Internal Error")
+			resp.Headers.Add("Retry-After", "45")
+			transport.queueRead(resp)
+		default:
+			t.Fatalf("unexpected transport write: %s", req.StartLine)
+		}
+	}
+	sess, reg := newRegisteredIMSRuntime(t, transport, 2*time.Second)
+
+	client := newReadyClient(t, Config{
+		Terminal:       TerminalInfo{ID: testIMEI},
+		ReconnectDelay: 3 * time.Second,
+		IMS: IMSConfig{
+			RegistrationRetryBase: 20 * time.Second,
+			RegistrationRetryMax:  80 * time.Second,
+		},
+	})
+	defer client.Close()
+	delayCh := make(chan time.Duration, 1)
+	client.reconnectFn = func(cause error) (*activeConn, error) {
+		delay := client.reconnectDelay(
+			cause,
+			newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+			newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+		)
+		delayCh <- delay
+		return nil, context.Canceled
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	active := &activeConn{runCtx: runCtx, cancel: cancelRun, imsSession: sess, reg: reg}
+	client.mu.Lock()
+	client.active = active
+	client.mu.Unlock()
+
+	done, ok := client.reserveCloseTask()
+	if !ok {
+		t.Fatal("reserveCloseTask() = false, want true")
+	}
+	runDone := client.startIMSRunner(active, done)
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	select {
+	case delay := <-delayCh:
+		if delay != 45*time.Second {
+			t.Fatalf("reconnect delay = %v, want Retry-After", delay)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waiting for reconnect delay")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("IMS runner did not stop after reconnect cancellation")
+	}
+}
+
+func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	nonce := testNonce()
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		switch transport.writeCount() {
+		case 1:
+			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+		case 2:
+			transport.queueRead(newIMSResponse(req, 200, "OK"))
+		default:
+			t.Fatalf("unexpected transport write after failure: %s", req.StartLine)
+		}
+	}
+	sess, reg := newRegisteredIMSRuntime(t, transport, time.Minute)
+
+	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	reconnectStarted := make(chan struct{})
+	client.reconnectFn = func(error) (*activeConn, error) {
+		close(reconnectStarted)
+		<-client.lifecycleCtx.Done()
+		return nil, client.lifecycleCtx.Err()
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	active := &activeConn{runCtx: runCtx, cancel: cancelRun, imsSession: sess, reg: reg}
+	client.mu.Lock()
+	client.active = active
+	client.mu.Unlock()
+
+	done, ok := client.reserveCloseTask()
+	if !ok {
+		t.Fatal("reserveCloseTask() = false, want true")
+	}
+	client.startIMSRunner(active, done)
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	transport.failRead(errors.New("primary transport read failed"))
+	select {
+	case <-reconnectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("waiting for reconnect to start")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.CloseContext(closeCtx); err != nil {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+}
+
+func TestReconnectBackoff(t *testing.T) {
+	tests := []struct {
+		name  string
+		first time.Duration
+		max   time.Duration
+		steps int
+		want  []time.Duration
+	}{
+		{
+			name:  "doubles until capped",
+			first: 3 * time.Second,
+			max:   20 * time.Second,
+			steps: 5,
+			want:  []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second, 20 * time.Second, 20 * time.Second},
+		},
+		{
+			name:  "zero delay stays immediate",
+			first: 0,
+			max:   time.Minute,
+			steps: 3,
+			want:  []time.Duration{0, 0, 0},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backoff := newReconnectBackoff(tt.first, tt.max)
+			got := make([]time.Duration, 0, tt.steps)
+			for range tt.steps {
+				got = append(got, backoff.Next())
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("backoff sequence = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReconnectDelayHonorsIMSRegistrationRetryPolicy(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		resp := newIMSResponse(req, 500, "Server Internal Error")
+		resp.Headers.Add("Retry-After", "45")
+		transport.queueRead(resp)
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	registerErr := reg.Register(context.Background())
+	if registerErr == nil {
+		t.Fatal("Register() error = nil, want Retry-After registration error")
+	}
+	if retryAfter, ok := registration.InitialRegistrationRetryAfter(registerErr); !ok || retryAfter != 45*time.Second {
+		t.Fatalf("InitialRegistrationRetryAfter() = %v, %v; want 45s, true", retryAfter, ok)
+	}
+
+	client := newReadyClient(t, Config{
+		Terminal:       TerminalInfo{ID: testIMEI},
+		ReconnectDelay: 3 * time.Second,
+		IMS: IMSConfig{
+			RegistrationRetryBase: 20 * time.Second,
+			RegistrationRetryMax:  80 * time.Second,
+		},
+	})
+	defer client.Close()
+	got := client.reconnectDelay(
+		fmt.Errorf("running IMS loop: %w", registerErr),
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 45*time.Second {
+		t.Fatalf("reconnectDelay() = %v, want Retry-After", got)
+	}
+
+	registrationErr := fmt.Errorf("running IMS loop: %w", registrationTestInitialRequiredError(t))
+	registrationBackoff := newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax)
+	got = client.reconnectDelay(
+		registrationErr,
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		registrationBackoff,
+	)
+	if got != 20*time.Second {
+		t.Fatalf("first registration reconnect delay = %v, want IMS retry base", got)
+	}
+	got = client.reconnectDelay(
+		registrationErr,
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		registrationBackoff,
+	)
+	if got != 40*time.Second {
+		t.Fatalf("second registration reconnect delay = %v, want IMS retry backoff", got)
+	}
+
+	genericBackoff := newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay)
+	got = client.reconnectDelay(
+		errors.New("tcp transport closed"),
+		genericBackoff,
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 3*time.Second {
+		t.Fatalf("generic reconnect delay = %v, want generic base", got)
+	}
+	got = client.reconnectDelay(
+		errors.New("tcp transport closed"),
+		genericBackoff,
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 6*time.Second {
+		t.Fatalf("second generic reconnect delay = %v, want generic backoff", got)
+	}
+
+	tunnelBackoffErr := fmt.Errorf("connecting swu: %w", testTunnelBackoffError{delay: 2 * time.Minute})
+	if delay, ok := swutunnel.BackoffDelay(tunnelBackoffErr); !ok || delay != 2*time.Minute {
+		t.Fatalf("swutunnel.BackoffDelay() = %v, %v; want 2m, true", delay, ok)
+	}
+	got = client.reconnectDelay(
+		tunnelBackoffErr,
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 2*time.Minute {
+		t.Fatalf("tunnel backoff reconnect delay = %v, want ePDG backoff timer", got)
+	}
+
+	reactivationErr := fmt.Errorf("running IMS loop: %w", swutunnel.ErrReactivationRequested)
+	if !swutunnel.ReactivationRequested(reactivationErr) {
+		t.Fatalf("swutunnel.ReactivationRequested() = false for %v", reactivationErr)
+	}
+	got = client.reconnectDelay(
+		reactivationErr,
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 0 {
+		t.Fatalf("reactivation reconnect delay = %v, want immediate retry", got)
+	}
+
+	pcscfReselectionErr := fmt.Errorf("running IMS loop: %w", swutunnel.ErrPCSCFReselectionRequested)
+	if !swutunnel.PCSCFReselectionRequested(pcscfReselectionErr) {
+		t.Fatalf("swutunnel.PCSCFReselectionRequested() = false for %v", pcscfReselectionErr)
+	}
+	got = client.reconnectDelay(
+		pcscfReselectionErr,
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 0 {
+		t.Fatalf("p-cscf reselection reconnect delay = %v, want immediate retry", got)
+	}
+}
+
+func TestReconnectDelayHonorsIMSSubscribeRetryAfter(t *testing.T) {
+	transport := newGatedCancelTransport(5062, 5060)
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		if req.Method() != "SUBSCRIBE" {
+			t.Fatalf("method = %q, want SUBSCRIBE", req.Method())
+		}
+		resp := newIMSResponse(req, 503, "Service Unavailable")
+		resp.Headers.Add("Retry-After", "75")
+		transport.queueRead(resp)
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	subscribeErr := reg.Subscribe(context.Background())
+	if subscribeErr == nil {
+		t.Fatal("Subscribe() error = nil, want Retry-After subscription error")
+	}
+	if retryAfter, ok := registration.RetryAfterDelay(subscribeErr); !ok || retryAfter != 75*time.Second {
+		t.Fatalf("RetryAfterDelay() = %v, %v; want 75s, true", retryAfter, ok)
+	}
+
+	client := newReadyClient(t, Config{
+		Terminal:       TerminalInfo{ID: testIMEI},
+		ReconnectDelay: 3 * time.Second,
+		IMS: IMSConfig{
+			RegistrationRetryBase: 20 * time.Second,
+			RegistrationRetryMax:  80 * time.Second,
+		},
+	})
+	defer client.Close()
+	got := client.reconnectDelay(
+		fmt.Errorf("starting IMS runtime: %w", subscribeErr),
+		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
+		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
+	)
+	if got != 75*time.Second {
+		t.Fatalf("reconnectDelay() = %v, want Subscribe Retry-After", got)
+	}
+}
+
+func TestReconnectStopsOnAccessRejectedCause(t *testing.T) {
+	client := newReadyClient(t, Config{
+		Terminal:       TerminalInfo{ID: testIMEI},
+		ReconnectDelay: time.Hour,
+	})
+	defer client.Close()
+
+	cause := fmt.Errorf("connecting swu: %w", swutunnel.ErrAccessRejected)
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.reconnect(cause)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, swutunnel.ErrAccessRejected) {
+			t.Fatalf("reconnect() error = %v, want access rejected", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("reconnect() slept or retried after access rejection")
+	}
+}
+
+func TestSWUBackoffGateScopesPolicy(t *testing.T) {
+	now := time.Unix(100, 0)
+	tests := []struct {
+		name      string
+		recordErr error
+		cfg       Config
+		card      Card
+		wantDelay time.Duration
+		wantBlock bool
+	}{
+		{
+			name:      "network failure blocks same epdg",
+			recordErr: testTunnelBackoffError{delay: 2 * time.Minute, scope: swutunnel.BackoffScopeEPDG},
+			cfg:       Config{EPDG: "epdg.example"},
+			card:      stubCard{},
+			wantDelay: 2 * time.Minute,
+		},
+		{
+			name:      "network failure does not block different epdg",
+			recordErr: testTunnelBackoffError{delay: 2 * time.Minute, scope: swutunnel.BackoffScopeEPDG},
+			cfg:       Config{EPDG: "other.example"},
+			card:      stubCard{},
+		},
+		{
+			name:      "no apn subscription blocks same plmn apn across epdgs",
+			recordErr: testTunnelBackoffError{delay: 3 * time.Minute, scope: swutunnel.BackoffScopePLMNAPN},
+			cfg:       Config{EPDG: "other.example"},
+			card:      stubCard{},
+			wantDelay: 3 * time.Minute,
+		},
+		{
+			name:      "no apn subscription does not block different plmn",
+			recordErr: testTunnelBackoffError{delay: 3 * time.Minute, scope: swutunnel.BackoffScopePLMNAPN},
+			cfg:       Config{EPDG: "epdg.example"},
+			card:      plmnTestCard{mcc: "002", mnc: "001"},
+		},
+		{
+			name:      "no apn subscription does not block different apn",
+			recordErr: testTunnelBackoffError{delay: 3 * time.Minute, scope: swutunnel.BackoffScopePLMNAPN},
+			cfg:       Config{EPDG: "other.example", Tunnel: swutunnel.Config{APN: "internet"}},
+			card:      stubCard{},
+		},
+		{
+			name:      "deactivated blocks terminally",
+			recordErr: testTunnelBackoffError{deactivated: true, scope: swutunnel.BackoffScopeEPDG},
+			cfg:       Config{EPDG: "epdg.example"},
+			card:      stubCard{},
+			wantBlock: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newReadyClient(t, Config{
+				EPDG:     "epdg.example",
+				Terminal: TerminalInfo{ID: testIMEI},
+			})
+			defer client.Close()
+			client.recordSWUBackoff(tt.recordErr, now)
+			client.cfg.EPDG = tt.cfg.EPDG
+			client.cfg.Tunnel.APN = tt.cfg.Tunnel.APN
+			client.card = tt.card
+
+			gotDelay, gotBlock, gotActive := client.swuBackoffDelay(now)
+			if gotActive != (tt.wantDelay > 0 || tt.wantBlock) {
+				t.Fatalf("swuBackoffDelay() active = %t, want %t", gotActive, tt.wantDelay > 0 || tt.wantBlock)
+			}
+			if gotBlock != tt.wantBlock {
+				t.Fatalf("swuBackoffDelay() deactivated = %t, want %t", gotBlock, tt.wantBlock)
+			}
+			if gotDelay != tt.wantDelay {
+				t.Fatalf("swuBackoffDelay() delay = %v, want %v", gotDelay, tt.wantDelay)
+			}
+		})
+	}
+}
+
+func TestSWUBackoffGateExpiresAndClears(t *testing.T) {
+	client := newReadyClient(t, Config{
+		EPDG:     "epdg.example",
+		Terminal: TerminalInfo{ID: testIMEI},
+	})
+	defer client.Close()
+
+	now := time.Unix(100, 0)
+	client.recordSWUBackoff(testTunnelBackoffError{delay: time.Minute, scope: swutunnel.BackoffScopeEPDG}, now)
+
+	if delay, deactivated, active := client.swuBackoffDelay(now.Add(30 * time.Second)); !active || deactivated || delay != 30*time.Second {
+		t.Fatalf("swuBackoffDelay(before expiry) = %v, %t, %t; want 30s, false, true", delay, deactivated, active)
+	}
+	if delay, deactivated, active := client.swuBackoffDelay(now.Add(time.Minute)); active || deactivated || delay != 0 {
+		t.Fatalf("swuBackoffDelay(after expiry) = %v, %t, %t; want inactive", delay, deactivated, active)
+	}
+
+	client.recordSWUBackoff(testTunnelBackoffError{delay: time.Minute, scope: swutunnel.BackoffScopeEPDG}, now)
+	client.clearCurrentSWUBackoff()
+	if delay, deactivated, active := client.swuBackoffDelay(now); active || deactivated || delay != 0 {
+		t.Fatalf("swuBackoffDelay(after clear) = %v, %t, %t; want inactive", delay, deactivated, active)
+	}
+}
+
+func TestTerminalReconnectError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "access rejected", err: fmt.Errorf("connecting swu: %w", swutunnel.ErrAccessRejected), want: true},
+		{name: "backoff deactivated", err: fmt.Errorf("connecting swu: %w", testTunnelBackoffDeactivatedError{}), want: true},
+		{name: "scoped backoff deactivated", err: fmt.Errorf("preparing connect: %w", errSWUBackoffDeactivated), want: true},
+		{name: "transport closed", err: errors.New("tcp transport closed")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := terminalReconnectError(tt.err); got != tt.want {
+				t.Fatalf("terminalReconnectError() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPCSCFCandidateIPs(t *testing.T) {
+	tests := []struct {
+		name string
+		info swutunnel.Info
+		want []net.IP
+	}{
+		{
+			name: "ordered list deduplicated",
+			info: swutunnel.Info{
+				PCSCFIP: net.IPv4(10, 0, 0, 1),
+				PCSCFIPs: []net.IP{
+					net.IPv4(10, 0, 0, 1),
+					net.IPv4(10, 0, 0, 2),
+					net.IPv4(10, 0, 0, 1),
+				},
+			},
+			want: []net.IP{net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)},
+		},
+		{
+			name: "legacy preferred address fallback",
+			info: swutunnel.Info{PCSCFIP: net.IPv4(10, 0, 0, 9)},
+			want: []net.IP{net.IPv4(10, 0, 0, 9)},
+		},
+		{
+			name: "empty",
+			info: swutunnel.Info{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pcscfCandidateIPs(tt.info)
+			if len(got) != len(tt.want) {
+				t.Fatalf("candidate count = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if !got[i].Equal(tt.want[i]) {
+					t.Fatalf("candidate[%d] = %s, want %s", i, got[i], tt.want[i])
+				}
+			}
+			if len(got) != 0 && &got[0][0] == &tt.want[0][0] {
+				t.Fatal("candidate IP aliases input")
+			}
+		})
+	}
+}
+
+func registrationTestInitialRequiredError(t *testing.T) error {
+	t.Helper()
+
+	transport := newGatedCancelTransport(5062, 5060)
+	transport.onWrite = func(data []byte) {
+		req, err := imssip.ParseMessage(data)
+		if err != nil {
+			t.Errorf("ParseMessage() error = %v", err)
+			return
+		}
+		transport.queueRead(newIMSResponse(req, 500, "Server Internal Error"))
+	}
+
+	sess, err := imssession.Open(imssession.Config{}, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	err = reg.Register(context.Background())
+	if err == nil {
+		t.Fatal("Register() error = nil, want initial registration required")
+	}
+	if !registration.InitialRegistrationRequired(err) {
+		t.Fatalf("InitialRegistrationRequired() = false for %v", err)
+	}
+	return err
+}
+
 func TestRunActiveIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
@@ -807,7 +1745,11 @@ func TestRunActiveIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) 
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), RegisterExpires: 2 * time.Second}, sess, stubCard{})
+	reg, err := registration.New(func() registration.Config {
+		cfg := testRegistrationConfig(transport)
+		cfg.RegisterExpires = 2 * time.Second
+		return cfg
+	}(), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -869,7 +1811,7 @@ func TestRunActiveIMSReturnsRegistrationEventTermination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger()}, sess, stubCard{})
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}

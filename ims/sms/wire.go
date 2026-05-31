@@ -20,20 +20,80 @@ const (
 	rpAckNetworkToMS   = 0x03
 	rpErrorMSToNetwork = 0x04
 	rpErrorNetworkToMS = 0x05
+	rpSMMAMSToNetwork  = 0x06
 )
 
 const (
+	rpCauseUnassignedNumber                     = 1
+	rpCauseOperatorDeterminedBarring            = 8
+	rpCauseCallBarred                           = 10
+	rpCauseShortMessageTransferRejected         = 21
+	rpCauseMemoryCapacityExceeded               = 22
+	rpCauseDestinationOutOfOrder                = 27
+	rpCauseUnidentifiedSubscriber               = 28
+	rpCauseFacilityRejected                     = 29
+	rpCauseUnknownSubscriber                    = 30
+	rpCauseNetworkOutOfOrder                    = 38
+	rpCauseTemporaryFailure                     = 41
+	rpCauseCongestion                           = 42
+	rpCauseResourcesUnavailable                 = 47
+	rpCauseRequestedFacilityNotSubscribed       = 50
+	rpCauseRequestedFacilityNotImplemented      = 69
 	rpCauseInvalidShortMessageTransferReference = 81
+	rpCauseSemanticallyIncorrectMessage         = 95
 	rpCauseInvalidMandatoryInformation          = 96
 	rpCauseMessageTypeNotImplemented            = 97
 	rpCauseMessageNotCompatibleWithState        = 98
+	rpCauseInformationElementNotImplemented     = 99
 	rpCauseProtocolErrorUnspecified             = 111
+	rpCauseInterworkingUnspecified              = 127
 )
 
 const (
-	tpduMTIDeliver      = 0x00
-	tpduMTIStatusReport = 0x02
-	tpduMTIReserved     = 0x03
+	tpduMTIDeliverReport = 0x00
+	tpduMTIDeliver       = 0x00
+	tpduMTISubmit        = 0x01
+	tpduMTIStatusReport  = 0x02
+	tpduMTIReserved      = 0x03
+	tpduMTIMask          = 0x03
+)
+
+const (
+	tpduRejectDuplicatesFlag      = 0x04
+	tpduNoMoreMessagesFlag        = 0x04
+	tpduLoopPreventionFlag        = 0x08
+	tpduStatusReportRequestFlag   = 0x20
+	tpduStatusReportFromCommand   = 0x20
+	tpduUserDataHeaderFlag        = 0x40
+	tpduParameterIndicatorNone    = 0x00
+	tpduParameterIndicatorPID     = 0x01
+	tpduParameterIndicatorDCS     = 0x02
+	tpduParameterIndicatorUDL     = 0x04
+	tpduParameterIndicatorExtFlag = 0x80
+	tpduTimestampOctets           = 7
+	tpduStatusReportTimeStatusLen = tpduTimestampOctets*2 + 1
+)
+
+const (
+	tpPIDUSIMDataDownload = 0x7F
+	tpDCSGSM7             = 0x00
+	tpDCSUCS2             = 0x08
+)
+
+const (
+	dcsGeneralCodingGroupMask = 0xC0
+	dcsGeneralCodingGroup     = 0x00
+	dcsMessageClassGroupMask  = 0xF0
+	dcsMessageClassGroup      = 0xF0
+	dcsCompressedFlag         = 0x20
+	dcsClassFlag              = 0x10
+	dcsAlphabetShift          = 2
+	dcsAlphabetMask           = 0x03
+	dcsClassMask              = 0x03
+	dcsMessageClassSIM        = 2
+	dcsAlphabetGSM7           = 0x00
+	dcsAlphabet8Bit           = 0x01
+	dcsAlphabetUCS2           = 0x02
 )
 
 const (
@@ -43,7 +103,49 @@ const (
 	concatUCS2Units = 67
 	concatIEI8Bit   = 0x00
 	concatIEI16Bit  = 0x08
+	concatUDH8Len   = 0x05
+	concatIEDL8Bit  = 0x03
 )
+
+const (
+	tpTOAUnknownISDN       = 0x81
+	tpTOAInternationalISDN = 0x91
+	tpTONShift             = 4
+	tpTONMask              = 0x07
+	tpTONInternational     = 0x01
+	tpTONAlphanumeric      = 0x05
+)
+
+const (
+	semiOctetMask       = 0x0F
+	semiOctetFill       = 0x0F
+	semiOctetStar       = 0x0A
+	semiOctetHash       = 0x0B
+	semiOctetA          = 0x0C
+	semiOctetB          = 0x0D
+	semiOctetC          = 0x0E
+	decimalDigitMax     = 9
+	timestampPivotYear  = 70
+	timestampCentury20  = 1900
+	timestampCentury21  = 2000
+	timeZoneSignFlag    = 0x08
+	timeZoneValueMask   = 0xF7
+	timeZoneQuarterSecs = 15 * 60
+)
+
+const (
+	gsm7EscapeSeptet = 0x1B
+	gsm7SeptetBits   = 7
+	gsm7SeptetMask   = 0x7F
+	octetBits        = 8
+)
+
+const (
+	ucs2HighSurrogateMin = 0xD800
+	ucs2HighSurrogateMax = 0xDBFF
+)
+
+var tpduZeroTimestamp [tpduTimestampOctets]byte
 
 type Incoming struct {
 	CallID        string
@@ -51,6 +153,9 @@ type Incoming struct {
 	To            string
 	ServiceCenter string
 	Text          string
+	RawTPDU       []byte
+	RawTPDUs      [][]byte
+	ReservedMTI   bool
 }
 
 type IncomingSMS = Incoming
@@ -59,7 +164,7 @@ type StatusReport struct {
 	ServiceCenter         string
 	Recipient             string
 	MessageReference      byte
-	Status                byte
+	Status                ReportStatus
 	MoreMessagesWaiting   bool
 	LoopPrevention        bool
 	FromCommand           bool
@@ -99,51 +204,51 @@ func (e *RPError) Error() string {
 
 func rpCauseText(cause byte) string {
 	switch cause {
-	case 1:
+	case rpCauseUnassignedNumber:
 		return "unassigned number"
-	case 8:
+	case rpCauseOperatorDeterminedBarring:
 		return "operator determined barring"
-	case 10:
+	case rpCauseCallBarred:
 		return "call barred"
-	case 21:
+	case rpCauseShortMessageTransferRejected:
 		return "short message transfer rejected"
-	case 22:
+	case rpCauseMemoryCapacityExceeded:
 		return "memory capacity exceeded"
-	case 27:
+	case rpCauseDestinationOutOfOrder:
 		return "destination out of order"
-	case 28:
+	case rpCauseUnidentifiedSubscriber:
 		return "unidentified subscriber"
-	case 29:
+	case rpCauseFacilityRejected:
 		return "facility rejected"
-	case 30:
+	case rpCauseUnknownSubscriber:
 		return "unknown subscriber"
-	case 38:
+	case rpCauseNetworkOutOfOrder:
 		return "network out of order"
-	case 41:
+	case rpCauseTemporaryFailure:
 		return "temporary failure"
-	case 42:
+	case rpCauseCongestion:
 		return "congestion"
-	case 47:
+	case rpCauseResourcesUnavailable:
 		return "resources unavailable"
-	case 50:
+	case rpCauseRequestedFacilityNotSubscribed:
 		return "requested facility not subscribed"
-	case 69:
+	case rpCauseRequestedFacilityNotImplemented:
 		return "requested facility not implemented"
-	case 81:
+	case rpCauseInvalidShortMessageTransferReference:
 		return "invalid short message transfer reference"
-	case 95:
+	case rpCauseSemanticallyIncorrectMessage:
 		return "semantically incorrect message"
-	case 96:
+	case rpCauseInvalidMandatoryInformation:
 		return "invalid mandatory information"
-	case 97:
+	case rpCauseMessageTypeNotImplemented:
 		return "message type not implemented"
-	case 98:
+	case rpCauseMessageNotCompatibleWithState:
 		return "message not compatible with short message protocol state"
-	case 99:
+	case rpCauseInformationElementNotImplemented:
 		return "information element not implemented"
-	case 111:
+	case rpCauseProtocolErrorUnspecified:
 		return "protocol error"
-	case 127:
+	case rpCauseInterworkingUnspecified:
 		return "interworking"
 	default:
 		return ""
@@ -224,7 +329,11 @@ func encodeSubmit(reference byte, to, text string) ([]byte, error) {
 	if len(parts) != 1 {
 		return nil, fmt.Errorf("encoding SMS-SUBMIT: message requires %d segments", len(parts))
 	}
-	return newSubmitTPDU(reference, to, parts[0], false).MarshalBinary()
+	return newSubmitTPDU(submitTPDUConfig{
+		Reference:   reference,
+		Destination: to,
+		Part:        parts[0],
+	}).MarshalBinary()
 }
 
 func buildUserDataParts(text string) ([]userDataPart, error) {
@@ -241,7 +350,7 @@ func buildUserDataParts(text string) ([]userDataPart, error) {
 
 func buildGSM7UserDataParts(gsm7 GSM7) ([]userDataPart, error) {
 	if gsm7.SeptetCount() <= singleGSM7Limit {
-		return []userDataPart{{dcs: 0x00, udl: gsm7.SeptetCount(), userData: gsm7.Packed()}}, nil
+		return []userDataPart{{dcs: tpDCSGSM7, udl: gsm7.SeptetCount(), userData: gsm7.Packed()}}, nil
 	}
 	chunks := splitGSM7Septets(gsm7.septets, concatGSM7Limit)
 	if len(chunks) > 255 {
@@ -252,7 +361,7 @@ func buildGSM7UserDataParts(gsm7 GSM7) ([]userDataPart, error) {
 	for i, chunk := range chunks {
 		header := buildConcatUDH8(ref, byte(len(chunks)), byte(i+1))
 		packed, headerSeptets := packSeptetsWithHeader(header, chunk)
-		parts = append(parts, userDataPart{udhi: true, dcs: 0x00, udl: headerSeptets + len(chunk), userData: packed})
+		parts = append(parts, userDataPart{udhi: true, dcs: tpDCSGSM7, udl: headerSeptets + len(chunk), userData: packed})
 	}
 	return parts, nil
 }
@@ -261,7 +370,7 @@ func buildUCS2UserDataParts(text UCS2) []userDataPart {
 	words := utf16.Encode([]rune(string(text)))
 	if len(words) <= singleUCS2Units {
 		userData := encodeUCS2Words(words)
-		return []userDataPart{{dcs: 0x08, udl: len(userData), userData: userData}}
+		return []userDataPart{{dcs: tpDCSUCS2, udl: len(userData), userData: userData}}
 	}
 	chunks := splitUCS2Words(words, concatUCS2Units)
 	if len(chunks) > 255 {
@@ -272,7 +381,7 @@ func buildUCS2UserDataParts(text UCS2) []userDataPart {
 	for i, chunk := range chunks {
 		header := buildConcatUDH8(ref, byte(len(chunks)), byte(i+1))
 		userData := append(header, encodeUCS2Words(chunk)...)
-		parts = append(parts, userDataPart{udhi: true, dcs: 0x08, udl: len(userData), userData: userData})
+		parts = append(parts, userDataPart{udhi: true, dcs: tpDCSUCS2, udl: len(userData), userData: userData})
 	}
 	return parts
 }
@@ -309,19 +418,25 @@ func buildDeliver(from, text string) ([]byte, error) {
 	return newDeliverTPDU(from, parts[0]).MarshalBinary()
 }
 
-func decodeRPUserData(data []byte) ([]byte, error) {
+func decodeRPUserData(data []byte, maxLen int) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 	if len(data) < 2 {
 		return nil, errors.New("decoding RP user data: truncated field")
 	}
-	if data[0] != 0x41 {
+	if data[0] != rpUserDataIEI {
 		return nil, fmt.Errorf("decoding RP user data: unexpected IEI 0x%02X", data[0])
 	}
 	length := int(data[1])
+	if length > maxLen {
+		return nil, fmt.Errorf("decoding RP user data: too long %d", length)
+	}
 	if len(data) < 2+length {
 		return nil, errors.New("decoding RP user data: truncated payload")
+	}
+	if len(data) > 2+length {
+		return nil, errors.New("decoding RP user data: trailing data")
 	}
 	return append([]byte(nil), data[2:2+length]...), nil
 }
@@ -330,30 +445,30 @@ func tpduMessageType(data []byte) (byte, error) {
 	if len(data) == 0 {
 		return 0, errors.New("decoding SMS-TPDU: packet too short")
 	}
-	return data[0] & 0x03, nil
+	return data[0] & tpduMTIMask, nil
 }
 
 func decodeDecimalByte(b byte) int {
-	tens := int(b & 0x0F)
-	ones := int((b >> 4) & 0x0F)
-	if tens > 9 {
+	tens := int(b & semiOctetMask)
+	ones := int((b >> 4) & semiOctetMask)
+	if tens > decimalDigitMax {
 		tens = 0
 	}
-	if ones > 9 {
+	if ones > decimalDigitMax {
 		ones = 0
 	}
 	return tens*10 + ones
 }
 
 func decodeTimestamp(data []byte) (time.Time, error) {
-	if len(data) < 7 {
+	if len(data) < tpduTimestampOctets {
 		return time.Time{}, errors.New("decoding SMS timestamp: packet too short")
 	}
 	year := decodeDecimalByte(data[0])
-	if year >= 70 {
-		year += 1900
+	if year >= timestampPivotYear {
+		year += timestampCentury20
 	} else {
-		year += 2000
+		year += timestampCentury21
 	}
 	month := decodeDecimalByte(data[1])
 	if month < 1 || month > 12 {
@@ -377,9 +492,9 @@ func decodeTimestamp(data []byte) (time.Time, error) {
 	}
 
 	zone := data[6]
-	negative := zone&0x08 != 0
-	quarters := decodeDecimalByte(zone & 0xF7)
-	offset := quarters * 15 * 60
+	negative := zone&timeZoneSignFlag != 0
+	quarters := decodeDecimalByte(zone & timeZoneValueMask)
+	offset := quarters * timeZoneQuarterSecs
 	if negative {
 		offset = -offset
 	}
@@ -397,13 +512,13 @@ func encodeTimestamp(ts time.Time) []byte {
 	if negative {
 		offset = -offset
 	}
-	quarters := offset / (15 * 60)
-	timeZone := byte(0x00)
+	quarters := offset / timeZoneQuarterSecs
+	timeZone := byte(0)
 	if digits := swapDigits(fmt.Sprintf("%02d", quarters)); len(digits) > 0 {
 		timeZone = digits[0]
 	}
 	if negative {
-		timeZone |= 0x08
+		timeZone |= timeZoneSignFlag
 	}
 
 	return []byte{
@@ -418,9 +533,9 @@ func encodeTimestamp(ts time.Time) []byte {
 }
 
 func encodeTPAddress(number string) []byte {
-	toa := byte(0x81)
+	toa := byte(tpTOAUnknownISDN)
 	if strings.HasPrefix(number, "+") {
-		toa = 0x91
+		toa = tpTOAInternationalISDN
 		number = strings.TrimPrefix(number, "+")
 	}
 	packed := swapDigits(number)
@@ -444,13 +559,13 @@ func decodeTPAddress(data []byte) (string, int, error) {
 		return "", 0, errors.New("decoding TP address: packet too short")
 	}
 	lengthSemiOctets := int(data[0])
-	ton := (data[1] >> 4) & 0x07
+	ton := (data[1] >> tpTONShift) & tpTONMask
 	numberBytes := digitOctetCount(lengthSemiOctets)
 	if len(data) < 2+numberBytes {
 		return "", 0, errors.New("decoding TP address: truncated address")
 	}
 	raw := data[2 : 2+numberBytes]
-	if ton == 0x05 {
+	if ton == tpTONAlphanumeric {
 		number, err := decodeAlphanumericAddress(raw, lengthSemiOctets)
 		if err != nil {
 			return "", 0, fmt.Errorf("decoding TP address: %w", err)
@@ -461,7 +576,7 @@ func decodeTPAddress(data []byte) (string, int, error) {
 	if len(number) > lengthSemiOctets {
 		number = number[:lengthSemiOctets]
 	}
-	if ton == 0x01 {
+	if ton == tpTONInternational {
 		number = "+" + number
 	}
 	return number, 2 + numberBytes, nil
@@ -473,7 +588,23 @@ func encodeRPAddress(number string) []byte {
 		return []byte{0x00}
 	}
 	packed := swapDigits(number)
-	return append([]byte{byte(len(packed) + 1), 0x91}, packed...)
+	return append([]byte{byte(len(packed) + 1), tpTOAInternationalISDN}, packed...)
+}
+
+const (
+	minRPAddressValueOctets = 2
+	maxRPAddressValueOctets = 11
+)
+
+func marshalRPAddress(number string) ([]byte, error) {
+	data := encodeRPAddress(number)
+	if data[0] == 0 {
+		return data, nil
+	}
+	if data[0] < minRPAddressValueOctets || data[0] > maxRPAddressValueOctets {
+		return nil, fmt.Errorf("invalid length %d", data[0])
+	}
+	return data, nil
 }
 
 func decodeRPAddress(data []byte) (string, int, error) {
@@ -484,12 +615,15 @@ func decodeRPAddress(data []byte) (string, int, error) {
 	if length == 0 {
 		return "", 1, nil
 	}
+	if length < minRPAddressValueOctets || length > maxRPAddressValueOctets {
+		return "", 0, fmt.Errorf("decoding RP address: invalid length %d", length)
+	}
 	if len(data) < 1+length {
 		return "", 0, errors.New("decoding RP address: truncated address")
 	}
-	ton := (data[1] >> 4) & 0x07
+	ton := (data[1] >> tpTONShift) & tpTONMask
 	number := unswapDigits(data[2 : 1+length])
-	if ton == 0x01 {
+	if ton == tpTONInternational {
 		number = "+" + number
 	}
 	return number, 1 + length, nil
@@ -498,14 +632,14 @@ func decodeRPAddress(data []byte) (string, int, error) {
 func encodeUserData(text string) ([]byte, byte, byte, error) {
 	gsm7, err := NewGSM7(text)
 	if err == nil {
-		return gsm7.Packed(), 0x00, byte(gsm7.SeptetCount()), nil
+		return gsm7.Packed(), tpDCSGSM7, byte(gsm7.SeptetCount()), nil
 	}
 	ucs2, _ := UCS2(text).MarshalBinary()
-	return ucs2, 0x08, byte(len(ucs2)), nil
+	return ucs2, tpDCSUCS2, byte(len(ucs2)), nil
 }
 
 func buildConcatUDH8(reference, total, sequence byte) []byte {
-	return []byte{0x05, concatIEI8Bit, 0x03, reference, total, sequence}
+	return []byte{concatUDH8Len, concatIEI8Bit, concatIEDL8Bit, reference, total, sequence}
 }
 
 func decodeUserDataHeader(payload []byte) (int, *concatInfo, error) {
@@ -569,7 +703,7 @@ func splitGSM7Septets(septets []byte, limit int) [][]byte {
 	parts := make([][]byte, 0, (len(septets)+limit-1)/limit)
 	for len(septets) > 0 {
 		end := min(len(septets), limit)
-		if end < len(septets) && septets[end-1] == 0x1B {
+		if end < len(septets) && septets[end-1] == gsm7EscapeSeptet {
 			end--
 		}
 		if end <= 0 {
@@ -585,7 +719,7 @@ func splitUCS2Words(words []uint16, limit int) [][]uint16 {
 	parts := make([][]uint16, 0, (len(words)+limit-1)/limit)
 	for len(words) > 0 {
 		end := min(len(words), limit)
-		if end < len(words) && end > 0 && words[end-1] >= 0xD800 && words[end-1] <= 0xDBFF {
+		if end < len(words) && end > 0 && words[end-1] >= ucs2HighSurrogateMin && words[end-1] <= ucs2HighSurrogateMax {
 			end--
 		}
 		if end <= 0 {
@@ -606,25 +740,25 @@ func encodeUCS2Words(words []uint16) []byte {
 }
 
 func gsm7OctetCount(septets int) int {
-	return (septets*7 + 7) / 8
+	return (septets*gsm7SeptetBits + gsm7SeptetBits) / octetBits
 }
 
 func septetCountForOctets(octets int) int {
-	return (octets*8 + 6) / 7
+	return (octets*octetBits + gsm7SeptetBits - 1) / gsm7SeptetBits
 }
 
 func packSeptetsWithHeader(header []byte, septets []byte) ([]byte, int) {
 	headerSeptets := septetCountForOctets(len(header))
-	bitPos := headerSeptets * 7
-	out := make([]byte, (bitPos+len(septets)*7+7)/8)
+	bitPos := headerSeptets * gsm7SeptetBits
+	out := make([]byte, (bitPos+len(septets)*gsm7SeptetBits+gsm7SeptetBits)/octetBits)
 	copy(out, header)
 	for _, septet := range septets {
-		for bit := range 7 {
+		for bit := range gsm7SeptetBits {
 			if septet&(1<<bit) == 0 {
 				bitPos++
 				continue
 			}
-			out[bitPos/8] |= 1 << (bitPos % 8)
+			out[bitPos/octetBits] |= 1 << (bitPos % octetBits)
 			bitPos++
 		}
 	}
@@ -634,14 +768,14 @@ func packSeptetsWithHeader(header []byte, septets []byte) ([]byte, int) {
 func unpackSeptetsAt(octets []byte, bitOffset, count int) []byte {
 	septets := make([]byte, 0, count)
 	for i := range count {
-		bitPos := bitOffset + i*7
+		bitPos := bitOffset + i*gsm7SeptetBits
 		var septet byte
-		for bit := range 7 {
+		for bit := range gsm7SeptetBits {
 			pos := bitPos + bit
-			if pos/8 >= len(octets) {
+			if pos/octetBits >= len(octets) {
 				break
 			}
-			if octets[pos/8]&(1<<(pos%8)) != 0 {
+			if octets[pos/octetBits]&(1<<(pos%octetBits)) != 0 {
 				septet |= 1 << bit
 			}
 		}
@@ -666,7 +800,7 @@ func encodeGSM7Septets(text string) ([]byte, error) {
 			continue
 		}
 		if value, ok := gsm7ExtensionEncodeMap[r]; ok {
-			septets = append(septets, 0x1B, value)
+			septets = append(septets, gsm7EscapeSeptet, value)
 			continue
 		}
 		return nil, fmt.Errorf("encoding GSM7: unsupported rune %q", r)
@@ -686,7 +820,7 @@ func decodeGSM7Septets(septets []byte) string {
 	b := strings.Builder{}
 	for i := 0; i < len(septets); i++ {
 		septet := septets[i]
-		if septet == 0x1B {
+		if septet == gsm7EscapeSeptet {
 			if i+1 >= len(septets) {
 				b.WriteRune('�')
 				continue
@@ -713,12 +847,12 @@ func packSeptets(septets []byte) []byte {
 	var bitBuf uint64
 	var bitCount uint
 	for _, septet := range septets {
-		bitBuf |= uint64(septet&0x7F) << bitCount
-		bitCount += 7
-		for bitCount >= 8 {
+		bitBuf |= uint64(septet&gsm7SeptetMask) << bitCount
+		bitCount += gsm7SeptetBits
+		for bitCount >= octetBits {
 			out = append(out, byte(bitBuf))
-			bitBuf >>= 8
-			bitCount -= 8
+			bitBuf >>= octetBits
+			bitCount -= octetBits
 		}
 	}
 	if bitCount > 0 {
@@ -733,11 +867,11 @@ func unpackSeptets(octets []byte, count int) []byte {
 	var bitCount uint
 	for _, octet := range octets {
 		bitBuf |= uint64(octet) << bitCount
-		bitCount += 8
-		for bitCount >= 7 && len(septets) < count {
-			septets = append(septets, byte(bitBuf&0x7F))
-			bitBuf >>= 7
-			bitCount -= 7
+		bitCount += octetBits
+		for bitCount >= gsm7SeptetBits && len(septets) < count {
+			septets = append(septets, byte(bitBuf&gsm7SeptetMask))
+			bitBuf >>= gsm7SeptetBits
+			bitCount -= gsm7SeptetBits
 		}
 	}
 	return septets
@@ -782,10 +916,10 @@ func swapDigits(number string) []byte {
 func unswapDigits(data []byte) string {
 	b := strings.Builder{}
 	for _, v := range data {
-		low := v & 0x0F
+		low := v & semiOctetMask
 		high := v >> 4
 		b.WriteByte(toHexNibble(low))
-		if high != 0x0F {
+		if high != semiOctetFill {
 			b.WriteByte(toHexNibble(high))
 		}
 	}
@@ -797,17 +931,17 @@ func fromHexNibble(b byte) byte {
 	case b >= '0' && b <= '9':
 		return b - '0'
 	case b == '*':
-		return 0x0A
+		return semiOctetStar
 	case b == '#':
-		return 0x0B
+		return semiOctetHash
 	case b == 'a' || b == 'A':
-		return 0x0C
+		return semiOctetA
 	case b == 'b' || b == 'B':
-		return 0x0D
+		return semiOctetB
 	case b == 'c' || b == 'C':
-		return 0x0E
+		return semiOctetC
 	case b == 'f' || b == 'F':
-		return 0x0F
+		return semiOctetFill
 	default:
 		return 0
 	}
@@ -817,17 +951,17 @@ func toHexNibble(v byte) byte {
 	switch {
 	case v < 10:
 		return '0' + v
-	case v == 0x0A:
+	case v == semiOctetStar:
 		return '*'
-	case v == 0x0B:
+	case v == semiOctetHash:
 		return '#'
-	case v == 0x0C:
+	case v == semiOctetA:
 		return 'a'
-	case v == 0x0D:
+	case v == semiOctetB:
 		return 'b'
-	case v == 0x0E:
+	case v == semiOctetC:
 		return 'c'
-	case v == 0x0F:
+	case v == semiOctetFill:
 		return 'f'
 	default:
 		return '0'

@@ -28,88 +28,188 @@ var (
 	ErrWFCEntitlementDenied             = errors.New("wfc entitlement denied")
 )
 
-type WFCEntitlementError struct {
-	Err        error
-	Config     ts43.WFCConfig
-	Status     ts43.WFCStatus
-	RetryAfter time.Duration
+type WFCEntitlementPurpose int
+
+const (
+	WFCEntitlementActivation WFCEntitlementPurpose = iota
+	WFCEntitlementEmergencyAddressUpdate
+	WFCEntitlementEmergencyAddressRecheck
+)
+
+func (p WFCEntitlementPurpose) valid() bool {
+	switch p {
+	case WFCEntitlementActivation, WFCEntitlementEmergencyAddressUpdate, WFCEntitlementEmergencyAddressRecheck:
+		return true
+	default:
+		return false
+	}
 }
 
+type WFCEntitlementScheme string
+
+const (
+	WFCEntitlementSchemeNone WFCEntitlementScheme = ""
+	WFCEntitlementSchemeTS43 WFCEntitlementScheme = "ts43"
+	WFCEntitlementSchemeNSDS WFCEntitlementScheme = "nsds"
+)
+
+type WFCEntitlementAction int
+
+const (
+	WFCEntitlementActionNone WFCEntitlementAction = iota
+	WFCEntitlementActionAllowActivation
+	WFCEntitlementActionOpenWebsheet
+	WFCEntitlementActionWait
+	WFCEntitlementActionDenied
+	WFCEntitlementActionDisableWFC
+)
+
+type WFCWebsheetKind string
+
+const (
+	WFCWebsheetKindEmergencyAddress   WFCWebsheetKind = "emergency-address"
+	WFCWebsheetKindTermsAndConditions WFCWebsheetKind = "terms-and-conditions"
+)
+
 type WFCWebsheet struct {
+	Kind       WFCWebsheetKind
 	URL        string
 	Data       string
 	Title      string
 	ClientName string
 }
 
-type NSDSWFCEntitlementError struct {
-	Err      error
-	Carrier  string
-	Websheet WFCWebsheet
+type WFCE911Info struct {
+	AddressID     string
+	AIDExpiration time.Time
+	ServerURL     string
+	ServerData    string
 }
 
-func (e *NSDSWFCEntitlementError) Error() string {
-	if e == nil || e.Err == nil {
-		return "wfc nsds entitlement failed"
+const wfcE911AIDMinimumValidity = 48 * time.Hour
+
+func (i WFCE911Info) ValidAt(now time.Time) bool {
+	if i.AIDExpiration.IsZero() {
+		return false
 	}
-	if e.Websheet.URL != "" {
-		return e.Err.Error() + ": " + e.Websheet.URL
-	}
-	return e.Err.Error()
+	return i.AIDExpiration.Sub(now) >= wfcE911AIDMinimumValidity
 }
 
-func (e *NSDSWFCEntitlementError) Unwrap() error {
-	if e == nil {
-		return nil
+type WFCEntitlementResult struct {
+	Scheme     WFCEntitlementScheme
+	Carrier    string
+	Action     WFCEntitlementAction
+	Entitled   bool
+	Pending    bool
+	RetryAfter time.Duration
+	Websheet   *WFCWebsheet
+	E911       *WFCE911Info
+}
+
+type WFCEntitlementRequest struct {
+	Config      *Config
+	Card        Card
+	Purpose     WFCEntitlementPurpose
+	CurrentE911 *WFCE911Info
+	Now         time.Time
+}
+
+func (req WFCEntitlementRequest) now() time.Time {
+	if req.Now.IsZero() {
+		return time.Now()
 	}
-	return e.Err
+	return req.Now
+}
+
+type WFCEntitlementError struct {
+	Err    error
+	Result WFCEntitlementResult
 }
 
 func (e *WFCEntitlementError) Error() string {
-	if e == nil || e.Err == nil {
-		return "wfc entitlement failed"
-	}
-	if e.Status.ServiceFlowURL != "" {
-		return e.Err.Error() + ": " + e.Status.ServiceFlowURL
+	if e.Result.Websheet != nil && e.Result.Websheet.URL != "" {
+		return e.Err.Error() + ": " + e.Result.Websheet.URL
 	}
 	return e.Err.Error()
 }
 
 func (e *WFCEntitlementError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
 	return e.Err
 }
 
 func (c *Client) checkWFCEntitlement(ctx context.Context, cfg *Config, card Card) error {
-	if profile, ok := nsdsWFCProfileForCard(card); ok {
-		if err := c.checkNSDSWFCEntitlement(ctx, cfg, card, profile); err != nil {
-			return err
-		}
-		c.logger.Debug("wfc nsds entitlement granted", "carrier", profile.Carrier)
+	result, err := c.CheckWFCEntitlement(ctx, WFCEntitlementRequest{
+		Config:  cfg,
+		Card:    card,
+		Purpose: WFCEntitlementActivation,
+	})
+	if err != nil {
+		return err
+	}
+	if result.Entitled {
 		return nil
 	}
+	return wfcEntitlementResultError(result)
+}
 
-	identity := ts43Identity(card)
+func (c *Client) CheckWFCEntitlement(ctx context.Context, req WFCEntitlementRequest) (WFCEntitlementResult, error) {
+	if req.Config == nil {
+		return WFCEntitlementResult{}, errors.New("wfc entitlement config is required")
+	}
+	if req.Card == nil {
+		return WFCEntitlementResult{}, errors.New("wfc entitlement card is required")
+	}
+	if !req.Purpose.valid() {
+		return WFCEntitlementResult{}, fmt.Errorf("wfc entitlement purpose %d is invalid", req.Purpose)
+	}
+	if profile, ok := nsdsWFCProfileForCard(req.Card); ok {
+		return c.checkNSDSWFCEntitlement(ctx, req, profile)
+	}
+
+	identity := ts43Identity(req.Card)
 	wfc, err := ts43.DiscoverWFC(identity)
 	if err != nil {
 		if errors.Is(err, ts43.ErrWFCConfigNotFound) {
 			c.logger.Debug("wfc entitlement config not found", "mcc", identity.MCC, "mnc", identity.MNC)
-			return nil
+			return wfcEntitlementConfigNotFoundResult(req.Purpose), nil
 		}
-		return fmt.Errorf("discovering wfc entitlement: %w", err)
+		return WFCEntitlementResult{}, fmt.Errorf("discovering wfc entitlement: %w", err)
 	}
 
-	if wfc.SkipActivation {
-		c.logger.Debug("skipping wfc activation entitlement", "carrier", wfc.CarrierName)
-		return nil
-	}
-
-	return c.checkTS43WFCEntitlement(ctx, cfg, card, wfc)
+	return c.checkDiscoveredWFCEntitlement(ctx, req.Config, req.Card, req.Purpose, wfc)
 }
 
-func (c *Client) checkTS43WFCEntitlement(ctx context.Context, cfg *Config, card Card, wfc ts43.WFCConfig) error {
+func (c *Client) CheckWFCE911Update(ctx context.Context, req WFCEntitlementRequest) (WFCEntitlementResult, error) {
+	req.Purpose = WFCEntitlementEmergencyAddressUpdate
+	return c.CheckWFCEntitlement(ctx, req)
+}
+
+func wfcEntitlementConfigNotFoundResult(purpose WFCEntitlementPurpose) WFCEntitlementResult {
+	switch purpose {
+	case WFCEntitlementActivation:
+		return WFCEntitlementResult{Action: WFCEntitlementActionAllowActivation, Entitled: true}
+	case WFCEntitlementEmergencyAddressRecheck:
+		return WFCEntitlementResult{Action: WFCEntitlementActionNone}
+	default:
+		return WFCEntitlementResult{Action: WFCEntitlementActionDenied}
+	}
+}
+
+func (c *Client) checkDiscoveredWFCEntitlement(ctx context.Context, cfg *Config, card Card, purpose WFCEntitlementPurpose, wfc ts43.WFCConfig) (WFCEntitlementResult, error) {
+	if purpose == WFCEntitlementActivation && wfc.SkipActivation {
+		c.logger.Debug("skipping wfc activation entitlement", "carrier", wfc.CarrierName)
+		return WFCEntitlementResult{
+			Scheme:   WFCEntitlementSchemeTS43,
+			Carrier:  wfc.CarrierName,
+			Action:   WFCEntitlementActionAllowActivation,
+			Entitled: true,
+		}, nil
+	}
+
+	return c.checkTS43WFCEntitlement(ctx, cfg, card, purpose, wfc)
+}
+
+func (c *Client) checkTS43WFCEntitlement(ctx context.Context, cfg *Config, card Card, purpose WFCEntitlementPurpose, wfc ts43.WFCConfig) (WFCEntitlementResult, error) {
 	identity := ts43Identity(card)
 	terminal := cfg.Terminal.trimmed()
 	status, err := ts43.CheckWFCEntitlement(ctx, ts43.Config{
@@ -121,31 +221,90 @@ func (c *Client) checkTS43WFCEntitlement(ctx context.Context, cfg *Config, card 
 		Model:           terminal.Model,
 		SoftwareVersion: terminal.SoftwareVersion,
 	}, wfc)
+	result := WFCEntitlementResult{
+		Scheme:  WFCEntitlementSchemeTS43,
+		Carrier: wfc.CarrierName,
+	}
 	if err != nil {
-		if pending, ok := ts43RetryAfterError(wfc, err); ok {
-			c.logger.Info("wfc entitlement pending", "retry_after", pending.RetryAfter)
-			return fmt.Errorf("checking wfc entitlement: %w", pending)
+		retryAfter, ok := ts43RetryAfter(err)
+		if ok {
+			result.Action = WFCEntitlementActionWait
+			result.Pending = true
+			result.RetryAfter = retryAfter
+			c.logger.Info("wfc entitlement pending", "retry_after", retryAfter)
+			return result, nil
 		}
-		return fmt.Errorf("checking wfc entitlement: %w", err)
+		return WFCEntitlementResult{}, fmt.Errorf("checking wfc entitlement: %w", err)
 	}
 	if status.Entitled() {
 		c.logger.Debug("wfc entitlement granted", "carrier", wfc.CarrierName)
-		return nil
+		result.Entitled = true
+		switch purpose {
+		case WFCEntitlementActivation:
+			result.Action = WFCEntitlementActionAllowActivation
+		case WFCEntitlementEmergencyAddressUpdate:
+			result.Action = WFCEntitlementActionOpenWebsheet
+			websheet, err := ts43WFCWebsheet(status, WFCWebsheetKindEmergencyAddress)
+			if err != nil {
+				return WFCEntitlementResult{}, err
+			}
+			result.Websheet = websheet
+		case WFCEntitlementEmergencyAddressRecheck:
+			result.Action = WFCEntitlementActionNone
+		}
+		return result, nil
 	}
-
-	return fmt.Errorf("checking wfc entitlement: %w", wfcEntitlementError(wfc, status))
+	if status.NeedsUserWebFlow() {
+		switch purpose {
+		case WFCEntitlementEmergencyAddressUpdate:
+			result.Action = WFCEntitlementActionDenied
+			return result, nil
+		case WFCEntitlementEmergencyAddressRecheck:
+			result.Action = WFCEntitlementActionDisableWFC
+			return result, nil
+		}
+		result.Action = WFCEntitlementActionOpenWebsheet
+		websheet, err := ts43WFCWebsheet(status, ts43WFCWebsheetKind(status))
+		if err != nil {
+			return WFCEntitlementResult{}, err
+		}
+		result.Websheet = websheet
+		return result, nil
+	}
+	if status.InProgress() {
+		result.Action = WFCEntitlementActionWait
+		result.Pending = true
+		return result, nil
+	}
+	result.Action = WFCEntitlementActionDenied
+	return result, nil
 }
 
-func ts43RetryAfterError(wfc ts43.WFCConfig, err error) (*WFCEntitlementError, bool) {
+func ts43WFCWebsheet(status ts43.WFCStatus, kind WFCWebsheetKind) (*WFCWebsheet, error) {
+	if status.ServiceFlowURL == "" {
+		return nil, errors.New("wfc service flow URL is missing")
+	}
+	return &WFCWebsheet{
+		Kind:  kind,
+		URL:   status.ServiceFlowURL,
+		Data:  status.ServiceFlowUserData,
+		Title: "Wi-Fi Calling",
+	}, nil
+}
+
+func ts43WFCWebsheetKind(status ts43.WFCStatus) WFCWebsheetKind {
+	if status.TCStatus == ts43.WFCTCNotAvailable {
+		return WFCWebsheetKindTermsAndConditions
+	}
+	return WFCWebsheetKindEmergencyAddress
+}
+
+func ts43RetryAfter(err error) (time.Duration, bool) {
 	var httpErr *ts43http.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
-		return nil, false
+		return 0, false
 	}
-	return &WFCEntitlementError{
-		Err:        ErrWFCEntitlementPending,
-		Config:     wfc,
-		RetryAfter: retryAfterDuration(httpErr.Header),
-	}, true
+	return retryAfterDuration(httpErr.Header), true
 }
 
 func retryAfterDuration(header http.Header) time.Duration {
@@ -175,18 +334,20 @@ func retryAfterDurationAt(header http.Header, now time.Time) time.Duration {
 	return delay
 }
 
-func wfcEntitlementError(cfg ts43.WFCConfig, status ts43.WFCStatus) error {
+func wfcEntitlementResultError(result WFCEntitlementResult) error {
+	if result.Entitled {
+		return nil
+	}
 	err := ErrWFCEntitlementDenied
 	switch {
-	case status.NeedsUserWebFlow():
+	case result.Action == WFCEntitlementActionOpenWebsheet:
 		err = ErrWFCEntitlementUserActionRequired
-	case status.InProgress():
+	case result.Action == WFCEntitlementActionWait:
 		err = ErrWFCEntitlementPending
 	}
 	return &WFCEntitlementError{
 		Err:    err,
-		Config: cfg,
-		Status: status,
+		Result: result,
 	}
 }
 
@@ -272,12 +433,28 @@ func nsdsWFCProfileForCard(card Card) (nsdsWFCProfile, bool) {
 	return nsdsWFCProfile{}, false
 }
 
-func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, cfg *Config, card Card, profile nsdsWFCProfile) error {
+func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, req WFCEntitlementRequest, profile nsdsWFCProfile) (WFCEntitlementResult, error) {
+	if req.Purpose == WFCEntitlementEmergencyAddressRecheck && req.CurrentE911 != nil && req.CurrentE911.ValidAt(req.now()) {
+		return WFCEntitlementResult{
+			Scheme:   WFCEntitlementSchemeNSDS,
+			Carrier:  profile.Carrier,
+			Action:   WFCEntitlementActionNone,
+			Entitled: true,
+			E911:     req.CurrentE911,
+		}, nil
+	}
+
+	cfg := req.Config
+	card := req.Card
+	imsiEAP, err := nsdsWFCIMSIEAP(card)
+	if err != nil {
+		return WFCEntitlementResult{}, err
+	}
 	client := nsdsWFCClient{
 		serverURL:  profile.ServerURL,
 		deviceID:   base64.StdEncoding.EncodeToString([]byte(cfg.Terminal.trimmed().ID)),
 		deviceName: nsdsWFCDeviceName(*cfg),
-		imsiEAP:    nsdsWFCIMSIEAP(card),
+		imsiEAP:    imsiEAP,
 		userAgent:  nsdsWFCUserAgent(*cfg),
 	}
 
@@ -286,13 +463,43 @@ func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, cfg *Config, card 
 
 	status, err := client.checkLocationAndTC(checkCtx, card)
 	if err != nil {
-		return fmt.Errorf("checking wfc nsds entitlement: %w", err)
+		if nsdsWFCActivationCheckOptional(req.Purpose, err) {
+			c.logger.Warn("wfc nsds entitlement check did not complete; continuing activation", "carrier", profile.Carrier, "err", err)
+			return WFCEntitlementResult{
+				Scheme:   WFCEntitlementSchemeNSDS,
+				Carrier:  profile.Carrier,
+				Action:   WFCEntitlementActionAllowActivation,
+				Entitled: true,
+			}, nil
+		}
+		return WFCEntitlementResult{}, fmt.Errorf("checking wfc nsds entitlement: %w", err)
+	}
+	result := WFCEntitlementResult{
+		Scheme:  WFCEntitlementSchemeNSDS,
+		Carrier: profile.Carrier,
+		E911:    nsdsWFCE911Info(status.LocationTC),
+	}
+	if !status.ServiceEntitled {
+		result.Action = WFCEntitlementActionDenied
+		return result, nil
+	}
+	if status.Pending {
+		result.Action = WFCEntitlementActionWait
+		result.Pending = true
+		return result, nil
 	}
 	if status.MSISDN != "" {
 		applyNSDSWFCMSISDN(cfg, status.MSISDN)
 		c.logger.Debug("wfc nsds msisdn received", "carrier", profile.Carrier, "msisdn", status.MSISDN, "public_identity", cfg.IMS.PublicIdentity)
 	}
 	if !status.LocationTCOK() {
+		if req.Purpose == WFCEntitlementEmergencyAddressRecheck {
+			result.Action = WFCEntitlementActionDisableWFC
+			return result, nil
+		}
+		if status.LocationTC.ServerURL == "" {
+			return WFCEntitlementResult{}, errors.New("nsds e911 websheet URL is missing")
+		}
 		c.logger.Warn("wfc nsds entitlement requires user action",
 			"carrier", profile.Carrier,
 			"url", status.LocationTC.ServerURL,
@@ -300,18 +507,25 @@ func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, cfg *Config, card 
 			"title", profile.Title,
 			"client", profile.ClientName,
 		)
-		return fmt.Errorf("checking wfc nsds entitlement: %w", &NSDSWFCEntitlementError{
-			Err:     ErrWFCEntitlementUserActionRequired,
-			Carrier: profile.Carrier,
-			Websheet: WFCWebsheet{
-				URL:        status.LocationTC.ServerURL,
-				Data:       status.LocationTC.ServerData,
-				Title:      profile.Title,
-				ClientName: profile.ClientName,
-			},
-		})
+		result.Action = WFCEntitlementActionOpenWebsheet
+		result.Websheet = nsdsWFCWebsheet(profile, status.LocationTC)
+		return result, nil
 	}
-	return nil
+	result.Entitled = true
+	switch req.Purpose {
+	case WFCEntitlementActivation:
+		result.Action = WFCEntitlementActionAllowActivation
+	case WFCEntitlementEmergencyAddressUpdate:
+		if status.LocationTC.ServerURL == "" {
+			return WFCEntitlementResult{}, errors.New("nsds e911 websheet URL is missing")
+		}
+		result.Action = WFCEntitlementActionOpenWebsheet
+		result.Websheet = nsdsWFCWebsheet(profile, status.LocationTC)
+	case WFCEntitlementEmergencyAddressRecheck:
+		result.Action = WFCEntitlementActionNone
+	}
+	c.logger.Debug("wfc nsds entitlement granted", "carrier", profile.Carrier)
+	return result, nil
 }
 
 func nsdsWFCDeviceName(cfg Config) string {
@@ -326,12 +540,22 @@ func nsdsWFCUserAgent(cfg Config) string {
 	return "Dalvik/2.1.0 (Linux; U; Android " + terminal.SoftwareVersion + "; " + terminal.Model + ")"
 }
 
-func nsdsWFCIMSIEAP(card Card) string {
-	return "0" + card.IMSI() + "@nai.epc.mnc" + strings.TrimSpace(card.MNC()) + ".mcc" + strings.TrimSpace(card.MCC()) + ".3gppnetwork.org"
+func nsdsWFCIMSIEAP(card Card) (string, error) {
+	mcc := strings.TrimSpace(card.MCC())
+	mnc := strings.TrimSpace(card.MNC())
+	switch n := cardMNCLength(card); n {
+	case 2, 3:
+		formatted, err := sim.FormatMNC(card.IMSI(), n)
+		if err != nil {
+			return "", err
+		}
+		mnc = formatted
+	}
+	return sim.IMSIEAPIdentity(mcc+mnc, card.IMSI(), ts43.DefaultEAPAkaRealm)
 }
 
 func applyNSDSWFCMSISDN(cfg *Config, msisdn string) {
-	if cfg == nil || strings.TrimSpace(cfg.IMS.PublicIdentity) != "" {
+	if strings.TrimSpace(cfg.IMS.PublicIdentity) != "" {
 		return
 	}
 	msisdn = nsdsWFCPublicMSISDN(msisdn)
@@ -367,6 +591,90 @@ type nsdsWFCClient struct {
 	userAgent  string
 }
 
+const (
+	nsdsMethod3GPPAuthentication     = "3gppAuthentication"
+	nsdsMethodServiceEntitlement     = "serviceEntitlementStatus"
+	nsdsMethodGetMSISDN              = "getMSISDN"
+	nsdsMethodManageLocationAndTC    = "manageLocationAndTC"
+	nsdsMethodManageService          = "manageService"
+	nsdsMethodManageConnectivity     = "manageConnectivity"
+	nsdsMethodManagePushToken        = "managePushToken"
+	nsdsMethodRegisteredMSISDN       = "registeredMSISDN"
+	nsdsMethodRegisteredDevices      = "registeredDevices"
+	nsdsMethodGetToken               = "getToken"
+	nsdsServiceVowifi                = "vowifi"
+	nsdsServiceVowifiAndVVM          = "vowifi+vvm"
+	nsdsResponseSuccessful           = 1000
+	nsdsResponseAKAChallenge         = 1003
+	nsdsResponseInvalidRequest       = 1004
+	nsdsResponseInvalidIPAuth        = 1005
+	nsdsResponseAKAAuthFailed        = 1006
+	nsdsResponseForbiddenRequest     = 1007
+	nsdsResponseInvalidClientID      = 1008
+	nsdsResponseMaxDeviceReached     = 1010
+	nsdsResponseInvalidDeviceID      = 1020
+	nsdsResponseNoEPDG               = 1021
+	nsdsResponseCertGenerationFailed = 1022
+	nsdsResponseRemovalFailed        = 1023
+	nsdsResponseInvalidOwnerID       = 1024
+	nsdsResponseInvalidCSR           = 1025
+	nsdsResponseDeviceLocked         = 1028
+	nsdsResponseInvalidDeviceStatus  = 1029
+	nsdsResponseMaxServiceReached    = 1040
+	nsdsResponseInvalidFingerprint   = 1041
+	nsdsResponseInvalidTargetDevice  = 1042
+	nsdsResponseInvalidTargetUser    = 1043
+	nsdsResponseMaxServiceInstance   = 1044
+	nsdsResponseCopyForbidden        = 1045
+	nsdsResponseInvalidServiceName   = 1046
+	nsdsResponseServiceNotEntitled   = 1048
+	nsdsResponseServiceNotPermitted  = 1049
+	nsdsResponseInvalidServiceInstID = 1053
+	nsdsResponseInvalidDeviceGroup   = 1054
+	nsdsResponseNoMSISDNFound        = 1060
+	nsdsResponseCreationFailed       = 1061
+	nsdsResponseServerSuspended      = 1063
+	nsdsResponseInvalidPushToken     = 1080
+	nsdsResponseServerError          = 1111
+	nsdsResponse3GPPAuthOngoing      = 1112
+	nsdsResponseRequestOngoing       = 1500
+	nsdsResponseUnsupportedOperation = 9999
+)
+
+const (
+	nsdsDefinedUnknown                          = -1
+	nsdsDefinedRequest3GPPAuthGenFailure        = 1001
+	nsdsDefinedRequest3GPPAuthServerError       = 1002
+	nsdsDefinedAKAAuthFailed                    = 1006
+	nsdsDefinedRegisteredMSISDNGenFailure       = 1100
+	nsdsDefinedManageConnectivityActivateFailed = 1300
+	nsdsDefinedManageConnectivityInvalidGroup   = 1301
+	nsdsDefinedManageConnectivityConfigFailed   = 1400
+	nsdsDefinedManageConnectivityConfigUpdated  = 1302
+	nsdsDefinedManageConnectivityDeactivated    = 1305
+	nsdsDefinedManageServiceProvisionFailed     = 1500
+	nsdsDefinedManageServiceInvalidOwnerID      = 1501
+	nsdsDefinedManageServiceMaxInstanceReached  = 1502
+	nsdsDefinedManageServiceNotEntitled         = 1503
+	nsdsDefinedManageServiceRenewFailed         = 1600
+	nsdsDefinedManageServiceRemoveFailed        = 1700
+	nsdsDefinedManageServiceInvalidDeviceStatus = 1701
+	nsdsDefinedManageServiceInvalidInstanceID   = 1702
+	nsdsDefinedManageLocationAndTCFailed        = 1800
+	nsdsDefinedManagePushTokenFailed            = 1900
+	nsdsDefinedRegisteredDevicesFailed          = 2000
+	nsdsDefinedSvcProvisionPending              = 2300
+	nsdsDefinedSvcNotProvisioned                = 2301
+	nsdsDefinedSvcProvisionCompleted            = 2302
+	nsdsDefinedForceToggleOff                   = 2303
+	nsdsDefinedVoidWebsheetTransaction          = 2304
+	nsdsDefinedInvalidSIMStatus                 = 2401
+	nsdsDefinedLocationTCUpdateCancel           = 2500
+	nsdsDefinedLocationTCUpdateSuccess          = 2501
+	nsdsDefinedLocationTCUpdateNotRequired      = 2502
+	nsdsDefinedHTTPTransactionError             = 2600
+)
+
 type nsdsRequest struct {
 	MessageID          int      `json:"message-id"`
 	Method             string   `json:"method"`
@@ -395,18 +703,21 @@ type nsdsResponse struct {
 	ServerURL              string               `json:"server-url"`
 	ServerData             string               `json:"server-data"`
 	AddressID              string               `json:"address-id"`
-	AIDExpiration          string               `json:"aid-expiration"`
+	AIDExpiration          nsdsAIDExpiration    `json:"aid-expiration"`
 	ServiceStatus          *int                 `json:"service-status"`
 }
 
 type serviceEntitlement struct {
 	ServiceName       string `json:"service-name"`
 	EntitlementStatus int    `json:"entitlement-status"`
+	OnDemandProv      *bool  `json:"on-demand-prov"`
 }
 
 type nsdsWFCStatus struct {
-	MSISDN     string
-	LocationTC nsdsResponse
+	MSISDN          string
+	LocationTC      nsdsResponse
+	ServiceEntitled bool
+	Pending         bool
 }
 
 func (status nsdsWFCStatus) LocationTCOK() bool {
@@ -430,47 +741,47 @@ func (c nsdsWFCClient) checkLocationAndTC(ctx context.Context, card Card) (nsdsW
 	token := firstNonEmpty(authenticated.AKAToken, authChallenge.AKAToken)
 
 	responses, err := c.post(ctx, []nsdsRequest{
-		c.authenticationRequest(1, "", token),
+		c.authenticationRequest(1, challengeResponse, token),
 		c.serviceEntitlementRequest(2),
 		c.getMSISDNRequest(3),
 	})
 	if err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	if err := nsdsRequireResponseCode(responses.response(1), 1000, "3gppAuthentication"); err != nil {
+	if err := nsdsRequireResponseCode(responses.response(1), nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsWFCStatus{}, err
 	}
 	entitlement := responses.response(2)
-	if err := nsdsRequireResponseCode(entitlement, 1000, "serviceEntitlementStatus"); err != nil {
+	if err := nsdsRequireResponseCode(entitlement, nsdsResponseSuccessful, nsdsMethodServiceEntitlement); err != nil {
 		return nsdsWFCStatus{}, err
 	}
 	if !nsdsVowifiEntitled(entitlement) {
-		return nsdsWFCStatus{}, &NSDSWFCEntitlementError{Err: ErrWFCEntitlementDenied}
+		return nsdsWFCStatus{}, nil
 	}
 	msisdn := responses.response(3)
-	if err := nsdsRequireResponseCode(msisdn, 1000, "getMSISDN"); err != nil {
+	if err := nsdsRequireResponseCode(msisdn, nsdsResponseSuccessful, nsdsMethodGetMSISDN); err != nil {
 		return nsdsWFCStatus{}, err
 	}
 	if msisdn.ServiceFingerprint == "" {
-		return nsdsWFCStatus{}, &NSDSWFCEntitlementError{Err: ErrWFCEntitlementPending}
+		return nsdsWFCStatus{ServiceEntitled: true, Pending: true}, nil
 	}
 
 	token = firstNonEmpty(responses.response(1).AKAToken, token)
 	responses, err = c.post(ctx, []nsdsRequest{
-		c.authenticationRequest(1, "", token),
+		c.authenticationRequest(1, challengeResponse, token),
 		c.manageLocationAndTCRequest(2, msisdn.ServiceFingerprint),
 	})
 	if err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	if err := nsdsRequireResponseCode(responses.response(1), 1000, "3gppAuthentication"); err != nil {
+	if err := nsdsRequireResponseCode(responses.response(1), nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsWFCStatus{}, err
 	}
 	locationTC := responses.response(2)
-	if err := nsdsRequireResponseCode(locationTC, 1000, "manageLocationAndTC"); err != nil {
+	if err := nsdsRequireResponseCode(locationTC, nsdsResponseSuccessful, nsdsMethodManageLocationAndTC); err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	return nsdsWFCStatus{MSISDN: msisdn.MSISDN, LocationTC: locationTC}, nil
+	return nsdsWFCStatus{MSISDN: msisdn.MSISDN, LocationTC: locationTC, ServiceEntitled: true}, nil
 }
 
 func (c nsdsWFCClient) respondToChallenge(ctx context.Context, challengeResponse string) (nsdsResponse, error) {
@@ -479,7 +790,7 @@ func (c nsdsWFCClient) respondToChallenge(ctx context.Context, challengeResponse
 		return nsdsResponse{}, err
 	}
 	response := responses.response(1)
-	if err := nsdsRequireResponseCode(response, 1000, "3gppAuthentication"); err != nil {
+	if err := nsdsRequireResponseCode(response, nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsResponse{}, err
 	}
 	return response, nil
@@ -491,7 +802,7 @@ func (c nsdsWFCClient) requestChallenge(ctx context.Context) (nsdsResponse, erro
 		return nsdsResponse{}, err
 	}
 	response := responses.response(1)
-	if err := nsdsRequireResponseCode(response, 1003, "3gppAuthentication"); err != nil {
+	if err := nsdsRequireResponseCode(response, nsdsResponseAKAChallenge, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsResponse{}, err
 	}
 	if response.AKAChallenge == "" {
@@ -503,7 +814,7 @@ func (c nsdsWFCClient) requestChallenge(ctx context.Context) (nsdsResponse, erro
 func (c nsdsWFCClient) authenticationRequest(messageID int, challengeResponse, token string) nsdsRequest {
 	return nsdsRequest{
 		MessageID:       messageID,
-		Method:          "3gppAuthentication",
+		Method:          nsdsMethod3GPPAuthentication,
 		DeviceID:        c.deviceID,
 		DeviceType:      new(int),
 		OSType:          new(int),
@@ -517,16 +828,16 @@ func (c nsdsWFCClient) authenticationRequest(messageID int, challengeResponse, t
 func (c nsdsWFCClient) serviceEntitlementRequest(messageID int) nsdsRequest {
 	return nsdsRequest{
 		MessageID:   messageID,
-		Method:      "serviceEntitlementStatus",
+		Method:      nsdsMethodServiceEntitlement,
 		DeviceID:    c.deviceID,
-		ServiceList: []string{"vowifi"},
+		ServiceList: []string{nsdsServiceVowifi},
 	}
 }
 
 func (c nsdsWFCClient) getMSISDNRequest(messageID int) nsdsRequest {
 	return nsdsRequest{
 		MessageID: messageID,
-		Method:    "getMSISDN",
+		Method:    nsdsMethodGetMSISDN,
 		DeviceID:  c.deviceID,
 	}
 }
@@ -534,7 +845,7 @@ func (c nsdsWFCClient) getMSISDNRequest(messageID int) nsdsRequest {
 func (c nsdsWFCClient) manageLocationAndTCRequest(messageID int, fingerprint string) nsdsRequest {
 	return nsdsRequest{
 		MessageID:          messageID,
-		Method:             "manageLocationAndTC",
+		Method:             nsdsMethodManageLocationAndTC,
 		DeviceID:           c.deviceID,
 		ServiceFingerprint: fingerprint,
 	}
@@ -615,7 +926,11 @@ func nsdsWFCChallengeResponse(ctx context.Context, card Card, imsiEAP, challenge
 	if err := challenge.UnmarshalText([]byte(challengeText)); err != nil {
 		return "", fmt.Errorf("decoding nsds aka challenge: %w", err)
 	}
-	aka, err := card.AKA(ctx, challenge.Rand, challenge.Autn)
+	authenticate := card.AKA
+	if eapCard, ok := card.(eapAKACard); ok {
+		authenticate = eapCard.EAPAKA
+	}
+	aka, err := authenticate(ctx, challenge.Rand, challenge.Autn)
 	if err != nil {
 		return "", fmt.Errorf("authenticating nsds aka challenge: %w", err)
 	}
@@ -640,24 +955,252 @@ func nsdsRequireResponseCode(response nsdsResponse, want int, method string) err
 		return nil
 	}
 	if response.MessageID == 0 && response.ResponseCode == 0 {
-		return fmt.Errorf("nsds %s response missing", method)
+		return nsdsResponseCodeError{Method: method, Want: want, Missing: true}
 	}
-	return fmt.Errorf("nsds %s response code %d, want %d", method, response.ResponseCode, want)
+	return nsdsResponseCodeError{Method: method, Got: response.ResponseCode, Want: want}
+}
+
+type nsdsResponseCodeError struct {
+	Method  string
+	Got     int
+	Want    int
+	Missing bool
+}
+
+func (e nsdsResponseCodeError) Error() string {
+	if e.Missing {
+		return fmt.Sprintf("nsds %s response missing", e.Method)
+	}
+	return fmt.Sprintf("nsds %s response code %d (%s), want %d (%s)", e.Method, e.Got, nsdsResponseCodeName(e.Got), e.Want, nsdsResponseCodeName(e.Want))
+}
+
+func nsdsWFCActivationCheckOptional(purpose WFCEntitlementPurpose, err error) bool {
+	if purpose != WFCEntitlementActivation {
+		return false
+	}
+	var codeErr nsdsResponseCodeError
+	return errors.As(err, &codeErr) &&
+		!codeErr.Missing &&
+		codeErr.Method == nsdsMethod3GPPAuthentication &&
+		codeErr.Got == nsdsResponseInvalidRequest
 }
 
 func nsdsVowifiEntitled(response nsdsResponse) bool {
 	for _, service := range response.ServiceEntitlementList {
-		if service.ServiceName != "vowifi" {
+		if service.ServiceName != nsdsServiceVowifi {
 			continue
 		}
 		switch service.EntitlementStatus {
-		case 1000, 1048, 1063:
+		case nsdsResponseSuccessful:
 			return true
+		case nsdsResponseServiceNotEntitled:
+			return service.OnDemandProv != nil && *service.OnDemandProv
 		default:
 			return false
 		}
 	}
 	return false
+}
+
+func nsdsResponseCodeName(code int) string {
+	switch code {
+	case nsdsDefinedUnknown:
+		return "UNKNOWN"
+	case nsdsResponseSuccessful:
+		return "REQUEST_SUCCESSFUL"
+	case nsdsResponseAKAChallenge:
+		return "REQUEST_AKA_CHALLENGE"
+	case nsdsResponseInvalidRequest:
+		return "ERROR_INVALID_REQUEST"
+	case nsdsResponseInvalidIPAuth:
+		return "ERROR_INVALID_IP_AUTHENTICATION"
+	case nsdsResponseAKAAuthFailed:
+		return "ERROR_AKA_AUTHENTICATION_FAILED"
+	case nsdsResponseForbiddenRequest:
+		return "FORBIDDEN_REQUEST"
+	case nsdsResponseInvalidClientID:
+		return "INVALID_CLIENT_ID"
+	case nsdsResponseMaxDeviceReached:
+		return "ERROR_MAX_DEVICE_REACHED"
+	case nsdsResponseInvalidDeviceID:
+		return "ERROR_INVALID_DEVICE_ID"
+	case nsdsResponseNoEPDG:
+		return "ERROR_NO_EPDG"
+	case nsdsResponseCertGenerationFailed:
+		return "ERROR_CERTIFICATE_GENERATION_FAILURE"
+	case nsdsResponseRemovalFailed:
+		return "ERROR_REMOVAL_SERVICE_FAILURE"
+	case nsdsResponseInvalidOwnerID:
+		return "ERROR_INVALID_OWNERID"
+	case nsdsResponseInvalidCSR:
+		return "ERROR_INVALID_CSR"
+	case nsdsResponseDeviceLocked:
+		return "ERROR_DEVICE_LOCKED"
+	case nsdsResponseInvalidDeviceStatus:
+		return "ERROR_INVALID_DEVICE_STATUS"
+	case nsdsResponseMaxServiceReached:
+		return "ERROR_MAX_SERVICE_REACHED"
+	case nsdsResponseInvalidFingerprint:
+		return "ERROR_INVALID_FINGERPRINT"
+	case nsdsResponseInvalidTargetDevice:
+		return "ERROR_INVALID_TARGET_DEVICEID"
+	case nsdsResponseInvalidTargetUser:
+		return "ERROR_INVALID_TARGET_USER"
+	case nsdsResponseMaxServiceInstance:
+		return "ERROR_MAX_SERVICE_INSTANCE_REACHED"
+	case nsdsResponseCopyForbidden:
+		return "ERROR_COPY_FORBIDDEN"
+	case nsdsResponseInvalidServiceName:
+		return "ERROR_INVALID_SERVICE_NAME"
+	case nsdsResponseServiceNotEntitled:
+		return "ERROR_SERVICE_NOT_ENTITLED"
+	case nsdsResponseServiceNotPermitted:
+		return "ERROR_SERVICE_NOT_PERMITTED"
+	case nsdsResponseInvalidServiceInstID:
+		return "ERROR_INVALID_SERVICE_INSTANCEID"
+	case nsdsResponseInvalidDeviceGroup:
+		return "ERROR_INVALID_DEVICE_GROUP"
+	case nsdsResponseNoMSISDNFound:
+		return "ERROR_NO_MSISDN_FOUND"
+	case nsdsResponseCreationFailed:
+		return "ERROR_CREATION_FAILURE"
+	case nsdsResponseServerSuspended:
+		return "ERROR_SERVER_SUSPENDED"
+	case nsdsResponseInvalidPushToken:
+		return "ERROR_INVALID_PUSH_TOKEN"
+	case nsdsResponseServerError:
+		return "ERROR_SERVER_ERROR"
+	case nsdsResponse3GPPAuthOngoing:
+		return "ERROR_3GPP_AUTH_ONGOING"
+	case nsdsResponseRequestOngoing:
+		return "ERROR_REQUEST_ONGOING"
+	case nsdsResponseUnsupportedOperation:
+		return "ERROR_UNSUPPORTED_OPERATION"
+	default:
+		return "ERROR_UNKNOWN"
+	}
+}
+
+func nsdsDefinedResponseCodeName(code int) string {
+	switch code {
+	case nsdsDefinedUnknown:
+		return "UNKNOWN"
+	case nsdsDefinedRequest3GPPAuthGenFailure:
+		return "REQUEST_3GPP_AUTH_GEN_FAILURE"
+	case nsdsDefinedRequest3GPPAuthServerError:
+		return "REQUEST_3GPP_AUTH_SERVER_ERROR"
+	case nsdsDefinedAKAAuthFailed:
+		return "AKA_AUTH_FAILED"
+	case nsdsDefinedRegisteredMSISDNGenFailure:
+		return "REGISTERED_MSISDN_GEN_FAILURE"
+	case nsdsDefinedManageConnectivityActivateFailed:
+		return "MANAGE_CONNECTIVITY_ACTIVATE_GEN_FAILURE"
+	case nsdsDefinedManageConnectivityInvalidGroup:
+		return "MANAGE_CONNECTIVITY_ACTIVATE_INVALID_DEVICE_GROUP"
+	case nsdsDefinedManageConnectivityConfigFailed:
+		return "MANAGE_CONNECTIVITY_CONFIGURE_GEN_FAILURE"
+	case nsdsDefinedManageConnectivityConfigUpdated:
+		return "MANAGE_CONNECTIVITY_NEW_CONFIG_UPDATED"
+	case nsdsDefinedManageConnectivityDeactivated:
+		return "MANAGE_CONNECTIVITY_DEACTIVATION_SUCCESS_FOR_INVALID_FINGERPRINT"
+	case nsdsDefinedManageServiceProvisionFailed:
+		return "MANAGE_SERVICE_PROVISION_GEN_FAILURE"
+	case nsdsDefinedManageServiceInvalidOwnerID:
+		return "MANAGE_SERVICE_PROVISION_INVALID_OWNER_ID"
+	case nsdsDefinedManageServiceMaxInstanceReached:
+		return "MANAGE_SERVICE_PROVISION_MAX_SVC_INST_REACHED"
+	case nsdsDefinedManageServiceNotEntitled:
+		return "MANAGE_SERVICE_PROVISION_SVC_NOT_ENTITLED"
+	case nsdsDefinedManageServiceRenewFailed:
+		return "MANAGE_SERVICE_RENEW_GEN_FAILURE"
+	case nsdsDefinedManageServiceRemoveFailed:
+		return "MANAGE_SERVICE_REMOVE_GEN_FAILURE"
+	case nsdsDefinedManageServiceInvalidDeviceStatus:
+		return "MANAGE_SERVICE_REMOVE_INVALID_DEVICE_STATUS"
+	case nsdsDefinedManageServiceInvalidInstanceID:
+		return "MANAGE_SERVICE_REMOVE_INVALID_SVC_INST_ID"
+	case nsdsDefinedManageLocationAndTCFailed:
+		return "MANAGE_LOCATION_AND_TC_GEN_FAILURE"
+	case nsdsDefinedManagePushTokenFailed:
+		return "MANAGE_PUSH_TOKEN_GEN_FAILURE"
+	case nsdsDefinedRegisteredDevicesFailed:
+		return "REGISTERED_DEVICES_GEN_FAILURE"
+	case nsdsDefinedSvcProvisionPending:
+		return "SVC_PROVISION_PENDING_ERROR_CODE"
+	case nsdsDefinedSvcNotProvisioned:
+		return "SVC_NOT_PROVISIONED_ERROR_CODE"
+	case nsdsDefinedSvcProvisionCompleted:
+		return "SVC_PROVISION_COMPLETED_SUCCESS_CODE"
+	case nsdsDefinedForceToggleOff:
+		return "FORCE_TOGGLE_OFF_ERROR_CODE"
+	case nsdsDefinedVoidWebsheetTransaction:
+		return "VOID_WEBSHEET_TRANSACTION"
+	case nsdsDefinedInvalidSIMStatus:
+		return "INVALID_SIM_STATUS"
+	case nsdsDefinedLocationTCUpdateCancel:
+		return "LOCATIONANDTC_UPDATE_CANCEL_CODE"
+	case nsdsDefinedLocationTCUpdateSuccess:
+		return "LOCATIONANDTC_UPDATE_SUCCESS_CODE"
+	case nsdsDefinedLocationTCUpdateNotRequired:
+		return "LOCATIONANDTC_UPDATE_NOT_REQUIRED"
+	case nsdsDefinedHTTPTransactionError:
+		return "HTTP_TRANSACTION_ERROR_CODE"
+	default:
+		return "ERROR_UNKNOWN"
+	}
+}
+
+func nsdsWFCE911Info(response nsdsResponse) *WFCE911Info {
+	if response.AddressID == "" && response.AIDExpiration.Time.IsZero() && response.ServerURL == "" && response.ServerData == "" {
+		return nil
+	}
+	return &WFCE911Info{
+		AddressID:     response.AddressID,
+		AIDExpiration: response.AIDExpiration.Time,
+		ServerURL:     response.ServerURL,
+		ServerData:    response.ServerData,
+	}
+}
+
+func nsdsWFCWebsheet(profile nsdsWFCProfile, response nsdsResponse) *WFCWebsheet {
+	if response.ServerURL == "" {
+		return nil
+	}
+	return &WFCWebsheet{
+		Kind:       WFCWebsheetKindEmergencyAddress,
+		URL:        response.ServerURL,
+		Data:       response.ServerData,
+		Title:      profile.Title,
+		ClientName: profile.ClientName,
+	}
+}
+
+type nsdsAIDExpiration struct {
+	time.Time
+}
+
+func (a *nsdsAIDExpiration) UnmarshalText(text []byte) error {
+	value := strings.TrimSpace(string(text))
+	if value == "" {
+		a.Time = time.Time{}
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.000Z-0700", "2006-01-02T15:04:05Z-0700"} {
+		t, err := time.Parse(layout, value)
+		if err == nil {
+			a.Time = t
+			return nil
+		}
+	}
+	a.Time = time.Time{}
+	return nil
+}
+
+func (a nsdsAIDExpiration) MarshalText() ([]byte, error) {
+	if a.Time.IsZero() {
+		return nil, nil
+	}
+	return []byte(a.Time.Format(time.RFC3339Nano)), nil
 }
 
 func (response nsdsResponse) LocationTCOK() bool {

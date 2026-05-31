@@ -13,12 +13,14 @@ type Flow struct {
 	MessagePort       int
 	ServiceRoutes     []string
 	SecurityClient    security.Param
+	SecurityClients   security.Params
 	SecurityVerify    *security.Param
 	SecurityServerRaw []string
 }
 
 func (f Flow) clone() Flow {
 	f.ServiceRoutes = append([]string(nil), f.ServiceRoutes...)
+	f.SecurityClients = append(security.Params(nil), f.SecurityClients...)
 	f.SecurityServerRaw = append([]string(nil), f.SecurityServerRaw...)
 	if f.SecurityVerify != nil {
 		verify := *f.SecurityVerify
@@ -37,14 +39,21 @@ func (f Flow) SecurityVerifyValue() string {
 	return f.SecurityVerify.String()
 }
 
+func (f Flow) SecurityClientValue() string {
+	if len(f.SecurityClients) != 0 {
+		return f.SecurityClients.String()
+	}
+	if f.SecurityClient.Mechanism == "" {
+		return ""
+	}
+	return f.SecurityClient.String()
+}
+
 func (f Flow) RequestPolicy(userAgent, accessNetworkInfo string) sip.ClientRequestPolicy {
 	return f.requestPolicy(f.ServiceRoutes, userAgent, accessNetworkInfo)
 }
 
 func (f Flow) DialogRequestPolicy(routes []string, userAgent, accessNetworkInfo string) sip.ClientRequestPolicy {
-	if len(routes) == 0 {
-		routes = f.ServiceRoutes
-	}
 	return f.requestPolicy(routes, userAgent, accessNetworkInfo)
 }
 

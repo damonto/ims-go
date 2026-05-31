@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/damonto/vowifi-go/ims/pidf"
+	"github.com/damonto/vowifi-go/ims/security"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 	"github.com/damonto/vowifi-go/swu/tunnel"
 )
@@ -32,11 +33,18 @@ func (cfg Config) normalized(card Card) (Config, error) {
 	if cfg.ReconnectDelay == 0 {
 		cfg.ReconnectDelay = defaultReconnectDelay
 	}
+	if cfg.ReconnectMaxDelay == 0 {
+		cfg.ReconnectMaxDelay = max(defaultReconnectMaxDelay, cfg.ReconnectDelay)
+	}
+	if cfg.ReconnectDelay > cfg.ReconnectMaxDelay {
+		return Config{}, errors.New("normalizing client config: reconnect max delay must be >= reconnect delay")
+	}
 
 	cfg.Terminal = cfg.Terminal.trimmed()
 	if cfg.Terminal.ID == "" {
 		return Config{}, errors.New("normalizing client config: terminal id is empty")
 	}
+	cfg.smsRequestStatusReport = true
 	profile, ok, err := loadWFCProfile(card)
 	if err != nil {
 		return Config{}, err
@@ -76,6 +84,9 @@ func (cfg Config) trimmed() Config {
 func (cfg Config) validate() error {
 	if cfg.ReconnectDelay < 0 {
 		return errors.New("normalizing client config: reconnect delay must be >= 0")
+	}
+	if cfg.ReconnectMaxDelay < 0 {
+		return errors.New("normalizing client config: reconnect max delay must be >= 0")
 	}
 	return nil
 }
@@ -127,6 +138,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
+	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
 	cfg.GeolocationPIDFRegister = pidf.NormalizeTypes(cfg.GeolocationPIDFRegister)
 	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
 	cfg.Voice.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.Voice.GeolocationCountry))
@@ -166,14 +178,47 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
 	}
+	if cfg.AuthAlgorithm == "" {
+		cfg.AuthAlgorithm = security.AlgorithmAKAv1MD5
+	} else {
+		algorithm, ok := security.NormalizeAKAAlgorithm(cfg.AuthAlgorithm)
+		if !ok {
+			return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported AKA algorithm %q", cfg.AuthAlgorithm)
+		}
+		if algorithm == security.AlgorithmAKAv2MD5 {
+			return IMSConfig{}, errors.New("normalizing ims config: AKAv2-MD5 is not a valid IMS REGISTER bootstrap algorithm")
+		}
+		cfg.AuthAlgorithm = algorithm
+	}
+	if cfg.RegistrationRetryBase < 0 {
+		return IMSConfig{}, errors.New("normalizing ims config: registration retry base must be >= 0")
+	}
+	if cfg.RegistrationRetryMax < 0 {
+		return IMSConfig{}, errors.New("normalizing ims config: registration retry max must be >= 0")
+	}
+	if cfg.RegistrationRetryBase == 0 {
+		cfg.RegistrationRetryBase = defaultIMSRegistrationRetryBase
+	}
+	if cfg.RegistrationRetryMax == 0 {
+		cfg.RegistrationRetryMax = max(defaultIMSRegistrationRetryMax, cfg.RegistrationRetryBase)
+	}
+	if cfg.RegistrationRetryBase > cfg.RegistrationRetryMax {
+		return IMSConfig{}, errors.New("normalizing ims config: registration retry max must be >= registration retry base")
+	}
 	if cfg.SIPServerPort < 0 || cfg.SIPServerPort > 65535 {
 		return IMSConfig{}, errors.New("normalizing ims config: sip server port must be between 0 and 65535")
 	}
 	if cfg.SMSSubmitReportTimeout < 0 {
 		return IMSConfig{}, errors.New("normalizing ims config: sms submit report timeout must be >= 0")
 	}
+	if cfg.SMSDeliveryReportTimeout < 0 {
+		return IMSConfig{}, errors.New("normalizing ims config: sms delivery report timeout must be >= 0")
+	}
 	if cfg.SMSSubmitReportTimeout == 0 {
 		cfg.SMSSubmitReportTimeout = imssms.DefaultSubmitReportTimeout()
+	}
+	if cfg.SMSDeliveryReportTimeout == 0 {
+		cfg.SMSDeliveryReportTimeout = imssms.DefaultDeliveryReportTimeout()
 	}
 	voiceCfg, err := cfg.Voice.Normalized()
 	if err != nil {
@@ -190,10 +235,6 @@ func geolocationPIDFConfigured(cfg IMSConfig) bool {
 }
 
 func defaultEPDGAddress(card Card) (string, error) {
-	if card == nil {
-		return "", errors.New("normalizing client config: card is nil")
-	}
-
 	mcc := strings.TrimSpace(card.MCC())
 	if len(mcc) != 3 {
 		return "", fmt.Errorf("normalizing client config: mcc %q must be 3 digits", mcc)

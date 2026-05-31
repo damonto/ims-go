@@ -17,7 +17,13 @@ import (
 	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
-const tcpDefaultSegmentSize = 1024
+const (
+	tcpDefaultSegmentSize = 1024
+	tcpDefaultRemotePort  = 5060
+	tcpEphemeralPortBase  = 40000
+	tcpEphemeralPortRange = 20000
+	tcpDefaultWindow      = 65535
+)
 
 var tcpDataACKTimeout = 2 * time.Second
 
@@ -26,6 +32,7 @@ var _ imssession.Transport = (*TCPConn)(nil)
 type TCPConfig struct {
 	LocalPort  int
 	RemotePort int
+	RemoteIP   net.IP
 }
 
 type SecureTCPConfig struct {
@@ -89,12 +96,12 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	if cfg.OutboundSPI == 0 || cfg.InboundSPI == 0 {
 		return nil, errors.New("listening secure tcp transport: spi is zero")
 	}
-	if len(cfg.IntegrityKey) == 0 {
-		return nil, errors.New("listening secure tcp transport: integrity key is empty")
+	encryption, err := secureEncryption(cfg.Encryption)
+	if err != nil {
+		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
-	encryption := secureEncryption(cfg.Encryption)
-	if encryption == esp.EncryptionAESCBC && len(cfg.EncryptionKey) == 0 {
-		return nil, errors.New("listening secure tcp transport: encryption key is empty")
+	if err := validateSecureESPConfig("listening secure tcp transport", encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
+		return nil, err
 	}
 	seq, err := randomUint32()
 	if err != nil {
@@ -103,7 +110,7 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	conn := &TCPConn{
 		session:     s,
 		local:       &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
-		remote:      &net.TCPAddr{IP: append(net.IP(nil), innerRemote.IP...), Port: cfg.RemotePort, Zone: innerRemote.Zone},
+		remote:      tcpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
 		secure:      true,
 		passive:     true,
 		initialSeq:  seq,
@@ -132,7 +139,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	}
 	remotePort := cfg.RemotePort
 	if remotePort == 0 {
-		remotePort = 5060
+		remotePort = tcpDefaultRemotePort
 	}
 	localPort := cfg.LocalPort
 	if localPort == 0 {
@@ -140,7 +147,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 		if err != nil {
 			return nil, fmt.Errorf("dialing tcp transport: %w", err)
 		}
-		localPort = int(40000 + rnd%20000)
+		localPort = int(tcpEphemeralPortBase + rnd%tcpEphemeralPortRange)
 	}
 	seq, err := randomUint32()
 	if err != nil {
@@ -149,7 +156,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	conn := &TCPConn{
 		session:    s,
 		local:      &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: localPort, Zone: innerLocal.Zone},
-		remote:     &net.TCPAddr{IP: append(net.IP(nil), innerRemote.IP...), Port: remotePort, Zone: innerRemote.Zone},
+		remote:     tcpRemoteAddr(innerRemote, remotePort, cfg.RemoteIP),
 		initialSeq: seq,
 		sendSeq:    seq + 1,
 		ackedSeq:   seq,
@@ -163,12 +170,12 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 		if secure.OutboundSPI == 0 || secure.InboundSPI == 0 {
 			return nil, errors.New("dialing secure tcp transport: spi is zero")
 		}
-		if len(secure.IntegrityKey) == 0 {
-			return nil, errors.New("dialing secure tcp transport: integrity key is empty")
+		encryption, err := secureEncryption(secure.Encryption)
+		if err != nil {
+			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
 		}
-		encryption := secureEncryption(secure.Encryption)
-		if encryption == esp.EncryptionAESCBC && len(secure.EncryptionKey) == 0 {
-			return nil, errors.New("dialing secure tcp transport: encryption key is empty")
+		if err := validateSecureESPConfig("dialing secure tcp transport", encryption, secure.Integrity, secure.EncryptionKey, secure.IntegrityKey); err != nil {
+			return nil, err
 		}
 		conn.secure = true
 		conn.outboundESP = esp.Codec{
@@ -399,6 +406,9 @@ func (t *TCPConn) acceptInboundESP(sequence uint32) bool {
 	if t.closed {
 		return false
 	}
+	if !espIntegrityEnabled(t.inboundESP.Integrity) {
+		return true
+	}
 	return t.inboundReplay.Accept(sequence)
 }
 
@@ -414,7 +424,7 @@ func (t *TCPConn) waitForAck(ctx context.Context, want uint32) error {
 		acked := t.ackedSeq
 		closed := t.closed
 		t.mu.Unlock()
-		if acked >= want {
+		if !tcpSeqAfter(want, acked) {
 			return nil
 		}
 		if closed {
@@ -433,7 +443,7 @@ func (t *TCPConn) waitForAck(ctx context.Context, want uint32) error {
 }
 
 func (t *TCPConn) noteAckLocked(ack uint32) {
-	if ack <= t.ackedSeq {
+	if !tcpSeqAfter(ack, t.ackedSeq) || tcpSeqAfter(ack, t.sendSeq) {
 		return
 	}
 	t.ackedSeq = ack
@@ -446,9 +456,13 @@ func (t *TCPConn) noteAckLocked(ack uint32) {
 func (t *TCPConn) noteSent(nextSeq uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if nextSeq > t.sendSeq {
+	if tcpSeqAfter(nextSeq, t.sendSeq) {
 		t.sendSeq = nextSeq
 	}
+}
+
+func tcpSeqAfter(a, b uint32) bool {
+	return int32(a-b) > 0
 }
 
 func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -463,6 +477,11 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 	}
 	t.session.Logger().Debug("received TCP segment", "src_addr", segment.Src, "dst_addr", segment.Dst, "tcp_flags", segment.Flags, "seq", segment.Seq, "ack", segment.Ack, "payload_len", len(segment.Payload))
 
+	if segment.Flags&packet.TCPFlagRST != 0 {
+		t.closeAfterSegmentError(errors.New("reading tcp packet: peer reset connection"))
+		return
+	}
+
 	if !t.established {
 		if t.passive {
 			if segment.Flags&packet.TCPFlagSYN != 0 && segment.Flags&packet.TCPFlagACK == 0 {
@@ -476,7 +495,7 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 				}()
 				return
 			}
-			if segment.Flags&packet.TCPFlagACK != 0 && segment.Ack >= t.sendSeq {
+			if segment.Flags&packet.TCPFlagACK != 0 && segment.Ack == t.sendSeq {
 				t.noteAckLocked(segment.Ack)
 				t.established = true
 				t.signalReady()
@@ -507,10 +526,7 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 				defer cancel()
 				_ = t.sendSegmentWithSeq(ctx, seq, ack, packet.TCPFlagACK, nil)
 			}(t.sendSeq)
-			select {
-			case t.errCh <- errors.New("reading tcp packet: peer closed connection"):
-			default:
-			}
+			t.closeAfterSegmentError(errors.New("reading tcp packet: peer closed connection"))
 		}
 		return
 	}
@@ -537,10 +553,7 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 	for {
 		msg, rest, ok, err := nextSIPMessage(t.stream)
 		if err != nil {
-			select {
-			case t.errCh <- err:
-			default:
-			}
+			t.closeAfterSegmentError(err)
 			return
 		}
 		if !ok {
@@ -550,13 +563,14 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 		select {
 		case t.msgCh <- msg:
 		default:
-			select {
-			case t.errCh <- errors.New("reading tcp packet: message queue is full"):
-			default:
-			}
+			t.closeAfterSegmentError(errors.New("reading tcp packet: message queue is full"))
 			return
 		}
 	}
+}
+
+func (t *TCPConn) closeAfterSegmentError(err error) {
+	go t.closeWithError(err)
 }
 
 func (t *TCPConn) signalReady() {
@@ -598,7 +612,7 @@ func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags
 		Seq:     seq,
 		Ack:     ack,
 		Flags:   flags,
-		Window:  65535,
+		Window:  tcpDefaultWindow,
 		Payload: append([]byte(nil), payload...),
 	}
 	if !t.secure {

@@ -73,17 +73,17 @@ func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action string) (*U
 	if cfg.OutboundSPI == 0 || cfg.InboundSPI == 0 {
 		return nil, fmt.Errorf("%s: spi is zero", action)
 	}
-	if len(cfg.IntegrityKey) == 0 {
-		return nil, fmt.Errorf("%s: integrity key is empty", action)
+	encryption, err := secureEncryption(cfg.Encryption)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
-	encryption := secureEncryption(cfg.Encryption)
-	if encryption == esp.EncryptionAESCBC && len(cfg.EncryptionKey) == 0 {
-		return nil, fmt.Errorf("%s: encryption key is empty", action)
+	if err := validateSecureESPConfig(action, encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
+		return nil, err
 	}
 	conn := &UDPConn{
 		session:     s,
 		local:       &net.UDPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
-		remote:      &net.UDPAddr{IP: append(net.IP(nil), innerRemote.IP...), Port: cfg.RemotePort, Zone: innerRemote.Zone},
+		remote:      udpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
 		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
 		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
 		readCh:      make(chan inboundPacket, 16),
@@ -112,18 +112,12 @@ func (t *UDPConn) WritePacket(ctx context.Context, data []byte) error {
 func (t *UDPConn) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
 	remote, ok := addr.(*net.UDPAddr)
 	if !ok || remote == nil {
-		return t.WritePacket(ctx, data)
+		return t.writePacket(ctx, data, t.remote)
 	}
 	t.mu.Lock()
 	configuredRemote := cloneUDPAddr(t.remote)
 	t.mu.Unlock()
-	if remote.IP.Equal(configuredRemote.IP) {
-		// The protected UDP flow is bound to the peer's IPsec port-c/port-s
-		// tuple. SIP Via may advertise 5060/6000, but sending outside the
-		// established protected flow makes networks retransmit the request.
-		remote.Port = configuredRemote.Port
-	}
-	return t.writePacket(ctx, data, cloneUDPAddr(remote))
+	return t.writePacket(ctx, data, protectedUDPWriteRemote(configuredRemote, remote))
 }
 
 func (t *UDPConn) writePacket(ctx context.Context, data []byte, remote *net.UDPAddr) error {
@@ -160,6 +154,20 @@ func (t *UDPConn) writePacket(ctx context.Context, data []byte, remote *net.UDPA
 			Payload:  sealed,
 		},
 	})
+}
+
+func protectedUDPWriteRemote(configuredRemote, requested *net.UDPAddr) *net.UDPAddr {
+	if requested == nil {
+		return cloneUDPAddr(configuredRemote)
+	}
+	remote := cloneUDPAddr(requested)
+	if configuredRemote != nil && remote.IP.Equal(configuredRemote.IP) {
+		// The protected UDP flow is bound to the peer's IPsec port-c/port-s
+		// tuple. SIP Via may advertise 5060/6000, but sending outside the
+		// established protected flow makes networks retransmit the request.
+		remote.Port = configuredRemote.Port
+	}
+	return remote
 }
 
 func (t *UDPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
@@ -252,6 +260,9 @@ func (t *UDPConn) acceptInboundESP(sequence uint32) bool {
 	defer t.mu.Unlock()
 	if t.closed {
 		return false
+	}
+	if !espIntegrityEnabled(t.inboundESP.Integrity) {
+		return true
 	}
 	return t.inboundReplay.Accept(sequence)
 }

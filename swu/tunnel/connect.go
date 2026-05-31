@@ -9,12 +9,20 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/damonto/vowifi-go/swu/esp"
 	"github.com/damonto/vowifi-go/swu/handshake"
 	"github.com/damonto/vowifi-go/swu/ike"
 	"github.com/damonto/vowifi-go/usim"
+)
+
+const (
+	defaultIKENonceLength     = 32
+	maxCookieNotifyDataLength = 64
+	maxIKESAInitCookieRetries = 4
+	ikeSPISeedLength          = 16
 )
 
 type connectState struct {
@@ -34,7 +42,10 @@ type connectState struct {
 	nonceI          []byte
 	ikeInitCookie   []byte
 	ikeInitRequest  []byte
+	ikeInitResponse []byte
 	responderNonce  []byte
+	nattSupported   bool
+	natDetected     bool
 	nextMessageID   uint32
 	finalPayloads   []ike.Payload
 	tunnel          Info
@@ -52,14 +63,14 @@ func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
 		s.logger.Error("IKE_SA_INIT exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
-	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI)
+	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected)
 	if err := s.exchangeIKEAuth(ctx, state); err != nil {
 		s.logger.Error("IKE_AUTH exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	s.commitConnect(state)
 	s.startBackgroundLoops()
-	s.logger.Info("SWu security associations established", "inner_ip", state.tunnel.InnerIP, "pcscf_ip", state.tunnel.PCSCFIP, "esp_initiator_spi", state.tunnel.ESPInitiatorSPI, "esp_responder_spi", state.tunnel.ESPResponderSPI)
+	s.logger.Info("SWu security associations established", "inner_ip", state.tunnel.InnerIP, "pcscf_ip", state.tunnel.PCSCFIP, "pcscf_ips", state.tunnel.PCSCFIPs, "esp_initiator_spi", state.tunnel.ESPInitiatorSPI, "esp_responder_spi", state.tunnel.ESPResponderSPI)
 	return nil
 }
 
@@ -154,7 +165,7 @@ func newConnectCryptoState(dhGroup uint16) (*ikeCrypto, uint64, uint32, []byte, 
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("generating child spi: %w", err)
 	}
-	nonceI, err := randomBytes(32)
+	nonceI, err := randomBytes(defaultIKENonceLength)
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("generating nonce: %w", err)
 	}
@@ -168,7 +179,7 @@ func (state *connectState) resetDHGroup(dhGroup uint16) error {
 	if err != nil {
 		return err
 	}
-	nonceI, err := randomBytes(32)
+	nonceI, err := randomBytes(defaultIKENonceLength)
 	if err != nil {
 		return fmt.Errorf("generating nonce: %w", err)
 	}
@@ -213,13 +224,21 @@ func decodeIKESAInitPacket(raw []byte) (ike.IKEPacket, error) {
 	return packet, nil
 }
 
-func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, request []byte) error {
+func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, request, responseRaw []byte, outerLocal, outerRemote *net.UDPAddr) error {
 	if response.Header.ResponderSPI == 0 {
 		return errors.New("responder spi is empty")
 	}
-	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, state.crypto.dhGroup)
+	requestProposals := ikeSAProposals(state.input.Config, state.crypto.dhGroup)
+	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, state.crypto.dhGroup, requestProposals)
 	if err != nil {
 		return err
+	}
+	nattSupported, natDetected, err := ikeSAInitNATDetection(response.Payloads, response.Header.InitiatorSPI, response.Header.ResponderSPI, outerLocal, outerRemote)
+	if err != nil {
+		return err
+	}
+	if !nattSupported {
+		return errors.New("parsing ike_sa_init response: peer does not support nat traversal")
 	}
 	state.crypto.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
 	state.crypto.SetSPIs(state.initiatorSPI, response.Header.ResponderSPI)
@@ -229,7 +248,10 @@ func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, reques
 	}
 	state.responderSPI = response.Header.ResponderSPI
 	state.ikeInitRequest = append([]byte(nil), request...)
+	state.ikeInitResponse = append([]byte(nil), responseRaw...)
 	state.responderNonce = append([]byte(nil), responderNonce...)
+	state.nattSupported = nattSupported
+	state.natDetected = natDetected
 	state.saInit.InitiatorSPI = state.initiatorSPI
 	state.saInit.ResponderSPI = state.responderSPI
 	state.saInit.NonceI = append([]byte(nil), state.nonceI...)
@@ -252,7 +274,7 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 		if err != nil {
 			return err
 		}
-		responseRaw, _, err := s.exchangeIKE(ctx, s.outerRemote, request, false, 0)
+		responseRaw, _, err := s.exchangeIKE(ctx, s.outerRemote, request, s.outerRemote.Port == s.cfg.NATTPort, 0)
 		if err != nil {
 			return err
 		}
@@ -266,7 +288,7 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 		}
 		if retryCookie {
 			cookieRetries++
-			if cookieRetries > 4 {
+			if cookieRetries > maxIKESAInitCookieRetries {
 				return errors.New("parsing ike_sa_init response: too many COOKIE retries")
 			}
 			s.logger.Info("retrying IKE_SA_INIT with COOKIE", "attempt", cookieRetries)
@@ -281,10 +303,13 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 			return err
 		}
 		if !retry {
-			return state.applyIKESAInitResponse(response, request)
+			return state.applyIKESAInitResponse(response, request, responseRaw, outerLocal, s.outerRemote)
 		}
 		if _, ok := triedGroups[group]; ok {
 			return fmt.Errorf("parsing ike_sa_init response: repeated INVALID_KE_PAYLOAD group %d", group)
+		}
+		if !slices.Contains(state.input.Config.DHGroups, group) {
+			return fmt.Errorf("parsing ike_sa_init response: invalid ke dh group %d was not requested", group)
 		}
 		s.logger.Info("retrying IKE_SA_INIT with responder DH group", "dh_group", group)
 		if err := state.resetDHGroup(group); err != nil {
@@ -303,7 +328,7 @@ func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) erro
 	if err != nil {
 		return err
 	}
-	finalPayloads, nextMessageID, err := s.authenticateEAPAKA(ctx, state.card, state.imei, state.identity, state.realm, state.initialAKAState, state.crypto, state.initiatorSPI, state.responderSPI, state.ikeInitRequest, state.responderNonce, idiData, challengePayloads)
+	finalPayloads, nextMessageID, err := s.authenticateEAPAKA(ctx, state.card, state.imei, state.identity, state.realm, state.initialAKAState, state.crypto, state.initiatorSPI, state.responderSPI, state.ikeInitRequest, state.ikeInitResponse, state.nonceI, state.responderNonce, idiData, challengePayloads)
 	if err != nil {
 		return err
 	}
@@ -311,7 +336,10 @@ func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) erro
 }
 
 func buildIKEAuthRequest(state *connectState) ([]byte, []byte, error) {
-	idi := (&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(state.identity)}).RawData()
+	idi, err := (&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(state.identity)}).RawData()
+	if err != nil {
+		return nil, nil, fmt.Errorf("building ike_auth request idi: %w", err)
+	}
 	payloads, err := defaultIKEAuthInitPayloads(state.input.Config, state.identity, state.espInitiatorSPI)
 	if err != nil {
 		return nil, nil, fmt.Errorf("building ike_auth request: %w", err)
@@ -342,7 +370,8 @@ func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState,
 }
 
 func finalizeIKEAuthState(state *connectState, finalPayloads []ike.Payload, nextMessageID uint32) error {
-	tunnel, err := tunnelInfoFromChildSA(finalPayloads, state.input.Config)
+	requestProposals := childSAProposals(state.input.Config, state.espInitiatorSPI)
+	tunnel, err := tunnelInfoFromChildSA(finalPayloads, state.input.Config, requestProposals)
 	if err != nil {
 		return err
 	}
@@ -380,22 +409,30 @@ func marshalPayloadCopies(payloads []ike.Payload) [][]byte {
 }
 
 func (state *connectState) outboundESPCodec() esp.Codec {
-	return esp.Codec{
-		SPI:           state.tunnel.ESPResponderSPI,
-		Encryption:    esp.EncryptionAESCBC,
-		Integrity:     integrityName(state.tunnel.Integrity),
-		EncryptionKey: append([]byte(nil), state.espKeys.EncryptionInitiator...),
-		IntegrityKey:  append([]byte(nil), state.espKeys.IntegrityInitiator...),
-	}
+	return outboundESPCodec(state.tunnel, state.espKeys)
 }
 
 func (state *connectState) inboundESPCodec() esp.Codec {
+	return inboundESPCodec(state.tunnel, state.espKeys)
+}
+
+func outboundESPCodec(info Info, keys ESPKeys) esp.Codec {
 	return esp.Codec{
-		SPI:           state.tunnel.ESPInitiatorSPI,
+		SPI:           info.ESPResponderSPI,
 		Encryption:    esp.EncryptionAESCBC,
-		Integrity:     integrityName(state.tunnel.Integrity),
-		EncryptionKey: append([]byte(nil), state.espKeys.EncryptionResponder...),
-		IntegrityKey:  append([]byte(nil), state.espKeys.IntegrityResponder...),
+		Integrity:     integrityName(info.Integrity),
+		EncryptionKey: append([]byte(nil), keys.EncryptionInitiator...),
+		IntegrityKey:  append([]byte(nil), keys.IntegrityInitiator...),
+	}
+}
+
+func inboundESPCodec(info Info, keys ESPKeys) esp.Codec {
+	return esp.Codec{
+		SPI:           info.ESPInitiatorSPI,
+		Encryption:    esp.EncryptionAESCBC,
+		Integrity:     integrityName(info.Integrity),
+		EncryptionKey: append([]byte(nil), keys.EncryptionResponder...),
+		IntegrityKey:  append([]byte(nil), keys.IntegrityResponder...),
 	}
 }
 
@@ -409,10 +446,13 @@ func (state *connectState) innerRemoteAddr(port int) *net.UDPAddr {
 
 func (state *connectState) sessionLivenessTimeout() time.Duration {
 	timeout := livenessTimeout(state.finalPayloads)
-	if timeout <= 0 {
-		return 60 * time.Second
+	if timeout > 0 {
+		return timeout
 	}
-	return timeout
+	if state.input.Config.LivenessTimeout > 0 {
+		return state.input.Config.LivenessTimeout
+	}
+	return defaultLivenessTimeout
 }
 
 func livenessTimeout(payloads []ike.Payload) time.Duration {
@@ -443,17 +483,26 @@ type negotiatedIKESA struct {
 	PRF              uint16
 }
 
-func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16) (negotiatedIKESA, []byte, []byte, error) {
+func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16, requestProposals []ike.Proposal) (negotiatedIKESA, []byte, []byte, error) {
 	nonce := ike.FindNoncePayload(payloads)
 	sa := ike.FindSAPayload(payloads)
 	ke := ike.FindKEPayload(payloads, dhGroup)
 	if nonce == nil || sa == nil || ke == nil {
 		return negotiatedIKESA{}, nil, nil, errors.New("parsing ike_sa_init response: required payload is missing")
 	}
-	if len(sa.Proposals) == 0 {
-		return negotiatedIKESA{}, nil, nil, errors.New("parsing ike_sa_init response: security association is empty")
+	if err := validateNonceData("parsing ike_sa_init response", nonce.Data); err != nil {
+		return negotiatedIKESA{}, nil, nil, err
 	}
-	proposal, err := negotiatedIKESAFromProposal(sa.Proposals[0])
+	if len(sa.Proposals) != 1 {
+		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: negotiated proposal count %d", len(sa.Proposals))
+	}
+	if len(sa.Proposals[0].SPI) != 0 {
+		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: invalid negotiated ike spi length %d", len(sa.Proposals[0].SPI))
+	}
+	if err := validateNegotiatedProposalFromRequests("parsing ike_sa_init response", sa.Proposals[0], requestProposals); err != nil {
+		return negotiatedIKESA{}, nil, nil, err
+	}
+	proposal, err := negotiatedIKESAFromProposal(sa.Proposals[0], dhGroup)
 	if err != nil {
 		return negotiatedIKESA{}, nil, nil, err
 	}
@@ -461,12 +510,16 @@ func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16) (negoti
 }
 
 func invalidKEPayloadGroup(payloads []ike.Payload) (uint16, bool, error) {
+	return invalidKEPayloadGroupFor("parsing ike_sa_init response", payloads)
+}
+
+func invalidKEPayloadGroupFor(action string, payloads []ike.Payload) (uint16, bool, error) {
 	notify := ike.FindNotifyPayload(payloads, notifyTypeInvalidKEPayload)
 	if notify == nil {
 		return 0, false, nil
 	}
 	if len(notify.Data) != 2 {
-		return 0, false, fmt.Errorf("parsing ike_sa_init response: invalid INVALID_KE_PAYLOAD length %d", len(notify.Data))
+		return 0, false, fmt.Errorf("%s: invalid INVALID_KE_PAYLOAD length %d", action, len(notify.Data))
 	}
 	return binary.BigEndian.Uint16(notify.Data), true, nil
 }
@@ -479,7 +532,7 @@ func cookiePayloadData(payloads []ike.Payload) ([]byte, bool, error) {
 	if len(notify.SPI) != 0 {
 		return nil, false, fmt.Errorf("parsing ike_sa_init response: invalid COOKIE spi length %d", len(notify.SPI))
 	}
-	if len(notify.Data) == 0 || len(notify.Data) > 64 {
+	if len(notify.Data) == 0 || len(notify.Data) > maxCookieNotifyDataLength {
 		return nil, false, fmt.Errorf("parsing ike_sa_init response: invalid COOKIE length %d", len(notify.Data))
 	}
 	return append([]byte(nil), notify.Data...), true, nil
@@ -488,7 +541,7 @@ func cookiePayloadData(payloads []ike.Payload) ([]byte, bool, error) {
 func ikeSAInitNotifyError(payloads []ike.Payload) error {
 	for _, payload := range payloads {
 		notify, ok := payload.(*ike.NotifyPayload)
-		if !ok || notify.NotifyType >= 16384 || notify.NotifyType == notifyTypeInvalidKEPayload {
+		if !ok || notify.NotifyType >= notifyTypeStatusMin || notify.NotifyType == notifyTypeInvalidKEPayload {
 			continue
 		}
 		return fmt.Errorf("parsing ike_sa_init response: received %s (%d)", ikeNotifyName(notify.NotifyType), notify.NotifyType)
@@ -496,11 +549,71 @@ func ikeSAInitNotifyError(payloads []ike.Payload) error {
 	return nil
 }
 
-func negotiatedIKESAFromProposal(proposal ike.Proposal) (negotiatedIKESA, error) {
+func ikeSAInitNATDetection(payloads []ike.Payload, initiatorSPI, responderSPI uint64, local, remote *net.UDPAddr) (bool, bool, error) {
+	natSources, natDest, err := ikeSAInitNATDetectionPayloads(payloads)
+	if err != nil {
+		return false, false, err
+	}
+	if len(natSources) == 0 && natDest == nil {
+		return false, false, nil
+	}
+	if len(natSources) == 0 || natDest == nil {
+		return false, false, errors.New("parsing ike_sa_init response: missing source or destination NAT detection notification")
+	}
+	for _, source := range natSources {
+		if len(source.Data) != sha1.Size {
+			return false, false, fmt.Errorf("parsing ike_sa_init response: invalid NAT_DETECTION_SOURCE_IP length %d", len(source.Data))
+		}
+	}
+	if len(natDest.Data) != sha1.Size {
+		return false, false, fmt.Errorf("parsing ike_sa_init response: invalid NAT_DETECTION_DESTINATION_IP length %d", len(natDest.Data))
+	}
+	expectedLocal := natDetectionHash(initiatorSPI, responderSPI, local)
+	localNATDetected := !slices.Equal(expectedLocal[:], natDest.Data)
+	expectedRemote := natDetectionHash(initiatorSPI, responderSPI, remote)
+	remoteNATDetected := true
+	for _, source := range natSources {
+		if slices.Equal(expectedRemote[:], source.Data) {
+			remoteNATDetected = false
+			break
+		}
+	}
+	return true, localNATDetected || remoteNATDetected, nil
+}
+
+func ikeSAInitNATDetectionPayloads(payloads []ike.Payload) ([]*ike.NotifyPayload, *ike.NotifyPayload, error) {
+	var natSources []*ike.NotifyPayload
+	var natDest *ike.NotifyPayload
+	for _, payload := range payloads {
+		notify, ok := payload.(*ike.NotifyPayload)
+		if !ok {
+			continue
+		}
+		switch notify.NotifyType {
+		case notifyTypeNATDetectionSourceIP:
+			natSources = append(natSources, notify)
+		case notifyTypeNATDetectionDestIP:
+			if natDest != nil {
+				return nil, nil, errors.New("parsing ike_sa_init response: multiple NAT_DETECTION_DESTINATION_IP notifications")
+			}
+			natDest = notify
+		}
+	}
+	return natSources, natDest, nil
+}
+
+func negotiatedIKESAFromProposal(proposal ike.Proposal, dhGroup uint16) (negotiatedIKESA, error) {
+	if proposal.ProtocolID != proposalProtocolIKE {
+		return negotiatedIKESA{}, fmt.Errorf("parsing negotiated ike proposal: invalid protocol id %d", proposal.ProtocolID)
+	}
 	parsed := negotiatedIKESA{}
+	negotiatedDH := uint16(0)
 	for _, transform := range proposal.Transforms {
 		switch transform.TransformType {
 		case transformTypeENCR:
+			if parsed.Encryption != 0 {
+				return negotiatedIKESA{}, errors.New("parsing negotiated ike proposal: duplicate encryption transform")
+			}
 			parsed.Encryption = transform.ID
 			for _, attr := range transform.Attributes {
 				if attr.Type == transformAttrKeyLength {
@@ -510,19 +623,35 @@ func negotiatedIKESAFromProposal(proposal ike.Proposal) (negotiatedIKESA, error)
 				}
 			}
 		case transformTypeINTEG:
+			if parsed.Integrity != 0 {
+				return negotiatedIKESA{}, errors.New("parsing negotiated ike proposal: duplicate integrity transform")
+			}
 			parsed.Integrity = transform.ID
 		case transformTypePRF:
+			if parsed.PRF != 0 {
+				return negotiatedIKESA{}, errors.New("parsing negotiated ike proposal: duplicate prf transform")
+			}
 			parsed.PRF = transform.ID
+		case transformTypeDH:
+			if negotiatedDH != 0 {
+				return negotiatedIKESA{}, errors.New("parsing negotiated ike proposal: duplicate dh transform")
+			}
+			negotiatedDH = transform.ID
+		default:
+			return negotiatedIKESA{}, fmt.Errorf("parsing negotiated ike proposal: unsupported transform type %d", transform.TransformType)
 		}
 	}
 	if parsed.Encryption == 0 || parsed.EncryptionKeyLen == 0 || parsed.Integrity == 0 || parsed.PRF == 0 {
-		return negotiatedIKESA{}, errors.New("parsing ike_sa_init response: negotiated transform is incomplete")
+		return negotiatedIKESA{}, errors.New("parsing negotiated ike proposal: transform is incomplete")
+	}
+	if negotiatedDH != dhGroup {
+		return negotiatedIKESA{}, fmt.Errorf("parsing negotiated ike proposal: dh group %d does not match ke group %d", negotiatedDH, dhGroup)
 	}
 	return parsed, nil
 }
 
-func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config) (Info, error) {
-	config, proposal, err := childSAConfig(payloads)
+func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config, requestProposals []ike.Proposal) (Info, error) {
+	config, proposal, tsi, tsr, err := childSAConfig(payloads, requestProposals)
 	if err != nil {
 		return Info{}, err
 	}
@@ -530,19 +659,116 @@ func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config) (Info, 
 	if err != nil {
 		return Info{}, err
 	}
-	if err := applyTunnelAddresses(&tunnel, config, cfg); err != nil {
+	tunnel.InitiatorTrafficSelectors = cloneTrafficSelectors(tsi.Selectors)
+	tunnel.ResponderTrafficSelectors = cloneTrafficSelectors(tsr.Selectors)
+	if err := applyTunnelAddresses(&tunnel, *config, cfg); err != nil {
+		return Info{}, err
+	}
+	if err := applyN1ModeInfo(&tunnel, payloads, cfg); err != nil {
 		return Info{}, err
 	}
 	return tunnel, nil
 }
 
-func childSAConfig(payloads []ike.Payload) (*ike.ConfigPayload, ike.Proposal, error) {
+func applyN1ModeInfo(tunnel *Info, payloads []ike.Payload, cfg handshake.Config) error {
+	if cfg.PDUSessionID == 0 {
+		return nil
+	}
+	tunnel.PDUSessionID = cfg.PDUSessionID
+	if notify := ike.FindNotifyPayload(payloads, notifyTypeN1ModeInformation); notify != nil {
+		var data n1ModeInformationNotifyData
+		if err := data.UnmarshalBinary(notify.Data); err != nil {
+			return err
+		}
+		tunnel.SNSSAI = data.SNSSAI
+	}
+	if notify := ike.FindNotifyPayload(payloads, notifyTypeN1ModeSNSSAIPlmnID); notify != nil {
+		var data n1ModeSNSSAIPlmnIDNotifyData
+		if err := data.UnmarshalBinary(notify.Data); err != nil {
+			return err
+		}
+		tunnel.SNSSAIPlmnID = data.PLMNID
+	}
+	return nil
+}
+
+func childSAConfig(payloads []ike.Payload, requestProposals []ike.Proposal) (*ike.ConfigPayload, ike.Proposal, *ike.TrafficSelectorPayload, *ike.TrafficSelectorPayload, error) {
 	config := ike.FindConfigPayload(payloads)
 	sa := ike.FindSAPayload(payloads)
-	if config == nil || sa == nil || len(sa.Proposals) == 0 {
-		return nil, ike.Proposal{}, errors.New("parsing ike_auth response: missing child sa or configuration")
+	if config == nil || sa == nil {
+		return nil, ike.Proposal{}, nil, nil, errors.New("parsing ike_auth response: missing child sa or configuration")
 	}
-	return config, sa.Proposals[0], nil
+	if config.ConfigType != configTypeReply {
+		return nil, ike.Proposal{}, nil, nil, fmt.Errorf("parsing ike_auth response: unexpected configuration type %d", config.ConfigType)
+	}
+	tsi := ike.FindTrafficSelectorPayload(payloads, payloadTypeTSi)
+	tsr := ike.FindTrafficSelectorPayload(payloads, payloadTypeTSr)
+	if tsi == nil || tsr == nil {
+		return nil, ike.Proposal{}, nil, nil, errors.New("parsing ike_auth response: missing traffic selectors")
+	}
+	if len(sa.Proposals) != 1 {
+		return nil, ike.Proposal{}, nil, nil, fmt.Errorf("parsing ike_auth response: negotiated proposal count %d", len(sa.Proposals))
+	}
+	if err := validateNegotiatedProposalFromRequests("parsing ike_auth response", sa.Proposals[0], requestProposals); err != nil {
+		return nil, ike.Proposal{}, nil, nil, err
+	}
+	proposal, err := negotiatedChildSAProposal("parsing ike_auth response", sa.Proposals[0], 0)
+	if err != nil {
+		return nil, ike.Proposal{}, nil, nil, err
+	}
+	return config, proposal, tsi, tsr, nil
+}
+
+func negotiatedChildSAProposal(action string, proposal ike.Proposal, dhGroup uint16) (ike.Proposal, error) {
+	if proposal.ProtocolID != proposalProtocolESP {
+		return ike.Proposal{}, fmt.Errorf("%s: invalid negotiated protocol id %d", action, proposal.ProtocolID)
+	}
+	seenENCR := false
+	seenINTEG := false
+	seenESN := false
+	seenDH := false
+	for _, transform := range proposal.Transforms {
+		switch transform.TransformType {
+		case transformTypeENCR:
+			if seenENCR {
+				return ike.Proposal{}, fmt.Errorf("%s: duplicate encryption transform", action)
+			}
+			seenENCR = true
+		case transformTypeINTEG:
+			if seenINTEG {
+				return ike.Proposal{}, fmt.Errorf("%s: duplicate integrity transform", action)
+			}
+			seenINTEG = true
+		case transformTypeESN:
+			if seenESN {
+				return ike.Proposal{}, fmt.Errorf("%s: duplicate esn transform", action)
+			}
+			if transform.ID != transformESNNoESN {
+				return ike.Proposal{}, fmt.Errorf("%s: unsupported esn transform %d", action, transform.ID)
+			}
+			seenESN = true
+		case transformTypeDH:
+			if seenDH {
+				return ike.Proposal{}, fmt.Errorf("%s: duplicate dh transform", action)
+			}
+			if dhGroup == 0 {
+				return ike.Proposal{}, fmt.Errorf("%s: unexpected dh group %d", action, transform.ID)
+			}
+			if transform.ID != dhGroup {
+				return ike.Proposal{}, fmt.Errorf("%s: dh group = %d, want %d", action, transform.ID, dhGroup)
+			}
+			seenDH = true
+		default:
+			return ike.Proposal{}, fmt.Errorf("%s: unsupported negotiated transform type %d", action, transform.TransformType)
+		}
+	}
+	if !seenENCR || !seenINTEG || !seenESN {
+		return ike.Proposal{}, fmt.Errorf("%s: negotiated esp transform is incomplete", action)
+	}
+	if dhGroup != 0 && !seenDH {
+		return ike.Proposal{}, fmt.Errorf("%s: dh group = 0, want %d", action, dhGroup)
+	}
+	return proposal, nil
 }
 
 func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
@@ -554,6 +780,9 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 	for _, transform := range proposal.Transforms {
 		switch transform.TransformType {
 		case transformTypeENCR:
+			if transform.ID != transformENCRAESCBC {
+				return Info{}, fmt.Errorf("parsing ike_auth response: unsupported encryption transform %d", transform.ID)
+			}
 			tunnel.Encryption = transform.ID
 			for _, attr := range transform.Attributes {
 				if attr.Type == transformAttrKeyLength {
@@ -572,65 +801,84 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 	return tunnel, nil
 }
 
-func applyTunnelAddresses(tunnel *Info, config *ike.ConfigPayload, cfg handshake.Config) error {
-	if tunnel == nil || config == nil {
-		return errors.New("parsing ike_auth response: missing child sa or configuration")
-	}
-	internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 := tunnelAddresses(config.Attributes, cfg.PCSCFIPv4ConfigAttribute, cfg.PCSCFIPv6ConfigAttribute)
+func applyTunnelAddresses(tunnel *Info, config ike.ConfigPayload, cfg handshake.Config) error {
+	addresses := tunnelAddresses(config.Attributes, cfg.PCSCFIPv4ConfigAttribute, cfg.PCSCFIPv6ConfigAttribute)
 	switch {
-	case internalIPv6 != nil && pcscfIPv6 != nil:
-		tunnel.InnerIP = internalIPv6
-		tunnel.PCSCFIP = pcscfIPv6
-	case internalIPv4 != nil && pcscfIPv4 != nil:
-		tunnel.InnerIP = internalIPv4
-		tunnel.PCSCFIP = pcscfIPv4
+	case addresses.internalIPv6 != nil && len(addresses.pcscfIPv6) != 0:
+		tunnel.InnerIP = addresses.internalIPv6
+		tunnel.PCSCFIP = append(net.IP(nil), addresses.pcscfIPv6[0]...)
+		tunnel.PCSCFIPs = cloneIPList(addresses.pcscfIPv6)
+	case addresses.internalIPv4 != nil && len(addresses.pcscfIPv4) != 0:
+		tunnel.InnerIP = addresses.internalIPv4
+		tunnel.PCSCFIP = append(net.IP(nil), addresses.pcscfIPv4[0]...)
+		tunnel.PCSCFIPs = cloneIPList(addresses.pcscfIPv4)
 	default:
 		return errors.New("parsing ike_auth response: p-cscf and internal ip families do not match")
 	}
 	return nil
 }
 
-func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16) (internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6 net.IP) {
+type tunnelAddressSet struct {
+	internalIPv4 net.IP
+	internalIPv6 net.IP
+	pcscfIPv4    []net.IP
+	pcscfIPv6    []net.IP
+}
+
+const (
+	configAttrInternalIPv6AddressLen = net.IPv6len + 1
+	configAttrInternalIPv6SubnetLen  = net.IPv6len + 1
+)
+
+func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16) tunnelAddressSet {
 	if pcscfIPv4Attr == 0 {
 		pcscfIPv4Attr = configAttrPCSCFIPv4Address
 	}
 	if pcscfIPv6Attr == 0 {
 		pcscfIPv6Attr = configAttrPCSCFIPv6Address
 	}
+	var addresses tunnelAddressSet
 	for _, attr := range attrs {
 		switch attr.Type {
 		case configAttrInternalIPv4Address:
-			if len(attr.Value) >= net.IPv4len {
-				internalIPv4 = append(net.IP(nil), attr.Value[:net.IPv4len]...)
+			if len(attr.Value) == net.IPv4len {
+				addresses.internalIPv4 = append(net.IP(nil), attr.Value...)
 			}
 		case configAttrInternalIPv6Address:
-			if len(attr.Value) >= net.IPv6len {
-				internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			if len(attr.Value) == configAttrInternalIPv6AddressLen {
+				addresses.internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
 		case configAttrInternalIPv6Subnet:
-			if internalIPv6 == nil && len(attr.Value) >= net.IPv6len {
-				internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			if addresses.internalIPv6 == nil && len(attr.Value) == configAttrInternalIPv6SubnetLen {
+				addresses.internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
 			}
 		}
 
 		matchesPCSCFIPv4 := attr.Type == pcscfIPv4Attr || attr.Type == configAttrPCSCFIPv4Address
 		matchesPCSCFIPv6 := attr.Type == pcscfIPv6Attr || attr.Type == configAttrPCSCFIPv6Address
 		switch {
-		case matchesPCSCFIPv4 && matchesPCSCFIPv6 && len(attr.Value) >= net.IPv6len:
-			if pcscfIPv6 == nil {
-				pcscfIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
-			}
+		case matchesPCSCFIPv4 && matchesPCSCFIPv6 && len(attr.Value) == net.IPv6len:
+			addresses.pcscfIPv6 = appendUniqueIP(addresses.pcscfIPv6, attr.Value)
 		case matchesPCSCFIPv4:
-			if pcscfIPv4 == nil && len(attr.Value) >= net.IPv4len {
-				pcscfIPv4 = append(net.IP(nil), attr.Value[:net.IPv4len]...)
+			if len(attr.Value) == net.IPv4len {
+				addresses.pcscfIPv4 = appendUniqueIP(addresses.pcscfIPv4, attr.Value)
 			}
 		case matchesPCSCFIPv6:
-			if pcscfIPv6 == nil && len(attr.Value) >= net.IPv6len {
-				pcscfIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			if len(attr.Value) == net.IPv6len {
+				addresses.pcscfIPv6 = appendUniqueIP(addresses.pcscfIPv6, attr.Value)
 			}
 		}
 	}
-	return internalIPv4, internalIPv6, pcscfIPv4, pcscfIPv6
+	return addresses
+}
+
+func appendUniqueIP(ips []net.IP, ip net.IP) []net.IP {
+	for _, existing := range ips {
+		if existing.Equal(ip) {
+			return ips
+		}
+	}
+	return append(ips, append(net.IP(nil), ip...))
 }
 
 func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
@@ -642,6 +890,7 @@ func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
 		for _, integ := range integrity {
 			for _, prf := range prfs {
 				proposals = append(proposals, ike.Proposal{
+					Number:     byte(len(proposals) + 1),
 					ProtocolID: proposalProtocolIKE,
 					Transforms: []ike.Transform{
 						aesCBCTransform(keyLen),
@@ -657,19 +906,28 @@ func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
 }
 
 func childSAProposals(cfg handshake.Config, espSPI uint32) []ike.Proposal {
+	return childSAProposalsWithDH(cfg, espSPI, 0)
+}
+
+func childSAProposalsWithDH(cfg handshake.Config, espSPI uint32, dhGroup uint16) []ike.Proposal {
 	keyLens := uint16ValuesOrDefault(cfg.ChildEncryptionKeyLens, defaultEncryptionKeyLens)
 	integrity := uint16ValuesOrDefault(cfg.ChildIntegrity, defaultChildIntegrity)
 	proposals := make([]ike.Proposal, 0, len(keyLens)*len(integrity))
 	for _, keyLen := range keyLens {
 		for _, integ := range integrity {
+			transforms := []ike.Transform{
+				aesCBCTransform(keyLen),
+				{TransformType: transformTypeINTEG, ID: integ},
+			}
+			if dhGroup != 0 {
+				transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
+			}
+			transforms = append(transforms, ike.Transform{TransformType: transformTypeESN, ID: transformESNNoESN})
 			proposals = append(proposals, ike.Proposal{
+				Number:     byte(len(proposals) + 1),
 				ProtocolID: proposalProtocolESP,
 				SPI:        uint32Bytes(espSPI),
-				Transforms: []ike.Transform{
-					aesCBCTransform(keyLen),
-					{TransformType: transformTypeINTEG, ID: integ},
-					{TransformType: transformTypeESN, ID: 0},
-				},
+				Transforms: transforms,
 			})
 		}
 	}
@@ -699,12 +957,19 @@ func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, re
 		&ike.SecurityAssociationPayload{Proposals: proposals},
 		&ike.KeyExchangePayload{DHGroup: crypto.dhGroup, Data: crypto.PublicKey()},
 		&ike.NoncePayload{Data: append([]byte(nil), crypto.nonceI...)},
-		&ike.NotifyPayload{ProtocolID: 0, NotifyType: notifyTypeNATDetectionSourceIP, Data: natSourceHash[:]},
-		&ike.NotifyPayload{ProtocolID: 0, NotifyType: notifyTypeNATDetectionDestIP, Data: natDestHash[:]},
+		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeNATDetectionSourceIP, Data: natSourceHash[:]},
+		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeNATDetectionDestIP, Data: natDestHash[:]},
 	}
 }
 
 func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI uint32) ([]ike.Payload, error) {
+	if identity == "" {
+		return nil, errors.New("identity is empty")
+	}
+	apn := strings.TrimSpace(cfg.APN)
+	if apn == "" {
+		apn = DefaultAPN
+	}
 	childSA := &ike.SecurityAssociationPayload{Proposals: childSAProposals(cfg, espSPI)}
 	config := &ike.ConfigPayload{ConfigType: configTypeRequest, Attributes: []ike.Attribute{
 		ike.NewTLVAttribute(configAttrInternalIPv4Address, nil),
@@ -717,15 +982,26 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 		config.Attributes = append(config.Attributes, ike.NewTLVAttribute(attr, nil))
 	}
 	selectors := ike.TrafficSelectorsAny()
-	return []ike.Payload{
+	payloads := []ike.Payload{
 		&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(identity)},
-		&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte("ims")},
+		&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte(apn)},
 		config,
 		childSA,
 		&ike.TrafficSelectorPayload{Tag: payloadTypeTSi, Selectors: selectors},
 		&ike.TrafficSelectorPayload{Tag: payloadTypeTSr, Selectors: selectors},
-		&ike.NotifyPayload{ProtocolID: 0, NotifyType: notifyTypeEAPOnlyAuthentication},
-	}, nil
+		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeEAPOnlyAuthentication},
+	}
+	if cfg.PCSCFRestoration {
+		payloads = append(payloads, &ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypePCSCFReselectionSupport})
+	}
+	if cfg.PDUSessionID != 0 {
+		data, err := (n1ModeCapabilityNotifyData{PDUSessionID: cfg.PDUSessionID}).MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, &ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeN1ModeCapability, Data: data})
+	}
+	return payloads, nil
 }
 
 func pcscfConfigAttributes(cfg handshake.Config) (uint16, uint16) {
@@ -801,8 +1077,8 @@ func discoverOutboundIP(remote *net.UDPAddr) (net.IP, error) {
 	return append(net.IP(nil), local.IP...), nil
 }
 
-func natDetectionHash(initiatorSPI, responderSPI uint64, addr *net.UDPAddr) [20]byte {
-	seed := make([]byte, 16)
+func natDetectionHash(initiatorSPI, responderSPI uint64, addr *net.UDPAddr) [sha1.Size]byte {
+	seed := make([]byte, ikeSPISeedLength)
 	binary.BigEndian.PutUint64(seed[0:8], initiatorSPI)
 	binary.BigEndian.PutUint64(seed[8:16], responderSPI)
 	if addr != nil {

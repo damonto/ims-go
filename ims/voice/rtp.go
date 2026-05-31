@@ -10,12 +10,48 @@ import (
 )
 
 const (
-	rtpHeaderSize      = 12
-	rtpVersion         = 2
-	rtcpRRPacketType   = 201
-	rtcpSDESPacketType = 202
-	rtcpSDESCNAMEItem  = 1
-	AMRNoModeRequest   = 15
+	rtpHeaderSize          = 12
+	rtpVersion             = 2
+	rtpVersionShift        = 6
+	rtpPaddingFlag         = 0x20
+	rtpExtensionFlag       = 0x10
+	rtpCSRCCountMask       = 0x0f
+	rtpCSRCSize            = 4
+	rtpExtensionHeaderSize = 4
+	rtpExtensionWordSize   = 4
+	rtpPayloadTypeMask     = 0x7f
+	rtpPayloadTypeMax      = 127
+	rtpMarkerFlag          = 0x80
+
+	rtcpRRPacketType             = 201
+	rtcpSDESPacketType           = 202
+	rtcpSDESCNAMEItem            = 1
+	rtcpReceiverReportWordLength = 1
+	rtcpSDESReportCount          = 1
+	rtcpSSRCFallback             = 1
+	rtcpCNAMEMaxLen              = 255
+	rtcpSDESChunkHeaderSize      = 4
+	rtcpSDESItemHeaderSize       = 2
+	rtcpSDESEndSize              = 1
+	rtcpWordSize                 = 4
+
+	AMRNoModeRequest = 15
+
+	amrCMRShift          = 4
+	amrCMRMax            = 15
+	amrToCFollowFlag     = 0x80
+	amrToCFrameTypeShift = 3
+	amrToCFrameTypeMask  = 0x0f
+	amrToCQualityFlag    = 0x04
+	amrNoDataFrameType   = 15
+	amrWBNoDataFrameType = 15
+	amrWBSpeechLostType  = 14
+	amrCMRBits           = 4
+	amrToCFollowBits     = 1
+	amrToCFrameTypeBits  = 4
+	amrToCQualityBits    = 1
+
+	bitsPerByte = 8
 )
 
 var (
@@ -47,22 +83,22 @@ func ParseRTPPacket(packet []byte) (RTPPacket, error) {
 	if len(packet) < rtpHeaderSize {
 		return RTPPacket{}, errors.New("parsing RTP packet: packet is too short")
 	}
-	if version := packet[0] >> 6; version != rtpVersion {
+	if version := packet[0] >> rtpVersionShift; version != rtpVersion {
 		return RTPPacket{}, fmt.Errorf("parsing RTP packet: unsupported version %d", version)
 	}
-	hasPadding := packet[0]&0x20 != 0
-	hasExtension := packet[0]&0x10 != 0
-	csrcCount := int(packet[0] & 0x0f)
-	offset := rtpHeaderSize + csrcCount*4
+	hasPadding := packet[0]&rtpPaddingFlag != 0
+	hasExtension := packet[0]&rtpExtensionFlag != 0
+	csrcCount := int(packet[0] & rtpCSRCCountMask)
+	offset := rtpHeaderSize + csrcCount*rtpCSRCSize
 	if offset > len(packet) {
 		return RTPPacket{}, errors.New("parsing RTP packet: csrc list is truncated")
 	}
 	if hasExtension {
-		if offset+4 > len(packet) {
+		if offset+rtpExtensionHeaderSize > len(packet) {
 			return RTPPacket{}, errors.New("parsing RTP packet: extension header is truncated")
 		}
-		extensionWords := int(binary.BigEndian.Uint16(packet[offset+2 : offset+4]))
-		offset += 4 + extensionWords*4
+		extensionWords := int(binary.BigEndian.Uint16(packet[offset+2 : offset+rtpExtensionHeaderSize]))
+		offset += rtpExtensionHeaderSize + extensionWords*rtpExtensionWordSize
 		if offset > len(packet) {
 			return RTPPacket{}, errors.New("parsing RTP packet: extension payload is truncated")
 		}
@@ -76,24 +112,24 @@ func ParseRTPPacket(packet []byte) (RTPPacket, error) {
 		end -= padding
 	}
 	return RTPPacket{
-		PayloadType:    int(packet[1] & 0x7f),
+		PayloadType:    int(packet[1] & rtpPayloadTypeMask),
 		SequenceNumber: binary.BigEndian.Uint16(packet[2:4]),
 		Timestamp:      binary.BigEndian.Uint32(packet[4:8]),
 		SSRC:           binary.BigEndian.Uint32(packet[8:12]),
-		Marker:         packet[1]&0x80 != 0,
+		Marker:         packet[1]&rtpMarkerFlag != 0,
 		Payload:        append([]byte(nil), packet[offset:end]...),
 	}, nil
 }
 
 func BuildRTPPacket(packet RTPPacket) ([]byte, error) {
-	if packet.PayloadType < 0 || packet.PayloadType > 127 {
-		return nil, fmt.Errorf("building RTP packet: payload type %d is outside 0..127", packet.PayloadType)
+	if packet.PayloadType < 0 || packet.PayloadType > rtpPayloadTypeMax {
+		return nil, fmt.Errorf("building RTP packet: payload type %d is outside 0..%d", packet.PayloadType, rtpPayloadTypeMax)
 	}
 	out := make([]byte, rtpHeaderSize+len(packet.Payload))
-	out[0] = rtpVersion << 6
+	out[0] = rtpVersion << rtpVersionShift
 	out[1] = byte(packet.PayloadType)
 	if packet.Marker {
-		out[1] |= 0x80
+		out[1] |= rtpMarkerFlag
 	}
 	binary.BigEndian.PutUint16(out[2:4], packet.SequenceNumber)
 	binary.BigEndian.PutUint32(out[4:8], packet.Timestamp)
@@ -114,30 +150,30 @@ func randomRTCPSSRC() uint32 {
 
 func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
 	if ssrc == 0 {
-		ssrc = 1
+		ssrc = rtcpSSRCFallback
 	}
 	cname = strings.TrimSpace(cname)
-	if len(cname) > 255 {
-		cname = cname[:255]
+	if len(cname) > rtcpCNAMEMaxLen {
+		cname = cname[:rtcpCNAMEMaxLen]
 	}
 	if cname == "" {
 		cname = "vowifi-go"
 	}
 
 	rr := make([]byte, 8)
-	rr[0] = rtpVersion << 6
+	rr[0] = rtpVersion << rtpVersionShift
 	rr[1] = rtcpRRPacketType
-	binary.BigEndian.PutUint16(rr[2:4], 1)
+	binary.BigEndian.PutUint16(rr[2:4], rtcpReceiverReportWordLength)
 	binary.BigEndian.PutUint32(rr[4:8], ssrc)
 
-	sdesLen := 4 + 2 + len(cname) + 1
-	for sdesLen%4 != 0 {
+	sdesLen := rtcpSDESChunkHeaderSize + rtcpSDESItemHeaderSize + len(cname) + rtcpSDESEndSize
+	for sdesLen%rtcpWordSize != 0 {
 		sdesLen++
 	}
-	sdes := make([]byte, 4+sdesLen)
-	sdes[0] = (rtpVersion << 6) | 1
+	sdes := make([]byte, rtcpWordSize+sdesLen)
+	sdes[0] = (rtpVersion << rtpVersionShift) | rtcpSDESReportCount
 	sdes[1] = rtcpSDESPacketType
-	binary.BigEndian.PutUint16(sdes[2:4], uint16(len(sdes)/4-1))
+	binary.BigEndian.PutUint16(sdes[2:4], uint16(len(sdes)/rtcpWordSize-1))
 	binary.BigEndian.PutUint32(sdes[4:8], ssrc)
 	sdes[8] = rtcpSDESCNAMEItem
 	sdes[9] = byte(len(cname))
@@ -173,7 +209,7 @@ func ParseAMROctetAlignedPayload(codec AudioCodec, payload []byte) (AMRPayload, 
 	if len(payload) < 2 {
 		return AMRPayload{}, errors.New("parsing AMR octet-aligned payload: payload is too short")
 	}
-	result := AMRPayload{CMR: int(payload[0] >> 4)}
+	result := AMRPayload{CMR: int(payload[0] >> amrCMRShift)}
 	offset := 1
 	for more := true; more; {
 		if offset >= len(payload) {
@@ -181,15 +217,15 @@ func ParseAMROctetAlignedPayload(codec AudioCodec, payload []byte) (AMRPayload, 
 		}
 		toc := payload[offset]
 		offset++
-		more = toc&0x80 != 0
-		frameType := int((toc >> 3) & 0x0f)
+		more = toc&amrToCFollowFlag != 0
+		frameType := int((toc >> amrToCFrameTypeShift) & amrToCFrameTypeMask)
 		frameBytes, err := amrFrameBytes(codec, frameType)
 		if err != nil {
 			return AMRPayload{}, fmt.Errorf("parsing AMR octet-aligned payload: %w", err)
 		}
 		result.Frames = append(result.Frames, AMRFrame{
 			FrameType: frameType,
-			Quality:   toc&0x04 != 0,
+			Quality:   toc&amrToCQualityFlag != 0,
 			Data:      make([]byte, frameBytes),
 		})
 	}
@@ -211,8 +247,8 @@ func BuildAMROctetAlignedPayload(codec AudioCodec, frames []AMRFrame, cmr int) (
 	if cmr < 0 {
 		cmr = AMRNoModeRequest
 	}
-	if cmr > 15 {
-		return nil, fmt.Errorf("building AMR octet-aligned payload: cmr %d is outside 0..15", cmr)
+	if cmr > amrCMRMax {
+		return nil, fmt.Errorf("building AMR octet-aligned payload: cmr %d is outside 0..%d", cmr, amrCMRMax)
 	}
 	speechBytes := 0
 	for _, frame := range frames {
@@ -226,15 +262,15 @@ func BuildAMROctetAlignedPayload(codec AudioCodec, frames []AMRFrame, cmr int) (
 		speechBytes += frameBytes
 	}
 	out := make([]byte, 1+len(frames)+speechBytes)
-	out[0] = byte(cmr << 4)
+	out[0] = byte(cmr << amrCMRShift)
 	offset := 1
 	for i, frame := range frames {
-		toc := byte((frame.FrameType & 0x0f) << 3)
+		toc := byte((frame.FrameType & amrToCFrameTypeMask) << amrToCFrameTypeShift)
 		if i < len(frames)-1 {
-			toc |= 0x80
+			toc |= amrToCFollowFlag
 		}
 		if frame.Quality {
-			toc |= 0x04
+			toc |= amrToCQualityFlag
 		}
 		out[offset] = toc
 		offset++
@@ -248,21 +284,21 @@ func BuildAMROctetAlignedPayload(codec AudioCodec, frames []AMRFrame, cmr int) (
 
 func ParseAMRBandwidthEfficientPayload(codec AudioCodec, payload []byte) (AMRPayload, error) {
 	reader := bitReader{data: payload}
-	cmr, ok := reader.readBits(4)
+	cmr, ok := reader.readBits(amrCMRBits)
 	if !ok {
 		return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: cmr is truncated")
 	}
 	result := AMRPayload{CMR: int(cmr)}
 	for more := true; more; {
-		f, ok := reader.readBits(1)
+		f, ok := reader.readBits(amrToCFollowBits)
 		if !ok {
 			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: table of contents is truncated")
 		}
-		ft, ok := reader.readBits(4)
+		ft, ok := reader.readBits(amrToCFrameTypeBits)
 		if !ok {
 			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: frame type is truncated")
 		}
-		q, ok := reader.readBits(1)
+		q, ok := reader.readBits(amrToCQualityBits)
 		if !ok {
 			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: frame quality is truncated")
 		}
@@ -294,11 +330,11 @@ func BuildAMRBandwidthEfficientPayload(codec AudioCodec, frames []AMRFrame, cmr 
 	if cmr < 0 {
 		cmr = AMRNoModeRequest
 	}
-	if cmr > 15 {
-		return nil, fmt.Errorf("building AMR bandwidth-efficient payload: cmr %d is outside 0..15", cmr)
+	if cmr > amrCMRMax {
+		return nil, fmt.Errorf("building AMR bandwidth-efficient payload: cmr %d is outside 0..%d", cmr, amrCMRMax)
 	}
 	writer := bitWriter{}
-	writer.writeBits(uint64(cmr), 4)
+	writer.writeBits(uint64(cmr), amrCMRBits)
 	for i, frame := range frames {
 		frameBits, err := amrFrameBitLen(codec, frame.FrameType)
 		if err != nil {
@@ -308,15 +344,15 @@ func BuildAMRBandwidthEfficientPayload(codec AudioCodec, frames []AMRFrame, cmr 
 			return nil, fmt.Errorf("building AMR bandwidth-efficient payload: frame type %d has %d bytes, want %d", frame.FrameType, len(frame.Data), bytesForBits(frameBits))
 		}
 		if i < len(frames)-1 {
-			writer.writeBits(1, 1)
+			writer.writeBits(1, amrToCFollowBits)
 		} else {
-			writer.writeBits(0, 1)
+			writer.writeBits(0, amrToCFollowBits)
 		}
-		writer.writeBits(uint64(frame.FrameType), 4)
+		writer.writeBits(uint64(frame.FrameType), amrToCFrameTypeBits)
 		if frame.Quality {
-			writer.writeBits(1, 1)
+			writer.writeBits(1, amrToCQualityBits)
 		} else {
-			writer.writeBits(0, 1)
+			writer.writeBits(0, amrToCQualityBits)
 		}
 	}
 	for _, frame := range frames {
@@ -337,14 +373,14 @@ func amrFrameBytes(codec AudioCodec, frameType int) (int, error) {
 func amrFrameBitLen(codec AudioCodec, frameType int) (int, error) {
 	switch normalizedAMRCodec(codec) {
 	case CodecAMR:
-		if frameType == 15 {
+		if frameType == amrNoDataFrameType {
 			return 0, nil
 		}
 		if frameType >= 0 && frameType < len(amrFrameBits) {
 			return amrFrameBits[frameType], nil
 		}
 	case CodecAMRWB:
-		if frameType == 14 || frameType == 15 {
+		if frameType == amrWBSpeechLostType || frameType == amrWBNoDataFrameType {
 			return 0, nil
 		}
 		if frameType >= 0 && frameType < len(amrWBFrameBits) {
@@ -373,7 +409,7 @@ func isAMRCodec(codec AudioCodec) bool {
 }
 
 func bytesForBits(bits int) int {
-	return (bits + 7) / 8
+	return (bits + bitsPerByte - 1) / bitsPerByte
 }
 
 type bitReader struct {
@@ -382,13 +418,13 @@ type bitReader struct {
 }
 
 func (r *bitReader) readBits(n int) (uint64, bool) {
-	if n < 0 || r.pos+n > len(r.data)*8 {
+	if n < 0 || r.pos+n > len(r.data)*bitsPerByte {
 		return 0, false
 	}
 	var value uint64
 	for range n {
-		byteIndex := r.pos / 8
-		bitIndex := 7 - r.pos%8
+		byteIndex := r.pos / bitsPerByte
+		bitIndex := bitsPerByte - 1 - r.pos%bitsPerByte
 		value = value<<1 | uint64((r.data[byteIndex]>>bitIndex)&1)
 		r.pos++
 	}
@@ -405,7 +441,7 @@ func (r *bitReader) readBytes(dst []byte, bits int) bool {
 			return false
 		}
 		if bit != 0 {
-			dst[i/8] |= 1 << (7 - i%8)
+			dst[i/bitsPerByte] |= 1 << (bitsPerByte - 1 - i%bitsPerByte)
 		}
 	}
 	return true
@@ -424,17 +460,17 @@ func (w *bitWriter) writeBits(value uint64, n int) {
 
 func (w *bitWriter) writeBytes(src []byte, bits int) {
 	for i := 0; i < bits; i++ {
-		bit := src[i/8]&(1<<(7-i%8)) != 0
+		bit := src[i/bitsPerByte]&(1<<(bitsPerByte-1-i%bitsPerByte)) != 0
 		w.writeBit(bit)
 	}
 }
 
 func (w *bitWriter) writeBit(value bool) {
-	if w.pos/8 == len(w.data) {
+	if w.pos/bitsPerByte == len(w.data) {
 		w.data = append(w.data, 0)
 	}
 	if value {
-		w.data[w.pos/8] |= 1 << (7 - w.pos%8)
+		w.data[w.pos/bitsPerByte] |= 1 << (bitsPerByte - 1 - w.pos%bitsPerByte)
 	}
 	w.pos++
 }

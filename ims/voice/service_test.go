@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net"
+	"net/textproto"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +68,16 @@ func newVoiceStubTransport() *voiceStubTransport {
 		readCh: make(chan []byte, 16),
 		closed: make(chan struct{}),
 	}
+}
+
+func secureRegistrationConfig(transport *voiceStubTransport, cfg registration.Config) registration.Config {
+	cfg.DialSecureUDP = func(ctx context.Context, secure session.SecureUDPConfig) (session.Transport, error) {
+		return transport, nil
+	}
+	cfg.DialSecureTCP = func(ctx context.Context, secure session.SecureTCPConfig) (session.Transport, error) {
+		return transport, nil
+	}
+	return cfg
 }
 
 func (voiceStubCard) IMSI() string { return "001010123456789" }
@@ -388,13 +403,13 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := registration.New(secureRegistrationConfig(transport, registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
 				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 				IMEI:              "123456789012345",
-			}, sess, voiceStubCard{})
+			}), sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
@@ -463,10 +478,12 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 
 func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      Config
-		req      DialRequest
-		wantPIDF bool
+		name                string
+		cfg                 Config
+		req                 DialRequest
+		wantPIDF            bool
+		wantCurrentLocation bool
+		wantRequestURI      string
 	}{
 		{
 			name: "non emergency wifi setting adds pidf",
@@ -491,8 +508,25 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				GeolocationPIDFInvite: []int{GeolocationPIDFEmergencyWiFi},
 				GeolocationCountry:    "US",
 			},
-			req:      DialRequest{To: "911", Emergency: true},
-			wantPIDF: true,
+			req:                 DialRequest{To: "911", Emergency: true},
+			wantPIDF:            true,
+			wantCurrentLocation: true,
+			wantRequestURI:      emergencyServiceURNSOS,
+		},
+		{
+			name: "emergency urn setting selects sub service urn",
+			cfg: Config{
+				GeolocationPIDFInvite: []int{GeolocationPIDFEmergencyWiFi},
+				GeolocationCountry:    "US",
+			},
+			req: DialRequest{
+				To:           "911",
+				Emergency:    true,
+				EmergencyURN: "urn:service:sos.police",
+			},
+			wantPIDF:            true,
+			wantCurrentLocation: true,
+			wantRequestURI:      "urn:service:sos.police",
 		},
 		{
 			name: "short code adds pidf for carrier service numbers",
@@ -549,6 +583,14 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				if msg.Method() != "INVITE" {
 					return
 				}
+				if tt.wantRequestURI != "" {
+					if got := sip.RequestURI(msg); got != tt.wantRequestURI {
+						t.Fatalf("INVITE Request-URI = %q, want %q", got, tt.wantRequestURI)
+					}
+					if got := msg.Header("To"); got != "<"+tt.wantRequestURI+">" {
+						t.Fatalf("INVITE To = %q, want <%s>", got, tt.wantRequestURI)
+					}
+				}
 				body, ok := sdpBody(msg)
 				if !ok {
 					t.Fatal("sdpBody() ok = false, want SDP part")
@@ -580,10 +622,136 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 						t.Fatalf("INVITE body contains PIDF, want SDP only:\n%s", string(msg.Body))
 					}
 				}
+				if tt.wantCurrentLocation {
+					if got := msg.Header("Recv-Info"); !sip.TokenListContains(got, currentLocationDiscoveryInfoPackage) {
+						t.Fatalf("INVITE Recv-Info = %q, want %q", got, currentLocationDiscoveryInfoPackage)
+					}
+					if got := msg.Header("Accept"); !strings.Contains(got, currentLocationDiscoveryContentType) {
+						t.Fatalf("INVITE Accept = %q, want current location discovery MIME", got)
+					}
+				} else if got := msg.Header("Recv-Info"); got != "" {
+					t.Fatalf("INVITE Recv-Info = %q, want empty", got)
+				}
 				transport.queue(callOK(msg))
 			}
 			if _, err := svc.Dial(context.Background(), tt.req); err != nil {
 				t.Fatalf("Dial() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestVoiceContactValueOmitsSipInstanceOutsideRegister(t *testing.T) {
+	tests := []struct {
+		name  string
+		state registration.State
+	}{
+		{
+			name: "imei available",
+			state: registration.State{
+				ContactHost: "127.0.0.1",
+				MessagePort: 5062,
+				IMEI:        "123456789012345",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := contactValue(tt.state)
+			if strings.Contains(got, "+sip.instance") {
+				t.Fatalf("contactValue() = %q, want no +sip.instance", got)
+			}
+		})
+	}
+}
+
+func TestEmergencyCurrentLocationDiscoveryOneShotPublishesPIDF(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "oneShot request",
+			body: `<?xml version="1.0" encoding="UTF-8"?><requestForLocationInformation><oneShot/></requestForLocationInformation>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity:   "001010123456789@one.att.net",
+				PublicIdentity:    "sip:001010123456789@one.att.net",
+				HomeDomain:        "one.att.net",
+				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
+				IMEI:              "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{
+				GeolocationPIDFInvite: []int{GeolocationPIDFEmergencyWiFi},
+				GeolocationCountry:    "US",
+				Logger:                testLogger(),
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "PUBLISH":
+					if got := msg.Header("Event"); got != presenceEventPackage {
+						t.Errorf("PUBLISH Event = %q, want %q", got, presenceEventPackage)
+					}
+					if got := msg.Header("Content-Type"); got != "application/pidf+xml" {
+						t.Errorf("PUBLISH Content-Type = %q, want application/pidf+xml", got)
+					}
+					if !strings.Contains(string(msg.Body), "<country>US</country>") {
+						t.Errorf("PUBLISH body = %q, want PIDF country", string(msg.Body))
+					}
+					transport.queue(okForRequest(msg))
+				}
+			}
+
+			call, err := svc.Dial(context.Background(), DialRequest{To: "911", Emergency: true})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			call.mu.Lock()
+			info := sip.NewRequest("INFO", call.targetURI)
+			info.Headers.Add("Via", "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bKcurrentlocation")
+			info.Headers.Add("From", call.remoteTo)
+			info.Headers.Add("To", fmt.Sprintf("<%s>;tag=%s", call.localURI, call.localTag))
+			info.Headers.Add("Call-ID", call.id)
+			call.mu.Unlock()
+			info.Headers.Add("CSeq", "2 INFO")
+			info.Headers.Add("Info-Package", currentLocationDiscoveryInfoPackage)
+			info.Headers.Add("Content-Type", currentLocationDiscoveryContentType)
+			info.Headers.Add("Content-Disposition", currentLocationDiscoveryDisposition)
+			info.Body = []byte(tt.body)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest(INFO) error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest(INFO) handled = false, want true")
+			}
+			if got := transport.messagesByStatus(sipStatusOK, "INFO"); len(got) != 1 {
+				t.Fatalf("200 INFO response count = %d, want 1", len(got))
+			}
+			if got := transport.messagesByMethod("PUBLISH"); len(got) != 1 {
+				t.Fatalf("PUBLISH count = %d, want 1", len(got))
 			}
 		})
 	}
@@ -653,6 +821,85 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 			}
 			if call.State() != CallStateConfirmed {
 				t.Fatalf("call.State() = %q, want %q", call.State(), CallStateConfirmed)
+			}
+		})
+	}
+}
+
+func TestSDPBodyMultipartSessionPart(t *testing.T) {
+	const boundary = "session-boundary"
+	const wantSDP = "v=0\r\nm=audio 49170 RTP/AVP 0\r\n"
+
+	multipartBody := func(t *testing.T, parts ...textproto.MIMEHeader) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		if err := writer.SetBoundary(boundary); err != nil {
+			t.Fatalf("SetBoundary() error = %v", err)
+		}
+		for _, header := range parts {
+			body := header.Get("X-Test-Body")
+			header.Del("X-Test-Body")
+			part, err := writer.CreatePart(header)
+			if err != nil {
+				t.Fatalf("CreatePart() error = %v", err)
+			}
+			if _, err := part.Write([]byte(body)); err != nil {
+				t.Fatalf("part.Write() error = %v", err)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		return buf.Bytes()
+	}
+	part := func(mediaType, body string) textproto.MIMEHeader {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Type", mediaType)
+		header.Set("X-Test-Body", body)
+		return header
+	}
+
+	tests := []struct {
+		name string
+		body []byte
+		ok   bool
+		want string
+	}{
+		{
+			name: "one SDP session part",
+			body: multipartBody(t,
+				part("application/sdp", wantSDP),
+				part("application/pidf+xml", "<presence/>"),
+			),
+			ok:   true,
+			want: wantSDP,
+		},
+		{
+			name: "duplicate SDP session parts",
+			body: multipartBody(t,
+				part("application/sdp", wantSDP),
+				part("application/sdp", "v=0\r\nm=audio 50000 RTP/AVP 8\r\n"),
+			),
+		},
+		{
+			name: "no SDP session part",
+			body: multipartBody(t,
+				part("application/pidf+xml", "<presence/>"),
+			),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := sdpBody(sip.Message{
+				Headers: sip.Headers{{Name: "Content-Type", Value: `multipart/mixed; boundary=` + boundary}},
+				Body:    tt.body,
+			})
+			if ok != tt.ok {
+				t.Fatalf("sdpBody() ok = %v, want %v", ok, tt.ok)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("sdpBody() body = %q, want %q", string(got), tt.want)
 			}
 		})
 	}
@@ -734,10 +981,11 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 			reg, err := registration.New(registration.Config{Logger: testLogger(),
-				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
-				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
-				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
-				IMEI:            "123456789012345",
+				PrivateIdentity:   "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:    "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:        "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:              "123456789012345",
+				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbcc",
 			}, sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
@@ -859,8 +1107,8 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 				if got := msg.Header("P-Early-Media"); got != "supported" {
 					t.Fatalf("INVITE P-Early-Media = %q, want supported", got)
 				}
-				if got := msg.Header("Supported"); !strings.Contains(got, "100rel") {
-					t.Fatalf("INVITE Supported = %q, want 100rel option tag", got)
+				if got := msg.Header("Supported"); strings.Contains(got, "100rel") {
+					t.Fatalf("INVITE Supported = %q, want no 100rel option tag by default", got)
 				}
 				if got := msg.Header("Supported"); !strings.Contains(got, "199") {
 					t.Fatalf("INVITE Supported = %q, want 199 option tag", got)
@@ -994,6 +1242,9 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 			if len(cancels) != 1 {
 				t.Fatalf("CANCEL count = %d, want 1", len(cancels))
 			}
+			if got := cancels[0].Header("P-Access-Network-Info"); got != "" {
+				t.Fatalf("CANCEL P-Access-Network-Info = %q, want empty", got)
+			}
 			if got := cancels[0].Header("Reason"); got != reasonUserTriggered {
 				t.Fatalf("CANCEL Reason = %q, want %q", got, reasonUserTriggered)
 			}
@@ -1033,14 +1284,35 @@ func TestAddInviteSessionTimer(t *testing.T) {
 			wantNoSessionHeader: true,
 		},
 		{
-			name: "configured interval omitted in initial invite",
+			name: "configured interval included in initial invite",
 			cfg: Config{
 				SessionTimer:      true,
 				SessionExpires:    3600 * time.Second,
 				MinSessionExpires: 600 * time.Second,
 			},
-			wantSupported:       sip.DefaultClientSupported + ",timer",
-			wantNoSessionHeader: true,
+			wantSupported:      sip.DefaultClientSupported + ",timer",
+			wantSessionExpires: "3600",
+			wantMinSE:          "600",
+		},
+		{
+			name: "configured uac refresher included in initial invite",
+			cfg: Config{
+				SessionTimer:     true,
+				SessionExpires:   3600 * time.Second,
+				SessionRefresher: sessionRefresherUAC,
+			},
+			wantSupported:      sip.DefaultClientSupported + ",timer",
+			wantSessionExpires: "3600;refresher=uac",
+		},
+		{
+			name: "configured uas refresher included in initial invite",
+			cfg: Config{
+				SessionTimer:     true,
+				SessionExpires:   3600 * time.Second,
+				SessionRefresher: sessionRefresherUAS,
+			},
+			wantSupported:      sip.DefaultClientSupported + ",timer",
+			wantSessionExpires: "3600;refresher=uas",
 		},
 	}
 	for _, tt := range tests {
@@ -1066,31 +1338,382 @@ func TestAddInviteSessionTimer(t *testing.T) {
 	}
 }
 
-func TestAddInviteOKSessionTimerUsesIR92Default(t *testing.T) {
+func TestAddInviteFeatureTags(t *testing.T) {
+	tests := []struct {
+		name          string
+		cfg           Config
+		wantSupported string
+	}{
+		{
+			name:          "disabled",
+			cfg:           Config{},
+			wantSupported: sip.DefaultClientSupported,
+		},
+		{
+			name: "reliable provisional enabled",
+			cfg: Config{
+				ReliableProvisional: true,
+			},
+			wantSupported: sip.DefaultClientSupported + ",100rel",
+		},
+		{
+			name: "preconditions enabled",
+			cfg: Config{
+				Preconditions: true,
+			},
+			wantSupported: sip.DefaultClientSupported + ",100rel,precondition",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := sip.NewRequest("INVITE", "sip:remote@example.com")
+			msg.Headers.Add("Supported", sip.DefaultClientSupported)
+
+			addInviteFeatureTags(&msg, tt.cfg)
+
+			if got := msg.Header("Supported"); got != tt.wantSupported {
+				t.Fatalf("Supported = %q, want %q", got, tt.wantSupported)
+			}
+		})
+	}
+}
+
+func TestDialogSnapshotAddsSessionTimerSupportToNonACKRequests(t *testing.T) {
+	snap := dialogSnapshot{
+		id:           "call-1",
+		localURI:     "sip:user@example.com",
+		localTag:     "local-1",
+		remoteTo:     "<sip:remote@example.com>;tag=remote-1",
+		targetURI:    "sip:remote@example.com",
+		routeSet:     []string{"<sip:pcscf.example.com;lr>"},
+		inviteSeq:    1,
+		sessionTimer: true,
+		transport:    "TCP",
+		contactHost:  "192.0.2.20",
+		messagePort:  5062,
+		contact:      "<sip:user@192.0.2.20:5062>",
+	}
+	tests := []struct {
+		name      string
+		msg       sip.Message
+		wantTimer bool
+	}{
+		{
+			name:      "BYE advertises timer",
+			msg:       snap.buildDialogRequest("BYE", 2),
+			wantTimer: true,
+		},
+		{
+			name: "ACK keeps timer out",
+			msg:  snap.buildACK(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sip.TokenListContains(tt.msg.Header("Supported"), sessionTimerOption)
+			if got != tt.wantTimer {
+				t.Fatalf("Supported = %q, timer present %t, want %t", tt.msg.Header("Supported"), got, tt.wantTimer)
+			}
+		})
+	}
+}
+
+func TestACKMatchesRetransmittedInviteOKCSeq(t *testing.T) {
+	tests := []struct {
+		name        string
+		inviteSeq   int64
+		okCSeq      int64
+		ackCSeq     string
+		retransmit  bool
+		wantMatches bool
+	}{
+		{
+			name:        "initial invite without retransmit state",
+			inviteSeq:   1,
+			ackCSeq:     "1 ACK",
+			wantMatches: true,
+		},
+		{
+			name:        "reinvite ack matches current 2xx retransmit",
+			inviteSeq:   1,
+			okCSeq:      7,
+			ackCSeq:     "7 ACK",
+			retransmit:  true,
+			wantMatches: true,
+		},
+		{
+			name:       "initial ack does not stop reinvite retransmit",
+			inviteSeq:  1,
+			okCSeq:     7,
+			ackCSeq:    "1 ACK",
+			retransmit: true,
+		},
+		{
+			name:      "method must be ack",
+			inviteSeq: 1,
+			ackCSeq:   "1 INVITE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{inviteSeq: tt.inviteSeq}
+			if tt.retransmit {
+				call.inviteOKStop = make(chan struct{})
+				call.inviteOKCSeq = tt.okCSeq
+			}
+			msg := sip.NewRequest("ACK", "sip:remote@example.com")
+			msg.Headers.Add("CSeq", tt.ackCSeq)
+
+			if got := call.ackMatchesInvite(msg); got != tt.wantMatches {
+				t.Fatalf("ackMatchesInvite() = %v, want %v", got, tt.wantMatches)
+			}
+		})
+	}
+}
+
+func TestConfigNormalizesSessionExpiresAgainstMinSE(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  Config
-		min  string
-		want string
+		want time.Duration
 	}{
 		{
-			name: "configured shorter interval ignored",
-			cfg:  Config{SessionTimer: true, SessionExpires: 600 * time.Second},
-			want: "1800;refresher=uac",
+			name: "session expires raised to configured minimum",
+			cfg:  Config{SessionExpires: 300 * time.Second, MinSessionExpires: 600 * time.Second},
+			want: 600 * time.Second,
 		},
 		{
-			name: "min se above default",
-			cfg:  Config{SessionTimer: true, SessionExpires: 600 * time.Second},
-			min:  "3600",
-			want: "3600;refresher=uac",
+			name: "session expires keeps configured interval above minimum",
+			cfg:  Config{SessionExpires: 900 * time.Second, MinSessionExpires: 600 * time.Second},
+			want: 900 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if got.SessionExpires != tt.want {
+				t.Fatalf("SessionExpires = %s, want %s", got.SessionExpires, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigNormalizesSessionRefresher(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		want    string
+		wantErr bool
+	}{
+		{name: "default", want: sessionRefresherNone},
+		{name: "none lower-case normalized", cfg: Config{SessionRefresher: " NONE "}, want: sessionRefresherNone},
+		{name: "uac lower-case normalized", cfg: Config{SessionRefresher: " UAC "}, want: sessionRefresherUAC},
+		{name: "uas lower-case normalized", cfg: Config{SessionRefresher: " UAS "}, want: sessionRefresherUAS},
+		{name: "invalid rejected", cfg: Config{SessionRefresher: "proxy"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.Normalized()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Normalized() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if got.SessionRefresher != tt.want {
+				t.Fatalf("SessionRefresher = %q, want %q", got.SessionRefresher, tt.want)
+			}
+		})
+	}
+}
+
+func TestSessionTimerHeaderCodecs(t *testing.T) {
+	t.Run("Session-Expires", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			value    string
+			want     sessionExpiresHeader
+			wantText string
+			wantErr  bool
+		}{
+			{
+				name:     "plain interval",
+				value:    "1800",
+				want:     sessionExpiresHeader{seconds: 1800},
+				wantText: "1800",
+			},
+			{
+				name:     "refresher and generic param",
+				value:    `600;foo=bar;refresher="uac"`,
+				want:     sessionExpiresHeader{seconds: 600, refresher: sessionRefresherUAC, params: []string{"foo=bar"}},
+				wantText: "600;foo=bar;refresher=uac",
+			},
+			{name: "empty", wantErr: true},
+			{name: "zero", value: "0", wantErr: true},
+			{name: "invalid refresher", value: "1800;refresher=server", wantErr: true},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				var got sessionExpiresHeader
+				err := got.UnmarshalText([]byte(tt.value))
+				if tt.wantErr {
+					if err == nil {
+						t.Fatal("UnmarshalText() error = nil, want error")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("UnmarshalText() error = %v", err)
+				}
+				if got.seconds != tt.want.seconds || got.refresher != tt.want.refresher || !slices.Equal(got.params, tt.want.params) {
+					t.Fatalf("UnmarshalText() = %+v, want %+v", got, tt.want)
+				}
+				text, err := got.MarshalText()
+				if err != nil {
+					t.Fatalf("MarshalText() error = %v", err)
+				}
+				if string(text) != tt.wantText {
+					t.Fatalf("MarshalText() = %q, want %q", text, tt.wantText)
+				}
+			})
+		}
+	})
+
+	t.Run("Min-SE", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			value    string
+			want     minSEHeader
+			wantText string
+			wantErr  bool
+		}{
+			{
+				name:     "absolute minimum",
+				value:    "90",
+				want:     minSEHeader{seconds: 90},
+				wantText: "90",
+			},
+			{
+				name:     "generic param preserved",
+				value:    "600;foo=bar",
+				want:     minSEHeader{seconds: 600, params: []string{"foo=bar"}},
+				wantText: "600;foo=bar",
+			},
+			{name: "empty", wantErr: true},
+			{name: "below absolute minimum", value: "89", wantErr: true},
+			{name: "not decimal", value: "soon", wantErr: true},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				var got minSEHeader
+				err := got.UnmarshalText([]byte(tt.value))
+				if tt.wantErr {
+					if err == nil {
+						t.Fatal("UnmarshalText() error = nil, want error")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("UnmarshalText() error = %v", err)
+				}
+				if got.seconds != tt.want.seconds || !slices.Equal(got.params, tt.want.params) {
+					t.Fatalf("UnmarshalText() = %+v, want %+v", got, tt.want)
+				}
+				text, err := got.MarshalText()
+				if err != nil {
+					t.Fatalf("MarshalText() error = %v", err)
+				}
+				if string(text) != tt.wantText {
+					t.Fatalf("MarshalText() = %q, want %q", text, tt.wantText)
+				}
+			})
+		}
+	})
+}
+
+func TestAddInviteOKSessionTimerUsesIR92Default(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         Config
+		min         string
+		session     string
+		want        string
+		wantRequire string
+		supported   bool
+	}{
+		{
+			name:        "configured interval used",
+			cfg:         Config{SessionTimer: true, SessionExpires: 600 * time.Second},
+			want:        "600;refresher=uac",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:        "configured uas refresher used when UAS selects",
+			cfg:         Config{SessionTimer: true, SessionExpires: 600 * time.Second, SessionRefresher: sessionRefresherUAS},
+			want:        "600;refresher=uas",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:        "min se above default",
+			cfg:         Config{SessionTimer: true, SessionExpires: 600 * time.Second},
+			min:         "3600",
+			want:        "3600;refresher=uac",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:        "uac refresher copied from request requires timer",
+			cfg:         Config{SessionTimer: true},
+			session:     "120;refresher=uac",
+			want:        "120;refresher=uac",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:        "uas refresher copied from supported request requires timer",
+			cfg:         Config{SessionTimer: true},
+			session:     "120;refresher=uas",
+			want:        "120;refresher=uas",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:        "configured uas refresher fills missing request refresher",
+			cfg:         Config{SessionTimer: true, SessionRefresher: sessionRefresherUAS},
+			session:     "120",
+			want:        "120;refresher=uas",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:    "proxy inserted session expires without uac timer support",
+			cfg:     Config{SessionTimer: true},
+			session: "300",
+			want:    "300;refresher=uas",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			invite := sip.NewRequest("INVITE", "sip:local@example.com")
-			invite.Headers.Add("Supported", "timer")
+			if tt.supported {
+				invite.Headers.Add("Supported", "timer")
+			}
 			if tt.min != "" {
 				invite.Headers.Add("Min-SE", tt.min)
+			}
+			if tt.session != "" {
+				invite.Headers.Add("Session-Expires", tt.session)
 			}
 			resp := sip.NewResponse(200, "OK")
 
@@ -1099,15 +1722,576 @@ func TestAddInviteOKSessionTimerUsesIR92Default(t *testing.T) {
 			if got := resp.Header("Session-Expires"); got != tt.want {
 				t.Fatalf("Session-Expires = %q, want %q", got, tt.want)
 			}
+			if got := resp.Header("Require"); got != tt.wantRequire {
+				t.Fatalf("Require = %q, want %q", got, tt.wantRequire)
+			}
+		})
+	}
+}
+
+func TestInvalidSessionTimerRefresher(t *testing.T) {
+	tests := []struct {
+		name      string
+		supported bool
+		session   string
+		want      bool
+	}{
+		{name: "absent", supported: false},
+		{name: "proxy inserted interval without refresher", session: "300"},
+		{name: "unsupported uac refresher", session: "300;refresher=uac", want: true},
+		{name: "unsupported uas refresher", session: "300;refresher=uas", want: true},
+		{name: "supported uac refresher", supported: true, session: "300;refresher=uac"},
+		{name: "malformed handled by header parser", session: "bad;refresher=uac"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := sip.NewRequest("INVITE", "sip:local@example.com")
+			if tt.supported {
+				msg.Headers.Add("Supported", "timer")
+			}
+			if tt.session != "" {
+				msg.Headers.Add("Session-Expires", tt.session)
+			}
+
+			if got := invalidSessionTimerRefresher(msg); got != tt.want {
+				t.Fatalf("invalidSessionTimerRefresher() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIncomingInviteRejectsTooSmallSessionInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		minSE   string
+		wantMin string
+		callID  string
+		cfg     Config
+	}{
+		{
+			name:    "below absolute minimum",
+			wantMin: "90",
+			callID:  "too-small-se-absolute",
+			cfg:     Config{SessionTimer: true},
+		},
+		{
+			name:    "below requested minimum",
+			minSE:   "600",
+			wantMin: "600",
+			callID:  "too-small-se-requested",
+			cfg:     Config{SessionTimer: true},
+		},
+		{
+			name:    "below configured minimum",
+			wantMin: "300",
+			callID:  "too-small-se-configured",
+			cfg:     Config{SessionTimer: true, MinSessionExpires: 300 * time.Second},
+		},
+		{
+			name:    "configured minimum below absolute minimum",
+			wantMin: "90",
+			callID:  "too-small-se-configured-below-absolute",
+			cfg:     Config{SessionTimer: true, MinSessionExpires: 30 * time.Second},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			cfg := tt.cfg
+			cfg.Logger = testLogger()
+			svc, err := New(cfg, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			invite := delayedInvite()
+			invite.Headers.Set("Call-ID", tt.callID)
+			invite.Headers.Add("Supported", "timer")
+			invite.Headers.Add("Session-Expires", "60;refresher=uac")
+			if tt.minSE != "" {
+				invite.Headers.Add("Min-SE", tt.minSE)
+			}
+
+			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
+				t.Fatalf("handleIncomingInvite() error = %v", err)
+			}
+
+			responses := transport.messagesByStatus(sipStatusSessionIntervalTooSmall, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("422 count = %d, want 1", len(responses))
+			}
+			if got := responses[0].Header("Min-SE"); got != tt.wantMin {
+				t.Fatalf("422 Min-SE = %q, want %q", got, tt.wantMin)
+			}
+			if call := svc.lookupCall(tt.callID); call != nil {
+				t.Fatalf("lookupCall() = %v, want no call stored after 422", call)
+			}
+		})
+	}
+}
+
+func TestIncomingInviteRejectsRefresherWithoutTimerSupport(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "refresher without Supported timer is malformed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			invite := delayedInvite()
+			invite.Headers.Set("Call-ID", "bad-session-refresher")
+			invite.Headers.Del("Supported")
+			invite.Headers.Add("Session-Expires", "180;refresher=uas")
+
+			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
+				t.Fatalf("handleIncomingInvite() error = %v", err)
+			}
+
+			responses := transport.messagesByStatus(sipStatusBadRequest, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("400 INVITE count = %d, want 1", len(responses))
+			}
+			if call := svc.lookupCall("bad-session-refresher"); call != nil {
+				t.Fatalf("lookupCall() = %v, want no call stored after 400", call)
+			}
+		})
+	}
+}
+
+func TestIncomingInviteRejectsRequiredTimerWhenUnsupported(t *testing.T) {
+	transport := newVoiceStubTransport()
+	sess, err := session.Open(session.Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{Logger: testLogger(),
+		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+	}, sess, voiceStubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		_ = svc.Close()
+		_ = sess.Close()
+	}()
+
+	invite := delayedInvite()
+	invite.Headers.Set("Call-ID", "required-timer-unsupported")
+	invite.Headers.Add("Require", sessionTimerOption)
+
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	responses := transport.messagesByStatus(sipStatusBadExtension, "INVITE")
+	if len(responses) != 1 {
+		t.Fatalf("420 count = %d, want 1", len(responses))
+	}
+	if got := responses[0].Header("Unsupported"); got != sessionTimerOption {
+		t.Fatalf("Unsupported = %q, want %q", got, sessionTimerOption)
+	}
+	if got := transport.countMethod("INVITE"); got != 0 {
+		t.Fatalf("outbound INVITE count = %d, want 0", got)
+	}
+	if call := svc.lookupCall("required-timer-unsupported"); call != nil {
+		t.Fatalf("lookupCall() = %v, want no call stored after 420", call)
+	}
+}
+
+func TestIncomingInviteRequiredReliableProvisional(t *testing.T) {
+	tests := []struct {
+		name            string
+		reliableEnabled bool
+		wantStatus      int
+		wantRequire     string
+		wantUnsupported string
+		wantStoredCall  bool
+	}{
+		{
+			name:            "unsupported required 100rel rejected",
+			wantStatus:      sipStatusBadExtension,
+			wantUnsupported: reliableProvisionalOption,
+		},
+		{
+			name:            "required 100rel sends reliable provisional",
+			reliableEnabled: true,
+			wantStatus:      sipStatusSessionProgress,
+			wantRequire:     reliableProvisionalOption,
+			wantStoredCall:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), ReliableProvisional: tt.reliableEnabled}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			invite := delayedInvite()
+			invite.Headers.Set("Call-ID", "required-100rel-"+tt.name)
+			invite.Headers.Del("Supported")
+			invite.Headers.Add("Require", reliableProvisionalOption)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(tt.wantStatus, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("%d count = %d, want 1", tt.wantStatus, len(responses))
+			}
+			if got := responses[0].Header("Require"); got != tt.wantRequire {
+				t.Fatalf("Require = %q, want %q", got, tt.wantRequire)
+			}
+			if got := responses[0].Header("Unsupported"); got != tt.wantUnsupported {
+				t.Fatalf("Unsupported = %q, want %q", got, tt.wantUnsupported)
+			}
+			if tt.wantRequire != "" && responses[0].Header("RSeq") == "" {
+				t.Fatal("RSeq = empty, want reliable provisional sequence")
+			}
+			call := svc.lookupCall(invite.Header("Call-ID"))
+			if (call != nil) != tt.wantStoredCall {
+				t.Fatalf("lookupCall() = %v, stored = %t", call, tt.wantStoredCall)
+			}
+		})
+	}
+}
+
+func TestIncomingInvitePreconditionResponseRequiresPrecondition(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "183 answer uses precondition"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			invite := inviteWithSDP()
+			invite.Headers.Set("Call-ID", "incoming-precondition")
+			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
+			invite.Body = append(invite.Body,
+				[]byte("a=curr:qos local none\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n")...)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			progress := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+			if len(progress) != 1 {
+				t.Fatalf("183 count = %d, want 1", len(progress))
+			}
+			if got := progress[0].Header("Require"); !sip.TokenListContains(got, reliableProvisionalOption) || !sip.TokenListContains(got, preconditionOption) {
+				t.Fatalf("183 Require = %q, want 100rel and precondition", got)
+			}
+			body := string(progress[0].Body)
+			if !strings.Contains(body, "a=conf:qos remote sendrecv\r\n") {
+				t.Fatalf("183 SDP body missing resource confirmation request:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
+	tests := []struct {
+		name        string
+		invite      func() sip.Message
+		wantSDPLine string
+	}{
+		{
+			name: "offer answer in final 200",
+			invite: func() sip.Message {
+				msg := inviteWithSDP()
+				msg.Headers.Set("Call-ID", "incoming-precondition-final-answer")
+				msg.Headers.Add("Supported", preconditionOption)
+				msg.Body = append(msg.Body,
+					[]byte("a=curr:qos local none\r\n"+
+						"a=curr:qos remote none\r\n"+
+						"a=des:qos mandatory local sendrecv\r\n"+
+						"a=des:qos optional remote sendrecv\r\n")...)
+				return msg
+			},
+			wantSDPLine: "a=curr:qos local none\r\n",
+		},
+		{
+			name: "delayed offer in final 200",
+			invite: func() sip.Message {
+				msg := delayedInvite()
+				msg.Headers.Set("Call-ID", "incoming-precondition-final-offer")
+				msg.Headers.Add("Supported", preconditionOption)
+				return msg
+			},
+			wantSDPLine: "a=des:qos mandatory local sendrecv\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			incoming := make(chan IncomingCall, 1)
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				OnIncomingCall: func(event IncomingCall) {
+					incoming <- event
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: tt.invite(), Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			got := <-incoming
+			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+				t.Fatalf("Answer() error = %v", err)
+			}
+			responses := transport.messagesByStatus(sipStatusOK, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("200 INVITE count = %d, want 1", len(responses))
+			}
+			if got := responses[0].Header("Require"); !sip.TokenListContains(got, preconditionOption) {
+				t.Fatalf("200 INVITE Require = %q, want %q", got, preconditionOption)
+			}
+			body := string(responses[0].Body)
+			if !strings.Contains(body, tt.wantSDPLine) {
+				t.Fatalf("200 INVITE SDP body missing %q:\n%s", tt.wantSDPLine, body)
+			}
 		})
 	}
 }
 
 func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 	tests := []struct {
-		name string
+		name       string
+		cfg        Config
+		wantFirst  string
+		wantSecond string
 	}{
-		{name: "422 with Min-SE"},
+		{
+			name:       "422 with Min-SE",
+			cfg:        Config{Logger: testLogger(), SessionTimer: true},
+			wantFirst:  "3600",
+			wantSecond: "4000",
+		},
+		{
+			name:       "422 preserves configured UAS refresher",
+			cfg:        Config{Logger: testLogger(), SessionTimer: true, SessionRefresher: sessionRefresherUAS},
+			wantFirst:  "3600;refresher=uas",
+			wantSecond: "4000;refresher=uas",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(tt.cfg, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			invites := 0
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "INVITE" {
+					return
+				}
+				invites++
+				switch invites {
+				case 1:
+					if got := msg.Header("Session-Expires"); got != "" {
+						t.Fatalf("initial Session-Expires = %q, want omitted", got)
+					}
+					resp := callStatus(msg, 422, "Session Interval Too Small")
+					resp.Headers.Add("Min-SE", "3600")
+					transport.queue(resp)
+				case 2:
+					if got := msg.Header("Session-Expires"); got != tt.wantFirst {
+						t.Fatalf("retry Session-Expires = %q, want %q", got, tt.wantFirst)
+					}
+					if got := msg.Header("Min-SE"); got != "3600" {
+						t.Fatalf("retry Min-SE = %q, want 3600", got)
+					}
+					resp := callStatus(msg, 422, "Session Interval Too Small")
+					resp.Headers.Add("Min-SE", "4000")
+					transport.queue(resp)
+				case 3:
+					if got := msg.Header("Session-Expires"); got != tt.wantSecond {
+						t.Fatalf("second retry Session-Expires = %q, want %q", got, tt.wantSecond)
+					}
+					if got := msg.Header("Min-SE"); got != "4000" {
+						t.Fatalf("second retry Min-SE = %q, want 4000", got)
+					}
+					transport.queue(callOK(msg))
+				default:
+					t.Fatalf("INVITE count = %d, want 3", invites)
+				}
+			}
+
+			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if invites != 3 {
+				t.Fatalf("INVITE count = %d, want 3", invites)
+			}
+		})
+	}
+}
+
+func TestDialRejectsInvalidMinSEOnSessionIntervalRetry(t *testing.T) {
+	tests := []struct {
+		name  string
+		minSE string
+	}{
+		{name: "missing Min-SE"},
+		{name: "below RFC minimum", minSE: "60"},
+		{name: "not seconds", minSE: "invalid"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1152,32 +2336,1100 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 					return
 				}
 				invites++
-				switch invites {
-				case 1:
-					if got := msg.Header("Session-Expires"); got != "" {
-						t.Fatalf("initial Session-Expires = %q, want omitted", got)
-					}
-					resp := callStatus(msg, 422, "Session Interval Too Small")
-					resp.Headers.Add("Min-SE", "3600")
+				if invites != 1 {
+					t.Fatalf("INVITE count = %d, want 1", invites)
+				}
+				resp := callStatus(msg, 422, "Session Interval Too Small")
+				if tt.minSE != "" {
+					resp.Headers.Add("Min-SE", tt.minSE)
+				}
+				transport.queue(resp)
+			}
+
+			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err == nil {
+				t.Fatal("Dial() error = nil, want invalid Min-SE")
+			}
+			if !strings.Contains(err.Error(), "session timer retry: invalid Min-SE") {
+				t.Fatalf("Dial() error = %v, want invalid Min-SE", err)
+			}
+			if invites != 1 {
+				t.Fatalf("INVITE count = %d, want 1", invites)
+			}
+		})
+	}
+}
+
+func TestDialRejectsTimerRequiredResponseWithoutSessionExpires(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "Require timer missing Session-Expires"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "INVITE" {
+					return
+				}
+				resp := callOK(msg)
+				resp.Headers.Add("Require", "timer")
+				transport.queue(resp)
+			}
+
+			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err == nil {
+				t.Fatal("Dial() error = nil, want missing Session-Expires")
+			}
+			if !strings.Contains(err.Error(), "Require timer without Session-Expires") {
+				t.Fatalf("Dial() error = %v, want missing Session-Expires", err)
+			}
+		})
+	}
+}
+
+func TestApplySessionTimerResponseKeepsUACRequestedTimerWithoutResponseHeader(t *testing.T) {
+	tests := []struct {
+		name               string
+		cfg                Config
+		currentMinSE       int
+		wantInterval       time.Duration
+		wantMinSE          int
+		wantLocalRefresher bool
+	}{
+		{
+			name:               "configured session expires",
+			cfg:                Config{SessionTimer: true, SessionExpires: 600 * time.Second},
+			wantInterval:       600 * time.Second,
+			wantMinSE:          durationSeconds(defaultMinSessionExpires),
+			wantLocalRefresher: true,
+		},
+		{
+			name:               "stored Min-SE raises fallback interval",
+			cfg:                Config{SessionTimer: true, SessionExpires: 600 * time.Second},
+			currentMinSE:       900,
+			wantInterval:       900 * time.Second,
+			wantMinSE:          900,
+			wantLocalRefresher: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{
+				service:       &Service{cfg: tt.cfg},
+				inviteRequest: sip.NewRequest("INVITE", "sip:remote@example.com"),
+				sessionTimer: sessionTimerState{
+					minSE: tt.currentMinSE,
+				},
+			}
+			defer call.stopSessionTimer()
+
+			if err := call.applySessionTimerUACResponse(sip.NewResponse(sipStatusOK, "OK"), true); err != nil {
+				t.Fatalf("applySessionTimerUACResponse() error = %v", err)
+			}
+			call.mu.Lock()
+			got := call.sessionTimer
+			call.mu.Unlock()
+			if !got.active {
+				t.Fatal("session timer active = false, want true")
+			}
+			if got.interval != tt.wantInterval {
+				t.Fatalf("session timer interval = %s, want %s", got.interval, tt.wantInterval)
+			}
+			if got.minSE != tt.wantMinSE {
+				t.Fatalf("session timer minSE = %d, want %d", got.minSE, tt.wantMinSE)
+			}
+			if got.localRefresher != tt.wantLocalRefresher {
+				t.Fatalf("session timer localRefresher = %t, want %t", got.localRefresher, tt.wantLocalRefresher)
+			}
+		})
+	}
+}
+
+func TestApplySessionTimerResponseWithoutHeaderStopsSubsequentRefreshTimer(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "subsequent UAC refresh can turn off timer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{
+				service: &Service{cfg: Config{SessionTimer: true}},
+				sessionTimer: sessionTimerState{
+					active:         true,
+					interval:       600 * time.Second,
+					minSE:          durationSeconds(defaultMinSessionExpires),
+					localRefresher: true,
+				},
+			}
+
+			if err := call.applySessionTimerUACResponse(sip.NewResponse(sipStatusOK, "OK"), false); err != nil {
+				t.Fatalf("applySessionTimerUACResponse() error = %v", err)
+			}
+			call.mu.Lock()
+			got := call.sessionTimer
+			call.mu.Unlock()
+			if got.active {
+				t.Fatalf("session timer active = true, want false after 2xx without Session-Expires")
+			}
+		})
+	}
+}
+
+func TestDialSessionTimerRefreshesWithUPDATE(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "local refresher sends UPDATE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			media := &voiceMediaTransport{}
+			svc, err := New(Config{Logger: testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					resp := callOK(msg)
+					resp.Headers.Add("Allow", sip.DefaultClientAllow)
+					resp.Headers.Add("Require", "timer")
+					resp.Headers.Add("Session-Expires", "180;refresher=uac")
 					transport.queue(resp)
-				case 2:
-					if got := msg.Header("Session-Expires"); got != "3600" {
-						t.Fatalf("retry Session-Expires = %q, want 3600", got)
-					}
-					if got := msg.Header("Min-SE"); got != "3600" {
-						t.Fatalf("retry Min-SE = %q, want 3600", got)
-					}
-					transport.queue(callOK(msg))
-				default:
-					t.Fatalf("INVITE count = %d, want 2", invites)
+				case "UPDATE":
+					resp := okForRequest(msg)
+					resp.Headers.Add("Require", "timer")
+					resp.Headers.Add("Session-Expires", "180;refresher=uac")
+					transport.queue(resp)
 				}
 			}
 
-			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if invites != 2 {
-				t.Fatalf("INVITE count = %d, want 2", invites)
+			call.refreshSession()
+
+			updates := transport.messagesByMethod("UPDATE")
+			if len(updates) != 1 {
+				t.Fatalf("UPDATE count = %d, want 1", len(updates))
+			}
+			if got := updates[0].Header("Session-Expires"); got != "180;refresher=uac" {
+				t.Fatalf("UPDATE Session-Expires = %q, want 180;refresher=uac", got)
+			}
+			if got := updates[0].Header("Supported"); !sip.TokenListContains(got, "timer") {
+				t.Fatalf("UPDATE Supported = %q, want timer", got)
+			}
+		})
+	}
+}
+
+func TestSessionTimerRefreshNon2xxTerminatesDialog(t *testing.T) {
+	transport := newVoiceStubTransport()
+	sess, err := session.Open(session.Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	reg, err := registration.New(registration.Config{Logger: testLogger(),
+		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+		IMEI:            "123456789012345",
+	}, sess, voiceStubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	media := &voiceMediaTransport{}
+	svc, err := New(Config{Logger: testLogger(),
+		SessionTimer: true,
+		OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+			media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+			media.onPacket = cfg.OnPacket
+			return media, nil
+		},
+	}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- sess.Run(ctx)
+	}()
+	if err := sess.WaitStarted(ctx); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+	defer func() {
+		cancel()
+		_ = svc.Close()
+		_ = sess.Close()
+		<-runErr
+	}()
+
+	transport.onWrite = func(msg sip.Message) {
+		switch msg.Method() {
+		case "INVITE":
+			resp := callOK(msg)
+			resp.Headers.Add("Allow", sip.DefaultClientAllow)
+			resp.Headers.Add("Require", "timer")
+			resp.Headers.Add("Session-Expires", "180;refresher=uac")
+			transport.queue(resp)
+		case "UPDATE":
+			transport.queue(callStatus(msg, sipStatusServerInternalError, "Server Internal Error"))
+		case "BYE":
+			transport.queue(okForRequest(msg))
+		}
+	}
+
+	call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	call.refreshSession()
+
+	if !waitForCallTest(func() bool { return transport.countMethod("BYE") == 1 }) {
+		t.Fatalf("BYE count = %d, want 1 after failed session refresh", transport.countMethod("BYE"))
+	}
+	if got := call.State(); got != CallStateEnded {
+		t.Fatalf("call state = %s, want %s", got, CallStateEnded)
+	}
+}
+
+func TestDialSessionTimerRefreshFallsBackToReINVITEWithoutRemoteUPDATE(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "remote Allow does not advertise UPDATE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			media := &voiceMediaTransport{}
+			svc, err := New(Config{Logger: testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			invites := 0
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "INVITE" {
+					return
+				}
+				invites++
+				resp := callOK(msg)
+				resp.Headers.Add("Require", "timer")
+				resp.Headers.Add("Session-Expires", "180;refresher=uac")
+				if invites == 1 {
+					resp.Headers.Add("Allow", "ACK,BYE,CANCEL,INVITE,PRACK")
+				} else {
+					resp.Headers.Set("Contact", "<sip:remote-refresh@192.0.2.11:5060>")
+					resp.Body = bytes.Replace(resp.Body, []byte("m=audio 50000 RTP/AVP 104 101\r\n"), []byte("m=audio 51000 RTP/AVP 104 101\r\n"), 1)
+				}
+				transport.queue(resp)
+			}
+
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			call.refreshSession()
+
+			if got := transport.countMethod("UPDATE"); got != 0 {
+				t.Fatalf("UPDATE count = %d, want 0", got)
+			}
+			refreshes := transport.messagesByMethod("INVITE")
+			if len(refreshes) != 2 {
+				t.Fatalf("INVITE count = %d, want initial plus refresh", len(refreshes))
+			}
+			refresh := refreshes[1]
+			if got := refresh.Header("Session-Expires"); got != "180;refresher=uac" {
+				t.Fatalf("re-INVITE Session-Expires = %q, want 180;refresher=uac", got)
+			}
+			if got := refresh.Header("Supported"); !sip.TokenListContains(got, "timer") {
+				t.Fatalf("re-INVITE Supported = %q, want timer", got)
+			}
+			if got := refresh.Header("Content-Type"); got != "application/sdp" {
+				t.Fatalf("re-INVITE Content-Type = %q, want application/sdp", got)
+			}
+			if got := transport.countMethod("ACK"); got != 2 {
+				t.Fatalf("ACK count = %d, want initial ACK plus re-INVITE ACK", got)
+			}
+			call.mu.Lock()
+			target := call.targetURI
+			call.mu.Unlock()
+			if target != "sip:remote-refresh@192.0.2.11:5060" {
+				t.Fatalf("targetURI = %q, want refreshed Contact", target)
+			}
+			remote, ok := media.RemoteAddr().(*net.UDPAddr)
+			if !ok {
+				t.Fatalf("media remote = %T, want *net.UDPAddr", media.RemoteAddr())
+			}
+			if remote.Port != 51000 {
+				t.Fatalf("media remote port = %d, want refreshed SDP answer port 51000", remote.Port)
+			}
+		})
+	}
+}
+
+func TestSessionRefreshReINVITEUsesLocalSDP(t *testing.T) {
+	const remoteSDP = "v=0\r\no=- 10 10 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\n"
+	const localSDP = "v=0\r\no=- 20 20 IN IP4 192.0.2.20\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 40000 RTP/AVP 104\r\n"
+
+	tests := []struct {
+		name string
+	}{
+		{name: "incoming dialog refresh reuses local answer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invite := sip.NewRequest("INVITE", "sip:local@example.com")
+			invite.Headers.Set("Content-Type", "application/sdp")
+			invite.Body = []byte(remoteSDP)
+			snap := dialogSnapshot{
+				id:            "call-id",
+				localURI:      "sip:local@example.com",
+				localTag:      "local-tag",
+				remoteTo:      "<sip:remote@example.com>;tag=remote-tag",
+				targetURI:     "sip:remote@192.0.2.10:5060",
+				inviteSeq:     1,
+				inviteRequest: invite,
+				localSDP:      []byte(localSDP),
+				transport:     "TCP",
+				contactHost:   "192.0.2.20",
+				messagePort:   5060,
+				contact:       "<sip:local@192.0.2.20:5060>",
+			}
+			msg := snap.buildSessionRefreshRequest(2, sessionTimerState{
+				active:         true,
+				interval:       180 * time.Second,
+				minSE:          durationSeconds(defaultMinSessionExpires),
+				localRefresher: true,
+			})
+
+			if got := msg.Method(); got != "INVITE" {
+				t.Fatalf("refresh method = %q, want INVITE", got)
+			}
+			if got := msg.Header("Content-Type"); got != "application/sdp" {
+				t.Fatalf("Content-Type = %q, want application/sdp", got)
+			}
+			if string(msg.Body) != localSDP {
+				t.Fatalf("refresh SDP = %q, want local SDP %q", string(msg.Body), localSDP)
+			}
+		})
+	}
+}
+
+func TestIncomingUPDATESessionRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "remote refresher updates dialog timer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			call := &Call{
+				service:   svc,
+				id:        "update-refresh-call",
+				sessionID: "update-refresh-session",
+				direction: CallDirectionIncoming,
+				state:     CallStateActive,
+				localURI:  "sip:001010123456789@example.com",
+				localTag:  "local-tag",
+				remoteURI: "sip:caller@example.com",
+				remoteTag: "remote-tag",
+				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
+				targetURI: "sip:caller@192.0.2.10:5060",
+				inviteSeq: 1,
+				localPort: 40000,
+				rtcpSSRC:  randomRTCPSSRC(),
+			}
+			if err := svc.storeCall(call); err != nil {
+				t.Fatalf("storeCall() error = %v", err)
+			}
+
+			update := sip.NewRequest("UPDATE", "sip:001010123456789@192.0.2.20:5062")
+			update.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKrefresh")
+			update.Headers.Add("From", "<sip:caller@example.com>;tag=remote-tag")
+			update.Headers.Add("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			update.Headers.Add("Call-ID", "update-refresh-call")
+			update.Headers.Add("CSeq", "2 UPDATE")
+			update.Headers.Add("Contact", "<sip:caller-refresh@192.0.2.11:5070>")
+			update.Headers.Add("Supported", "timer")
+			update.Headers.Add("Session-Expires", "600;refresher=uac")
+			update.Headers.Add("Min-SE", "600")
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: update, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusOK, "UPDATE")
+			if len(responses) != 1 {
+				t.Fatalf("200 UPDATE count = %d, want 1", len(responses))
+			}
+			if got := responses[0].Header("Session-Expires"); got != "600;refresher=uac" {
+				t.Fatalf("200 UPDATE Session-Expires = %q, want 600;refresher=uac", got)
+			}
+			if got := responses[0].Header("Require"); got != "timer" {
+				t.Fatalf("200 UPDATE Require = %q, want timer", got)
+			}
+			call.mu.Lock()
+			timer := call.sessionTimer
+			targetURI := call.targetURI
+			call.mu.Unlock()
+			if !timer.active || timer.localRefresher || timer.minSE != 600 {
+				t.Fatalf("session timer = %+v, want active remote refresher", timer)
+			}
+			if targetURI != "sip:caller-refresh@192.0.2.11:5070" {
+				t.Fatalf("targetURI = %q, want UPDATE Contact remote target", targetURI)
+			}
+		})
+	}
+}
+
+func TestIncomingUPDATESessionRefreshWithOfferAnswersSDP(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "normal UPDATE refresh can carry offer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			media := &voiceMediaTransport{}
+			svc, err := New(Config{
+				Logger:       testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					if err := media.ConfigureRemote(ctx, cfg); err != nil {
+						return nil, err
+					}
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			call := &Call{
+				service:   svc,
+				id:        "update-offer-call",
+				sessionID: "update-offer-session",
+				direction: CallDirectionIncoming,
+				state:     CallStateActive,
+				localURI:  "sip:001010123456789@example.com",
+				localTag:  "local-tag",
+				remoteURI: "sip:caller@example.com",
+				remoteTag: "remote-tag",
+				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
+				targetURI: "sip:caller@192.0.2.10:5060",
+				inviteSeq: 1,
+				localPort: 40000,
+				rtcpSSRC:  randomRTCPSSRC(),
+			}
+			if err := svc.storeCall(call); err != nil {
+				t.Fatalf("storeCall() error = %v", err)
+			}
+
+			update := sip.NewRequest("UPDATE", "sip:001010123456789@192.0.2.20:5062")
+			update.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKupdateoffer")
+			update.Headers.Add("From", "<sip:caller@example.com>;tag=remote-tag")
+			update.Headers.Add("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			update.Headers.Add("Call-ID", "update-offer-call")
+			update.Headers.Add("CSeq", "2 UPDATE")
+			update.Headers.Add("Supported", "timer")
+			update.Headers.Add("Session-Expires", "600;refresher=uac")
+			update.Headers.Add("Content-Type", "application/sdp")
+			update.Body = inviteWithSDP().Body
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: update, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusOK, "UPDATE")
+			if len(responses) != 1 {
+				t.Fatalf("200 UPDATE count = %d, want 1", len(responses))
+			}
+			if _, ok := sdpBody(responses[0]); !ok {
+				t.Fatalf("200 UPDATE SDP present = false, want true")
+			}
+			if got := responses[0].Header("Session-Expires"); got != "600;refresher=uac" {
+				t.Fatalf("200 UPDATE Session-Expires = %q, want 600;refresher=uac", got)
+			}
+			remote, ok := media.RemoteAddr().(*net.UDPAddr)
+			if !ok {
+				t.Fatalf("media remote = %T, want *net.UDPAddr", media.RemoteAddr())
+			}
+			if remote.Port != 50000 {
+				t.Fatalf("media remote port = %d, want offered port 50000", remote.Port)
+			}
+		})
+	}
+}
+
+func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "UPDATE offer uses precondition"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), Preconditions: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			call := &Call{
+				service:   svc,
+				id:        "update-precondition-call",
+				sessionID: "update-precondition-session",
+				direction: CallDirectionIncoming,
+				state:     CallStateActive,
+				localURI:  "sip:001010123456789@example.com",
+				localTag:  "local-tag",
+				remoteURI: "sip:caller@example.com",
+				remoteTag: "remote-tag",
+				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
+				targetURI: "sip:caller@192.0.2.10:5060",
+				inviteSeq: 1,
+				localPort: 40000,
+				rtcpSSRC:  randomRTCPSSRC(),
+			}
+			if err := svc.storeCall(call); err != nil {
+				t.Fatalf("storeCall() error = %v", err)
+			}
+
+			update := sip.NewRequest("UPDATE", "sip:001010123456789@192.0.2.20:5062")
+			update.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKupdateprecondition")
+			update.Headers.Add("From", "<sip:caller@example.com>;tag=remote-tag")
+			update.Headers.Add("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			update.Headers.Add("Call-ID", "update-precondition-call")
+			update.Headers.Add("CSeq", "2 UPDATE")
+			update.Headers.Add("Supported", preconditionOption)
+			update.Headers.Add("Content-Type", "application/sdp")
+			update.Body = append(inviteWithSDP().Body,
+				[]byte("a=curr:qos local none\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n")...)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: update, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusOK, "UPDATE")
+			if len(responses) != 1 {
+				t.Fatalf("200 UPDATE count = %d, want 1", len(responses))
+			}
+			if got := responses[0].Header("Require"); got != preconditionOption {
+				t.Fatalf("200 UPDATE Require = %q, want %q", got, preconditionOption)
+			}
+			body := string(responses[0].Body)
+			if !strings.Contains(body, "a=conf:qos remote sendrecv\r\n") {
+				t.Fatalf("200 UPDATE body missing resource confirmation request:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestIncomingReINVITESessionRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "existing dialog re-invite refreshes session"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			call := &Call{
+				service:   svc,
+				id:        "reinvite-refresh-call",
+				sessionID: "reinvite-refresh-session",
+				direction: CallDirectionIncoming,
+				state:     CallStateActive,
+				localURI:  "sip:001010123456789@example.com",
+				localTag:  "local-tag",
+				remoteURI: "sip:caller@example.com",
+				remoteTag: "remote-tag",
+				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
+				targetURI: "sip:caller@192.0.2.10:5060",
+				inviteSeq: 1,
+				localPort: 40000,
+				rtcpSSRC:  randomRTCPSSRC(),
+			}
+			if err := svc.storeCall(call); err != nil {
+				t.Fatalf("storeCall() error = %v", err)
+			}
+
+			reinvite := inviteWithSDP()
+			reinvite.Headers.Set("Call-ID", "reinvite-refresh-call")
+			reinvite.Headers.Set("From", "<sip:caller@example.com>;tag=remote-tag")
+			reinvite.Headers.Set("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			reinvite.Headers.Set("CSeq", "2 INVITE")
+			reinvite.Headers.Add("Supported", "timer")
+			reinvite.Headers.Add("Session-Expires", "180;refresher=uac")
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusOK, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("200 INVITE count = %d, want 1", len(responses))
+			}
+			if got := responses[0].Header("Session-Expires"); got != "180;refresher=uac" {
+				t.Fatalf("200 re-INVITE Session-Expires = %q, want 180;refresher=uac", got)
+			}
+			if _, ok := sdpBody(responses[0]); !ok {
+				t.Fatalf("200 re-INVITE SDP present = false, want true")
+			}
+			call.mu.Lock()
+			timer := call.sessionTimer
+			call.mu.Unlock()
+			if !timer.active || timer.localRefresher {
+				t.Fatalf("session timer = %+v, want active remote refresher", timer)
+			}
+		})
+	}
+}
+
+func TestIncomingReINVITEGlareWhileLocalINVITEPending(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "local re-invite in progress"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			call := &Call{
+				service:            svc,
+				id:                 "local-pending-reinvite-call",
+				sessionID:          "local-pending-reinvite-session",
+				direction:          CallDirectionOutgoing,
+				state:              CallStateActive,
+				localURI:           "sip:001010123456789@example.com",
+				localTag:           "local-tag",
+				remoteURI:          "sip:callee@example.com",
+				remoteTag:          "remote-tag",
+				remoteTo:           "<sip:callee@example.com>;tag=remote-tag",
+				targetURI:          "sip:callee@192.0.2.10:5060",
+				inviteSeq:          1,
+				localPort:          40000,
+				localINVITEPending: true,
+				rtcpSSRC:           randomRTCPSSRC(),
+			}
+			if err := svc.storeCall(call); err != nil {
+				t.Fatalf("storeCall() error = %v", err)
+			}
+
+			reinvite := inviteWithSDP()
+			reinvite.Headers.Set("Call-ID", "local-pending-reinvite-call")
+			reinvite.Headers.Set("From", "<sip:callee@example.com>;tag=remote-tag")
+			reinvite.Headers.Set("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			reinvite.Headers.Set("CSeq", "2 INVITE")
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusRequestPending, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("491 re-INVITE count = %d, want 1", len(responses))
+			}
+		})
+	}
+}
+
+func TestSecondIncomingReINVITEGetsRetryAfterWhileFirstPending(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "second re-invite receives 500 retry-after"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			openStarted := make(chan struct{})
+			releaseOpen := make(chan struct{})
+			var openOnce sync.Once
+			var releaseOnce sync.Once
+			svc, err := New(Config{
+				Logger:       testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					openOnce.Do(func() { close(openStarted) })
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-releaseOpen:
+					}
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}}, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				releaseOnce.Do(func() { close(releaseOpen) })
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			call := &Call{
+				service:   svc,
+				id:        "remote-pending-reinvite-call",
+				sessionID: "remote-pending-reinvite-session",
+				direction: CallDirectionIncoming,
+				state:     CallStateActive,
+				localURI:  "sip:001010123456789@example.com",
+				localTag:  "local-tag",
+				remoteURI: "sip:caller@example.com",
+				remoteTag: "remote-tag",
+				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
+				targetURI: "sip:caller@192.0.2.10:5060",
+				inviteSeq: 1,
+				localPort: 40000,
+				rtcpSSRC:  randomRTCPSSRC(),
+			}
+			if err := svc.storeCall(call); err != nil {
+				t.Fatalf("storeCall() error = %v", err)
+			}
+
+			first := inviteWithSDP()
+			first.Headers.Set("Call-ID", "remote-pending-reinvite-call")
+			first.Headers.Set("From", "<sip:caller@example.com>;tag=remote-tag")
+			first.Headers.Set("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			first.Headers.Set("CSeq", "2 INVITE")
+
+			firstErr := make(chan error, 1)
+			go func() {
+				_, err := svc.HandleRequest(context.Background(), session.Request{Message: first, Transport: transport})
+				firstErr <- err
+			}()
+			select {
+			case <-openStarted:
+			case <-time.After(time.Second):
+				t.Fatal("OpenMedia was not called for first re-INVITE")
+			}
+
+			second := first
+			second.Headers = first.Headers.Clone()
+			second.Body = append([]byte(nil), first.Body...)
+			second.Headers.Set("CSeq", "3 INVITE")
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: second, Transport: transport})
+			if err != nil {
+				t.Fatalf("second HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("second HandleRequest() handled = false, want true")
+			}
+
+			responses := transport.messagesByStatus(sipStatusServerInternalError, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("500 re-INVITE count = %d, want 1", len(responses))
+			}
+			retryAfter, err := strconv.Atoi(responses[0].Header("Retry-After"))
+			if err != nil || retryAfter < 0 || retryAfter > 10 {
+				t.Fatalf("Retry-After = %q, want 0..10 seconds", responses[0].Header("Retry-After"))
+			}
+
+			releaseOnce.Do(func() { close(releaseOpen) })
+			if err := <-firstErr; err != nil {
+				t.Fatalf("first HandleRequest() error = %v", err)
+			}
+			if got := len(transport.messagesByStatus(sipStatusOK, "INVITE")); got != 1 {
+				t.Fatalf("200 re-INVITE count = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestUnknownReINVITEDialogGets481(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "unknown dialog"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			reinvite := sip.NewRequest("INVITE", "sip:001010123456789@192.0.2.20:5062")
+			reinvite.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKmissingreinvite")
+			reinvite.Headers.Add("From", "<sip:caller@example.com>;tag=remote-tag")
+			reinvite.Headers.Add("To", "<sip:001010123456789@example.com>;tag=local-tag")
+			reinvite.Headers.Add("Call-ID", "missing-reinvite-call")
+			reinvite.Headers.Add("CSeq", "2 INVITE")
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusCallTransactionDoesNotExist, "INVITE")
+			if len(responses) != 1 {
+				t.Fatalf("481 re-INVITE count = %d, want 1", len(responses))
 			}
 		})
 	}
@@ -1351,8 +3603,8 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			if len(byes) != 1 {
 				t.Fatalf("BYE count = %d, want 1", len(byes))
 			}
-			if got := byes[0].Header("Reason"); got != reasonMediaBearerReleased {
-				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaBearerReleased)
+			if got := byes[0].Header("Reason"); got != reasonMediaTimeout {
+				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaTimeout)
 			}
 		})
 	}
@@ -1571,12 +3823,12 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := registration.New(secureRegistrationConfig(transport, registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
 				UserAgent:       "test-agent",
-			}, sess, voiceStubCard{})
+			}), sess, voiceStubCard{})
 			if err != nil {
 				t.Fatalf("registration New() error = %v", err)
 			}
@@ -1600,7 +3852,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			if err := reg.Register(context.Background()); err != nil {
 				t.Fatalf("Register() error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger(),
+			svc, err := New(Config{Logger: testLogger(), SessionTimer: true,
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
 				},
@@ -1626,14 +3878,27 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			}()
 
 			var invite sip.Message
+			prackCount := 0
 			transport.onWrite = func(msg sip.Message) {
 				switch msg.Method() {
 				case "INVITE":
 					invite = msg
 					transport.queue(reliableCallProgress(msg))
 				case "PRACK":
+					prackCount++
 					transport.queue(callStatus(msg, 200, "OK"))
-					transport.queue(callOKWithoutSDP(invite, "early-tag"))
+					if prackCount == 1 {
+						progress := sip.NewResponse(180, "Ringing")
+						progress.Headers = sip.ResponseHeaders(invite, 180)
+						progress.Headers = sip.UpsertHeader(progress.Headers, "To", sip.WithTag(invite.Header("To"), "", "early-tag"))
+						progress.Headers.Add("Require", "100rel")
+						progress.Headers.Add("RSeq", "8")
+						transport.queue(progress)
+						return
+					}
+					if prackCount == 2 {
+						transport.queue(callOKWithoutSDP(invite, "early-tag"))
+					}
 				}
 			}
 
@@ -1645,8 +3910,8 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				t.Fatalf("call.State() = %q, want %q", call.State(), CallStateConfirmed)
 			}
 			pracks := transport.messagesByMethod("PRACK")
-			if len(pracks) != 1 {
-				t.Fatalf("PRACK count = %d, want 1", len(pracks))
+			if len(pracks) != 2 {
+				t.Fatalf("PRACK count = %d, want 2", len(pracks))
 			}
 			prack := pracks[0]
 			if got := prack.Header("RAck"); got != "7 1 INVITE" {
@@ -1660,6 +3925,19 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			}
 			if got := prack.Header("Require"); got != "sec-agree" {
 				t.Fatalf("PRACK Require = %q, want sec-agree", got)
+			}
+			if got := prack.Header("Supported"); !sip.TokenListContains(got, sessionTimerOption) {
+				t.Fatalf("PRACK Supported = %q, want timer", got)
+			}
+			nextPRACK := pracks[1]
+			if got := nextPRACK.Header("RAck"); got != "8 1 INVITE" {
+				t.Fatalf("second PRACK RAck = %q, want %q", got, "8 1 INVITE")
+			}
+			if got := sip.RequestURI(nextPRACK); got != "sip:early@192.0.2.10:5060" {
+				t.Fatalf("second PRACK Request-URI = %q, want early dialog target", got)
+			}
+			if got := nextPRACK.Header("Route"); got != "<sip:pcscf.example.com;lr>" {
+				t.Fatalf("second PRACK Route = %q, want early dialog route set", got)
 			}
 			media := call.Media()
 			if !media.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) || media.RemotePort != 50000 {
@@ -1926,6 +4204,119 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 	}
 }
 
+func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "183 requires precondition"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			var invite sip.Message
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					invite = msg
+					if got := msg.Header("Supported"); !sip.TokenListContains(got, preconditionOption) {
+						t.Fatalf("INVITE Supported = %q, want precondition", got)
+					}
+					if got := msg.Header("Supported"); !sip.TokenListContains(got, reliableProvisionalOption) {
+						t.Fatalf("INVITE Supported = %q, want 100rel", got)
+					}
+					progress := reliableCallProgress(msg)
+					progress.Headers.Add("Require", preconditionOption)
+					progress.Body = append(progress.Body,
+						[]byte("a=curr:qos local none\r\n"+
+							"a=curr:qos remote none\r\n"+
+							"a=des:qos mandatory local sendrecv\r\n"+
+							"a=des:qos optional remote sendrecv\r\n")...)
+					transport.queue(progress)
+				case "PRACK":
+					transport.queue(callStatus(msg, sipStatusOK, "OK"))
+				case "UPDATE":
+					if got := sip.RequestURI(msg); got != "sip:early@192.0.2.10:5060" {
+						t.Fatalf("UPDATE Request-URI = %q, want early dialog target", got)
+					}
+					if got := sip.HeaderTag(msg.Header("To")); got != "early-tag" {
+						t.Fatalf("UPDATE To tag = %q, want early-tag", got)
+					}
+					if got := msg.Header("Require"); got != preconditionOption {
+						t.Fatalf("UPDATE Require = %q, want %q", got, preconditionOption)
+					}
+					body := string(msg.Body)
+					for _, want := range []string{
+						"m=audio 40000 RTP/AVP 104 101",
+						"a=curr:qos local sendrecv",
+						"a=des:qos mandatory local sendrecv",
+						"a=des:qos optional remote sendrecv",
+					} {
+						if !strings.Contains(body, want+"\r\n") {
+							t.Fatalf("UPDATE body missing %q:\n%s", want, body)
+						}
+					}
+					if strings.Contains(body, "a=rtpmap:102") {
+						t.Fatalf("UPDATE body included unselected codec:\n%s", body)
+					}
+					transport.queue(callStatus(msg, sipStatusOK, "OK"))
+					transport.queue(callOK(invite))
+				}
+			}
+
+			dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+			defer dialCancel()
+			if _, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"}); err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if got := len(transport.messagesByMethod("PRACK")); got != 1 {
+				t.Fatalf("PRACK count = %d, want 1", got)
+			}
+			if got := len(transport.messagesByMethod("UPDATE")); got != 1 {
+				t.Fatalf("UPDATE count = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2015,8 +4406,9 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			if got := progress.Header("Require"); got != "100rel" {
 				t.Fatalf("183 Require = %q, want 100rel", got)
 			}
-			if got := progress.Header("RSeq"); got != "1" {
-				t.Fatalf("183 RSeq = %q, want 1", got)
+			progressRSeq, err := strconv.ParseInt(progress.Header("RSeq"), 10, 64)
+			if err != nil || progressRSeq < 1 || progressRSeq > rseqInitialMax {
+				t.Fatalf("183 RSeq = %q, want 1..%d", progress.Header("RSeq"), rseqInitialMax)
 			}
 			if got := progress.Header("Server"); got == "" {
 				t.Fatal("183 Server header is empty")
@@ -2044,8 +4436,9 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			if got := ringing.Header("Require"); got != "100rel" {
 				t.Fatalf("180 Require = %q, want 100rel", got)
 			}
-			if got := ringing.Header("RSeq"); got != "2" {
-				t.Fatalf("180 RSeq = %q, want 2", got)
+			ringingRSeq, err := strconv.ParseInt(ringing.Header("RSeq"), 10, 64)
+			if err != nil || ringingRSeq != progressRSeq+1 {
+				t.Fatalf("180 RSeq = %q, want %d", ringing.Header("RSeq"), progressRSeq+1)
 			}
 			ringingPRACK := prackWithoutSDPForReliableProvisional(invite, ringing)
 			ringingPRACK.Headers.Set("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKprack2")
@@ -2172,6 +4565,59 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 			}
 			if !waitForCallTest(func() bool { return len(transport.messagesByStatus(180, "INVITE")) == 1 }) {
 				t.Fatalf("180 count = %d, want 1 after matching PRACK", len(transport.messagesByStatus(180, "INVITE")))
+			}
+		})
+	}
+}
+
+func TestUnknownPRACKDialogGets481(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "unknown early dialog"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			prack := sip.NewRequest("PRACK", "sip:001010123456789@192.0.2.20:5062")
+			prack.Headers.Add("Via", "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bKunknownprack")
+			prack.Headers.Add("From", `<sip:caller@example.com>;tag=remote-tag`)
+			prack.Headers.Add("To", `<sip:001010123456789@example.com>;tag=missing-local-tag`)
+			prack.Headers.Add("Call-ID", "missing-call")
+			prack.Headers.Add("CSeq", "2 PRACK")
+			prack.Headers.Add("RAck", "1 1 INVITE")
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: prack, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			responses := transport.messagesByStatus(sipStatusCallTransactionDoesNotExist, "PRACK")
+			if len(responses) != 1 {
+				t.Fatalf("481 PRACK count = %d, want 1", len(responses))
 			}
 		})
 	}
@@ -2573,8 +5019,9 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			if got := progress.Header("Require"); got != "100rel" {
 				t.Fatalf("183 Require = %q, want 100rel", got)
 			}
-			if got := progress.Header("RSeq"); got != "1" {
-				t.Fatalf("183 RSeq = %q, want 1", got)
+			progressRSeq, err := strconv.ParseInt(progress.Header("RSeq"), 10, 64)
+			if err != nil || progressRSeq < 1 || progressRSeq > rseqInitialMax {
+				t.Fatalf("183 RSeq = %q, want 1..%d", progress.Header("RSeq"), rseqInitialMax)
 			}
 			if got := progress.Header("P-Early-Media"); got != "" {
 				t.Fatalf("183 P-Early-Media = %q, want empty for terminating UE", got)
@@ -2626,8 +5073,9 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("180 Ringing was not sent after PRACK and media preparation")
 			}
-			if got := ringing.Header("RSeq"); got != "2" {
-				t.Fatalf("180 RSeq = %q, want 2", got)
+			ringingRSeq, err := strconv.ParseInt(ringing.Header("RSeq"), 10, 64)
+			if err != nil || ringingRSeq != progressRSeq+1 {
+				t.Fatalf("180 RSeq = %q, want %d", ringing.Header("RSeq"), progressRSeq+1)
 			}
 
 			if err := <-answerErr; err != nil {
@@ -2652,6 +5100,245 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			transport.queue(ackWithoutSDP(invite, inviteOK))
 			if !waitForCallEvent(events, CallStateActive, "", time.Second) {
 				t.Fatalf("call state = %s, want active after ACK", got.Call.State())
+			}
+		})
+	}
+}
+
+func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "PRACK offer is answered in 200 OK"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				UserAgent:       "test-agent",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			incoming := make(chan IncomingCall, 1)
+			prepared := make(chan MediaConfig, 1)
+			svc, err := New(Config{Logger: testLogger(),
+				ReliableProvisional: true,
+				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					prepared <- cfg
+					return nil, nil
+				},
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			invite := inviteWithSDP()
+			invite.Headers.Add("Supported", "100rel")
+			invite.Headers.Add("Allow", sip.DefaultClientAllow)
+			transport.queue(invite)
+			var call *Call
+			select {
+			case event := <-incoming:
+				call = event.Call
+			case <-time.After(time.Second):
+				t.Fatal("incoming call event timed out")
+			}
+			var progress sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+				if len(messages) == 0 {
+					return false
+				}
+				progress = messages[0]
+				return true
+			}) {
+				t.Fatal("183 Session Progress was not sent")
+			}
+
+			prack := prackForReliableProvisional(invite, progress)
+			prack.Body = []byte("v=0\r\n" +
+				"o=- 3 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 51002 RTP/AVP 104 101\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				"a=rtpmap:101 telephone-event/8000\r\n" +
+				"a=ptime:20\r\n")
+			transport.queue(prack)
+
+			var ok sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusOK, "PRACK")
+				if len(messages) == 0 {
+					return false
+				}
+				ok = messages[0]
+				return true
+			}) {
+				t.Fatal("200 OK for PRACK was not sent")
+			}
+			if got := ok.Header("Content-Type"); got != "application/sdp" {
+				t.Fatalf("200 PRACK Content-Type = %q, want application/sdp", got)
+			}
+			if !strings.Contains(string(ok.Body), "m=audio ") {
+				t.Fatalf("200 PRACK body = %q, want SDP answer", string(ok.Body))
+			}
+			select {
+			case cfg := <-prepared:
+				if cfg.Media.RemotePort != 51002 || !cfg.Media.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+					t.Fatalf("prepared media remote = %v:%d, want 192.0.2.10:51002", cfg.Media.RemoteIP, cfg.Media.RemotePort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("PrepareMedia was not called after PRACK")
+			}
+			if media := call.Media(); media.RemotePort != 51002 || !media.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+				t.Fatalf("call media remote = %v:%d, want 192.0.2.10:51002", media.RemoteIP, media.RemotePort)
+			}
+		})
+	}
+}
+
+func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "PRACK answer requests terminating resource confirmation"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			incoming := make(chan IncomingCall, 1)
+			updateCh := make(chan sip.Message, 1)
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() == "UPDATE" {
+					updateCh <- msg
+					transport.queue(callStatus(msg, sipStatusOK, "OK"))
+				}
+			}
+
+			invite := delayedInvite()
+			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
+			invite.Headers.Add("Allow", sip.DefaultClientAllow)
+			transport.queue(invite)
+			select {
+			case <-incoming:
+			case <-time.After(time.Second):
+				t.Fatal("incoming call event timed out")
+			}
+			var progress sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+				if len(messages) == 0 {
+					return false
+				}
+				progress = messages[0]
+				return true
+			}) {
+				t.Fatal("183 Session Progress was not sent")
+			}
+			if got := progress.Header("Require"); !sip.TokenListContains(got, reliableProvisionalOption) || !sip.TokenListContains(got, preconditionOption) {
+				t.Fatalf("183 Require = %q, want 100rel and precondition", got)
+			}
+
+			prack := prackForReliableProvisional(invite, progress)
+			prack.Headers.Add("Require", preconditionOption)
+			prack.Body = append(prack.Body,
+				[]byte("a=curr:qos local none\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n"+
+					"a=conf:qos remote sendrecv\r\n")...)
+			transport.queue(prack)
+
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusOK, "PRACK")) == 1
+			}) {
+				t.Fatalf("200 PRACK count = %d, want 1", len(transport.messagesByStatus(sipStatusOK, "PRACK")))
+			}
+			var update sip.Message
+			select {
+			case update = <-updateCh:
+			case <-time.After(time.Second):
+				t.Fatal("precondition UPDATE was not sent")
+			}
+			if got := update.Header("Require"); got != preconditionOption {
+				t.Fatalf("UPDATE Require = %q, want %q", got, preconditionOption)
+			}
+			body := string(update.Body)
+			for _, want := range []string{
+				"a=curr:qos local sendrecv",
+				"a=des:qos mandatory local sendrecv",
+				"a=des:qos optional remote sendrecv",
+			} {
+				if !strings.Contains(body, want+"\r\n") {
+					t.Fatalf("UPDATE body missing %q:\n%s", want, body)
+				}
 			}
 		})
 	}
@@ -3251,11 +5938,11 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 	}
 }
 
-func TestDialEndsAfterRTCPInactivity(t *testing.T) {
+func TestDialEndsAfterRTCPInactivityByDefault(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "missing rtcp releases media dialog"},
+		{name: "default inactivity end reasons include connected rtcp timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3274,12 +5961,12 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 				t.Fatalf("registration.New() error = %v", err)
 			}
 
-			timeout := 80 * time.Millisecond
+			rtcpTimeout := 40 * time.Millisecond
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  time.Second,
-				RTCPInactivityTimeout: timeout,
+				RTCPInactivityTimeout: rtcpTimeout,
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
 						t.Fatal("OpenMedia OnPacket is nil")
@@ -3310,13 +5997,11 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 				<-runErr
 			}()
 
-			mediaClosedBeforeBYE := make(chan bool, 1)
 			transport.onWrite = func(msg sip.Message) {
 				switch msg.Method() {
 				case "INVITE":
 					transport.queue(callOK(msg))
 				case "BYE":
-					mediaClosedBeforeBYE <- media.isClosed()
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
@@ -3325,28 +6010,112 @@ func TestDialEndsAfterRTCPInactivity(t *testing.T) {
 				t.Fatalf("Dial() error = %v", err)
 			}
 
-			time.Sleep(timeout / 2)
-			media.notify(MediaPacket{RTCP: true})
-			if waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", timeout*3/4) {
-				t.Fatal("call ended before reset RTCP inactivity timeout elapsed")
-			}
-			if !waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", 2*timeout) {
-				t.Fatalf("call state = %s, want %s after RTCP inactivity", call.State(), CallStateEnded)
-			}
-			select {
-			case closed := <-mediaClosedBeforeBYE:
-				if !closed {
-					t.Fatal("media transport was open while sending RTCP inactivity BYE")
-				}
-			default:
-				t.Fatal("BYE was not sent after RTCP inactivity")
+			if !waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", 3*rtcpTimeout) {
+				t.Fatalf("call state = %s, want ended after RTCP inactivity", call.State())
 			}
 			byes := transport.messagesByMethod("BYE")
 			if len(byes) != 1 {
 				t.Fatalf("BYE count = %d, want 1", len(byes))
 			}
-			if got := byes[0].Header("Reason"); got != reasonMediaBearerReleased {
-				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaBearerReleased)
+			if got := byes[0].Header("Reason"); got != reasonMediaTimeout {
+				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaTimeout)
+			}
+		})
+	}
+}
+
+func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "rtp activity keeps call alive without rtcp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+
+			rtcpTimeout := 40 * time.Millisecond
+			rtpTimeout := 180 * time.Millisecond
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			svc, err := New(Config{Logger: testLogger(),
+				RTPInactivityTimeout:          rtpTimeout,
+				RTCPInactivityTimeout:         rtcpTimeout,
+				AudioInactivityCallEndReasons: []AudioInactivityCallEndReason{AudioInactivityRTPOnConnected},
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					if cfg.OnPacket == nil {
+						t.Fatal("OpenMedia OnPacket is nil")
+					}
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+				OnCallEvent: func(event CallEvent) { events <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "BYE":
+					transport.queue(callStatus(msg, 200, "OK"))
+				}
+			}
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+
+			time.Sleep(2 * rtcpTimeout)
+			media.notify(MediaPacket{})
+			if waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", rtcpTimeout) {
+				t.Fatal("call ended after RTCP inactivity despite RTP activity")
+			}
+			if got := transport.countMethod("BYE"); got != 0 {
+				t.Fatalf("BYE count before hangup = %d, want 0", got)
+			}
+
+			time.Sleep(2 * rtcpTimeout)
+			if call.State() == CallStateEnded {
+				t.Fatalf("call state = %s, want active call before RTP timeout", call.State())
+			}
+			if got := transport.countMethod("BYE"); got != 0 {
+				t.Fatalf("BYE count before hangup = %d, want 0", got)
+			}
+			if err := call.Hangup(context.Background()); err != nil {
+				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
 	}

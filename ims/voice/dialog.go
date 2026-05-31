@@ -7,21 +7,31 @@ import (
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
+	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
 func (c *Call) handleRequest(ctx context.Context, req session.Request) error {
-	switch strings.ToUpper(req.Message.Method()) {
+	method := strings.ToUpper(req.Message.Method())
+	if method != "ACK" && method != "CANCEL" {
+		if status, reason := c.recordRemoteCSeq(req.Message); status != 0 {
+			return c.service.writeStatus(ctx, req, status, reason)
+		}
+	}
+	switch method {
 	case "ACK":
+		if !c.ackMatchesInvite(req.Message) {
+			c.service.logger.Debug("ignoring ACK with mismatched CSeq", "call_id", c.id, "cseq", req.Message.Header("CSeq"), "invite_cseq", c.inviteSeq)
+			return nil
+		}
 		if err := c.handleACK(ctx, req); err != nil {
 			return err
 		}
 		c.stopInviteOKRetransmit()
 		return nil
 	case "BYE":
-		if err := c.service.writeStatus(ctx, req, 200, "OK"); err != nil {
+		if err := c.service.writeStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 			return err
 		}
 		c.finish(CallStateEnded, "remote bye")
@@ -29,11 +39,44 @@ func (c *Call) handleRequest(ctx context.Context, req session.Request) error {
 	case "CANCEL":
 		c.finish(CallStateEnded, "remote cancel")
 		return nil
+	case "INVITE":
+		return c.handleReINVITE(ctx, req)
+	case "INFO":
+		return c.handleINFO(ctx, req)
 	case "PRACK":
 		return c.handlePRACK(ctx, req)
+	case "UPDATE":
+		return c.handleSessionRefresh(ctx, req)
 	default:
 		return nil
 	}
+}
+
+func (c *Call) ackMatchesInvite(msg sip.Message) bool {
+	if !strings.EqualFold(sip.CSeqMethod(msg.Header("CSeq")), "ACK") {
+		return false
+	}
+	cseq := sip.CSeqNumber(msg.Header("CSeq"))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.inviteOKStop != nil && c.inviteOKCSeq > 0 {
+		return cseq == c.inviteOKCSeq
+	}
+	return cseq == c.inviteSeq
+}
+
+func (c *Call) recordRemoteCSeq(msg sip.Message) (int, string) {
+	cseq := sip.CSeqNumber(msg.Header("CSeq"))
+	if cseq <= 0 {
+		return sipStatusBadRequest, "Bad Request"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.remoteCSeq != 0 && cseq <= c.remoteCSeq {
+		return sipStatusServerInternalError, "Server Internal Error"
+	}
+	c.remoteCSeq = cseq
+	return 0, ""
 }
 
 func (c *Call) handleACK(ctx context.Context, req session.Request) error {
@@ -119,27 +162,53 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 	}
 	c.mu.Unlock()
 
-	if msg.StatusCode() == 199 {
+	if msg.StatusCode() == sipStatusEarlyDialogTerminated {
 		c.handleEarlyDialogTerminated(msg)
 		return nil
 	}
-	if msg.StatusCode() == 180 {
+	needsPRACK := false
+	if isReliableProvisional(msg) {
+		c.mu.Lock()
+		var err error
+		needsPRACK, err = c.recordReliableProvisionalLocked(msg)
+		if err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		if !needsPRACK {
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+	}
+	if msg.StatusCode() == sipStatusRinging {
 		c.setState(CallStateRinging, "")
 		c.startRingbackTimer()
 	}
+	c.updateRemoteAllow(msg)
 
 	remoteTag := sip.HeaderTag(msg.Header("To"))
 	var authorized bool
+	var earlyTarget string
+	var earlyRoutes []string
+	var preconditionUpdateBody []byte
 	if remoteTag != "" {
 		c.mu.Lock()
 		if c.earlyDialogs == nil {
 			c.earlyDialogs = make(map[string]earlyDialog)
 		}
 		dialog := c.earlyDialogs[remoteTag]
+		if dialog.remoteTarget == "" {
+			dialog.remoteTarget = nonEmpty(sip.AddressURI(msg.Header("Contact")), sip.AddressURI(msg.Header("To")), c.targetURI)
+			dialog.routeSet = routeSetFromResponse(msg)
+		}
 		if hasEarlyMediaHeader(msg) {
 			dialog.earlyMediaAuthorized = earlyMediaAuthorized(msg)
 		}
 		authorized = dialog.earlyMediaAuthorized
+		earlyTarget = dialog.remoteTarget
+		earlyRoutes = make([]string, len(dialog.routeSet))
+		copy(earlyRoutes, dialog.routeSet)
 		c.earlyDialogs[remoteTag] = dialog
 		c.mu.Unlock()
 	}
@@ -160,6 +229,14 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 			dialog.hasAnswer = true
 			c.earlyDialogs[remoteTag] = dialog
 		}
+		if c.service.cfg.Preconditions && tokenHeaderContains(msg, "Require", preconditionOption) && answer.Preconditions {
+			body, err := buildSDPPreconditionUpdate(c.service.cfg, c.service.localIP(), c.localPort, answer, c.media)
+			if err != nil {
+				c.mu.Unlock()
+				return err
+			}
+			preconditionUpdateBody = body
+		}
 		c.mu.Unlock()
 	} else if remoteTag != "" {
 		c.mu.Lock()
@@ -172,30 +249,21 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 		c.mu.Unlock()
 	}
 
-	if !isReliableProvisional(msg) {
+	if !needsPRACK {
 		return nil
 	}
 	c.mu.Lock()
-	key := provisionalResponseKey(msg)
-	if key == "" {
-		c.mu.Unlock()
-		return nil
-	}
-	if c.prackedRSeq == nil {
-		c.prackedRSeq = make(map[string]struct{})
-	}
-	if _, ok := c.prackedRSeq[key]; ok {
-		c.mu.Unlock()
-		return nil
-	}
-	c.prackedRSeq[key] = struct{}{}
 	snap := c.dialogSnapshot()
 	c.mu.Unlock()
-	prack, err := snap.buildPRACKForResponse(msg, c.nextCSeq())
+	prack, err := snap.buildPRACKForResponse(msg, c.nextCSeq(), earlyTarget, earlyRoutes)
 	if err != nil {
 		return err
 	}
-	go c.sendPRACK(prack)
+	var preconditionUpdate sip.Message
+	if len(preconditionUpdateBody) != 0 {
+		preconditionUpdate = snap.buildPreconditionUPDATEForResponse(msg, c.nextCSeq(), earlyTarget, earlyRoutes, preconditionUpdateBody)
+	}
+	go c.sendPRACK(prack, preconditionUpdate)
 	return nil
 }
 
@@ -292,10 +360,13 @@ type dialogSnapshot struct {
 	localURI          string
 	localTag          string
 	remoteTo          string
+	peerAllowsUPDATE  bool
 	targetURI         string
 	routeSet          []string
 	inviteSeq         int64
 	inviteRequest     sip.Message
+	localSDP          []byte
+	sessionTimer      bool
 	flow              registration.Flow
 	userAgent         string
 	accessNetworkInfo string
@@ -318,10 +389,13 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 		localURI:          c.localURI,
 		localTag:          c.localTag,
 		remoteTo:          c.remoteTo,
+		peerAllowsUPDATE:  sip.TokenListContains(c.remoteAllow, "UPDATE"),
 		targetURI:         c.targetURI,
 		routeSet:          append([]string(nil), c.routeSet...),
 		inviteSeq:         c.inviteSeq,
 		inviteRequest:     invite,
+		localSDP:          append([]byte(nil), c.localSDP...),
+		sessionTimer:      c.service.cfg.SessionTimer,
 		flow:              state.Flow,
 		userAgent:         state.UserAgent,
 		accessNetworkInfo: state.AccessNetworkInfo,
@@ -333,7 +407,10 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 }
 
 func (c *Call) nextCSeq() int64 {
-	return atomic.AddInt64(&c.service.cseq, 1)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.localCSeq++
+	return c.localCSeq
 }
 
 func (s dialogSnapshot) requestPolicy(routes []string) sip.ClientRequestPolicy {
@@ -341,6 +418,13 @@ func (s dialogSnapshot) requestPolicy(routes []string) sip.ClientRequestPolicy {
 		routes = s.routeSet
 	}
 	return s.flow.DialogRequestPolicy(routes, s.userAgent, s.accessNetworkInfo)
+}
+
+func (s dialogSnapshot) applyRequestPolicy(msg *sip.Message, routes []string) {
+	s.requestPolicy(routes).Apply(msg)
+	if s.sessionTimer && !strings.EqualFold(msg.Method(), "ACK") {
+		addTokenHeader(msg, "Supported", sessionTimerOption)
+	}
 }
 
 func (s dialogSnapshot) addDialogHeaders(msg *sip.Message, method string, cseq int64) {
@@ -358,7 +442,7 @@ func (s dialogSnapshot) buildACK() sip.Message {
 	msg := sip.NewRequest("ACK", s.targetURI)
 	s.addDialogHeaders(&msg, "ACK", s.inviteSeq)
 	msg.Headers.Del("Session-ID")
-	s.requestPolicy(nil).Apply(&msg)
+	s.applyRequestPolicy(&msg, nil)
 	return msg
 }
 
@@ -368,7 +452,17 @@ func (s dialogSnapshot) buildACKForResponse(resp sip.Message) sip.Message {
 	s.addDialogHeaders(&msg, "ACK", s.inviteSeq)
 	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
 	msg.Headers.Del("Session-ID")
-	s.requestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
+	s.applyRequestPolicy(&msg, reverseValues(resp.HeadersByName("Record-Route")))
+	return msg
+}
+
+func (s dialogSnapshot) buildACKForSessionRefreshINVITE(resp sip.Message) sip.Message {
+	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), s.targetURI)
+	msg := sip.NewRequest("ACK", targetURI)
+	s.addDialogHeaders(&msg, "ACK", sip.CSeqNumber(resp.Header("CSeq")))
+	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
+	msg.Headers.Del("Session-ID")
+	s.applyRequestPolicy(&msg, nil)
 	return msg
 }
 
@@ -390,9 +484,6 @@ func (s dialogSnapshot) buildCANCEL(reason string) sip.Message {
 	}
 	if userAgent := strings.TrimSpace(s.userAgent); userAgent != "" {
 		msg.Headers.Add("User-Agent", userAgent)
-	}
-	if accessNetworkInfo := strings.TrimSpace(s.accessNetworkInfo); accessNetworkInfo != "" {
-		msg.Headers.Add("P-Access-Network-Info", accessNetworkInfo)
 	}
 	if securityVerify := invite.Header("Security-Verify"); securityVerify != "" {
 		msg.Headers.Add("Security-Verify", securityVerify)
@@ -418,6 +509,72 @@ func (s dialogSnapshot) buildBYE(reason string, cseq int64) sip.Message {
 	return msg
 }
 
+func (s dialogSnapshot) buildSessionRefreshUPDATE(cseq int64, timer sessionTimerState) sip.Message {
+	msg := s.buildDialogRequest("UPDATE", cseq)
+	addTokenHeader(&msg, "Supported", sessionTimerOption)
+	if timer.active {
+		seconds := durationSeconds(timer.interval)
+		if timer.minSE > seconds {
+			seconds = timer.minSE
+		}
+		msg.Headers.Set("Session-Expires", sessionExpiresHeader{
+			seconds:   seconds,
+			refresher: sessionRefresherUAC,
+		}.String())
+	}
+	if timer.minSE > durationSeconds(defaultMinSessionExpires) {
+		msg.Headers.Set("Min-SE", strconv.Itoa(timer.minSE))
+	}
+	return msg
+}
+
+func (s dialogSnapshot) buildPreconditionUPDATEForResponse(resp sip.Message, cseq int64, remoteTarget string, routes []string, body []byte) sip.Message {
+	targetURI := nonEmpty(remoteTarget, sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), s.targetURI)
+	msg := sip.NewRequest("UPDATE", targetURI)
+	s.addDialogHeaders(&msg, "UPDATE", cseq)
+	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
+	msg.Headers.Add("Contact", s.contact)
+	msg.Headers.Set("Content-Type", "application/sdp")
+	msg.Headers.Add("Require", preconditionOption)
+	msg.Body = append([]byte(nil), body...)
+	s.applyRequestPolicy(&msg, routes)
+	return msg
+}
+
+func (s dialogSnapshot) buildPreconditionUPDATE(cseq int64, body []byte) sip.Message {
+	msg := s.buildDialogRequest("UPDATE", cseq)
+	msg.Headers.Set("Content-Type", "application/sdp")
+	msg.Headers.Add("Require", preconditionOption)
+	msg.Body = append([]byte(nil), body...)
+	return msg
+}
+
+func (s dialogSnapshot) buildSessionRefreshRequest(cseq int64, timer sessionTimerState) sip.Message {
+	if s.peerAllowsUPDATE {
+		return s.buildSessionRefreshUPDATE(cseq, timer)
+	}
+	msg := s.buildDialogRequest("INVITE", cseq)
+	addTokenHeader(&msg, "Supported", sessionTimerOption)
+	if len(s.localSDP) != 0 {
+		msg.Headers.Set("Content-Type", "application/sdp")
+		msg.Body = append([]byte(nil), s.localSDP...)
+	}
+	if timer.active {
+		seconds := durationSeconds(timer.interval)
+		if timer.minSE > seconds {
+			seconds = timer.minSE
+		}
+		msg.Headers.Set("Session-Expires", sessionExpiresHeader{
+			seconds:   seconds,
+			refresher: sessionRefresherUAC,
+		}.String())
+	}
+	if timer.minSE > durationSeconds(defaultMinSessionExpires) {
+		msg.Headers.Set("Min-SE", strconv.Itoa(timer.minSE))
+	}
+	return msg
+}
+
 func (s dialogSnapshot) buildBYEForResponse(resp sip.Message, cseq int64, reason string) sip.Message {
 	targetURI := nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), s.targetURI)
 	msg := sip.NewRequest("BYE", targetURI)
@@ -427,7 +584,7 @@ func (s dialogSnapshot) buildBYEForResponse(resp sip.Message, cseq int64, reason
 	if reason != "" {
 		msg.Headers.Add("Reason", reason)
 	}
-	s.requestPolicy(reverseValues(resp.HeadersByName("Record-Route"))).Apply(&msg)
+	s.applyRequestPolicy(&msg, reverseValues(resp.HeadersByName("Record-Route")))
 	return msg
 }
 
@@ -435,7 +592,7 @@ func (s dialogSnapshot) buildDialogRequest(method string, cseq int64) sip.Messag
 	msg := sip.NewRequest(method, s.targetURI)
 	s.addDialogHeaders(&msg, method, cseq)
 	msg.Headers.Add("Contact", s.contact)
-	s.requestPolicy(nil).Apply(&msg)
+	s.applyRequestPolicy(&msg, nil)
 	return msg
 }
 
@@ -488,25 +645,35 @@ func (c *Call) writeInviteOK(ctx context.Context, body []byte) error {
 	}
 	c.mu.Lock()
 	c.inviteOK = resp
+	if len(body) != 0 {
+		c.localSDP = append([]byte(nil), body...)
+	}
 	c.mu.Unlock()
+	if err := c.applySessionTimerUASResponse(resp); err != nil {
+		c.finish(CallStateFailed, err.Error())
+		return err
+	}
 	c.setState(CallStateAnswering, "")
 	c.startInviteOKRetransmit(req, resp)
 	return nil
 }
 
 func (c *Call) buildInviteOK(msg sip.Message, body []byte) (sip.Message, error) {
-	ok := sip.NewResponse(200, "OK")
-	ok.Headers = sip.ResponseHeaders(msg, 200)
+	ok := sip.NewResponse(sipStatusOK, "OK")
+	ok.Headers = sip.ResponseHeaders(msg, sipStatusOK)
 	c.service.addAccessNetworkInfo(&ok)
 	ok.Headers = sip.UpsertHeader(ok.Headers, "To", sip.WithTag(msg.Header("To"), c.localURI, c.localTag))
 	ok.Headers.Add("Session-ID", c.sessionID)
 	ok.Headers.Add("Contact", contactValue(c.service.reg.State()))
 	ok.Headers.Add("Allow", sip.DefaultClientAllow)
-	ok.Headers.Add("Accept", callAcceptHeader(false))
+	ok.Headers.Add("Accept", callAcceptHeader(false, false))
 	addInviteOKSessionTimer(&ok, msg, c.service.cfg)
 	if len(body) != 0 {
 		if err := setInviteResponseBody(&ok, c.service.cfg, c.localURI, false, body); err != nil {
 			return sip.Message{}, err
+		}
+		if c.service.usesPreconditions(msg) && sdpUsesPreconditions(body) {
+			addTokenHeader(&ok, "Require", preconditionOption)
 		}
 	}
 	return ok, nil
@@ -539,12 +706,17 @@ func (c *Call) finish(state CallState, cause string) {
 	ringbackStop := c.ringbackStop
 	ringingStop := c.ringingStop
 	mediaStop := c.mediaWatchStop
+	reliableStop := c.reliableStop
+	sessionTimerStop := c.sessionTimerStop
 	provisionalReady := c.provisionalReady
 	c.inviteOKStop = nil
+	c.inviteOKCSeq = 0
 	c.ringbackStop = nil
 	c.ringingStop = nil
 	c.mediaActivity = nil
 	c.mediaWatchStop = nil
+	c.reliableStop = nil
+	c.sessionTimerStop = nil
 	c.provisionalReady = nil
 	c.dialogAttachment = nil
 	c.mu.Unlock()
@@ -560,6 +732,12 @@ func (c *Call) finish(state CallState, cause string) {
 	}
 	if mediaStop != nil {
 		close(mediaStop)
+	}
+	if reliableStop != nil {
+		close(reliableStop)
+	}
+	if sessionTimerStop != nil {
+		close(sessionTimerStop)
 	}
 	if provisionalReady != nil {
 		close(provisionalReady)

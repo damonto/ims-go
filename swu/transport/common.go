@@ -20,11 +20,32 @@ func randomUint32() (uint32, error) {
 	return binary.BigEndian.Uint32(buf), nil
 }
 
-func secureEncryption(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), esp.EncryptionAESCBC) {
-		return esp.EncryptionAESCBC
+func secureEncryption(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, esp.EncryptionNull) {
+		return esp.EncryptionNull, nil
 	}
-	return esp.EncryptionNull
+	if strings.EqualFold(value, esp.EncryptionAESCBC) {
+		return esp.EncryptionAESCBC, nil
+	}
+	return "", fmt.Errorf("unsupported encryption %q", value)
+}
+
+func espIntegrityEnabled(value string) bool {
+	return !strings.EqualFold(strings.TrimSpace(value), esp.IntegrityNone)
+}
+
+func validateSecureESPConfig(action, encryption, integrity string, encryptionKey, integrityKey []byte) error {
+	if encryption == esp.EncryptionNull && strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityNone) {
+		return fmt.Errorf("%s: encryption and integrity must not both be null", action)
+	}
+	if encryption == esp.EncryptionAESCBC && len(encryptionKey) == 0 {
+		return fmt.Errorf("%s: encryption key is empty", action)
+	}
+	if espIntegrityEnabled(integrity) && len(integrityKey) == 0 {
+		return fmt.Errorf("%s: integrity key is empty", action)
+	}
+	return nil
 }
 
 func connectedUDPAddrs(s *tunnel.Session) (*net.UDPAddr, *net.UDPAddr, error) {
@@ -44,6 +65,22 @@ func connectedUDPAddrs(s *tunnel.Session) (*net.UDPAddr, *net.UDPAddr, error) {
 		return nil, nil, errors.New("session remote address is not an inner udp address")
 	}
 	return cloneUDPAddr(local), cloneUDPAddr(remote), nil
+}
+
+func udpRemoteAddr(innerRemote *net.UDPAddr, port int, remoteIP net.IP) *net.UDPAddr {
+	ip := innerRemote.IP
+	if len(remoteIP) != 0 {
+		ip = remoteIP
+	}
+	return &net.UDPAddr{IP: append(net.IP(nil), ip...), Port: port, Zone: innerRemote.Zone}
+}
+
+func tcpRemoteAddr(innerRemote *net.UDPAddr, port int, remoteIP net.IP) *net.TCPAddr {
+	ip := innerRemote.IP
+	if len(remoteIP) != 0 {
+		ip = remoteIP
+	}
+	return &net.TCPAddr{IP: append(net.IP(nil), ip...), Port: port, Zone: innerRemote.Zone}
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {

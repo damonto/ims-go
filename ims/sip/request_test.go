@@ -58,6 +58,17 @@ func TestClientRequestPolicyApply(t *testing.T) {
 	}
 }
 
+func TestClientRequestPolicyApplyKeepsExistingMaxForwards(t *testing.T) {
+	msg := NewRequest("CANCEL", "sip:user@example.com")
+	msg.Headers.Add("Max-Forwards", "3")
+
+	ClientRequestPolicy{}.Apply(&msg)
+
+	if got := msg.HeadersByName("Max-Forwards"); len(got) != 1 || got[0] != "3" {
+		t.Fatalf("Max-Forwards headers = %#v, want existing single value 3", got)
+	}
+}
+
 func TestDialogIDMatches(t *testing.T) {
 	tests := []struct {
 		name string
@@ -78,7 +89,7 @@ func TestDialogIDMatches(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "missing remote tag still matches",
+			name: "missing remote tag does not match",
 			id:   DialogID{CallID: "call-1", LocalTag: "local", RemoteTag: "remote"},
 			msg: Message{
 				Headers: Headers{
@@ -87,7 +98,7 @@ func TestDialogIDMatches(t *testing.T) {
 					{Name: "From", Value: "<sip:a@example.com>"},
 				},
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name: "wrong local tag",

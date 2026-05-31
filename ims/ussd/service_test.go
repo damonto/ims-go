@@ -70,9 +70,10 @@ func TestUSSDXMLRoundTrip(t *testing.T) {
 		want Message
 	}{
 		{name: "plain", msg: Message{Text: "*100#", Language: "en"}, want: Message{Text: "*100#", Language: "en"}},
+		{name: "string preserves spaces", msg: Message{Text: " Enter PIN: ", Language: "en"}, want: Message{Text: " Enter PIN: ", Language: "en"}},
 		{name: "request", msg: Message{Text: "Enter PIN", Language: "en", Request: true}, want: Message{Text: "Enter PIN", Language: "en", Request: true}},
 		{name: "notify", msg: Message{Text: "Done", Language: "en", Notify: true}, want: Message{Text: "Done", Language: "en", Notify: true}},
-		{name: "error", msg: Message{Language: "en", ErrorCode: 2}, want: Message{Language: "en", ErrorCode: 2}},
+		{name: "error", msg: Message{Language: "en", ErrorCode: ErrorCodeLanguageUnsupported}, want: Message{Language: "en", ErrorCode: ErrorCodeLanguageUnsupported}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -95,19 +96,68 @@ func TestUSSDXMLValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		body    string
+		want    Message
 		wantErr bool
 	}{
 		{
 			name: "valid",
 			body: xml.Header + `<ussd-data><language>en</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#"},
 		},
 		{
 			name: "unknown element ignored",
 			body: xml.Header + `<ussd-data><language>en</language><vendor-extension>ignored</vendor-extension><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#"},
 		},
 		{
 			name: "namespaced unknown element ignored",
 			body: xml.Header + `<ussd-data xmlns:x="urn:vendor"><language>en</language><x:language>ignored</x:language><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#"},
+		},
+		{
+			name: "android undefined language accepted",
+			body: xml.Header + `<ussd-data><language>undefined</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "undefined", Text: "*100#"},
+		},
+		{
+			name: "top-level request marker accepted",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>*100#</ussd-string><UnstructuredSS-Request/></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#", Request: true},
+		},
+		{
+			name: "top-level notify marker accepted",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>*100#</ussd-string><UnstructuredSS-Notify/></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#", Notify: true},
+		},
+		{
+			name: "request marker in anyExt accepted",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>*100#</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#", Request: true},
+		},
+		{
+			name: "notify marker in anyExt accepted",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>*100#</ussd-string><anyExt><UnstructuredSS-Notify/></anyExt></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#", Notify: true},
+		},
+		{
+			name: "bare ampersand in string",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>AT&T</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "AT&T"},
+		},
+		{
+			name: "escaped ampersand preserved",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>AT&amp;T</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "AT&T"},
+		},
+		{
+			name: "undefined error code treated as unspecified",
+			body: xml.Header + `<ussd-data><error-code>0</error-code></ussd-data>`,
+			want: Message{ErrorCode: ErrorCodeUnspecified},
+		},
+		{
+			name: "out of range error code treated as unspecified",
+			body: xml.Header + `<ussd-data><error-code>9</error-code></ussd-data>`,
+			want: Message{ErrorCode: ErrorCodeUnspecified},
 		},
 		{
 			name:    "duplicate language",
@@ -129,12 +179,25 @@ func TestUSSDXMLValidation(t *testing.T) {
 			body:    xml.Header + `<ussd><language>en</language><ussd-string>*100#</ussd-string></ussd>`,
 			wantErr: true,
 		},
+		{
+			name: "namespaced root",
+			body: xml.Header + `<ussd-data xmlns="urn:vendor"><language>en</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#"},
+		},
+		{
+			name: "namespaced anyExt marker",
+			body: xml.Header + `<ussd-data xmlns="urn:vendor"><language>en</language><ussd-string>*100#</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#", Request: true},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := decodeXML([]byte(tt.body))
+			got, err := decodeXML([]byte(tt.body))
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Fatalf("decodeXML() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if err == nil && got != tt.want {
+				t.Fatalf("decodeXML() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -147,6 +210,7 @@ func TestMarshalUSSDXMLRejectsInvalidLanguage(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "valid", msg: Message{Text: "*100#", Language: "en"}},
+		{name: "android undefined", msg: Message{Text: "*100#", Language: "undefined"}},
 		{name: "region subtag", msg: Message{Text: "*100#", Language: "en-US"}, wantErr: true},
 		{name: "numeric", msg: Message{Text: "*100#", Language: "123"}, wantErr: true},
 	}
@@ -206,6 +270,37 @@ func TestValidateSDPBodyRequiresOneZeroPortMedia(t *testing.T) {
 	}
 }
 
+func TestAcceptsMediaParsesMIMETypes(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{
+			name:  "required media types",
+			value: `application/vnd.3gpp.ussd+xml; q=1.0, application/sdp, multipart/mixed`,
+			want:  true,
+		},
+		{
+			name:  "missing multipart",
+			value: `application/vnd.3gpp.ussd+xml, application/sdp`,
+			want:  false,
+		},
+		{
+			name:  "substring false positive",
+			value: `application/not-vnd.3gpp.ussd+xml, application/sdp, multipart/mixed-extra`,
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := acceptsMedia(tt.value); got != tt.want {
+				t.Fatalf("acceptsMedia() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateInboundUSSDInfoRequiresSingleUSSDXMLBody(t *testing.T) {
 	payload, err := (xmlBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
 	if err != nil {
@@ -221,20 +316,25 @@ func TestValidateInboundUSSDInfoRequiresSingleUSSDXMLBody(t *testing.T) {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	tests := []struct {
-		name              string
-		headerContentType string
-		body              []byte
-		wantErr           bool
+		name                     string
+		headerContentDisposition string
+		headerContentType        string
+		body                     []byte
+		wantErr                  bool
 	}{
-		{name: "single ussd xml", headerContentType: xmlContentType, body: payload},
-		{name: "multipart rejected", headerContentType: "multipart/mixed; boundary=info", body: multipartPayload, wantErr: true},
-		{name: "missing content type", body: payload, wantErr: true},
+		{name: "single ussd xml", headerContentDisposition: "Info-Package", headerContentType: xmlContentType, body: payload},
+		{name: "missing content disposition accepted", headerContentType: xmlContentType, body: payload},
+		{name: "wrong content disposition rejected", headerContentDisposition: "render", headerContentType: xmlContentType, body: payload, wantErr: true},
+		{name: "multipart rejected", headerContentDisposition: "Info-Package", headerContentType: "multipart/mixed; boundary=info", body: multipartPayload, wantErr: true},
+		{name: "missing content type", headerContentDisposition: "Info-Package", body: payload, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := sip.NewRequest("INFO", "sip:ussias@example.com")
 			msg.Headers.Add("Info-Package", infoPackage)
-			msg.Headers.Add("Content-Disposition", "Info-Package")
+			if tt.headerContentDisposition != "" {
+				msg.Headers.Add("Content-Disposition", tt.headerContentDisposition)
+			}
 			if tt.headerContentType != "" {
 				msg.Headers.Add("Content-Type", tt.headerContentType)
 			}
@@ -242,6 +342,255 @@ func TestValidateInboundUSSDInfoRequiresSingleUSSDXMLBody(t *testing.T) {
 			_, err := validateInboundInfo(msg, false)
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Fatalf("validateInboundInfo() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateNetworkInitiatedInboundInfoMarkerRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		msg     Message
+		wantErr bool
+	}{
+		{
+			name:    "plain string without marker rejected",
+			msg:     Message{Text: "Enter PIN", Language: "en"},
+			wantErr: true,
+		},
+		{
+			name: "request string accepted",
+			msg:  Message{Text: "Enter PIN", Language: "en", Request: true},
+		},
+		{
+			name: "notify string accepted",
+			msg:  Message{Text: "Done", Language: "en", Notify: true},
+		},
+		{
+			name: "error only accepted",
+			msg:  Message{Language: "en", ErrorCode: ErrorCodeUnexpectedDataValue},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := (xmlBody{Message: tt.msg}).MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			msg := sip.NewRequest("INFO", "sip:ussias@example.com")
+			msg.Headers.Add("Info-Package", infoPackage)
+			msg.Headers.Add("Content-Disposition", infoPackageDisposition)
+			msg.Headers.Add("Content-Type", xmlContentType)
+			msg.Body = payload
+
+			_, err = validateInboundInfo(msg, true)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("validateInboundInfo() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeInvitePayloadRejectsDuplicateBodyParts(t *testing.T) {
+	payload, err := (xmlBody{Message: Message{Text: "Enter PIN", Language: "en", Request: true}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	sdp := []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")
+	tests := []struct {
+		name  string
+		parts []multipartBodyPart
+	}{
+		{
+			name: "duplicate ussd xml",
+			parts: []multipartBodyPart{
+				{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: sdp},
+				{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
+				{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
+			},
+		},
+		{
+			name: "duplicate sdp",
+			parts: []multipartBodyPart{
+				{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: sdp},
+				{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: sdp},
+				{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := (multipartBody{Boundary: "invite", Parts: tt.parts}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			msg := sip.NewRequest("INVITE", "sip:user@example.com")
+			msg.Headers.Add("Content-Type", "multipart/mixed; boundary=invite")
+			msg.Body = body
+			if _, _, err := decodeInvitePayload(msg); err == nil {
+				t.Fatal("decodeInvitePayload() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestDecodeInvitePayloadUnsupportedBodyPartHandling(t *testing.T) {
+	payload, err := (xmlBody{Message: Message{Text: "Enter PIN", Language: "en", Request: true}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	sdp := []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")
+	tests := []struct {
+		name    string
+		header  textproto.MIMEHeader
+		wantErr bool
+	}{
+		{
+			name: "optional unsupported part ignored",
+			header: textproto.MIMEHeader{
+				"Content-Type":        {"text/plain"},
+				"Content-Disposition": {"render;handling=optional"},
+			},
+		},
+		{
+			name: "optional malformed content type ignored",
+			header: textproto.MIMEHeader{
+				"Content-Type":        {"%%%"},
+				"Content-Disposition": {"render;handling=optional"},
+			},
+		},
+		{
+			name: "missing disposition is required",
+			header: textproto.MIMEHeader{
+				"Content-Type": {"text/plain"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "explicit required unsupported part rejected",
+			header: textproto.MIMEHeader{
+				"Content-Type":        {"text/plain"},
+				"Content-Disposition": {"render;handling=required"},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := (multipartBody{
+				Boundary: "invite",
+				Parts: []multipartBodyPart{
+					{Header: textproto.MIMEHeader{"Content-Type": {sdpContentType}}, Body: sdp},
+					{Header: tt.header, Body: []byte("ignored")},
+					{Header: textproto.MIMEHeader{"Content-Type": {xmlContentType}}, Body: payload},
+				},
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			msg := sip.NewRequest("INVITE", "sip:user@example.com")
+			msg.Headers.Add("Content-Type", "multipart/mixed; boundary=invite")
+			msg.Body = body
+			got, hasSDP, err := decodeInvitePayload(msg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("decodeInvitePayload() error = nil, want unsupported body part error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeInvitePayload() error = %v", err)
+			}
+			if !hasSDP {
+				t.Fatal("decodeInvitePayload() hasSDP = false, want true")
+			}
+			if got.Text != "Enter PIN" || !got.Request {
+				t.Fatalf("decodeInvitePayload() = %+v, want request payload", got)
+			}
+		})
+	}
+}
+
+func TestHandleInfoMapsPackageAndMediaErrors(t *testing.T) {
+	payload, err := (xmlBody{Message: Message{Text: "Balance", Language: "en"}}).MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	tests := []struct {
+		name               string
+		infoPackage        string
+		contentDisposition string
+		contentType        string
+		wantStatus         int
+	}{
+		{
+			name:               "missing info package",
+			contentDisposition: "info-package",
+			contentType:        xmlContentType,
+			wantStatus:         sipStatusBadInfoPackage,
+		},
+		{
+			name:               "wrong info package",
+			infoPackage:        "g.example.other",
+			contentDisposition: "info-package",
+			contentType:        xmlContentType,
+			wantStatus:         sipStatusBadInfoPackage,
+		},
+		{
+			name:               "wrong content disposition",
+			infoPackage:        infoPackage,
+			contentDisposition: "render",
+			contentType:        xmlContentType,
+			wantStatus:         sipStatusUnsupportedMediaType,
+		},
+		{
+			name:               "wrong content type",
+			infoPackage:        infoPackage,
+			contentDisposition: "info-package",
+			contentType:        "text/plain",
+			wantStatus:         sipStatusUnsupportedMediaType,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			us := &Session{
+				service:     svc,
+				callID:      "info-call",
+				localTag:    "local",
+				remoteTag:   "remote",
+				remoteTo:    "<sip:network@example.com>;tag=remote",
+				targetURI:   "sip:network@example.com",
+				events:      make(chan Message, 1),
+				remoteCSeqs: make(map[string]struct{}),
+			}
+			info := newDialogRequest("INFO", "sip:user@example.com", "<sip:network@example.com>;tag=remote", "<sip:user@example.com>;tag=local", "info-call", "2 INFO")
+			if tt.infoPackage != "" {
+				info.Headers.Add("Info-Package", tt.infoPackage)
+			}
+			if tt.contentDisposition != "" {
+				info.Headers.Add("Content-Disposition", tt.contentDisposition)
+			}
+			if tt.contentType != "" {
+				info.Headers.Add("Content-Type", tt.contentType)
+			}
+			info.Body = payload
+			if err := us.handleInfo(context.Background(), session.Request{Message: info, Transport: transport}); err != nil {
+				t.Fatalf("handleInfo() error = %v", err)
+			}
+			resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+			if got := resp.StatusCode(); got != tt.wantStatus {
+				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
+			}
+			if tt.wantStatus == sipStatusUnsupportedMediaType {
+				if got := resp.Header("Accept"); got != ussdAcceptHeader {
+					t.Fatalf("Accept = %q, want %q", got, ussdAcceptHeader)
+				}
 			}
 		})
 	}
@@ -275,7 +624,7 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTransport()
 			sess, reg := registeredService(t, transport)
-			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -299,6 +648,11 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 			if got := resp.StatusCode(); got != tt.wantStatus {
 				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
 			}
+			if tt.wantStatus == sipStatusUnsupportedMediaType {
+				if got := resp.Header("Accept"); got != ussdAcceptHeader {
+					t.Fatalf("Accept = %q, want %q", got, ussdAcceptHeader)
+				}
+			}
 			if got := us.isClosed(); got != tt.wantClosed {
 				t.Fatalf("isClosed() = %t, want %t", got, tt.wantClosed)
 			}
@@ -308,9 +662,11 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 
 func TestContactValueFormatsIPHosts(t *testing.T) {
 	tests := []struct {
-		name  string
-		state registration.State
-		want  string
+		name                      string
+		state                     registration.State
+		networkInitiatedSupported bool
+		want                      string
+		wantNetworkInitTag        bool
 	}{
 		{
 			name: "ipv4",
@@ -328,12 +684,38 @@ func TestContactValueFormatsIPHosts(t *testing.T) {
 			},
 			want: "<sip:[2001:db8::20]:5062>;",
 		},
+		{
+			name:                      "network initiated advertised only when configured",
+			networkInitiatedSupported: true,
+			state: registration.State{
+				ContactHost: "127.0.0.1",
+				MessagePort: 5062,
+			},
+			want:               "<sip:127.0.0.1:5062>;",
+			wantNetworkInitTag: true,
+		},
+		{
+			name: "imei does not add sip instance outside REGISTER",
+			state: registration.State{
+				ContactHost: "127.0.0.1",
+				MessagePort: 5062,
+				IMEI:        "123456789012345",
+			},
+			want: "<sip:127.0.0.1:5062>;",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := contactValue(tt.state); !strings.HasPrefix(got, tt.want) {
+			got := contactValue(tt.state, tt.networkInitiatedSupported)
+			if !strings.HasPrefix(got, tt.want) {
 				t.Fatalf("contactValue() = %q, want prefix %q", got, tt.want)
+			}
+			if strings.Contains(got, nwInitUSSI) != tt.wantNetworkInitTag {
+				t.Fatalf("contactValue() = %q, want network init tag %t", got, tt.wantNetworkInitTag)
+			}
+			if strings.Contains(got, "+sip.instance") {
+				t.Fatalf("contactValue() = %q, want no +sip.instance", got)
 			}
 		})
 	}
@@ -402,6 +784,205 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	}
 	if payload.Request {
 		t.Fatalf("payload.Request = %t, want false", payload.Request)
+	}
+}
+
+func TestAbortClosesUSSDLocallyWithoutBYE(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "INVITE":
+			transport.queue(newUSSDResponse(req, 200, "OK",
+				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
+				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
+				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
+				sip.Header{Name: "Recv-Info", Value: infoPackage},
+				sip.Header{Name: "Accept", Value: xmlContentType + ", application/sdp, multipart/mixed"},
+				sip.Header{Name: "Content-Type", Value: "application/sdp"},
+			))
+		case "BYE":
+			t.Fatalf("unexpected BYE during local abort: %s", req.StartLine)
+		}
+	}
+
+	ussdSession, err := svc.Start(context.Background(), "*100#")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	writesAfterStart := len(transport.writes)
+	svc.Abort()
+
+	if got := len(transport.writes); got != writesAfterStart {
+		t.Fatalf("write count after Abort() = %d, want %d", got, writesAfterStart)
+	}
+	if !ussdSession.isClosed() {
+		t.Fatal("USSD session closed = false, want true")
+	}
+	select {
+	case _, ok := <-ussdSession.Events():
+		if ok {
+			t.Fatal("USSD events channel still open")
+		}
+	default:
+		t.Fatal("USSD events channel not closed")
+	}
+}
+
+func TestUSSDRejectsParallelTransactions(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, svc *Service, transport *stubTransport)
+	}{
+		{
+			name: "local start while active",
+			run: func(t *testing.T, svc *Service, transport *stubTransport) {
+				writesBefore := len(transport.writes)
+				_, err := svc.Start(context.Background(), "*101#")
+				if !errors.Is(err, errSessionActive) {
+					t.Fatalf("Start() error = %v, want errSessionActive", err)
+				}
+				if got := len(transport.writes); got != writesBefore {
+					t.Fatalf("write count = %d, want %d", got, writesBefore)
+				}
+			},
+		},
+		{
+			name: "network invite while active",
+			run: func(t *testing.T, svc *Service, transport *stubTransport) {
+				transport.onWrite = nil
+				invite := buildNetworkUSSDInvite(t)
+				handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+				if err != nil {
+					t.Fatalf("HandleRequest() error = %v", err)
+				}
+				if !handled {
+					t.Fatal("HandleRequest() handled = false, want true")
+				}
+				resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+				if got := resp.StatusCode(); got != sipStatusBusyHere {
+					t.Fatalf("parallel INVITE status = %d, want %d", got, sipStatusBusyHere)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			transport.onWrite = func(data []byte) {
+				req := mustParseUSSDMessage(t, data)
+				switch req.Method() {
+				case "INVITE":
+					transport.queue(newUSSDResponse(req, 200, "OK",
+						[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
+						sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
+						sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
+						sip.Header{Name: "Recv-Info", Value: infoPackage},
+						sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
+						sip.Header{Name: "Content-Type", Value: "application/sdp"},
+					))
+				case "BYE":
+					transport.queue(newUSSDResponse(req, 200, "OK", nil))
+				}
+			}
+			if _, err := svc.Start(context.Background(), "*100#"); err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+			tt.run(t, svc, transport)
+		})
+	}
+}
+
+func TestHandleIncomingInviteMapsUnsupportedMediaTo415(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *sip.Message)
+	}{
+		{
+			name: "unsupported invite content type",
+			mutate: func(t *testing.T, msg *sip.Message) {
+				msg.Headers.Set("Content-Type", "application/vnd.3gpp.ussd+xml")
+			},
+		},
+		{
+			name: "unsupported required multipart part",
+			mutate: func(t *testing.T, msg *sip.Message) {
+				t.Helper()
+				body, err := (multipartBody{
+					Boundary: "invite",
+					Parts: []multipartBodyPart{
+						{Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}}, Body: []byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n")},
+						{Header: textproto.MIMEHeader{"Content-Type": {"text/plain"}}, Body: []byte("ignored")},
+					},
+				}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				msg.Body = body
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			invite := buildNetworkUSSDInvite(t)
+			tt.mutate(t, &invite)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+			if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
+				t.Fatalf("StatusCode() = %d, want %d", got, sipStatusUnsupportedMediaType)
+			}
+			if got := resp.Header("Accept"); got != ussdAcceptHeader {
+				t.Fatalf("Accept = %q, want %q", got, ussdAcceptHeader)
+			}
+		})
+	}
+}
+
+func TestHandleIncomingInviteDisabledReturns404(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: buildNetworkUSSDInvite(t), Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+	if got := resp.StatusCode(); got != sipStatusNotFound {
+		t.Fatalf("StatusCode() = %d, want %d", got, sipStatusNotFound)
+	}
+	if got := svc.lookupSessionByCallID("call-1"); got != nil {
+		t.Fatalf("lookupSessionByCallID() = %p, want nil", got)
 	}
 }
 
@@ -487,6 +1068,8 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 }
 
 func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222"
+
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	svc, err := New(Config{Logger: testLogger()}, sess, reg)
@@ -514,6 +1097,15 @@ func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
 	}
 	if got := ack.HeadersByName("Route"); len(got) != 2 || got[0] != "<sip:pcscf.example.com;lr>" || got[1] != "<sip:ussias@example.com>" {
 		t.Fatalf("Route = %v", got)
+	}
+	if got := ack.Header("Security-Verify"); got != wantSecurityVerify {
+		t.Fatalf("Security-Verify = %q, want %q", got, wantSecurityVerify)
+	}
+	if got := ack.Header("Require"); got != "sec-agree" {
+		t.Fatalf("Require = %q, want sec-agree", got)
+	}
+	if got := ack.Header("Proxy-Require"); got != "sec-agree" {
+		t.Fatalf("Proxy-Require = %q, want sec-agree", got)
 	}
 }
 
@@ -771,7 +1363,7 @@ func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	callbackCh := make(chan Message, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(session *Session, msg Message) { callbackCh <- msg }}, sess, reg)
+	svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true, OnIncoming: func(session *Session, msg Message) { callbackCh <- msg }}, sess, reg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -824,13 +1416,60 @@ func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
 	}
 }
 
+func TestNetworkInitiatedUSSDInviteOKRetransmitsUntilACK(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredServiceWithSessionConfig(t, transport, session.Config{
+		TransactionTimers: session.TransactionTimers{
+			T1: 10 * time.Millisecond,
+			T2: 20 * time.Millisecond,
+		},
+	})
+	svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	transport.onWrite = nil
+
+	invite := buildNetworkUSSDInvite(t)
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+	if err != nil {
+		t.Fatalf("HandleRequest(INVITE) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(INVITE) handled = false, want true")
+	}
+
+	deadline := time.After(time.Second)
+	for countUSSDResponses(transport, sipStatusOK, "INVITE") < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("200 OK INVITE count = %d, want retransmission", countUSSDResponses(transport, sipStatusOK, "INVITE"))
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	us := svc.lookupSessionByCallID(invite.Header("Call-ID"))
+	if us == nil {
+		t.Fatal("lookupSessionByCallID() = nil")
+	}
+	ack := newDialogRequest("ACK", us.targetURI, invite.Header("From"), sip.WithTag(invite.Header("To"), "", us.localTag), invite.Header("Call-ID"), "1 ACK")
+	if _, err := svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: transport}); err != nil {
+		t.Fatalf("HandleRequest(ACK) error = %v", err)
+	}
+	afterACK := countUSSDResponses(transport, sipStatusOK, "INVITE")
+	time.Sleep(50 * time.Millisecond)
+	if got := countUSSDResponses(transport, sipStatusOK, "INVITE"); got != afterACK {
+		t.Fatalf("200 OK INVITE count after ACK = %d, want stopped at %d", got, afterACK)
+	}
+}
+
 func TestNetworkInitiatedUSSDWaitsForCallbackBefore200OK(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	callbackStarted := make(chan struct{})
 	callbackRelease := make(chan struct{})
 	writeCh := make(chan sip.Message, 1)
-	svc, err := New(Config{Logger: testLogger(),
+	svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true,
 		OnIncoming: func(session *Session, msg Message) {
 			close(callbackStarted)
 			<-callbackRelease
@@ -896,7 +1535,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 	sess, reg := registeredService(t, transport)
 	callbackReturned := make(chan struct{})
 	writeCh := make(chan sip.Message, 5)
-	svc, err := New(Config{Logger: testLogger(),
+	svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true,
 		OnIncoming: func(session *Session, msg Message) {
 			replyCtx, cancel := context.WithCancel(context.Background())
 			if err := session.Reply(replyCtx, "1"); err != nil {
@@ -1049,13 +1688,57 @@ func newTransport() *stubTransport {
 	}
 }
 
+func countUSSDResponses(transport *stubTransport, status int, cseqMethod string) int {
+	count := 0
+	for _, data := range transport.writes {
+		msg, err := sip.ParseMessage(data)
+		if err != nil {
+			continue
+		}
+		if msg.StatusCode() == status && strings.EqualFold(sip.CSeqMethod(msg.Header("CSeq")), cseqMethod) {
+			count++
+		}
+	}
+	return count
+}
+
 func registeredService(t *testing.T, transport *stubTransport) (*session.Session, *registration.Service) {
 	t.Helper()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
+	if err != nil {
+		t.Fatalf("registration.New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "REGISTER":
+			if len(transport.writes) == 1 {
+				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
+					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+				))
+				return
+			}
+			transport.queue(newUSSDResponse(req, 200, "OK", nil, sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"}))
+		}
+	}
+	if err := reg.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return sess, reg
+}
+
+func registeredServiceWithSessionConfig(t *testing.T, transport *stubTransport, cfg session.Config) (*session.Session, *registration.Service) {
+	t.Helper()
+	sess, err := session.Open(cfg, transport)
+	if err != nil {
+		t.Fatalf("session.Open() error = %v", err)
+	}
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -1085,7 +1768,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, stubCard{})
+	reg, err := registration.New(testRegistrationConfig(transport), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -1111,6 +1794,19 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg
+}
+
+func testRegistrationConfig(transport *stubTransport) registration.Config {
+	return registration.Config{
+		Logger:            testLogger(),
+		AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa",
+		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			return transport, nil
+		},
+		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			return transport, nil
+		},
+	}
 }
 
 func buildNetworkUSSDInvite(t *testing.T) sip.Message {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	imssession "github.com/damonto/vowifi-go/ims/session"
+	imssms "github.com/damonto/vowifi-go/ims/sms"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
@@ -18,12 +19,15 @@ import (
 )
 
 type Config struct {
-	EPDG           string
-	Logger         *slog.Logger
-	ReconnectDelay time.Duration
-	Terminal       TerminalInfo
-	Tunnel         swutunnel.Config
-	IMS            IMSConfig
+	EPDG              string
+	Logger            *slog.Logger
+	ReconnectDelay    time.Duration
+	ReconnectMaxDelay time.Duration
+	Terminal          TerminalInfo
+	Tunnel            swutunnel.Config
+	IMS               IMSConfig
+
+	smsRequestStatusReport bool
 }
 
 type TerminalInfo struct {
@@ -37,25 +41,29 @@ type TerminalInfo struct {
 }
 
 type IMSConfig struct {
-	Transport               string
-	PrivateIdentity         string
-	PublicIdentity          string
-	HomeDomain              string
-	PhoneContextDomain      string
-	USSDLanguage            string
-	UserAgent               string
-	AccessNetworkInfo       string
-	WLANNodeID              string
-	RegisterExpires         time.Duration
-	ServiceCenter           string
-	IMEI                    string
-	GeolocationPIDFRegister []int
-	GeolocationCountry      string
-	UseTelURIForPIDFXML     bool
-	SIPServerPort           int
-	SIPTimers               imssession.TransactionTimers
-	SMSSubmitReportTimeout  time.Duration
-	Voice                   imsvoice.Config
+	Transport                string
+	PrivateIdentity          string
+	PublicIdentity           string
+	HomeDomain               string
+	PhoneContextDomain       string
+	USSDLanguage             string
+	UserAgent                string
+	AccessNetworkInfo        string
+	WLANNodeID               string
+	RegisterExpires          time.Duration
+	AuthAlgorithm            string
+	RegistrationRetryBase    time.Duration
+	RegistrationRetryMax     time.Duration
+	ServiceCenter            string
+	IMEI                     string
+	GeolocationPIDFRegister  []int
+	GeolocationCountry       string
+	UseTelURIForPIDFXML      bool
+	SIPServerPort            int
+	SIPTimers                imssession.TransactionTimers
+	SMSSubmitReportTimeout   time.Duration
+	SMSDeliveryReportTimeout time.Duration
+	Voice                    imsvoice.Config
 
 	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
 	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
@@ -100,11 +108,52 @@ type SMS struct {
 	ReceivedAt    time.Time
 }
 
+type SMSReportStatus = imssms.ReportStatus
+type SMSReportStatusClass = imssms.ReportStatusClass
+
+const (
+	SMSReportStatusClassCompleted              SMSReportStatusClass = imssms.ReportStatusClassCompleted
+	SMSReportStatusClassTemporaryErrorRetrying SMSReportStatusClass = imssms.ReportStatusClassTemporaryErrorRetrying
+	SMSReportStatusClassPermanentError         SMSReportStatusClass = imssms.ReportStatusClassPermanentError
+	SMSReportStatusClassTemporaryErrorNoRetry  SMSReportStatusClass = imssms.ReportStatusClassTemporaryErrorNoRetry
+
+	SMSReportStatusReceivedBySME             SMSReportStatus = imssms.ReportStatusReceivedBySME
+	SMSReportStatusForwardedUnconfirmed      SMSReportStatus = imssms.ReportStatusForwardedUnconfirmed
+	SMSReportStatusReplacedByServiceCenter   SMSReportStatus = imssms.ReportStatusReplacedByServiceCenter
+	SMSReportStatusRetryingCongestion        SMSReportStatus = imssms.ReportStatusRetryingCongestion
+	SMSReportStatusRetryingSMEBusy           SMSReportStatus = imssms.ReportStatusRetryingSMEBusy
+	SMSReportStatusRetryingNoResponseFromSME SMSReportStatus = imssms.ReportStatusRetryingNoResponseFromSME
+	SMSReportStatusRetryingServiceRejected   SMSReportStatus = imssms.ReportStatusRetryingServiceRejected
+	SMSReportStatusRetryingQoSUnavailable    SMSReportStatus = imssms.ReportStatusRetryingQoSUnavailable
+	SMSReportStatusRetryingErrorInSME        SMSReportStatus = imssms.ReportStatusRetryingErrorInSME
+
+	SMSReportStatusPermanentRemoteProcedureError    SMSReportStatus = imssms.ReportStatusPermanentRemoteProcedureError
+	SMSReportStatusPermanentIncompatibleDestination SMSReportStatus = imssms.ReportStatusPermanentIncompatibleDestination
+	SMSReportStatusPermanentConnectionRejectedBySME SMSReportStatus = imssms.ReportStatusPermanentConnectionRejectedBySME
+	SMSReportStatusPermanentNotObtainable           SMSReportStatus = imssms.ReportStatusPermanentNotObtainable
+	SMSReportStatusPermanentQoSUnavailable          SMSReportStatus = imssms.ReportStatusPermanentQoSUnavailable
+	SMSReportStatusPermanentNoInterworking          SMSReportStatus = imssms.ReportStatusPermanentNoInterworking
+	SMSReportStatusPermanentValidityExpired         SMSReportStatus = imssms.ReportStatusPermanentValidityExpired
+	SMSReportStatusPermanentDeletedByOriginatingSME SMSReportStatus = imssms.ReportStatusPermanentDeletedByOriginatingSME
+	SMSReportStatusPermanentDeletedByServiceCenter  SMSReportStatus = imssms.ReportStatusPermanentDeletedByServiceCenter
+	SMSReportStatusPermanentSMDoesNotExist          SMSReportStatus = imssms.ReportStatusPermanentSMDoesNotExist
+
+	SMSReportStatusNoRetryCongestion        SMSReportStatus = imssms.ReportStatusNoRetryCongestion
+	SMSReportStatusNoRetrySMEBusy           SMSReportStatus = imssms.ReportStatusNoRetrySMEBusy
+	SMSReportStatusNoRetryNoResponseFromSME SMSReportStatus = imssms.ReportStatusNoRetryNoResponseFromSME
+	SMSReportStatusNoRetryServiceRejected   SMSReportStatus = imssms.ReportStatusNoRetryServiceRejected
+	SMSReportStatusNoRetryQoSUnavailable    SMSReportStatus = imssms.ReportStatusNoRetryQoSUnavailable
+	SMSReportStatusNoRetryErrorInSME        SMSReportStatus = imssms.ReportStatusNoRetryErrorInSME
+)
+
 type SMSReport struct {
+	SubmissionID          string
+	SegmentIndex          int
+	SegmentCount          int
 	ServiceCenter         string
 	Recipient             string
 	MessageReference      byte
-	Status                byte
+	Status                SMSReportStatus
 	MoreMessagesWaiting   bool
 	LoopPrevention        bool
 	FromCommand           bool
@@ -129,11 +178,13 @@ type SMSSubmission struct {
 }
 
 type SMSSubmissionSegment struct {
-	Index       int
-	SubmittedAt time.Time
-	CallID      string
-	RPReference byte
-	TPReference byte
+	Index         int
+	SubmittedAt   time.Time
+	Recipient     string
+	ServiceCenter string
+	CallID        string
+	RPReference   byte
+	TPReference   byte
 }
 
 type USSDMessage = imsussd.Message
@@ -242,17 +293,29 @@ type Client struct {
 	active       *activeConn
 	closeWG      sync.WaitGroup
 	close        sync.Once
+	reconnectFn  func(error) (*activeConn, error)
 
 	events       eventHub
+	swuBackoff   swuBackoffGate
 	sms          SMSService
 	ussd         USSDService
 	voice        VoiceService
 	smsSeq       atomic.Uint64
+	smsReportsMu sync.Mutex
+	smsReports   map[byte][]smsReportLink
 	ussdSessions map[*imsussd.Session]*Session
 }
 
 type SMSService struct {
 	client *Client
+}
+
+type smsReportLink struct {
+	submissionID  string
+	segmentIndex  int
+	segmentCount  int
+	recipient     string
+	serviceCenter string
 }
 
 type USSDService struct {
@@ -309,8 +372,10 @@ func newClient(cfg Config) *Client {
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		events:          newEventHub(),
+		smsReports:      make(map[byte][]smsReportLink),
 		ussdSessions:    make(map[*imsussd.Session]*Session),
 	}
+	client.reconnectFn = client.reconnect
 	client.sms.client = client
 	client.ussd.client = client
 	client.voice.client = client

@@ -42,13 +42,13 @@ func (s *Service) buildInviteBody(code, language string) (string, []byte, error)
 	boundary := "ussd-" + sip.RandomAlphaNum(12)
 	body, err := (multipartBody{Boundary: boundary, Parts: []multipartBodyPart{
 		{
-			Header: textproto.MIMEHeader{"Content-Type": {"application/sdp"}},
+			Header: textproto.MIMEHeader{"Content-Type": {sdpContentType}},
 			Body:   []byte(s.ussdSDP()),
 		},
 		{
 			Header: textproto.MIMEHeader{
 				"Content-Type":        {xmlContentType},
-				"Content-Disposition": {"render;handling=optional"},
+				"Content-Disposition": {renderOptionalDisposition},
 			},
 			Body: payload,
 		},
@@ -69,10 +69,10 @@ func (s *Service) buildInvite(start startRequest, boundary string, body []byte) 
 	msg.Headers.Add("Call-ID", start.callID)
 	msg.Headers.Add("Session-ID", start.sessionID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d INVITE", start.inviteSeq))
-	msg.Headers.Add("Accept-Contact", `*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`)
+	msg.Headers.Add("Accept-Contact", "*;"+icsiRefFeatureTag)
 	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
-	msg.Headers.Add("Contact", contactValue(state))
-	msg.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
+	msg.Headers.Add("Contact", contactValue(state, s.cfg.NetworkInitiatedSupported))
+	msg.Headers.Add("Accept", ussdAcceptHeader)
 	msg.Headers.Add("Recv-Info", infoPackage)
 	s.reg.RequestPolicy().Apply(&msg)
 	msg.Headers.Add("Content-Type", fmt.Sprintf("%s; boundary=%s", mixedMultipartType, boundary))
@@ -95,12 +95,17 @@ func (s *Service) startSession(ctx context.Context, start startRequest, invite, 
 		targetURI:    nonEmpty(sip.AddressURI(resp.Header("Contact")), start.target),
 		routeSet:     reverseValues(resp.HeadersByName("Record-Route")),
 		inviteSeq:    start.inviteSeq,
+		localCSeq:    start.inviteSeq,
 		language:     start.language,
 		events:       make(chan Message, 16),
 		remoteCSeqs:  make(map[string]struct{}),
 		responseKind: dialogKindRequest,
 	}
 	if err := s.storeSession(ussdSession); err != nil {
+		if endErr := ussdSession.endDirect(ctx, ""); endErr != nil {
+			err = errors.Join(err, endErr)
+		}
+		ussdSession.finish(false)
 		return nil, err
 	}
 	if err := s.sess.Send(ctx, ussdSession.buildACK()); err != nil {
@@ -122,16 +127,29 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 	if handled, err := s.handleExistingInvite(ctx, req); handled || err != nil {
 		return err
 	}
+	if !s.cfg.NetworkInitiatedSupported {
+		return s.sess.WriteStatus(ctx, req, sipStatusNotFound, "Not Found")
+	}
+	if s.hasActiveSession() {
+		return s.sess.WriteStatus(ctx, req, sipStatusBusyHere, "Busy Here")
+	}
 	payload, err := validateIncomingInvite(req.Message)
 	if err != nil {
-		return s.sess.WriteStatus(ctx, req, 488, "Not Acceptable Here")
+		if errors.Is(err, errUnsupportedMediaType) {
+			return s.writeUnsupportedMediaType(ctx, req)
+		}
+		return s.sess.WriteStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 	}
 	ussdSession := s.newIncomingSession(req.Message, payload)
-	if err := s.sess.WriteStatus(ctx, req, 100, "Trying"); err != nil {
+	if err := s.sess.WriteStatus(ctx, req, sipStatusTrying, "Trying"); err != nil {
 		return fmt.Errorf("handling USSD INVITE: sending 100 Trying: %w", err)
 	}
 	ussdSession.inviteOK = s.buildIncomingInviteOK(req.Message, ussdSession.localURI, ussdSession.localTag)
 	if err := s.storeSession(ussdSession); err != nil {
+		ussdSession.closeEvents()
+		if errors.Is(err, errSessionActive) {
+			return s.sess.WriteStatus(ctx, req, sipStatusBusyHere, "Busy Here")
+		}
 		return err
 	}
 	ussdSession.emit(payload)
@@ -144,6 +162,7 @@ func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request)
 		ussdSession.finish(false)
 		return fmt.Errorf("handling USSD INVITE: sending 200 OK: %w", err)
 	}
+	ussdSession.startInviteOKRetransmit(req, ussdSession.inviteOK)
 	s.logger.Info("accepted network-initiated USSD", "call_id", ussdSession.callID, "target_uri", ussdSession.targetURI)
 	return nil
 }
@@ -156,7 +175,46 @@ func (s *Service) handleExistingInvite(ctx context.Context, req session.Request)
 	if ussdSession.inviteOK.StartLine != "" {
 		return true, s.sess.WriteResponse(ctx, req, ussdSession.inviteOK)
 	}
-	return true, s.sess.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+	return true, s.sess.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
+}
+
+func (s *Session) startInviteOKRetransmit(req session.Request, resp sip.Message) {
+	s.mu.Lock()
+	if s.inviteOKStop != nil || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	s.inviteOKStop = stop
+	s.mu.Unlock()
+
+	s.service.startBackgroundTask(func() {
+		timers := s.service.sess.TransactionTimers()
+		interval := timers.T1
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		deadline := time.NewTimer(inviteOKTimeoutMultiplier * timers.T1)
+		defer deadline.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-deadline.C:
+				s.service.logger.Warn("USSD INVITE 200 OK ACK timeout", "call_id", s.callID)
+				s.finish(false)
+				return
+			case <-timer.C:
+				ctx, cancel := context.WithTimeout(context.Background(), min(inviteOKWriteTimeout, interval))
+				if err := s.service.sess.WriteResponse(ctx, req, resp); err != nil {
+					s.service.logger.Warn("retransmitting USSD INVITE 200 OK", "call_id", s.callID, "err", err)
+				}
+				cancel()
+				interval = min(interval*2, timers.T2)
+				timer.Reset(interval)
+			}
+		}
+	})
 }
 
 func (s *Service) newIncomingSession(msg sip.Message, payload Message) *Session {
@@ -179,6 +237,8 @@ func (s *Service) newIncomingSession(msg sip.Message, payload Message) *Session 
 		targetURI:        targetURI,
 		routeSet:         append([]string(nil), msg.HeadersByName("Record-Route")...),
 		inviteSeq:        sip.CSeqNumber(msg.Header("CSeq")),
+		localCSeq:        0,
+		remoteCSeq:       sip.CSeqNumber(msg.Header("CSeq")),
 		language:         defaultValue(payload.Language, defaultValue(s.cfg.Language, defaultLang)),
 		networkInitiated: true,
 		responseKind:     kindFromPayload(payload),
@@ -189,13 +249,13 @@ func (s *Service) newIncomingSession(msg sip.Message, payload Message) *Session 
 }
 
 func (s *Service) buildIncomingInviteOK(msg sip.Message, localURI, localTag string) sip.Message {
-	ok := sip.NewResponse(200, "OK")
-	ok.Headers = sip.ResponseHeaders(msg, 200)
+	ok := sip.NewResponse(sipStatusOK, "OK")
+	ok.Headers = sip.ResponseHeaders(msg, sipStatusOK)
 	ok.Headers = sip.UpsertHeader(ok.Headers, "To", sip.WithTag(msg.Header("To"), localURI, localTag))
-	ok.Headers.Add("Contact", contactValue(s.reg.State()))
+	ok.Headers.Add("Contact", contactValue(s.reg.State(), s.cfg.NetworkInitiatedSupported))
 	ok.Headers.Add("Recv-Info", infoPackage)
-	ok.Headers.Add("Accept", "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed")
-	ok.Headers.Add("Content-Type", "application/sdp")
+	ok.Headers.Add("Accept", ussdAcceptHeader)
+	ok.Headers.Add("Content-Type", sdpContentType)
 	ok.Body = []byte(s.ussdSDP())
 	return ok
 }
@@ -236,10 +296,13 @@ func decodeInvitePayload(msg sip.Message) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	if mediaType != mixedMultipartType {
-		return Message{}, false, fmt.Errorf("parsing USSD INVITE: unsupported content type %q", mediaType)
+		return Message{}, false, fmt.Errorf("%w: parsing USSD INVITE: unsupported content type %q", errUnsupportedMediaType, mediaType)
 	}
 	body, err := readMultipartMessageBody("parsing USSD INVITE", params, msg.Body)
 	if err != nil {
+		return Message{}, false, err
+	}
+	if err := body.rejectUnsupportedRequiredParts("parsing USSD INVITE", xmlContentType, sdpContentType); err != nil {
 		return Message{}, false, err
 	}
 	payload, err := decodeMultipartPayload("parsing USSD INVITE", body)

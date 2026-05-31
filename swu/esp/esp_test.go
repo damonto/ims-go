@@ -53,6 +53,95 @@ func TestESPPacketMarshalBinaryAddsSequentialPadding(t *testing.T) {
 	}
 }
 
+func TestCodecEncodeNullAddsAlignmentPadding(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		wantPadLen byte
+		wantLen    int
+	}{
+		{
+			name:       "payload needs padding for four byte trailer alignment",
+			payload:    []byte{0xAA, 0xBB, 0xCC},
+			wantPadLen: 3,
+			wantLen:    espHeaderLen + 8,
+		},
+		{
+			name:       "payload already aligned with trailer",
+			payload:    []byte{0xAA, 0xBB},
+			wantPadLen: 0,
+			wantLen:    espHeaderLen + 4,
+		},
+	}
+
+	codec := Codec{
+		Encryption:   EncryptionNull,
+		Integrity:    IntegrityHMACSHA196,
+		IntegrityKey: []byte("0123456789abcdef0123"),
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := codec.Encode(ESPPacket{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: tt.payload})
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if len(wire) != tt.wantLen+12 {
+				t.Fatalf("Encode() length = %d, want %d", len(wire), tt.wantLen+12)
+			}
+			trailer := len(wire) - 12 - espTrailerLen
+			if got := wire[trailer]; got != tt.wantPadLen {
+				t.Fatalf("PadLen = %d, want %d", got, tt.wantPadLen)
+			}
+			for i := byte(1); i <= tt.wantPadLen; i++ {
+				if got := wire[espHeaderLen+len(tt.payload)+int(i)-1]; got != i {
+					t.Fatalf("padding byte %d = %d, want %d", i, got, i)
+				}
+			}
+
+			got, err := codec.Decode(wire)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if string(got.Payload) != string(tt.payload) || got.NextHeader != 17 {
+				t.Fatalf("Decode() = %+v, want payload % X next header 17", got, tt.payload)
+			}
+		})
+	}
+}
+
+func TestCodecRejectsNullEncryptionWithoutIntegrity(t *testing.T) {
+	codec := Codec{Encryption: EncryptionNull, Integrity: IntegrityNone}
+	if _, err := codec.Encode(ESPPacket{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: []byte{0xAA}}); err == nil {
+		t.Fatal("Encode() error = nil, want error")
+	}
+	if _, err := codec.Decode([]byte{0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0x01, 0x00, 0x3b}); err == nil {
+		t.Fatal("Decode() error = nil, want error")
+	}
+}
+
+func TestCodecCryptoPayloadBytesIncludesESPAlignmentPadding(t *testing.T) {
+	tests := []struct {
+		name       string
+		encryption string
+		payloadLen int
+		want       uint64
+	}{
+		{name: "null encryption aligns trailer", encryption: EncryptionNull, payloadLen: 3, want: 8},
+		{name: "aes cbc aligns to block size", encryption: EncryptionAESCBC, payloadLen: 3, want: 16},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (Codec{Encryption: tt.encryption}).CryptoPayloadBytes(tt.payloadLen)
+			if err != nil {
+				t.Fatalf("CryptoPayloadBytes() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("CryptoPayloadBytes() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReplayWindowAccept(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -2,7 +2,6 @@ package voice
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
@@ -11,12 +10,6 @@ import (
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
-	if sess == nil {
-		return nil, errors.New("creating voice service: session is nil")
-	}
-	if reg == nil {
-		return nil, errors.New("creating voice service: registration service is nil")
-	}
 	normalized, err := cfg.Normalized()
 	if err != nil {
 		return nil, err
@@ -67,9 +60,19 @@ func (s *Service) Close() error {
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
 	switch strings.ToUpper(req.Message.Method()) {
 	case "INVITE":
+		if sip.HeaderTag(req.Message.Header("To")) != "" {
+			call := s.lookupCallForMessage(req.Message)
+			if call == nil {
+				return true, s.writeStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
+			}
+			return true, call.handleRequest(ctx, req)
+		}
 		return true, s.handleIncomingInvite(ctx, req)
-	case "ACK", "BYE", "CANCEL", "PRACK":
+	case "ACK", "BYE", "CANCEL", "INFO", "PRACK", "UPDATE":
 		call := s.lookupCallForMessage(req.Message)
+		if call == nil && strings.EqualFold(req.Message.Method(), "CANCEL") {
+			call = s.lookupIncoming(req.Message)
+		}
 		if call == nil {
 			s.logger.Debug("call request did not match dialog",
 				"method", req.Message.Method(),
@@ -78,6 +81,9 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 				"to", req.Message.Header("To"),
 				"cseq", req.Message.Header("CSeq"),
 			)
+			if strings.EqualFold(req.Message.Method(), "PRACK") {
+				return true, s.writeStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
+			}
 			return false, nil
 		}
 		return true, call.handleRequest(ctx, req)
@@ -94,14 +100,14 @@ func (s *Service) HandleResponse(ctx context.Context, msg sip.Message) (bool, er
 	if call == nil {
 		return false, nil
 	}
-	if msg.StatusCode() >= 100 && msg.StatusCode() < 200 {
+	if msg.StatusCode() >= sipStatusTrying && msg.StatusCode() < sipStatusOK {
 		call.markInviteResponse(ctx)
-		if msg.StatusCode() == 100 {
+		if msg.StatusCode() == sipStatusTrying {
 			return true, nil
 		}
 		return true, call.handleProvisionalResponse(ctx, msg)
 	}
-	if msg.StatusCode() < 200 || msg.StatusCode() >= 300 {
+	if msg.StatusCode() < sipStatusOK || msg.StatusCode() >= sipStatusMultipleChoices {
 		return false, nil
 	}
 	return true, call.handleResponse(ctx, msg)

@@ -21,7 +21,7 @@ func (s *Session) Reply(ctx context.Context, text string) error {
 	}
 	msg := s.buildDialogRequest("INFO", payload)
 	msg.Headers.Add("Info-Package", infoPackage)
-	msg.Headers.Add("Content-Disposition", "info-package")
+	msg.Headers.Add("Content-Disposition", infoPackageDisposition)
 	msg.Headers.Add("Content-Type", xmlContentType)
 	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
 		return err
@@ -39,7 +39,7 @@ func (s *Session) ReplyError(ctx context.Context, errorCode int) error {
 	}
 	msg := s.buildDialogRequest("INFO", payload)
 	msg.Headers.Add("Info-Package", infoPackage)
-	msg.Headers.Add("Content-Disposition", "info-package")
+	msg.Headers.Add("Content-Disposition", infoPackageDisposition)
 	msg.Headers.Add("Content-Type", xmlContentType)
 	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
 		return err
@@ -106,12 +106,8 @@ func (s *Session) endDirect(ctx context.Context, text string) error {
 	if len(payload) > 0 {
 		msg.Headers.Add("Content-Type", xmlContentType)
 	}
-	resp, err := s.service.sess.Exchange(ctx, msg)
-	if err != nil {
-		return fmt.Errorf("ending USSD: %w", err)
-	}
-	if resp.StatusCode() != 200 {
-		return fmt.Errorf("ending USSD: unexpected response: %w", sip.NewResponseError(resp))
+	if err := s.exchange(ctx, msg, "ending USSD"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -200,7 +196,7 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action string) 
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
-	if resp.StatusCode() != 200 {
+	if resp.StatusCode() != sipStatusOK {
 		return fmt.Errorf("%s: unexpected response: %w", action, sip.NewResponseError(resp))
 	}
 	releaseInfo = false

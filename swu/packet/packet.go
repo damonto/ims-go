@@ -15,11 +15,15 @@ const (
 	ProtocolUDP byte = 17
 	ProtocolESP byte = 50
 
+	IPVersion4 int = 4
+	IPVersion6 int = 6
+
 	OuterIPv4 byte = 4
 	OuterIPv6 byte = 41
 
 	TCPFlagFIN byte = 0x01
 	TCPFlagSYN byte = 0x02
+	TCPFlagRST byte = 0x04
 	TCPFlagPSH byte = 0x08
 	TCPFlagACK byte = 0x10
 )
@@ -68,9 +72,9 @@ type InnerPacket struct {
 
 func NextHeaderForVersion(version int) (byte, error) {
 	switch version {
-	case 4:
+	case IPVersion4:
 		return OuterIPv4, nil
-	case 6:
+	case IPVersion6:
 		return OuterIPv6, nil
 	default:
 		return 0, fmt.Errorf("resolving outer next header: unsupported ip version %d", version)
@@ -105,7 +109,11 @@ func DecodePayload(proto byte, srcIP, dstIP net.IP, payload []byte) (InnerPacket
 		}
 		packet.TCP = &segment
 	case ProtocolESP:
-		packet.ESP = parseOpaqueESPPacket(payload)
+		espPacket, err := decodeOpaqueESPPacket(payload)
+		if err != nil {
+			return InnerPacket{}, err
+		}
+		packet.ESP = &espPacket
 	}
 	return packet, nil
 }
@@ -117,7 +125,7 @@ func (p IPPacket) MarshalBinary() ([]byte, error) {
 	}
 	payload := append([]byte(nil), p.Payload...)
 	switch version {
-	case 4:
+	case IPVersion4:
 		packet := make([]byte, 20+len(payload))
 		packet[0] = 0x45
 		packet[1] = 0x00
@@ -129,7 +137,7 @@ func (p IPPacket) MarshalBinary() ([]byte, error) {
 		binary.BigEndian.PutUint16(packet[10:12], ipv4HeaderChecksum(packet[:20]))
 		copy(packet[20:], payload)
 		return packet, nil
-	case 6:
+	case IPVersion6:
 		packet := make([]byte, 40+len(payload))
 		packet[0] = 0x60
 		binary.BigEndian.PutUint16(packet[4:6], uint16(len(payload)))
@@ -291,7 +299,11 @@ func (p *InnerPacket) UnmarshalBinary(data []byte) error {
 		}
 		packet.TCP = &segment
 	case ProtocolESP:
-		packet.ESP = parseOpaqueESPPacket(ip.Payload)
+		espPacket, err := decodeOpaqueESPPacket(ip.Payload)
+		if err != nil {
+			return err
+		}
+		packet.ESP = &espPacket
 	}
 	*p = packet
 	return nil
@@ -327,10 +339,10 @@ func decodeIPPacket(packet []byte) (int, byte, net.IP, net.IP, []byte, error) {
 	if len(packet) == 0 {
 		return 0, 0, nil, nil, nil, errors.New("parsing ip packet: packet is empty")
 	}
-	switch packet[0] >> 4 {
-	case 4:
+	switch int(packet[0] >> 4) {
+	case IPVersion4:
 		return decodeIPv4Packet(packet)
-	case 6:
+	case IPVersion6:
 		return decodeIPv6Packet(packet)
 	default:
 		return 0, 0, nil, nil, nil, fmt.Errorf("parsing ip packet: unsupported version %d", packet[0]>>4)
@@ -349,7 +361,7 @@ func decodeIPv4Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) 
 	if total < ihl || len(packet) < total {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid total length")
 	}
-	return 4, packet[9], append(net.IP(nil), packet[12:16]...), append(net.IP(nil), packet[16:20]...), append([]byte(nil), packet[ihl:total]...), nil
+	return IPVersion4, packet[9], append(net.IP(nil), packet[12:16]...), append(net.IP(nil), packet[16:20]...), append([]byte(nil), packet[ihl:total]...), nil
 }
 
 func decodeIPv6Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) {
@@ -360,7 +372,7 @@ func decodeIPv6Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) 
 	if len(packet) < 40+length {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv6 packet: invalid payload length")
 	}
-	return 6, packet[6], append(net.IP(nil), packet[8:24]...), append(net.IP(nil), packet[24:40]...), append([]byte(nil), packet[40:40+length]...), nil
+	return IPVersion6, packet[6], append(net.IP(nil), packet[8:24]...), append(net.IP(nil), packet[24:40]...), append([]byte(nil), packet[40:40+length]...), nil
 }
 
 func decodeUDPSegment(srcIP, dstIP net.IP, payload []byte) (UDPSegment, error) {
@@ -402,25 +414,25 @@ func normalizeIPPair(srcIP, dstIP net.IP, version int) (int, net.IP, net.IP, err
 	dst := append(net.IP(nil), dstIP...)
 	switch {
 	case src.To4() != nil && dst.To4() != nil:
-		if version != 0 && version != 4 {
+		if version != 0 && version != IPVersion4 {
 			return 0, nil, nil, fmt.Errorf("normalizing ip packet: mismatched ip version %d", version)
 		}
-		return 4, src.To4(), dst.To4(), nil
+		return IPVersion4, src.To4(), dst.To4(), nil
 	case src.To16() != nil && dst.To16() != nil:
-		if version != 0 && version != 6 {
+		if version != 0 && version != IPVersion6 {
 			return 0, nil, nil, fmt.Errorf("normalizing ip packet: mismatched ip version %d", version)
 		}
-		return 6, src.To16(), dst.To16(), nil
+		return IPVersion6, src.To16(), dst.To16(), nil
 	default:
 		return 0, nil, nil, errors.New("normalizing ip packet: mismatched ip family")
 	}
 }
 
-func parseOpaqueESPPacket(data []byte) *esp.ESPPacket {
+func decodeOpaqueESPPacket(data []byte) (esp.ESPPacket, error) {
 	if len(data) < 8 {
-		return nil
+		return esp.ESPPacket{}, errors.New("parsing esp packet: packet too short")
 	}
-	packet := &esp.ESPPacket{
+	packet := esp.ESPPacket{
 		SPI:      binary.BigEndian.Uint32(data[:4]),
 		Sequence: binary.BigEndian.Uint32(data[4:8]),
 		Payload:  append([]byte(nil), data[8:]...),
@@ -430,7 +442,7 @@ func parseOpaqueESPPacket(data []byte) *esp.ESPPacket {
 		packet.NextHeader = decoded.NextHeader
 		packet.Payload = decoded.Payload
 	}
-	return packet
+	return packet, nil
 }
 
 func tcpOptionsForFlags(flags byte) []byte {

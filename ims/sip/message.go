@@ -497,11 +497,16 @@ func topViaParam(value, want string) (string, bool) {
 }
 
 func (m *Message) parseBytes(data []byte) error {
+	data = trimLeadingCRLF(data)
 	headerBlock, body, err := splitMessageSections(data)
 	if err != nil {
 		return err
 	}
 	startLine, headers, err := parseMessageHeaderBlock(headerBlock)
+	if err != nil {
+		return err
+	}
+	body, err = bodyFromContentLength(body, headers)
 	if err != nil {
 		return err
 	}
@@ -624,15 +629,20 @@ func expandedHeaderName(name string) string {
 }
 
 func readHeaderSection(br *bufio.Reader) (string, Headers, int64, error) {
-	startLine, n, err := readLine(br)
-	if err != nil {
-		if err == io.EOF {
-			return "", nil, n, errors.New("parsing SIP message: missing start line")
+	var total int64
+	var startLine string
+	for startLine == "" {
+		line, n, err := readLine(br)
+		total += n
+		if err != nil {
+			if err == io.EOF {
+				return "", nil, total, errors.New("parsing SIP message: missing start line")
+			}
+			return "", nil, total, fmt.Errorf("parsing SIP message: %w", err)
 		}
-		return "", nil, n, fmt.Errorf("parsing SIP message: %w", err)
+		startLine = line
 	}
 	headers := make(Headers, 0, 8)
-	total := n
 	for {
 		line, lineN, err := readLine(br)
 		total += lineN
@@ -661,17 +671,13 @@ func readLine(br *bufio.Reader) (string, int64, error) {
 }
 
 func readBody(br *bufio.Reader, headers Headers) ([]byte, int64, error) {
-	lengthValue := strings.TrimSpace(headers.Get("Content-Length"))
-	if lengthValue == "" {
+	length, ok, err := contentLength(headers)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !ok {
 		body, err := io.ReadAll(br)
 		return body, int64(len(body)), err
-	}
-	length, err := strconv.Atoi(lengthValue)
-	if err != nil {
-		return nil, 0, fmt.Errorf("parsing Content-Length %q: %w", lengthValue, err)
-	}
-	if length < 0 {
-		return nil, 0, fmt.Errorf("parsing Content-Length %q: negative value", lengthValue)
 	}
 	body := make([]byte, length)
 	n, err := io.ReadFull(br, body)
@@ -681,14 +687,57 @@ func readBody(br *bufio.Reader, headers Headers) ([]byte, int64, error) {
 	return body, int64(n), nil
 }
 
+func bodyFromContentLength(body []byte, headers Headers) ([]byte, error) {
+	length, ok, err := contentLength(headers)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return body, nil
+	}
+	if length > len(body) {
+		return nil, fmt.Errorf("parsing SIP body: Content-Length %d exceeds available body %d", length, len(body))
+	}
+	return body[:length], nil
+}
+
+func contentLength(headers Headers) (int, bool, error) {
+	values := headers.Values("Content-Length")
+	if len(values) == 0 {
+		return 0, false, nil
+	}
+	if len(values) > 1 {
+		return 0, true, errors.New("parsing SIP headers: multiple Content-Length fields")
+	}
+	lengthValue := strings.TrimSpace(values[0])
+	if lengthValue == "" {
+		return 0, true, errors.New("parsing Content-Length: empty value")
+	}
+	length, err := strconv.Atoi(lengthValue)
+	if err != nil {
+		return 0, true, fmt.Errorf("parsing Content-Length %q: %w", lengthValue, err)
+	}
+	if length < 0 {
+		return 0, true, fmt.Errorf("parsing Content-Length %q: negative value", lengthValue)
+	}
+	return length, true, nil
+}
+
 func (m Message) serializedHeaders() Headers {
 	headers := m.Headers.Clone()
 	for _, header := range headers {
-		if strings.EqualFold(header.Name, "Content-Length") {
+		if strings.EqualFold(expandedHeaderName(header.Name), "Content-Length") {
 			return headers
 		}
 	}
 	return append(headers, Header{Name: "Content-Length", Value: strconv.Itoa(len(m.Body))})
+}
+
+func trimLeadingCRLF(data []byte) []byte {
+	for bytes.HasPrefix(data, []byte("\r\n")) {
+		data = data[2:]
+	}
+	return data
 }
 
 type writeCounter struct {

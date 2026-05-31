@@ -15,12 +15,14 @@ import (
 	"io"
 	"math/big"
 
+	"github.com/damonto/vowifi-go/swu/eapaka"
 	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 var (
 	sha1DSSIncrement = big.NewInt(1)
 	sha1DSSModulus   = new(big.Int).Lsh(big.NewInt(1), 160)
+	dhPublicMin      = big.NewInt(1)
 
 	errMissingEncryptedPayload = errors.New("opening ike packet: missing encrypted payload")
 )
@@ -149,18 +151,75 @@ func (c *ikeCrypto) DeriveIKEKeys(peerPublic []byte) error {
 	return nil
 }
 
+func (c *ikeCrypto) DeriveRekeyedIKEKeys(old *ikeCrypto, peerPublic []byte) error {
+	shared, err := c.sharedSecret(peerPublic)
+	if err != nil {
+		return err
+	}
+	nonce := append(append([]byte(nil), c.nonceI...), c.nonceR...)
+	skeyseedInput := make([]byte, 0, len(shared)+len(nonce))
+	skeyseedInput = append(skeyseedInput, shared...)
+	skeyseedInput = append(skeyseedInput, nonce...)
+	skeyseed := old.prfHMAC(old.keys.SKD, skeyseedInput)
+	seed := make([]byte, 0, len(nonce)+16)
+	seed = append(seed, nonce...)
+	spi := make([]byte, 16)
+	binary.BigEndian.PutUint64(spi[0:8], c.initiatorSPI)
+	binary.BigEndian.PutUint64(spi[8:16], c.responderSPI)
+	seed = append(seed, spi...)
+	total := (3 * c.prfLength()) + (2 * c.integKeyLength()) + (2 * c.encrKeyLength())
+	stream, err := c.prfPlus(skeyseed, seed, total)
+	if err != nil {
+		return err
+	}
+	c.keys.SKD = append([]byte(nil), stream[:c.prfLength()]...)
+	stream = stream[c.prfLength():]
+	c.keys.SKAI = append([]byte(nil), stream[:c.integKeyLength()]...)
+	stream = stream[c.integKeyLength():]
+	c.keys.SKAR = append([]byte(nil), stream[:c.integKeyLength()]...)
+	stream = stream[c.integKeyLength():]
+	c.keys.SKEI = append([]byte(nil), stream[:c.encrKeyLength()]...)
+	stream = stream[c.encrKeyLength():]
+	c.keys.SKER = append([]byte(nil), stream[:c.encrKeyLength()]...)
+	stream = stream[c.encrKeyLength():]
+	c.keys.SKPI = append([]byte(nil), stream[:c.prfLength()]...)
+	stream = stream[c.prfLength():]
+	c.keys.SKPR = append([]byte(nil), stream[:c.prfLength()]...)
+	return nil
+}
+
 func (c *ikeCrypto) DeriveESPKeys(encrKeyBits, integ uint16) (ESPKeys, error) {
+	return c.DeriveESPKeysWithNonces(encrKeyBits, integ, c.nonceI, c.nonceR)
+}
+
+func (c *ikeCrypto) DeriveESPKeysWithNonces(encrKeyBits, integ uint16, nonceI, nonceR []byte) (ESPKeys, error) {
+	seed := append(append([]byte(nil), nonceI...), nonceR...)
+	return c.deriveESPKeysWithSeed(encrKeyBits, integ, seed)
+}
+
+func (c *ikeCrypto) DeriveESPKeysWithDH(encrKeyBits, integ uint16, nonceI, nonceR []byte, dh *ikeCrypto, peerPublic []byte) (ESPKeys, error) {
+	shared, err := dh.sharedSecret(peerPublic)
+	if err != nil {
+		return ESPKeys{}, err
+	}
+	seed := make([]byte, 0, len(shared)+len(nonceI)+len(nonceR))
+	seed = append(seed, shared...)
+	seed = append(seed, nonceI...)
+	seed = append(seed, nonceR...)
+	return c.deriveESPKeysWithSeed(encrKeyBits, integ, seed)
+}
+
+func (c *ikeCrypto) deriveESPKeysWithSeed(encrKeyBits, integ uint16, seed []byte) (ESPKeys, error) {
 	if len(c.keys.SKD) == 0 {
 		return ESPKeys{}, errors.New("deriving esp keys: ike keys are empty")
 	}
-	nonce := append(append([]byte(nil), c.nonceI...), c.nonceR...)
 	encrKeyLen := encrKeyLengthFromBits(encrKeyBits)
 	integKeyLen, err := integKeyLength(integ)
 	if err != nil {
 		return ESPKeys{}, err
 	}
 	total := (2 * encrKeyLen) + (2 * integKeyLen)
-	stream, err := c.prfPlus(c.keys.SKD, nonce, total)
+	stream, err := c.prfPlus(c.keys.SKD, seed, total)
 	if err != nil {
 		return ESPKeys{}, err
 	}
@@ -194,6 +253,24 @@ func (c *ikeCrypto) DeriveEAPKeys(identity, res, ik, ck []byte) error {
 	return nil
 }
 
+func (c *ikeCrypto) DeriveAKAPrimeEAPKeys(identity, res, ck, ik, networkName, sqnXorAK []byte) error {
+	keys, err := eapaka.DeriveAKAPrimeKeys(identity, ck, ik, networkName, sqnXorAK)
+	if err != nil {
+		return err
+	}
+	c.eap = eapKeys{
+		RES:  append([]byte(nil), res...),
+		IK:   append([]byte(nil), ik...),
+		CK:   append([]byte(nil), ck...),
+		MK:   keys.MK,
+		ENCR: keys.ENCR,
+		AUT:  keys.AUT,
+		MSK:  keys.MSK,
+		EMSK: keys.EMSK,
+	}
+	return nil
+}
+
 func (c *ikeCrypto) ComputeInitiatorAuth(saInitRequest, responderNonce, idiRaw []byte) ([]byte, error) {
 	if len(c.eap.MSK) == 0 {
 		return nil, errors.New("computing initiator auth: eap msk is empty")
@@ -202,6 +279,19 @@ func (c *ikeCrypto) ComputeInitiatorAuth(saInitRequest, responderNonce, idiRaw [
 	data := make([]byte, 0, len(saInitRequest)+len(responderNonce)+len(inner))
 	data = append(data, saInitRequest...)
 	data = append(data, responderNonce...)
+	data = append(data, inner...)
+	tmpKey := c.prfHMAC(c.eap.MSK, []byte("Key Pad for IKEv2"))
+	return c.prfHMAC(tmpKey, data), nil
+}
+
+func (c *ikeCrypto) ComputeResponderAuth(saInitResponse, initiatorNonce, idrRaw []byte) ([]byte, error) {
+	if len(c.eap.MSK) == 0 {
+		return nil, errors.New("computing responder auth: eap msk is empty")
+	}
+	inner := c.prfHMAC(c.keys.SKPR, idrRaw)
+	data := make([]byte, 0, len(saInitResponse)+len(initiatorNonce)+len(inner))
+	data = append(data, saInitResponse...)
+	data = append(data, initiatorNonce...)
 	data = append(data, inner...)
 	tmpKey := c.prfHMAC(c.eap.MSK, []byte("Key Pad for IKEv2"))
 	return c.prfHMAC(tmpKey, data), nil
@@ -280,9 +370,39 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 	plain = plain[:len(plain)-1-padLen]
 	payloads, err := ike.DecodePayloadChain(container.NextPayload, plain)
 	if err != nil {
-		return nil, err
+		var critical ike.UnsupportedCriticalPayloadError
+		if errors.As(err, &critical) {
+			return nil, err
+		}
+		return nil, ike.InvalidSyntaxError{Err: err}
+	}
+	if hasEncryptedPayload(payloads) {
+		return nil, ike.InvalidSyntaxError{Err: errors.New("nested encrypted payload")}
 	}
 	return payloads, nil
+}
+
+func (c *ikeCrypto) ProtectedBytes(wire []byte) (uint64, error) {
+	packet := normalizeIKEPacket(wire, true)
+	var ikePacket ike.IKEPacket
+	if err := ikePacket.UnmarshalBinary(packet); err != nil {
+		return 0, fmt.Errorf("counting ike protected bytes: %w", err)
+	}
+	if len(ikePacket.Payloads) != 1 {
+		return 0, errors.New("counting ike protected bytes: expected encrypted payload container")
+	}
+	container, ok := ikePacket.Payloads[0].(*ike.EncryptedPayload)
+	if !ok {
+		return 0, errMissingEncryptedPayload
+	}
+	icvLen, err := integLength(c.integ)
+	if err != nil {
+		return 0, err
+	}
+	if len(container.Raw) < aes.BlockSize+icvLen {
+		return 0, errors.New("counting ike protected bytes: encrypted body too short")
+	}
+	return uint64(len(container.Raw) - aes.BlockSize - icvLen), nil
 }
 
 func (c *ikeCrypto) EAPAuthKey() []byte {
@@ -319,8 +439,16 @@ func (c *ikeCrypto) sharedSecret(peerPublic []byte) ([]byte, error) {
 		return nil, errors.New("deriving shared secret: peer public key is empty")
 	}
 	peer := new(big.Int).SetBytes(peerPublic)
+	if !validMODPPublicKey(peer, c.groupPrime) {
+		return nil, errors.New("deriving shared secret: peer public key is outside modp group range")
+	}
 	shared := new(big.Int).Exp(peer, c.private, c.groupPrime)
 	return shared.FillBytes(make([]byte, c.groupByteSize)), nil
+}
+
+func validMODPPublicKey(peer, prime *big.Int) bool {
+	upper := new(big.Int).Sub(prime, dhPublicMin)
+	return peer.Cmp(dhPublicMin) > 0 && peer.Cmp(upper) < 0
 }
 
 func (c *ikeCrypto) prfPlus(key, seed []byte, size int) ([]byte, error) {

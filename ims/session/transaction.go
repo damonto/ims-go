@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,7 @@ type clientTransaction struct {
 	reliable  bool
 	timers    TransactionTimers
 
-	responseCh chan sip.Message
+	responseCh chan inboundMessage
 	resultCh   chan transactionResult
 	cancelCh   chan struct{}
 
@@ -46,14 +47,14 @@ type transactionResult struct {
 }
 
 var defaultTransactionTimers = TransactionTimers{
-	T1: 2 * time.Second,
-	T2: 16 * time.Second,
-	T4: 17 * time.Second,
-	TB: 128 * time.Second,
-	TD: 130 * time.Second,
-	TF: 128 * time.Second,
-	TH: 128 * time.Second,
-	TJ: 128 * time.Second,
+	T1: 500 * time.Millisecond,
+	T2: 4 * time.Second,
+	T4: 5 * time.Second,
+	TB: 32 * time.Second,
+	TD: 32 * time.Second,
+	TF: 32 * time.Second,
+	TH: 32 * time.Second,
+	TJ: 32 * time.Second,
 }
 
 func DefaultTransactionTimers() TransactionTimers {
@@ -122,7 +123,7 @@ func newClientTransaction(s *Session, transport Transport, req sip.Message, opts
 		method:     strings.ToUpper(req.Method()),
 		reliable:   transportIsReliable(transport),
 		timers:     s.cfg.TransactionTimers,
-		responseCh: make(chan sip.Message, 8),
+		responseCh: make(chan inboundMessage, 8),
 		resultCh:   make(chan transactionResult, 1),
 		cancelCh:   make(chan struct{}),
 		opts:       opts,
@@ -154,12 +155,17 @@ func (tx *clientTransaction) await(ctx context.Context) (sip.Message, error) {
 	}
 }
 
-func (tx *clientTransaction) handleResponse(msg sip.Message) {
+func (tx *clientTransaction) handleResponse(inbound inboundMessage) {
 	select {
-	case tx.responseCh <- msg:
+	case tx.responseCh <- inbound:
 	default:
+		msg := inbound.msg
 		tx.session.logger.Warn("dropping buffered transaction response", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "status", msg.StatusCode())
 	}
+}
+
+func (tx *clientTransaction) acceptsResponse(msg sip.Message) bool {
+	return responseMatchesRequestTransaction(tx.request, msg)
 }
 
 func (tx *clientTransaction) abort(err error) {
@@ -203,6 +209,7 @@ func (tx *clientTransaction) runNonInvite() {
 	defer timerF.Stop()
 
 	retransmitDelay := tx.timers.T1
+	proceeding := false
 	var timerEC <-chan time.Time
 	timerE := (*time.Timer)(nil)
 	if !tx.reliable {
@@ -222,15 +229,26 @@ func (tx *clientTransaction) runNonInvite() {
 			if !tx.resend() {
 				return
 			}
-			if retransmitDelay < tx.timers.T2 {
+			if proceeding {
+				retransmitDelay = tx.timers.T2
+			} else if retransmitDelay < tx.timers.T2 {
 				retransmitDelay *= 2
 				if retransmitDelay > tx.timers.T2 {
 					retransmitDelay = tx.timers.T2
 				}
 			}
 			timerE.Reset(retransmitDelay)
-		case resp := <-tx.responseCh:
+		case inbound := <-tx.responseCh:
+			if tx.opts.AcceptResponseTransport != nil && !tx.opts.AcceptResponseTransport(inbound.transport) {
+				continue
+			}
+			resp := inbound.msg
 			if isProvisionalResponse(resp) {
+				if err := tx.notifyProvisional(resp); err != nil {
+					tx.abort(err)
+					return
+				}
+				proceeding = true
 				continue
 			}
 			tx.deliverResponse(resp)
@@ -270,7 +288,11 @@ func (tx *clientTransaction) runInvite() {
 			}
 			retransmitDelay *= 2
 			timerA.Reset(retransmitDelay)
-		case resp := <-tx.responseCh:
+		case inbound := <-tx.responseCh:
+			if tx.opts.AcceptResponseTransport != nil && !tx.opts.AcceptResponseTransport(inbound.transport) {
+				continue
+			}
+			resp := inbound.msg
 			switch {
 			case isProvisionalResponse(resp):
 				if err := tx.notifyProvisional(resp); err != nil {
@@ -349,7 +371,8 @@ func (tx *clientTransaction) awaitInviteCompleted(ack sip.Message, timeout time.
 		case <-timer.C:
 			tx.terminate()
 			return
-		case resp := <-tx.responseCh:
+		case inbound := <-tx.responseCh:
+			resp := inbound.msg
 			if resp.StatusCode() >= 300 && resp.StatusCode() < 700 {
 				tx.sendACK(ack)
 			}
@@ -380,23 +403,27 @@ func (s *Session) registerTransaction(tx *clientTransaction) error {
 		return errors.New("registering transaction: key is empty")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return errors.New("registering transaction: session is closed")
 	}
 	if _, exists := s.transactions[tx.key]; exists {
+		s.mu.Unlock()
 		return fmt.Errorf("registering transaction: duplicate key %q", tx.key)
 	}
 	s.transactions[tx.key] = tx
+	s.notifyTransactionsChangedLocked()
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *Session) unregisterTransaction(tx *clientTransaction) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if current, ok := s.transactions[tx.key]; ok && current == tx {
 		delete(s.transactions, tx.key)
+		s.notifyTransactionsChangedLocked()
 	}
+	s.mu.Unlock()
 }
 
 func (s *Session) abortTransactions(err error) {
@@ -408,6 +435,29 @@ func (s *Session) abortTransactions(err error) {
 	s.mu.Unlock()
 	for _, tx := range transactions {
 		tx.abort(err)
+	}
+}
+
+func (s *Session) abortTransportTransactions(transport Transport, err error) {
+	s.mu.Lock()
+	clientTxs := make([]*clientTransaction, 0)
+	for _, tx := range s.transactions {
+		if tx.transport == transport {
+			clientTxs = append(clientTxs, tx)
+		}
+	}
+	serverTxs := make([]*serverTransaction, 0)
+	for _, tx := range s.serverTxs {
+		if tx.transport == transport {
+			serverTxs = append(serverTxs, tx)
+		}
+	}
+	s.mu.Unlock()
+	for _, tx := range clientTxs {
+		tx.abort(err)
+	}
+	for _, tx := range serverTxs {
+		tx.terminate()
 	}
 }
 
@@ -426,7 +476,7 @@ func buildInviteErrorACK(req, resp sip.Message) sip.Message {
 	for _, route := range req.HeadersByName("Route") {
 		ack.Headers.Add("Route", route)
 	}
-	ack.Headers.Add("Max-Forwards", "70")
+	ack.Headers.Add("Max-Forwards", strconv.Itoa(sip.DefaultMaxForwards))
 	ack.Headers.Add("From", req.Header("From"))
 	ack.Headers.Add("To", resp.Header("To"))
 	ack.Headers.Add("Call-ID", req.Header("Call-ID"))

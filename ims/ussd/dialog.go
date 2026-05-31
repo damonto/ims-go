@@ -2,11 +2,12 @@ package ussd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
+	"strconv"
 	"strings"
-	"sync/atomic"
 )
 
 func (s *Session) buildACK() sip.Message {
@@ -14,12 +15,12 @@ func (s *Session) buildACK() sip.Message {
 	senderIdentity := s.localDialogURI()
 	msg := sip.NewRequest("ACK", s.targetURI)
 	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
-	msg.Headers.Add("Max-Forwards", "70")
-	sip.ApplyRouteSet(&msg, s.routeSet)
+	msg.Headers.Add("Max-Forwards", strconv.Itoa(sip.DefaultMaxForwards))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, s.localTag))
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d ACK", s.inviteSeq))
+	s.service.reg.DialogRequestPolicy(s.routeSet).Apply(&msg)
 	return msg
 }
 
@@ -32,16 +33,39 @@ func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 	msg.Headers.Add("To", s.remoteTo)
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("Session-ID", s.sessionID)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", atomic.AddInt64(&s.service.cseq, 1), method))
-	msg.Headers.Add("Contact", contactValue(state))
+	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", s.nextCSeq(), method))
+	msg.Headers.Add("Contact", contactValue(state, s.service.cfg.NetworkInitiatedSupported))
 	s.service.reg.DialogRequestPolicy(s.routeSet).Apply(&msg)
 	msg.Body = body
 	return msg
 }
 
+func (s *Session) nextCSeq() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.localCSeq++
+	return s.localCSeq
+}
+
 func (s *Session) handleRequest(ctx context.Context, req session.Request) error {
-	switch strings.ToUpper(req.Message.Method()) {
+	method := strings.ToUpper(req.Message.Method())
+	if method != "ACK" && method != "CANCEL" {
+		if duplicate, status, reason := s.recordRemoteCSeq(req.Message); status != 0 {
+			return s.service.sess.WriteStatus(ctx, req, status, reason)
+		} else if duplicate {
+			if err := s.service.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
+				return err
+			}
+			s.service.logger.Debug("suppressing duplicate USSD request", "call_id", s.callID, "cseq", req.Message.Header("CSeq"))
+			return nil
+		}
+	}
+	switch method {
 	case "ACK":
+		if !s.ackMatchesInvite(req.Message) {
+			s.service.logger.Debug("ignoring ACK with mismatched CSeq", "call_id", s.callID, "cseq", req.Message.Header("CSeq"), "invite_cseq", s.inviteSeq)
+			return nil
+		}
 		s.handleACK()
 		return nil
 	case "INFO":
@@ -53,7 +77,31 @@ func (s *Session) handleRequest(ctx context.Context, req session.Request) error 
 	}
 }
 
+func (s *Session) ackMatchesInvite(msg sip.Message) bool {
+	return strings.EqualFold(sip.CSeqMethod(msg.Header("CSeq")), "ACK") && sip.CSeqNumber(msg.Header("CSeq")) == s.inviteSeq
+}
+
+func (s *Session) recordRemoteCSeq(msg sip.Message) (bool, int, string) {
+	cseq := sip.CSeqNumber(msg.Header("CSeq"))
+	if cseq <= 0 {
+		return false, sipStatusBadRequest, "Bad Request"
+	}
+	key := msg.Method() + "|" + msg.Header("CSeq")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.remoteCSeqs[key]; ok {
+		return true, 0, ""
+	}
+	if s.remoteCSeq != 0 && cseq <= s.remoteCSeq {
+		return false, sipStatusServerInternalError, "Server Internal Error"
+	}
+	s.remoteCSeq = cseq
+	s.remoteCSeqs[key] = struct{}{}
+	return false, 0, ""
+}
+
 func (s *Session) handleACK() {
+	s.stopInviteOKRetransmit()
 	pending := s.markACK()
 	if pending == nil {
 		return
@@ -71,19 +119,28 @@ func (s *Session) handleACK() {
 	})
 }
 
+func (s *Session) stopInviteOKRetransmit() {
+	s.mu.Lock()
+	stop := s.inviteOKStop
+	s.inviteOKStop = nil
+	s.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
 func (s *Session) handleInfo(ctx context.Context, req session.Request) error {
 	payload, err := validateInboundInfo(req.Message, s.networkInitiated)
 	if err != nil {
-		return s.service.sess.WriteStatus(ctx, req, 415, "Unsupported Media Type")
+		if errors.Is(err, errBadInfoPackage) {
+			return s.service.sess.WriteStatus(ctx, req, sipStatusBadInfoPackage, "Bad Info Package")
+		}
+		return s.service.writeUnsupportedMediaType(ctx, req)
 	}
-	if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
+	if err := s.service.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return err
 	}
 	s.releaseInfoExchange()
-	if s.isDuplicateRemote(req.Message) {
-		s.service.logger.Debug("suppressing duplicate USSD request", "call_id", s.callID, "cseq", req.Message.Header("CSeq"))
-		return nil
-	}
 	s.setLanguage(payload.Language)
 	s.setDialogKind(payload)
 	s.emit(payload)
@@ -97,18 +154,11 @@ func (s *Session) handleBye(ctx context.Context, req session.Request) error {
 	if hasPayload {
 		decoded, err := decodeSinglePayload("parsing USSD BYE", req.Message)
 		if err != nil {
-			return s.service.sess.WriteStatus(ctx, req, 415, "Unsupported Media Type")
+			return s.service.writeUnsupportedMediaType(ctx, req)
 		}
 		payload = decoded
 	}
-	if s.isDuplicateRemote(req.Message) {
-		if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
-			return err
-		}
-		s.service.logger.Debug("suppressing duplicate USSD request", "call_id", s.callID, "cseq", req.Message.Header("CSeq"))
-		return nil
-	}
-	if err := s.service.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
+	if err := s.service.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return err
 	}
 	payload.Final = true
@@ -128,17 +178,6 @@ func (s *Session) emit(msg Message) {
 	default:
 		s.service.logger.Debug("dropping USSD event", "call_id", s.callID, "text", msg.Text)
 	}
-}
-
-func (s *Session) isDuplicateRemote(msg sip.Message) bool {
-	key := msg.Method() + "|" + msg.Header("CSeq")
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.remoteCSeqs[key]; ok {
-		return true
-	}
-	s.remoteCSeqs[key] = struct{}{}
-	return false
 }
 
 func (s *Session) markACK() *queuedRequest {
@@ -175,11 +214,16 @@ func (s *Session) finish(fromNetwork bool) {
 	s.closed = true
 	s.deliveringInvite = false
 	s.pendingInitial = nil
+	stop := s.inviteOKStop
+	s.inviteOKStop = nil
 	if !s.acked && s.ackCh != nil {
 		close(s.ackCh)
 		s.acked = true
 	}
 	s.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 	if s.dialogAttachment != nil {
 		_ = s.dialogAttachment.Close()
 		s.dialogAttachment = nil
@@ -256,7 +300,7 @@ func incomingInviteKey(msg sip.Message) string {
 	if method == "" {
 		return ""
 	}
-	if method == "ACK" {
+	if method == "ACK" || method == "CANCEL" {
 		method = "INVITE"
 	}
 
@@ -273,6 +317,9 @@ func incomingInviteKey(msg sip.Message) string {
 	requestURI := strings.TrimSpace(sip.RequestURI(msg))
 	callID := strings.TrimSpace(msg.Header("Call-ID"))
 	cseq := strings.TrimSpace(msg.Header("CSeq"))
+	if number := sip.CSeqNumber(cseq); number > 0 && (strings.EqualFold(sip.CSeqMethod(cseq), "ACK") || strings.EqualFold(sip.CSeqMethod(cseq), "CANCEL")) {
+		cseq = fmt.Sprintf("%d INVITE", number)
+	}
 	fromTag := strings.TrimSpace(sip.HeaderTag(msg.Header("From")))
 	toTag := strings.TrimSpace(sip.HeaderTag(msg.Header("To")))
 	if requestURI == "" || via == "" || callID == "" || cseq == "" || fromTag == "" {

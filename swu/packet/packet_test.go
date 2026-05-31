@@ -3,6 +3,8 @@ package packet
 import (
 	"net"
 	"testing"
+
+	"github.com/damonto/vowifi-go/swu/esp"
 )
 
 func TestIPPacketRoundTrip(t *testing.T) {
@@ -13,7 +15,7 @@ func TestIPPacketRoundTrip(t *testing.T) {
 		{
 			name: "ipv4",
 			packet: IPPacket{
-				Version:  4,
+				Version:  IPVersion4,
 				Protocol: ProtocolUDP,
 				SrcIP:    net.IPv4(10, 0, 0, 1),
 				DstIP:    net.IPv4(10, 0, 0, 2),
@@ -23,7 +25,7 @@ func TestIPPacketRoundTrip(t *testing.T) {
 		{
 			name: "ipv6",
 			packet: IPPacket{
-				Version:  6,
+				Version:  IPVersion6,
 				Protocol: ProtocolTCP,
 				SrcIP:    net.ParseIP("2001:db8::1"),
 				DstIP:    net.ParseIP("2001:db8::2"),
@@ -90,6 +92,27 @@ func TestInnerPacketRoundTrip(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "esp opaque",
+			packet: InnerPacket{
+				IP: IPPacket{
+					Version: IPVersion4,
+					SrcIP:   net.IPv4(10, 0, 0, 1),
+					DstIP:   net.IPv4(10, 0, 0, 2),
+				},
+				ESP: &esp.ESPPacket{
+					SPI:      0x01020304,
+					Sequence: 0x05060708,
+					Payload:  []byte{0xaa, 0xbb},
+				},
+			},
+			check: func(t *testing.T, got InnerPacket) {
+				t.Helper()
+				if got.ESP == nil || got.ESP.SPI != 0x01020304 || got.ESP.Sequence != 0x05060708 || string(got.ESP.Payload) != string([]byte{0xaa, 0xbb}) {
+					t.Fatalf("ESP = %+v", got.ESP)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -131,6 +154,17 @@ func TestDecodePayload(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:    "esp dispatch keeps opaque payload",
+			proto:   ProtocolESP,
+			payload: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xaa},
+			check: func(t *testing.T, pkt InnerPacket) {
+				t.Helper()
+				if pkt.ESP == nil || pkt.ESP.SPI != 0x01020304 || pkt.ESP.Sequence != 0x05060708 || string(pkt.ESP.Payload) != string([]byte{0xaa}) {
+					t.Fatalf("ESP = %+v", pkt.ESP)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -139,6 +173,24 @@ func TestDecodePayload(t *testing.T) {
 				t.Fatalf("DecodePayload() error = %v", err)
 			}
 			tt.check(t, pkt)
+		})
+	}
+}
+
+func TestDecodePayloadRejectsShortESP(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "empty"},
+		{name: "short header", payload: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := DecodePayload(ProtocolESP, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), tt.payload)
+			if err == nil {
+				t.Fatal("DecodePayload() error = nil, want short ESP error")
+			}
 		})
 	}
 }

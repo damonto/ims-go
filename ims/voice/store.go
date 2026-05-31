@@ -66,7 +66,7 @@ func (s *Service) lookupCall(callID string) *Call {
 }
 
 func (s *Service) storeIncoming(msg sip.Message, call *Call) {
-	key := incomingInviteKey(msg)
+	key := incomingInviteKey(msg, "INVITE")
 	if key == "" {
 		return
 	}
@@ -76,7 +76,11 @@ func (s *Service) storeIncoming(msg sip.Message, call *Call) {
 }
 
 func (s *Service) lookupIncoming(msg sip.Message) *Call {
-	key := incomingInviteKey(msg)
+	method := sip.CSeqMethod(msg.Header("CSeq"))
+	if strings.EqualFold(method, "CANCEL") {
+		method = "INVITE"
+	}
+	key := incomingInviteKey(msg, method)
 	if key == "" {
 		return nil
 	}

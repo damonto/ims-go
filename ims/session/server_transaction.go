@@ -29,8 +29,23 @@ type serverTransaction struct {
 	mu            sync.Mutex
 	lastResponse  sip.Message
 	finalStatus   int
+	tryingTimer   *time.Timer
 	lifetimeTimer *time.Timer
+	retryTimer    *time.Timer
+	retryDelay    time.Duration
+	state         serverTransactionState
 }
+
+type serverTransactionState uint8
+
+const (
+	serverTransactionProceeding serverTransactionState = iota
+	serverTransactionCompleted
+	serverTransactionConfirmed
+	serverTransactionTerminated
+)
+
+const inviteTryingDelay = 200 * time.Millisecond
 
 func newServerTransaction(s *Session, req Request) *serverTransaction {
 	msg := cloneSIPMessage(req.Message)
@@ -64,16 +79,16 @@ func (s *Session) processServerTransaction(ctx context.Context, req Request) (bo
 			return false, nil
 		}
 		if tx.finalResponseCode() >= 300 {
-			tx.terminate()
+			tx.confirmInviteErrorACK()
 			return true, nil
 		}
 		return false, nil
 	case "CANCEL":
 		tx := s.matchCanceledTransaction(req.Message)
 		if tx == nil {
-			return true, s.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+			return true, s.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
 		}
-		if err := s.WriteStatus(ctx, req, 200, "OK"); err != nil {
+		if err := s.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 			return true, err
 		}
 		if err := tx.handleCancel(ctx); err != nil {
@@ -91,24 +106,31 @@ func (s *Session) processServerTransaction(ctx context.Context, req Request) (bo
 }
 
 func (s *Session) registerServerTransaction(tx *serverTransaction) {
-	if tx == nil || tx.key == "" {
+	if tx.key == "" {
 		return
 	}
+	registered := false
 	s.mu.Lock()
 	if !s.closed {
 		s.serverTxs[tx.key] = tx
+		s.notifyTransactionsChangedLocked()
+		registered = true
 	}
 	s.mu.Unlock()
+	if registered {
+		tx.startInviteTryingTimer()
+	}
 }
 
 func (s *Session) unregisterServerTransaction(tx *serverTransaction) {
-	if tx == nil || tx.key == "" {
+	if tx.key == "" {
 		return
 	}
-	tx.stopLifetimeTimer()
+	tx.markTerminated()
 	s.mu.Lock()
 	if current, ok := s.serverTxs[tx.key]; ok && current == tx {
 		delete(s.serverTxs, tx.key)
+		s.notifyTransactionsChangedLocked()
 	}
 	s.mu.Unlock()
 }
@@ -120,9 +142,10 @@ func (s *Session) clearServerTransactions() {
 		transactions = append(transactions, tx)
 	}
 	s.serverTxs = make(map[string]*serverTransaction)
+	s.notifyTransactionsChangedLocked()
 	s.mu.Unlock()
 	for _, tx := range transactions {
-		tx.stopLifetimeTimer()
+		tx.markTerminated()
 	}
 }
 
@@ -176,16 +199,37 @@ func (s *Session) recordServerTransactionResponse(req Request, resp sip.Message)
 
 func (tx *serverTransaction) recordResponse(resp sip.Message) {
 	tx.mu.Lock()
+	if tx.state != serverTransactionProceeding {
+		tx.mu.Unlock()
+		return
+	}
+	tryingTimer := tx.tryingTimer
+	tx.tryingTimer = nil
 	tx.lastResponse = cloneSIPMessage(resp)
 	tx.finalStatus = resp.StatusCode()
 	final := tx.finalStatus >= 200
 	reliable := tx.reliable
+	method := tx.method
+	status := tx.finalStatus
+	timers := tx.session.cfg.TransactionTimers
+	if final && method == "INVITE" && status >= 300 {
+		tx.state = serverTransactionCompleted
+		if !reliable {
+			tx.retryDelay = timers.T1
+			tx.retryTimer = time.AfterFunc(tx.retryDelay, tx.retransmitInviteFinal)
+		}
+		tx.startLifetimeTimerLocked(timers.TH)
+	}
 	tx.mu.Unlock()
+	stopTimer(tryingTimer)
 	if !final {
 		return
 	}
-	if tx.method == "INVITE" && tx.finalStatus >= 300 {
-		tx.scheduleTermination(tx.session.cfg.TransactionTimers.TH)
+	if method == "INVITE" && status >= 300 {
+		return
+	}
+	if method == "INVITE" {
+		tx.terminate()
 		return
 	}
 	if reliable {
@@ -193,6 +237,37 @@ func (tx *serverTransaction) recordResponse(resp sip.Message) {
 		return
 	}
 	tx.scheduleTermination(tx.session.cfg.TransactionTimers.TJ)
+}
+
+func (tx *serverTransaction) startInviteTryingTimer() {
+	if tx.method != "INVITE" {
+		return
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.tryingTimer = time.AfterFunc(inviteTryingDelay, tx.sendAutomaticTrying)
+}
+
+func (tx *serverTransaction) sendAutomaticTrying() {
+	tx.mu.Lock()
+	if tx.state != serverTransactionProceeding || tx.lastResponse.StartLine != "" {
+		tx.tryingTimer = nil
+		tx.mu.Unlock()
+		return
+	}
+	req := cloneSIPMessage(tx.request)
+	transport := tx.transport
+	resp := sip.NewResponse(sipStatusTrying, "Trying")
+	resp.Headers = sip.ResponseHeaders(req, sipStatusTrying)
+	tx.session.applyResponseDecorator(&resp)
+	tx.lastResponse = cloneSIPMessage(resp)
+	tx.finalStatus = sipStatusTrying
+	tx.tryingTimer = nil
+	tx.mu.Unlock()
+
+	if err := tx.session.writeResponse(context.Background(), transport, req, resp); err != nil {
+		tx.session.logger.Warn("sending automatic invite trying response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "err", err)
+	}
 }
 
 func (tx *serverTransaction) retransmit(ctx context.Context) error {
@@ -217,8 +292,8 @@ func (tx *serverTransaction) handleCancel(ctx context.Context) error {
 	if final || method != "INVITE" {
 		return nil
 	}
-	resp := sip.NewResponse(487, "Request Terminated")
-	resp.Headers = sip.ResponseHeaders(req, 487)
+	resp := sip.NewResponse(sipStatusRequestTerminated, "Request Terminated")
+	resp.Headers = sip.ResponseHeaders(req, sipStatusRequestTerminated)
 	tx.session.applyResponseDecorator(&resp)
 	if err := tx.session.writeResponse(ctx, transport, req, resp); err != nil {
 		return err
@@ -237,6 +312,62 @@ func (tx *serverTransaction) terminate() {
 	tx.session.unregisterServerTransaction(tx)
 }
 
+func (tx *serverTransaction) confirmInviteErrorACK() {
+	tx.mu.Lock()
+	switch tx.state {
+	case serverTransactionCompleted:
+		stopTimer(tx.retryTimer)
+		tx.retryTimer = nil
+		tx.state = serverTransactionConfirmed
+		timeout := tx.session.cfg.TransactionTimers.T4
+		if tx.reliable {
+			timeout = 0
+		}
+		if timeout > 0 {
+			tx.startLifetimeTimerLocked(timeout)
+		}
+		tx.mu.Unlock()
+		if timeout <= 0 {
+			tx.terminate()
+		}
+	case serverTransactionConfirmed:
+		tx.mu.Unlock()
+	default:
+		tx.mu.Unlock()
+	}
+}
+
+func (tx *serverTransaction) retransmitInviteFinal() {
+	tx.mu.Lock()
+	if tx.state != serverTransactionCompleted {
+		tx.mu.Unlock()
+		return
+	}
+	resp := cloneSIPMessage(tx.lastResponse)
+	req := cloneSIPMessage(tx.request)
+	transport := tx.transport
+	timers := tx.session.cfg.TransactionTimers
+	tx.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), max(timers.T1, 250*time.Millisecond))
+	defer cancel()
+	if err := tx.session.writeResponse(ctx, transport, req, resp); err != nil {
+		tx.session.logger.Warn("retransmitting invite final response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "status", resp.StatusCode(), "err", err)
+	}
+
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.state != serverTransactionCompleted || tx.retryTimer == nil {
+		return
+	}
+	nextDelay := tx.retryDelay * 2
+	if nextDelay > timers.T2 {
+		nextDelay = timers.T2
+	}
+	tx.retryDelay = nextDelay
+	tx.retryTimer.Reset(nextDelay)
+}
+
 func (tx *serverTransaction) scheduleTermination(timeout time.Duration) {
 	if timeout <= 0 {
 		tx.terminate()
@@ -244,6 +375,10 @@ func (tx *serverTransaction) scheduleTermination(timeout time.Duration) {
 	}
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
+	tx.startLifetimeTimerLocked(timeout)
+}
+
+func (tx *serverTransaction) startLifetimeTimerLocked(timeout time.Duration) {
 	if tx.lifetimeTimer != nil {
 		tx.lifetimeTimer.Reset(timeout)
 		return
@@ -253,14 +388,19 @@ func (tx *serverTransaction) scheduleTermination(timeout time.Duration) {
 	})
 }
 
-func (tx *serverTransaction) stopLifetimeTimer() {
+func (tx *serverTransaction) markTerminated() {
 	tx.mu.Lock()
-	timer := tx.lifetimeTimer
+	tx.state = serverTransactionTerminated
+	tryingTimer := tx.tryingTimer
+	tx.tryingTimer = nil
+	lifetimeTimer := tx.lifetimeTimer
 	tx.lifetimeTimer = nil
+	retryTimer := tx.retryTimer
+	tx.retryTimer = nil
 	tx.mu.Unlock()
-	if timer != nil {
-		timer.Stop()
-	}
+	stopTimer(tryingTimer)
+	stopTimer(lifetimeTimer)
+	stopTimer(retryTimer)
 }
 
 func serverTransactionKey(msg sip.Message) string {
@@ -290,9 +430,6 @@ func serverTransactionKey(msg sip.Message) string {
 }
 
 func cancelMatchesServerTransaction(msg sip.Message, tx *serverTransaction) bool {
-	if tx == nil {
-		return false
-	}
 	via := strings.TrimSpace(msg.Header("Via"))
 	branch := strings.TrimSpace(sip.TopViaBranch(via))
 	if strings.HasPrefix(branch, "z9hG4bK") {
@@ -310,17 +447,26 @@ func cancelMatchesServerTransaction(msg sip.Message, tx *serverTransaction) bool
 }
 
 func ackMatchesServerTransaction(msg sip.Message, tx *serverTransaction) bool {
-	if tx == nil || tx.method != "INVITE" {
+	if tx.method != "INVITE" {
 		return false
 	}
 	via := strings.TrimSpace(msg.Header("Via"))
 	branch := strings.TrimSpace(sip.TopViaBranch(via))
-	if !strings.HasPrefix(branch, "z9hG4bK") {
-		return false
+	if strings.HasPrefix(branch, "z9hG4bK") {
+		return branch == tx.branch &&
+			strings.TrimSpace(sip.TopViaSentBy(via)) == tx.sentBy &&
+			strings.TrimSpace(msg.Header("Call-ID")) == tx.callID &&
+			sip.CSeqNumber(msg.Header("CSeq")) == tx.cseqNumber
 	}
-	return branch == tx.branch &&
-		strings.TrimSpace(sip.TopViaSentBy(via)) == tx.sentBy &&
+	tx.mu.Lock()
+	responseToTag := strings.TrimSpace(sip.HeaderTag(tx.lastResponse.Header("To")))
+	tx.mu.Unlock()
+	return responseToTag != "" &&
+		strings.TrimSpace(sip.RequestURI(msg)) == tx.requestURI &&
+		via == tx.topVia &&
 		strings.TrimSpace(msg.Header("Call-ID")) == tx.callID &&
+		strings.TrimSpace(sip.HeaderTag(msg.Header("From"))) == tx.fromTag &&
+		strings.TrimSpace(sip.HeaderTag(msg.Header("To"))) == responseToTag &&
 		sip.CSeqNumber(msg.Header("CSeq")) == tx.cseqNumber
 }
 

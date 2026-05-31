@@ -15,7 +15,13 @@ func buildIKEWire(request []byte, nat bool) []byte {
 	if !nat {
 		return request
 	}
-	return append([]byte{0x00, 0x00, 0x00, 0x00}, request...)
+	return prependNonESPMarker(request)
+}
+
+func prependNonESPMarker(packet []byte) []byte {
+	wire := make([]byte, 0, nonESPMarkerLen+len(packet))
+	wire = append(wire, nonESPMarker[:]...)
+	return append(wire, packet...)
 }
 
 func (s *Session) writeIKERequest(ctx context.Context, addr *net.UDPAddr, request []byte, nat bool, messageID uint32) error {
@@ -26,12 +32,8 @@ func (s *Session) writeIKERequest(ctx context.Context, addr *net.UDPAddr, reques
 	return nil
 }
 
-func (s *Session) awaitIKEAttempt(ctx context.Context, expected ikeResponseMatch, attempt int) ([]byte, *net.UDPAddr, error) {
-	return s.awaitIKEAttemptWithDelay(ctx, expected, attempt, ikeRetransmitDelay(attempt))
-}
-
-func (s *Session) awaitIKEAttemptWithDelay(ctx context.Context, expected ikeResponseMatch, attempt int, delay time.Duration) ([]byte, *net.UDPAddr, error) {
-	response, peer, err := s.readIKEMessage(ctx, expected, delay)
+func (s *Session) awaitIKEAttemptWithDelay(ctx context.Context, expected ikeResponseMatch, attempt int, delay time.Duration, udpEncap bool) ([]byte, *net.UDPAddr, error) {
+	response, peer, err := s.readIKEMessage(ctx, expected, delay, udpEncap)
 	if err == nil {
 		s.logger.Debug("received IKE message", "message_id", expected.messageID, "peer_addr", peer, "response_len", len(response))
 		return response, peer, nil
@@ -46,15 +48,11 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 	if err != nil {
 		return nil, nil, err
 	}
-	delays := s.cfg.IKERetransmitDelays
-	if len(delays) == 0 {
-		delays = defaultIKERetransmitDelays
-	}
-	for attempt, delay := range delays {
+	for attempt, delay := range s.ikeRetransmitDelays() {
 		if err := s.writeIKERequest(ctx, addr, request, nat, messageID); err != nil {
 			return nil, nil, err
 		}
-		response, peer, err := s.awaitIKEAttemptWithDelay(ctx, expected, attempt, delay)
+		response, peer, err := s.awaitIKEAttemptWithDelay(ctx, expected, attempt, delay, nat)
 		if err == nil {
 			return response, peer, nil
 		}
@@ -65,50 +63,28 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 	return nil, nil, fmt.Errorf("connecting swu session: waiting message %d: timeout", messageID)
 }
 
-const (
-	informationalRetransmitAttempts = 8
-)
-
 var defaultIKERetransmitDelays = []time.Duration{
 	500 * time.Millisecond,
 	1 * time.Second,
 	2 * time.Second,
 	4 * time.Second,
 	8 * time.Second,
-	8 * time.Second,
+	16 * time.Second,
+	32 * time.Second,
+	64 * time.Second,
+	128 * time.Second,
+	256 * time.Second,
+	512 * time.Second,
+	1024 * time.Second,
 }
 
-func ikeRetransmitDelay(attempt int) time.Duration {
-	if attempt < 0 {
-		attempt = 0
-	}
-	if attempt >= len(defaultIKERetransmitDelays) {
-		return defaultIKERetransmitDelays[len(defaultIKERetransmitDelays)-1]
-	}
-	return defaultIKERetransmitDelays[attempt]
+func (s *Session) ikeRetransmitDelays() []time.Duration {
+	return s.cfg.IKERetransmitDelays
 }
 
-func informationalRetransmitDelay(attempt int) time.Duration {
-	return retransmitDelay(attempt, 32*time.Second)
-}
-
-func retransmitDelay(attempt int, maxDelay time.Duration) time.Duration {
-	if attempt < 0 {
-		attempt = 0
-	}
-	delay := 500 * time.Millisecond
-	for range attempt {
-		delay *= 2
-		if delay >= maxDelay {
-			return maxDelay
-		}
-	}
-	return delay
-}
-
-func (s *Session) readIKEMessage(ctx context.Context, expected ikeResponseMatch, timeout time.Duration) ([]byte, *net.UDPAddr, error) {
+func (s *Session) readIKEMessage(ctx context.Context, expected ikeResponseMatch, timeout time.Duration, udpEncap bool) ([]byte, *net.UDPAddr, error) {
 	deadline := time.Now().Add(timeout)
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, maxUDPPacketSize)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -116,7 +92,7 @@ func (s *Session) readIKEMessage(ctx context.Context, expected ikeResponseMatch,
 		if ikeReadTimedOut(deadline) {
 			return nil, nil, handshake.ErrIKETimeout
 		}
-		packet, udpAddr, err := s.readIKECandidate(deadline, buf)
+		packet, udpAddr, err := s.readIKECandidate(deadline, buf, udpEncap)
 		if err != nil {
 			if errors.Is(err, handshake.ErrIKETimeout) {
 				continue
@@ -135,14 +111,14 @@ func ikeReadTimedOut(deadline time.Time) bool {
 }
 
 func nextIKEReadDeadline(deadline time.Time) time.Time {
-	readDeadline := time.Now().Add(250 * time.Millisecond)
+	readDeadline := time.Now().Add(outerReadPollDelay)
 	if readDeadline.After(deadline) {
 		return deadline
 	}
 	return readDeadline
 }
 
-func (s *Session) readIKECandidate(deadline time.Time, buf []byte) ([]byte, *net.UDPAddr, error) {
+func (s *Session) readIKECandidate(deadline time.Time, buf []byte, udpEncap bool) ([]byte, *net.UDPAddr, error) {
 	if err := s.conn.SetReadDeadline(nextIKEReadDeadline(deadline)); err != nil {
 		return nil, nil, fmt.Errorf("connecting swu session: setting read deadline: %w", err)
 	}
@@ -153,15 +129,15 @@ func (s *Session) readIKECandidate(deadline time.Time, buf []byte) ([]byte, *net
 		}
 		return nil, nil, fmt.Errorf("connecting swu session: reading ike response: %w", err)
 	}
-	packet := normalizeIKEPacket(buf[:n])
+	packet := normalizeIKEPacket(buf[:n], udpEncap)
 	udpAddr, _ := addr.(*net.UDPAddr)
 	return packet, cloneUDPAddr(udpAddr), nil
 }
 
-func normalizeIKEPacket(packet []byte) []byte {
+func normalizeIKEPacket(packet []byte, udpEncap bool) []byte {
 	packet = append([]byte(nil), packet...)
-	if hasNonESPMarker(packet) {
-		return packet[4:]
+	if udpEncap && hasNonESPMarker(packet) {
+		return packet[nonESPMarkerLen:]
 	}
 	return packet
 }
@@ -235,8 +211,48 @@ func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) er
 	return nil
 }
 
+func (s *Session) writeProtectedWire(ctx context.Context, action string, crypto *ikeCrypto, wire []byte, peer net.Addr, skipIKESAByteAccounting bool) error {
+	protectedBytes, err := currentIKEProtectedBytes(crypto, wire, skipIKESAByteAccounting)
+	if err != nil {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	if protectedBytes != 0 {
+		s.mu.RLock()
+		expired := s.ikeSAByteExpiredLocked(protectedBytes)
+		s.mu.RUnlock()
+		if expired {
+			s.failSecurityAssociations(errIKESAExpired)
+			return fmt.Errorf("%s: %w", action, errIKESAExpired)
+		}
+	}
+	if err := s.writeOuter(ctx, wire, peer); err != nil {
+		return fmt.Errorf("%s: writing packet: %w", action, err)
+	}
+	now := time.Now()
+	if s.addIKESAOutboundBytes(protectedBytes, now) {
+		s.failSecurityAssociations(errIKESAExpired)
+	}
+	s.markProtectedTx(now)
+	return nil
+}
+
+func currentIKEProtectedBytes(crypto *ikeCrypto, wire []byte, skipIKESAByteAccounting bool) (uint64, error) {
+	if skipIKESAByteAccounting {
+		return 0, nil
+	}
+	return crypto.ProtectedBytes(wire)
+}
+
+func (s *Session) acceptIKEProtectedBytes(crypto *ikeCrypto, wire []byte, now time.Time) (ikeAcceptResult, error) {
+	protectedBytes, err := currentIKEProtectedBytes(crypto, wire, false)
+	if err != nil {
+		return ikeAcceptResult{}, err
+	}
+	return s.acceptIKESAInboundBytes(protectedBytes, now), nil
+}
+
 func (s *Session) readOuterClosed() error {
-	if s.closeCtx != nil && s.closeCtx.Err() != nil {
+	if s.closeCtx.Err() != nil {
 		return errors.New("reading packet: session is closed")
 	}
 	return nil
@@ -254,7 +270,7 @@ func (s *Session) readOuterCandidate(buf []byte) ([]byte, net.Addr, error) {
 }
 
 func (s *Session) readOuterPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, maxUDPPacketSize)
 	for {
 		if err := s.readOuterClosed(); err != nil {
 			return nil, nil, err

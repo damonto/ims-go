@@ -11,12 +11,6 @@ import (
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
-	if sess == nil {
-		return nil, errors.New("creating ussd service: session is nil")
-	}
-	if reg == nil {
-		return nil, errors.New("creating ussd service: registration service is nil")
-	}
 	cfg.Language = strings.TrimSpace(cfg.Language)
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	s := &Service{
@@ -38,6 +32,9 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 }
 
 func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
+	if err := s.ensureNoActiveSession("starting USSD"); err != nil {
+		return nil, err
+	}
 	start, invite, err := s.newStart(code)
 	if err != nil {
 		return nil, err
@@ -49,9 +46,9 @@ func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 		}
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
-	if status := resp.StatusCode(); status == 404 {
+	if status := resp.StatusCode(); status == sipStatusNotFound {
 		return nil, errors.New("starting USSD: missing network support")
-	} else if status != 200 {
+	} else if status != sipStatusOK {
 		return nil, fmt.Errorf("starting USSD: unexpected response: %w", sip.NewResponseError(resp))
 	}
 	return s.startSession(ctx, start, invite, resp)
@@ -90,6 +87,35 @@ func (s *Service) CloseContext(ctx context.Context) error {
 	return err
 }
 
+// Abort tears down local USSD state after transport loss without sending BYE.
+func (s *Service) Abort() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	sessions := make([]*Session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.sessions = make(map[string]*Session)
+	s.incomingIndex = make(map[string]string)
+	s.mu.Unlock()
+
+	if s.cleanupCancel != nil {
+		s.cleanupCancel()
+	}
+	if s.attachment != nil {
+		_ = s.attachment.Close()
+	}
+
+	for _, ussdSession := range sessions {
+		ussdSession.finish(false)
+	}
+	s.bgWG.Wait()
+}
+
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
 	switch strings.ToUpper(req.Message.Method()) {
 	case "INVITE":
@@ -103,13 +129,20 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 			return false, nil
 		}
 		return true, ussdSession.handleRequest(ctx, req)
+	case "CANCEL":
+		ussdSession := s.lookupIncomingInviteSession(req.Message)
+		if ussdSession == nil {
+			return false, nil
+		}
+		ussdSession.finish(false)
+		return true, nil
 	case "INFO", "BYE":
 		ussdSession := s.lookupSessionForMessage(req.Message)
 		if ussdSession != nil {
 			return true, ussdSession.handleRequest(ctx, req)
 		}
 		if looksLikeDialogMessage(req.Message) {
-			return true, s.sess.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+			return true, s.sess.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
 		}
 		return false, nil
 	default:
@@ -122,4 +155,11 @@ func (s *Service) HandleError(err error) {
 		return
 	}
 	s.logger.Debug("session error", "err", err)
+}
+
+func (s *Service) writeUnsupportedMediaType(ctx context.Context, req session.Request) error {
+	resp := sip.NewResponse(sipStatusUnsupportedMediaType, "Unsupported Media Type")
+	resp.Headers = sip.ResponseHeaders(req.Message, sipStatusUnsupportedMediaType)
+	resp.Headers.Add("Accept", ussdAcceptHeader)
+	return s.sess.WriteResponse(ctx, req, resp)
 }

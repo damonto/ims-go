@@ -35,38 +35,117 @@ func mediaOfferFromSDP(offer sdpOffer) MediaOffer {
 	return MediaOffer{Codecs: codecs, PTime: offer.PTime}
 }
 
-func callAcceptHeader(includePIDF bool) string {
+func callAcceptHeader(includePIDF bool, includeCurrentLocation bool) string {
+	types := []string{"application/sdp"}
 	if includePIDF {
-		return "application/sdp, application/pidf+xml, multipart/mixed"
+		types = append(types, "application/pidf+xml", "multipart/mixed")
 	}
-	return "application/sdp"
+	if includeCurrentLocation {
+		types = append(types, currentLocationDiscoveryContentType)
+	}
+	return strings.Join(types, ", ")
 }
 
 func addInviteOKSessionTimer(resp *sip.Message, invite sip.Message, cfg Config) {
-	if !cfg.SessionTimer || !tokenHeaderContains(invite, "Supported", "timer") {
+	if !cfg.SessionTimer {
 		return
+	}
+	uacSupportsTimer := tokenHeaderContains(invite, "Supported", sessionTimerOption)
+	value := strings.TrimSpace(invite.Header("Session-Expires"))
+	if value == "" {
+		if !uacSupportsTimer {
+			return
+		}
+		seconds := sessionExpiresSeconds(cfg, invite)
+		resp.Headers.Set("Session-Expires", sessionExpiresHeader{seconds: seconds, refresher: configuredSessionRefresher(cfg)}.String())
+		addTokenHeader(resp, "Require", sessionTimerOption)
+		return
+	}
+
+	sessionExpires, ok := parseSessionExpiresHeader(value)
+	if !ok {
+		return
+	}
+	switch {
+	case sessionExpires.refresher == "":
+		if uacSupportsTimer {
+			sessionExpires.refresher = configuredSessionRefresher(cfg)
+		} else {
+			sessionExpires.refresher = sessionRefresherUAS
+		}
+	case !uacSupportsTimer && sessionExpires.refresher == sessionRefresherUAC:
+		sessionExpires.refresher = sessionRefresherUAS
+	}
+	resp.Headers.Set("Session-Expires", sessionExpires.String())
+	if sessionExpires.refresher == sessionRefresherUAC || (uacSupportsTimer && sessionExpires.refresher == sessionRefresherUAS) {
+		addTokenHeader(resp, "Require", sessionTimerOption)
+	}
+}
+
+func incomingSessionTimerTooSmall(invite sip.Message, cfg Config) (int, bool) {
+	if !cfg.SessionTimer {
+		return 0, false
 	}
 	sessionExpires := strings.TrimSpace(invite.Header("Session-Expires"))
 	if sessionExpires == "" {
-		seconds := sessionExpiresSeconds()
-		if minSE, ok := parseSessionSeconds(invite.Header("Min-SE")); ok && minSE > seconds {
-			seconds = minSE
-		}
-		resp.Headers.Set("Session-Expires", fmt.Sprintf("%d;refresher=uac", seconds))
-		return
+		return 0, false
 	}
-	if sessionExpiresHasRefresher(sessionExpires) {
-		resp.Headers.Set("Session-Expires", sessionExpires)
-		return
+	parsed, ok := parseSessionExpiresHeader(sessionExpires)
+	if !ok {
+		return minSessionExpiresSeconds(cfg, invite), true
 	}
-	resp.Headers.Set("Session-Expires", strings.TrimSpace(sessionExpires)+";refresher=uac")
+	minSE := minSessionExpiresSeconds(cfg, invite)
+	return minSE, parsed.seconds < minSE
+}
+
+func invalidSessionTimerRefresher(msg sip.Message) bool {
+	value := strings.TrimSpace(msg.Header("Session-Expires"))
+	if value == "" || tokenHeaderContains(msg, "Supported", sessionTimerOption) {
+		return false
+	}
+	sessionExpires, ok := parseSessionExpiresHeader(value)
+	return ok && sessionExpires.refresher != ""
+}
+
+func (s *Service) unsupportedRequiredTimer(msg sip.Message) bool {
+	return !s.cfg.SessionTimer && tokenHeaderContains(msg, "Require", sessionTimerOption)
+}
+
+func (s *Service) unsupportedRequiredPrecondition(msg sip.Message) bool {
+	return !s.cfg.Preconditions && tokenHeaderContains(msg, "Require", preconditionOption)
+}
+
+func minSessionExpiresSeconds(cfg Config, msg sip.Message) int {
+	minSE := durationSeconds(defaultMinSessionExpires)
+	if configured := durationSeconds(cfg.MinSessionExpires); configured > minSE {
+		minSE = configured
+	}
+	if requested, ok := parseMinSessionSeconds(msg.Header("Min-SE")); ok && requested > minSE {
+		minSE = requested
+	}
+	return minSE
 }
 
 func addInviteSessionTimer(invite *sip.Message, cfg Config) {
 	if !cfg.SessionTimer {
 		return
 	}
-	addTokenHeader(invite, "Supported", "timer")
+	addTokenHeader(invite, "Supported", sessionTimerOption)
+	if minSE := minSessionExpiresSeconds(cfg, *invite); minSE > durationSeconds(defaultMinSessionExpires) {
+		invite.Headers.Set("Min-SE", strconv.Itoa(minSE))
+	}
+	if cfg.SessionExpires > 0 {
+		invite.Headers.Set("Session-Expires", sessionExpiresRequestHeader(cfg, *invite).String())
+	}
+}
+
+func addInviteFeatureTags(invite *sip.Message, cfg Config) {
+	if cfg.ReliableProvisional || cfg.Preconditions {
+		addTokenHeader(invite, "Supported", reliableProvisionalOption)
+	}
+	if cfg.Preconditions {
+		addTokenHeader(invite, "Supported", preconditionOption)
+	}
 }
 
 func addTokenHeader(msg *sip.Message, name string, token string) {
@@ -81,31 +160,165 @@ func addTokenHeader(msg *sip.Message, name string, token string) {
 	msg.Headers.Set(name, current+","+token)
 }
 
-func sessionExpiresSeconds() int {
-	return durationSeconds(defaultSessionExpires)
+func sessionExpiresSeconds(cfg Config, msg sip.Message) int {
+	seconds := durationSeconds(defaultSessionExpires)
+	if cfg.SessionExpires > 0 {
+		seconds = durationSeconds(cfg.SessionExpires)
+	}
+	return max(seconds, minSessionExpiresSeconds(cfg, msg))
+}
+
+func sessionExpiresRequestHeader(cfg Config, msg sip.Message) sessionExpiresHeader {
+	return sessionExpiresHeader{
+		seconds:   sessionExpiresSeconds(cfg, msg),
+		refresher: configuredRequestSessionRefresher(cfg),
+	}
+}
+
+func configuredRequestSessionRefresher(cfg Config) string {
+	refresher := strings.ToLower(strings.TrimSpace(cfg.SessionRefresher))
+	switch refresher {
+	case sessionRefresherUAC, sessionRefresherUAS:
+		return refresher
+	default:
+		return ""
+	}
+}
+
+func configuredSessionRefresher(cfg Config) string {
+	refresher := strings.ToLower(strings.TrimSpace(cfg.SessionRefresher))
+	if refresher == sessionRefresherUAS {
+		return sessionRefresherUAS
+	}
+	return sessionRefresherUAC
 }
 
 func durationSeconds(d time.Duration) int {
 	return int(d / time.Second)
 }
 
-func parseSessionSeconds(value string) (int, bool) {
-	value, _, _ = strings.Cut(strings.TrimSpace(value), ";")
-	seconds, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || seconds <= 0 {
+func parseMinSessionSeconds(value string) (int, bool) {
+	var h minSEHeader
+	if err := h.UnmarshalText([]byte(value)); err != nil {
 		return 0, false
 	}
-	return seconds, true
+	return h.seconds, true
 }
 
-func sessionExpiresHasRefresher(value string) bool {
-	for _, part := range strings.Split(value, ";")[1:] {
-		name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-		if strings.EqualFold(name, "refresher") {
-			return true
+const (
+	sessionTimerOption   = "timer"
+	preconditionOption   = "precondition"
+	sessionRefresherNone = "none"
+	sessionRefresherUAC  = "uac"
+	sessionRefresherUAS  = "uas"
+)
+
+type minSEHeader struct {
+	seconds int
+	params  []string
+}
+
+func (h minSEHeader) MarshalText() ([]byte, error) {
+	if h.seconds < durationSeconds(defaultMinSessionExpires) {
+		return nil, fmt.Errorf("building Min-SE: invalid delta %d", h.seconds)
+	}
+	parts := make([]string, 0, len(h.params)+1)
+	parts = append(parts, strconv.Itoa(h.seconds))
+	parts = append(parts, h.params...)
+	return []byte(strings.Join(parts, ";")), nil
+}
+
+func (h *minSEHeader) UnmarshalText(text []byte) error {
+	value := strings.TrimSpace(string(text))
+	if value == "" {
+		return errors.New("parsing Min-SE: empty value")
+	}
+	parts := strings.Split(value, ";")
+	seconds, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || seconds < durationSeconds(defaultMinSessionExpires) {
+		return fmt.Errorf("parsing Min-SE: invalid delta %q", parts[0])
+	}
+	params := make([]string, 0, len(parts)-1)
+	for _, part := range parts[1:] {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			params = append(params, part)
 		}
 	}
-	return false
+	*h = minSEHeader{seconds: seconds, params: params}
+	return nil
+}
+
+type sessionExpiresHeader struct {
+	seconds   int
+	refresher string
+	params    []string
+}
+
+func parseSessionExpiresHeader(value string) (sessionExpiresHeader, bool) {
+	var h sessionExpiresHeader
+	if err := h.UnmarshalText([]byte(value)); err != nil {
+		return sessionExpiresHeader{}, false
+	}
+	return h, true
+}
+
+func (h sessionExpiresHeader) String() string {
+	text, err := h.MarshalText()
+	if err != nil {
+		return ""
+	}
+	return string(text)
+}
+
+func (h sessionExpiresHeader) MarshalText() ([]byte, error) {
+	if h.seconds <= 0 {
+		return nil, fmt.Errorf("building Session-Expires: invalid delta %d", h.seconds)
+	}
+	if h.refresher != "" && h.refresher != sessionRefresherUAC && h.refresher != sessionRefresherUAS {
+		return nil, fmt.Errorf("building Session-Expires: invalid refresher %q", h.refresher)
+	}
+	parts := make([]string, 0, len(h.params)+2)
+	parts = append(parts, strconv.Itoa(h.seconds))
+	parts = append(parts, h.params...)
+	if h.refresher != "" {
+		parts = append(parts, "refresher="+h.refresher)
+	}
+	return []byte(strings.Join(parts, ";")), nil
+}
+
+func (h *sessionExpiresHeader) UnmarshalText(text []byte) error {
+	value := strings.TrimSpace(string(text))
+	if value == "" {
+		return errors.New("parsing Session-Expires: empty value")
+	}
+	parts := strings.Split(value, ";")
+	seconds, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || seconds <= 0 {
+		return fmt.Errorf("parsing Session-Expires: invalid delta %q", parts[0])
+	}
+	refresher := ""
+	params := make([]string, 0, len(parts)-1)
+	for _, part := range parts[1:] {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, paramValue, ok := strings.Cut(part, "=")
+		if !strings.EqualFold(strings.TrimSpace(name), "refresher") {
+			params = append(params, part)
+			continue
+		}
+		if !ok {
+			return fmt.Errorf("parsing Session-Expires: invalid refresher %q", part)
+		}
+		refresher = strings.ToLower(strings.Trim(strings.TrimSpace(paramValue), `"`))
+		if refresher != sessionRefresherUAC && refresher != sessionRefresherUAS {
+			return fmt.Errorf("parsing Session-Expires: invalid refresher %q", paramValue)
+		}
+	}
+	*h = sessionExpiresHeader{seconds: seconds, refresher: refresher, params: params}
+	return nil
 }
 
 func setInviteBody(msg *sip.Message, cfg Config, localURI string, includePIDF bool, sdp []byte) error {
@@ -189,6 +402,15 @@ func includePIDFForInvite(cfg Config, req DialRequest) bool {
 	return slices.Contains(cfg.PIDFShortCodes, normalizeDialString(req.To))
 }
 
+func includeCurrentLocationDiscoveryForInvite(cfg Config, req DialRequest) bool {
+	return req.Emergency && slices.Contains(cfg.GeolocationPIDFInvite, GeolocationPIDFEmergencyWiFi)
+}
+
+func isEmergencyServiceURN(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == emergencyServiceURNSOS || strings.HasPrefix(value, emergencyServiceURNSOS+".")
+}
+
 func pidfEntityURI(cfg Config, state registration.State) string {
 	if cfg.UseTelURIForPIDFXML {
 		if uri := strings.TrimSpace(state.TelPublicID); uri != "" {
@@ -230,10 +452,11 @@ func sdpBody(msg sip.Message) ([]byte, bool) {
 			return nil, false
 		}
 		reader := multipart.NewReader(bytes.NewReader(msg.Body), boundary)
+		var sdp []byte
 		for {
 			part, err := reader.NextPart()
 			if errors.Is(err, io.EOF) {
-				return nil, false
+				return sdp, len(sdp) > 0
 			}
 			if err != nil {
 				return nil, false
@@ -243,20 +466,27 @@ func sdpBody(msg sip.Message) ([]byte, bool) {
 				continue
 			}
 			body, err := io.ReadAll(part)
-			return body, err == nil && len(body) > 0
+			if err != nil || len(body) == 0 {
+				return nil, false
+			}
+			if len(sdp) > 0 {
+				return nil, false
+			}
+			sdp = body
 		}
 	default:
 		return nil, false
 	}
 }
 
-func incomingInviteKey(msg sip.Message) string {
+func incomingInviteKey(msg sip.Message, method string) string {
 	callID := strings.TrimSpace(msg.Header("Call-ID"))
-	cseq := strings.TrimSpace(msg.Header("CSeq"))
-	if callID == "" || cseq == "" {
+	cseq := sip.CSeqNumber(msg.Header("CSeq"))
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if callID == "" || cseq <= 0 || method == "" {
 		return ""
 	}
-	return callID + "|" + cseq
+	return fmt.Sprintf("%s|%d %s", callID, cseq, method)
 }
 
 func contactValue(state registration.State) string {
@@ -266,9 +496,6 @@ func contactValue(state registration.State) string {
 		`+g.3gpp.mid-call`,
 		`+g.3gpp.ps2cs-srvcc-orig-pre-alerting`,
 		`+g.3gpp.srvcc-alerting`,
-	}
-	if state.IMEI != "" {
-		params = append(params, fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, state.IMEI))
 	}
 	return fmt.Sprintf("<%s>;%s", sipContactURI(state.ContactHost, state.MessagePort), strings.Join(params, ";"))
 }

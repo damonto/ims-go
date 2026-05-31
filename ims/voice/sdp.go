@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"encoding"
 	"errors"
 	"fmt"
 	"net"
@@ -8,6 +9,10 @@ import (
 	"strings"
 	"time"
 )
+
+var _ encoding.TextUnmarshaler = (*sdpOffer)(nil)
+var _ encoding.TextMarshaler = sdpConnectionLine{}
+var _ encoding.TextUnmarshaler = (*sdpConnectionLine)(nil)
 
 type MediaOffer struct {
 	Codecs []AudioCodec
@@ -25,12 +30,21 @@ type NegotiatedMedia struct {
 	PTime           time.Duration
 	RemoteIP        net.IP
 	RemotePort      int
+	RemoteRTCPIP    net.IP
+	RemoteRTCPPort  int
+	RTCPMux         bool
 	RTCPDisabled    bool
 }
 
 type sdpOffer struct {
 	RemoteIP              net.IP
 	RemotePort            int
+	RemoteRTCPIP          net.IP
+	RemoteRTCPPort        int
+	RTCPMux               bool
+	Preconditions         bool
+	LocalQoSStatus        string
+	RemoteQoSConfirmation bool
 	Profile               string
 	Payloads              []int
 	Codecs                map[int]AudioCodecConfig
@@ -46,9 +60,28 @@ type sdpMediaLine struct {
 	Formats  []string
 }
 
+type sdpAudioLine struct {
+	Port     int
+	Protocol string
+	Payloads []int
+}
+
+type sdpConnectionLine struct {
+	Network     string
+	AddressType string
+	IP          net.IP
+}
+
 const (
 	rtcpSenderBandwidth   = 0
 	rtcpReceiverBandwidth = 2500
+
+	amrModeChangeCapability = 2
+	amrMaxRedMillis         = 220
+
+	sdpNetworkIN      = "IN"
+	sdpAddressTypeIP4 = "IP4"
+	sdpAddressTypeIP6 = "IP6"
 )
 
 func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) ([]byte, NegotiatedMedia, error) {
@@ -92,6 +125,9 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 		fmt.Fprintf(&b, "a=maxptime:%d\r\n", durationMillis(cfg.MaxPTime))
 	}
 	fmt.Fprintf(&b, "a=sendrecv\r\n")
+	if cfg.Preconditions {
+		appendQoSPreconditions(&b, qosStatusNone, false)
+	}
 	media := NegotiatedMedia{
 		Codec:       firstSpeechCodec(codecs).Name,
 		PayloadType: firstSpeechCodec(codecs).PayloadTypes[0],
@@ -155,11 +191,76 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 	if cfg.MaxPTime > 0 {
 		fmt.Fprintf(&b, "a=maxptime:%d\r\n", durationMillis(cfg.MaxPTime))
 	}
+	if remote.RTCPMux {
+		fmt.Fprintf(&b, "a=rtcp-mux\r\n")
+	}
 	fmt.Fprintf(&b, "a=sendrecv\r\n")
+	if cfg.Preconditions && remote.Preconditions {
+		appendQoSPreconditions(&b, qosStatusNone, remote.LocalQoSStatus != qosStatusSendRecv)
+	}
 	appendRejectedMedia(&b, remote.UnsupportedMedia)
 	media := negotiatedMedia(remote, selected, ptime, dtmf, hasDTMF)
 	media.RTCPDisabled = rtcpBandwidthDisabled(rs, rr)
 	return []byte(b.String()), media, nil
+}
+
+func buildSDPPreconditionUpdate(cfg Config, localIP net.IP, localPort int, answer sdpOffer, current NegotiatedMedia) ([]byte, error) {
+	selected, ok := chooseCodec(answer, cfg.Codecs)
+	if !ok {
+		return nil, errors.New("building voice precondition SDP update: no compatible codec")
+	}
+	dtmf, hasDTMF := chooseTelephoneEvent(answer, cfg.Codecs)
+	if localIP == nil || localIP.IsUnspecified() {
+		localIP = net.IPv4(0, 0, 0, 0)
+	}
+	ptime := nonZeroDuration(answer.PTime, current.PTime, cfg.PTime)
+	ipType := "IP4"
+	if localIP.To4() == nil {
+		ipType = "IP6"
+	}
+	payloads := []string{strconv.Itoa(selected.PayloadTypes[0])}
+	if hasDTMF {
+		payloads = append(payloads, strconv.Itoa(dtmf.PayloadTypes[0]))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "v=0\r\n")
+	fmt.Fprintf(&b, "o=- %d 1 IN %s %s\r\n", time.Now().UnixNano(), ipType, localIP.String())
+	fmt.Fprintf(&b, "s=-\r\n")
+	fmt.Fprintf(&b, "c=IN %s %s\r\n", ipType, localIP.String())
+	fmt.Fprintf(&b, "t=0 0\r\n")
+	fmt.Fprintf(&b, "m=audio %d %s %s\r\n", localPort, cfg.RTPProfile, strings.Join(payloads, " "))
+	if bandwidth := audioBandwidthAS(cfg, selected); bandwidth > 0 {
+		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
+	}
+	appendRTCPBandwidth(&b, rtcpSenderBandwidth, rtcpReceiverBandwidth)
+	appendAnswerCodecAttributes(&b, selected)
+	if hasDTMF {
+		appendAnswerCodecAttributes(&b, dtmf)
+	}
+	if ptime > 0 {
+		fmt.Fprintf(&b, "a=ptime:%d\r\n", durationMillis(ptime))
+	}
+	if cfg.MaxPTime > 0 {
+		fmt.Fprintf(&b, "a=maxptime:%d\r\n", durationMillis(cfg.MaxPTime))
+	}
+	fmt.Fprintf(&b, "a=sendrecv\r\n")
+	appendQoSPreconditions(&b, qosStatusSendRecv, false)
+	return []byte(b.String()), nil
+}
+
+const (
+	qosStatusNone     = "none"
+	qosStatusSendRecv = "sendrecv"
+)
+
+func appendQoSPreconditions(b *strings.Builder, localStatus string, requestRemoteConfirmation bool) {
+	fmt.Fprintf(b, "a=curr:qos local %s\r\n", localStatus)
+	fmt.Fprintf(b, "a=curr:qos remote none\r\n")
+	fmt.Fprintf(b, "a=des:qos mandatory local sendrecv\r\n")
+	fmt.Fprintf(b, "a=des:qos optional remote sendrecv\r\n")
+	if requestRemoteConfirmation {
+		fmt.Fprintf(b, "a=conf:qos remote sendrecv\r\n")
+	}
 }
 
 func appendRejectedMedia(b *strings.Builder, media []sdpMediaLine) {
@@ -181,16 +282,28 @@ func appendRTCPBandwidth(b *strings.Builder, rs int, rr int) {
 }
 
 func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Duration, dtmf AudioCodecConfig, hasDTMF bool) NegotiatedMedia {
+	remoteRTCPIP := append(net.IP(nil), remote.RemoteRTCPIP...)
+	if len(remoteRTCPIP) == 0 {
+		remoteRTCPIP = append(net.IP(nil), remote.RemoteIP...)
+	}
+	remoteRTCPPort := remote.RemoteRTCPPort
+	if remote.RTCPMux {
+		remoteRTCPIP = append(net.IP(nil), remote.RemoteIP...)
+		remoteRTCPPort = remote.RemotePort
+	}
 	media := NegotiatedMedia{
-		Codec:        selected.Name,
-		PayloadType:  selected.PayloadTypes[0],
-		ClockRate:    selected.ClockRate,
-		Channels:     selected.Channels,
-		OctetAlign:   selected.OctetAlign,
-		PTime:        ptime,
-		RemoteIP:     append(net.IP(nil), remote.RemoteIP...),
-		RemotePort:   remote.RemotePort,
-		RTCPDisabled: rtcpDisabled(remote),
+		Codec:          selected.Name,
+		PayloadType:    selected.PayloadTypes[0],
+		ClockRate:      selected.ClockRate,
+		Channels:       selected.Channels,
+		OctetAlign:     selected.OctetAlign,
+		PTime:          ptime,
+		RemoteIP:       append(net.IP(nil), remote.RemoteIP...),
+		RemotePort:     remote.RemotePort,
+		RemoteRTCPIP:   remoteRTCPIP,
+		RemoteRTCPPort: remoteRTCPPort,
+		RTCPMux:        remote.RTCPMux,
+		RTCPDisabled:   rtcpDisabled(remote),
 	}
 	if hasDTMF {
 		media.DTMFPayloadType = dtmf.PayloadTypes[0]
@@ -200,7 +313,15 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Dura
 }
 
 func parseSDP(text []byte) (sdpOffer, error) {
-	offer := sdpOffer{Codecs: make(map[int]AudioCodecConfig)}
+	var offer sdpOffer
+	if err := offer.UnmarshalText(text); err != nil {
+		return sdpOffer{}, err
+	}
+	return offer, nil
+}
+
+func (offer *sdpOffer) UnmarshalText(text []byte) error {
+	*offer = sdpOffer{Codecs: make(map[int]AudioCodecConfig)}
 	var mediaPayloads map[int]struct{}
 	inAudio := false
 	lines := strings.FieldsFunc(string(text), func(r rune) bool { return r == '\n' || r == '\r' })
@@ -213,29 +334,29 @@ func parseSDP(text []byte) (sdpOffer, error) {
 		case strings.HasPrefix(line, "c="):
 			ip, err := parseConnectionLine(line)
 			if err != nil {
-				return sdpOffer{}, err
+				return err
 			}
 			if inAudio || offer.RemoteIP == nil {
 				offer.RemoteIP = ip
 			}
 		case strings.HasPrefix(line, "m=audio "):
-			port, profile, payloads, err := parseAudioLine(line)
-			if err != nil {
-				return sdpOffer{}, err
+			var audio sdpAudioLine
+			if err := audio.UnmarshalText([]byte(line)); err != nil {
+				return err
 			}
 			inAudio = true
-			offer.RemotePort = port
-			offer.Profile = profile
-			offer.Payloads = payloads
-			mediaPayloads = make(map[int]struct{}, len(payloads))
-			for _, payload := range payloads {
+			offer.RemotePort = audio.Port
+			offer.Profile = audio.Protocol
+			offer.Payloads = audio.Payloads
+			mediaPayloads = make(map[int]struct{}, len(audio.Payloads))
+			for _, payload := range audio.Payloads {
 				mediaPayloads[payload] = struct{}{}
 			}
 		case strings.HasPrefix(line, "m="):
 			inAudio = false
 			media, err := parseMediaLine(line)
 			if err != nil {
-				return sdpOffer{}, err
+				return err
 			}
 			offer.UnsupportedMedia = append(offer.UnsupportedMedia, media)
 		case strings.HasPrefix(line, "a=rtpmap:"):
@@ -244,7 +365,7 @@ func parseSDP(text []byte) (sdpOffer, error) {
 			}
 			payloadType, codec, err := parseRTPMap(line)
 			if err != nil {
-				return sdpOffer{}, err
+				return err
 			}
 			if mediaPayloads == nil {
 				continue
@@ -272,33 +393,70 @@ func parseSDP(text []byte) (sdpOffer, error) {
 			if inAudio {
 				offer.PTime = parseSDPDuration(strings.TrimPrefix(line, "a=ptime:"))
 			}
+		case strings.HasPrefix(line, "a=rtcp:"):
+			if !inAudio {
+				continue
+			}
+			port, ip, err := parseRTCPAttribute(line)
+			if err != nil {
+				return err
+			}
+			offer.RemoteRTCPPort = port
+			offer.RemoteRTCPIP = ip
+		case strings.EqualFold(line, "a=rtcp-mux"):
+			if inAudio {
+				offer.RTCPMux = true
+			}
+		case strings.HasPrefix(line, "a=curr:qos") || strings.HasPrefix(line, "a=des:qos") || strings.HasPrefix(line, "a=conf:qos"):
+			if inAudio {
+				offer.Preconditions = true
+				if status, ok := parseCurrentQoSLocal(line); ok {
+					offer.LocalQoSStatus = status
+				}
+				if parseQoSConfirmationRemote(line) {
+					offer.RemoteQoSConfirmation = true
+				}
+			}
 		case strings.HasPrefix(line, "b="):
 			if !inAudio {
 				continue
 			}
 			modifier, value, ok, err := parseRTCPBandwidth(line)
 			if err != nil {
-				return sdpOffer{}, err
+				return err
 			}
 			if !ok {
 				continue
 			}
 			switch modifier {
 			case "RS":
-				offer.RTCPSenderBandwidth = intPtr(value)
+				offer.RTCPSenderBandwidth = new(value)
 			case "RR":
-				offer.RTCPReceiverBandwidth = intPtr(value)
+				offer.RTCPReceiverBandwidth = new(value)
 			}
 		}
 	}
 	if offer.RemotePort == 0 {
-		return sdpOffer{}, errors.New("parsing voice SDP: audio media line is missing")
+		return errors.New("parsing voice SDP: audio media line is missing")
 	}
 	if offer.RemoteIP == nil {
-		return sdpOffer{}, errors.New("parsing voice SDP: connection line is missing")
+		return errors.New("parsing voice SDP: connection line is missing")
 	}
-	applyStaticRTPPayloads(&offer)
-	return offer, nil
+	applyStaticRTPPayloads(offer)
+	return nil
+}
+
+func parseCurrentQoSLocal(line string) (string, bool) {
+	fields := strings.Fields(strings.TrimPrefix(line, "a=curr:qos"))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "local") {
+		return "", false
+	}
+	return strings.ToLower(fields[1]), true
+}
+
+func parseQoSConfirmationRemote(line string) bool {
+	fields := strings.Fields(strings.TrimPrefix(line, "a=conf:qos"))
+	return len(fields) == 2 && strings.EqualFold(fields[0], "remote")
 }
 
 func applyStaticRTPPayloads(offer *sdpOffer) {
@@ -469,10 +627,14 @@ func appendAnswerCodecAttributes(b *strings.Builder, codec AudioCodecConfig) {
 func offerCodecFMTP(codec AudioCodecConfig) string {
 	switch codec.Name {
 	case CodecAMR, CodecAMRWB:
-		if codec.OctetAlign {
-			return "octet-align=1"
+		params := []string{
+			"mode-change-capability=" + strconv.Itoa(amrModeChangeCapability),
+			"max-red=" + strconv.Itoa(amrMaxRedMillis),
 		}
-		return ""
+		if codec.OctetAlign {
+			params = append([]string{"octet-align=1"}, params...)
+		}
+		return strings.Join(params, ";")
 	case CodecEVS:
 		var params []string
 		if codec.Bitrate != "" {
@@ -497,6 +659,10 @@ func answerCodecFMTP(codec AudioCodecConfig) string {
 		if codec.OctetAlign {
 			params = append(params, "octet-align=1")
 		}
+		params = append(params,
+			"mode-change-capability="+strconv.Itoa(amrModeChangeCapability),
+			"max-red="+strconv.Itoa(amrMaxRedMillis),
+		)
 		if codec.ModeSet != "" {
 			params = append(params, "mode-set="+codec.ModeSet)
 		}
@@ -553,35 +719,110 @@ func evsBandwidthAS(bitrate string) int {
 }
 
 func parseConnectionLine(line string) (net.IP, error) {
+	var conn sdpConnectionLine
+	if err := conn.UnmarshalText([]byte(line)); err != nil {
+		return nil, err
+	}
+	return conn.IP, nil
+}
+
+func (l sdpConnectionLine) MarshalText() ([]byte, error) {
+	network := strings.TrimSpace(l.Network)
+	if network == "" {
+		network = sdpNetworkIN
+	}
+	if !strings.EqualFold(network, sdpNetworkIN) {
+		return nil, fmt.Errorf("building voice SDP: invalid connection network %q", l.Network)
+	}
+	addressType := strings.TrimSpace(l.AddressType)
+	if addressType == "" {
+		if l.IP.To4() == nil {
+			addressType = sdpAddressTypeIP6
+		} else {
+			addressType = sdpAddressTypeIP4
+		}
+	}
+	if err := validateSDPConnectionAddress(addressType, l.IP); err != nil {
+		return nil, err
+	}
+	return []byte(fmt.Sprintf("c=%s %s %s", sdpNetworkIN, strings.ToUpper(addressType), l.IP.String())), nil
+}
+
+func (l *sdpConnectionLine) UnmarshalText(text []byte) error {
+	line := string(text)
 	fields := strings.Fields(strings.TrimPrefix(line, "c="))
-	if len(fields) != 3 || !strings.EqualFold(fields[0], "IN") {
-		return nil, fmt.Errorf("parsing voice SDP: invalid connection line %q", line)
+	if len(fields) != 3 || !strings.EqualFold(fields[0], sdpNetworkIN) {
+		return fmt.Errorf("parsing voice SDP: invalid connection line %q", line)
 	}
 	ip := net.ParseIP(fields[2])
 	if ip == nil {
-		return nil, fmt.Errorf("parsing voice SDP: invalid connection address %q", fields[2])
+		return fmt.Errorf("parsing voice SDP: invalid connection address %q", fields[2])
 	}
-	return ip, nil
+	if err := validateSDPConnectionAddress(fields[1], ip); err != nil {
+		return err
+	}
+	*l = sdpConnectionLine{
+		Network:     sdpNetworkIN,
+		AddressType: strings.ToUpper(fields[1]),
+		IP:          ip,
+	}
+	return nil
 }
 
-func parseAudioLine(line string) (int, string, []int, error) {
+func validateSDPConnectionAddress(addressType string, ip net.IP) error {
+	switch {
+	case ip == nil:
+		return errors.New("building voice SDP: connection address is empty")
+	case strings.EqualFold(addressType, sdpAddressTypeIP4) && ip.To4() == nil:
+		return fmt.Errorf("parsing voice SDP: invalid connection IP4 address %q", ip.String())
+	case strings.EqualFold(addressType, sdpAddressTypeIP6) && ip.To4() != nil:
+		return fmt.Errorf("parsing voice SDP: invalid connection IP6 address %q", ip.String())
+	case !strings.EqualFold(addressType, sdpAddressTypeIP4) && !strings.EqualFold(addressType, sdpAddressTypeIP6):
+		return fmt.Errorf("parsing voice SDP: invalid connection address type %q", addressType)
+	}
+	return nil
+}
+
+func (l sdpAudioLine) MarshalText() ([]byte, error) {
+	if l.Port <= 0 || l.Port > 65535 {
+		return nil, fmt.Errorf("building voice SDP: invalid audio port %d", l.Port)
+	}
+	if strings.TrimSpace(l.Protocol) == "" {
+		return nil, errors.New("building voice SDP: audio protocol is empty")
+	}
+	if len(l.Payloads) == 0 {
+		return nil, errors.New("building voice SDP: audio payloads are empty")
+	}
+	payloads := make([]string, 0, len(l.Payloads))
+	for _, payload := range l.Payloads {
+		if payload < 0 || payload > 127 {
+			return nil, fmt.Errorf("building voice SDP: invalid payload type %d", payload)
+		}
+		payloads = append(payloads, strconv.Itoa(payload))
+	}
+	return []byte(fmt.Sprintf("m=audio %d %s %s", l.Port, l.Protocol, strings.Join(payloads, " "))), nil
+}
+
+func (l *sdpAudioLine) UnmarshalText(text []byte) error {
+	line := string(text)
 	fields := strings.Fields(strings.TrimPrefix(line, "m=audio "))
 	if len(fields) < 3 {
-		return 0, "", nil, fmt.Errorf("parsing voice SDP: invalid audio line %q", line)
+		return fmt.Errorf("parsing voice SDP: invalid audio line %q", line)
 	}
 	port, ok := parseBoundedDecimal(fields[0], 1, 65535)
 	if !ok {
-		return 0, "", nil, fmt.Errorf("parsing voice SDP: invalid audio port %q", fields[0])
+		return fmt.Errorf("parsing voice SDP: invalid audio port %q", fields[0])
 	}
 	payloads := make([]int, 0, len(fields)-2)
 	for _, field := range fields[2:] {
 		payload, ok := parseRTPPayloadType(field)
 		if !ok {
-			return 0, "", nil, fmt.Errorf("parsing voice SDP: invalid payload type %q", field)
+			return fmt.Errorf("parsing voice SDP: invalid payload type %q", field)
 		}
 		payloads = append(payloads, payload)
 	}
-	return port, fields[1], payloads, nil
+	*l = sdpAudioLine{Port: port, Protocol: fields[1], Payloads: payloads}
+	return nil
 }
 
 func parseMediaLine(line string) (sdpMediaLine, error) {
@@ -636,6 +877,36 @@ func parseRTCPBandwidth(line string) (string, int, bool, error) {
 	return modifier, bandwidth, true, nil
 }
 
+func parseRTCPAttribute(line string) (int, net.IP, error) {
+	fields := strings.Fields(strings.TrimPrefix(line, "a=rtcp:"))
+	if len(fields) != 1 && len(fields) != 4 {
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp attribute %q", line)
+	}
+	port, ok := parseBoundedDecimal(fields[0], 1, 65535)
+	if !ok {
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp port %q", fields[0])
+	}
+	if len(fields) == 1 {
+		return port, nil, nil
+	}
+	if !strings.EqualFold(fields[1], "IN") {
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp network type %q", fields[1])
+	}
+	ip := net.ParseIP(fields[3])
+	if ip == nil {
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp address %q", fields[3])
+	}
+	switch {
+	case strings.EqualFold(fields[2], sdpAddressTypeIP4) && ip.To4() == nil:
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp IP4 address %q", fields[3])
+	case strings.EqualFold(fields[2], sdpAddressTypeIP6) && ip.To4() != nil:
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp IP6 address %q", fields[3])
+	case !strings.EqualFold(fields[2], sdpAddressTypeIP4) && !strings.EqualFold(fields[2], sdpAddressTypeIP6):
+		return 0, nil, fmt.Errorf("parsing voice SDP: invalid rtcp address type %q", fields[2])
+	}
+	return port, ip, nil
+}
+
 func rtcpAnswerBandwidth(remote sdpOffer) (int, int) {
 	rs := rtcpSenderBandwidth
 	rr := rtcpReceiverBandwidth
@@ -655,10 +926,6 @@ func rtcpDisabled(remote sdpOffer) bool {
 
 func rtcpBandwidthDisabled(rs int, rr int) bool {
 	return rs == 0 && rr == 0
-}
-
-func intPtr(value int) *int {
-	return &value
 }
 
 func parseBoundedDecimal(value string, minValue, maxValue int) (int, bool) {

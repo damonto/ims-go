@@ -11,7 +11,8 @@ import (
 
 const (
 	DefaultClientAllow     = "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,REFER,UPDATE"
-	DefaultClientSupported = "100rel,199,path,replaces,sec-agree"
+	DefaultClientSupported = "199,path,replaces,sec-agree"
+	DefaultMaxForwards     = 70
 )
 
 type SecurityAgreement struct {
@@ -38,7 +39,9 @@ type DialogID struct {
 
 func (p ClientRequestPolicy) Apply(msg *Message) {
 	msg.Headers.Add("Allow", DefaultClientAllow)
-	msg.Headers.Add("Max-Forwards", "70")
+	if strings.TrimSpace(msg.Header("Max-Forwards")) == "" {
+		msg.Headers.Add("Max-Forwards", strconv.Itoa(DefaultMaxForwards))
+	}
 	msg.Headers.Add("Supported", DefaultClientSupported)
 	if userAgent := strings.TrimSpace(p.UserAgent); userAgent != "" {
 		msg.Headers.Add("User-Agent", userAgent)
@@ -66,11 +69,15 @@ func (id DialogID) Matches(msg Message) bool {
 	if msg.Header("Call-ID") != id.CallID {
 		return false
 	}
-	if tag := HeaderTag(msg.Header("To")); tag != "" && id.LocalTag != "" && tag != id.LocalTag {
-		return false
+	if id.LocalTag != "" {
+		if tag := HeaderTag(msg.Header("To")); tag != id.LocalTag {
+			return false
+		}
 	}
-	if tag := HeaderTag(msg.Header("From")); tag != "" && id.RemoteTag != "" && tag != id.RemoteTag {
-		return false
+	if id.RemoteTag != "" {
+		if tag := HeaderTag(msg.Header("From")); tag != id.RemoteTag {
+			return false
+		}
 	}
 	return true
 }

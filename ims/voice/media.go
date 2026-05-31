@@ -74,11 +74,14 @@ func (c *Call) openMedia(ctx context.Context) error {
 	c.mu.Unlock()
 
 	cfg := MediaConfig{
-		LocalPort:  localPort,
-		RemoteIP:   append(net.IP(nil), media.RemoteIP...),
-		RemotePort: media.RemotePort,
-		Media:      media,
-		OnPacket:   c.recordMediaPacket,
+		LocalPort:      localPort,
+		RemoteIP:       append(net.IP(nil), media.RemoteIP...),
+		RemotePort:     media.RemotePort,
+		RemoteRTCPIP:   append(net.IP(nil), media.RemoteRTCPIP...),
+		RemoteRTCPPort: media.RemoteRTCPPort,
+		RTCPMux:        media.RTCPMux,
+		Media:          media,
+		OnPacket:       c.recordMediaPacket,
 	}
 	if transport != nil {
 		if configurable, ok := transport.(interface {
@@ -169,6 +172,8 @@ func (c *Call) startMediaInactivityWatch() {
 	rtpTimeout := c.service.cfg.RTPInactivityTimeout
 	rtcpTimeout := c.service.cfg.RTCPInactivityTimeout
 	rtcpSendInterval := c.service.cfg.RTCPSendInterval
+	endOnRTPInactivity := c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTPOnConnected)
+	endOnRTCPInactivity := c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTCPOnConnected)
 	c.mu.Lock()
 	if c.mediaWatchStop != nil || c.closed {
 		c.mu.Unlock()
@@ -223,7 +228,7 @@ func (c *Call) startMediaInactivityWatch() {
 			case packet := <-activity:
 				if packet.RTCP {
 					if packet.RTCPBye {
-						c.endAfterMediaEvent("rtcp bye")
+						c.endAfterMediaEvent(mediaReleaseRTCPBye)
 						return
 					}
 					if rtcpTimer != nil {
@@ -233,11 +238,23 @@ func (c *Call) startMediaInactivityWatch() {
 					resetTimer(rtpTimer, rtpTimeout)
 				}
 			case <-rtpC:
-				c.endAfterMediaEvent("rtp inactivity timeout")
-				return
+				if endOnRTPInactivity {
+					c.endAfterMediaEvent(mediaReleaseRTPTimeout)
+					return
+				}
+				c.noteMediaInactivity(mediaReleaseRTPTimeout, rtpTimeout)
+				if rtpTimer != nil {
+					resetTimer(rtpTimer, rtpTimeout)
+				}
 			case <-rtcpC:
-				c.endAfterMediaEvent("rtcp inactivity timeout")
-				return
+				if endOnRTCPInactivity {
+					c.endAfterMediaEvent(mediaReleaseRTCPTimeout)
+					return
+				}
+				c.noteMediaInactivity(mediaReleaseRTCPTimeout, rtcpTimeout)
+				if rtcpTimer != nil {
+					resetTimer(rtcpTimer, rtcpTimeout)
+				}
 			case <-rtcpSendC:
 				c.writeRTCPReport()
 			}
@@ -245,7 +262,15 @@ func (c *Call) startMediaInactivityWatch() {
 	}()
 }
 
-func (c *Call) endAfterMediaEvent(cause string) {
+func (c *Call) noteMediaInactivity(reason mediaReleaseReason, timeout time.Duration) {
+	c.mu.Lock()
+	id := c.id
+	state := c.state
+	c.mu.Unlock()
+	c.service.logger.Debug("call media inactivity", "call_id", id, "state", state, "reason", reason.cause(), "timeout", timeout)
+}
+
+func (c *Call) endAfterMediaEvent(reason mediaReleaseReason) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -255,10 +280,11 @@ func (c *Call) endAfterMediaEvent(cause string) {
 	c.mu.Unlock()
 
 	_ = c.closeMedia()
+	cause := reason.cause()
 	if state == CallStateActive || state == CallStateConfirmed {
 		c.setState(CallStateEnding, cause)
 		ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
-		resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reasonMediaBearerReleased))
+		resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reason.sipReason()))
 		cancel()
 		if !byeReleaseCompleted(resp, err) {
 			c.service.emitError(byeReleaseError("ending call after media event", resp, err))

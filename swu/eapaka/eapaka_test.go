@@ -2,6 +2,11 @@ package eapaka
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha1"
+	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -13,10 +18,10 @@ func TestAKAMessageRoundTrip(t *testing.T) {
 		{
 			name: "identity request",
 			message: AKAMessage{
-				Code:       CodeRequest,
+				Code:       eapCodeRequest,
 				Identifier: 7,
-				Subtype:    SubtypeIdentity,
-				Attributes: []AKAAttribute{{Type: AttrRAND, Value: []byte{0x00, 0x00}}},
+				Subtype:    akaSubtypeIdentity,
+				Attributes: []AKAAttribute{{Type: akaAttrRAND, Value: []byte{0x00, 0x00}}},
 			},
 		},
 	}
@@ -32,6 +37,408 @@ func TestAKAMessageRoundTrip(t *testing.T) {
 			}
 			if got.Code != tt.message.Code || got.Identifier != tt.message.Identifier || got.Subtype != tt.message.Subtype {
 				t.Fatalf("AKAMessage = %+v, want %+v", got, tt.message)
+			}
+		})
+	}
+}
+
+func TestAKAMessageMarshalBinaryUsesAKAPrimeType(t *testing.T) {
+	message := AKAMessage{
+		Code:       eapCodeResponse,
+		Identifier: 0x10,
+		EAPType:    eapTypeAKAPrime,
+		Subtype:    akaSubtypeIdentity,
+		Attributes: []AKAAttribute{buildAKAStringAttribute(akaAttrIdentity, "6123456789012345")},
+	}
+	want := []byte{
+		0x02, 0x10, 0x00, 0x1c,
+		0x32, 0x05, 0x00, 0x00,
+		0x0e, 0x05, 0x00, 0x10,
+		0x36, 0x31, 0x32, 0x33,
+		0x34, 0x35, 0x36, 0x37,
+		0x38, 0x39, 0x30, 0x31,
+		0x32, 0x33, 0x34, 0x35,
+	}
+
+	got, err := message.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalBinary() = % X, want % X", got, want)
+	}
+
+	var parsed AKAMessage
+	if err := parsed.UnmarshalBinary(got); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+	if parsed.EAPType != eapTypeAKAPrime {
+		t.Fatalf("EAPType = %d, want %d", parsed.EAPType, eapTypeAKAPrime)
+	}
+}
+
+func TestDeriveAKAPrimeCKIK(t *testing.T) {
+	tests := []struct {
+		name        string
+		ck          []byte
+		ik          []byte
+		networkName []byte
+		sqnXorAK    []byte
+		wantCK      []byte
+		wantIK      []byte
+	}{
+		{
+			name:        "android challenge state vector",
+			ck:          mustHex(t, "00112233445566778899AABBCCDDEEFF"),
+			ik:          mustHex(t, "FFEEDDCCBBAA99887766554433221100"),
+			networkName: []byte("foo:bar"),
+			sqnXorAK:    mustHex(t, "0123456789AB"),
+			wantCK:      mustHex(t, "3F7B2687E2000F35F4AD0796E579CC90"),
+			wantIK:      mustHex(t, "CCE648C28E26FAD3FC2749B790249F1E"),
+		},
+		{
+			name:        "rfc 5448 appendix c case 1",
+			ck:          mustHex(t, "5349fbe098649f948f5d2e973a81c00f"),
+			ik:          mustHex(t, "9744871ad32bf9bbd1dd5ce54e3e2e5a"),
+			networkName: []byte("WLAN"),
+			sqnXorAK:    mustHex(t, "bb52e91c747a"),
+			wantCK:      mustHex(t, "0093962d0dd84aa5684b045c9edffa04"),
+			wantIK:      mustHex(t, "ccfc230ca74fcc96c0a5d61164f5a76c"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCK, gotIK, err := DeriveAKAPrimeCKIK(tt.ck, tt.ik, tt.networkName, tt.sqnXorAK)
+			if err != nil {
+				t.Fatalf("DeriveAKAPrimeCKIK() error = %v", err)
+			}
+			if !bytes.Equal(gotCK, tt.wantCK) {
+				t.Fatalf("CK' = % X, want % X", gotCK, tt.wantCK)
+			}
+			if !bytes.Equal(gotIK, tt.wantIK) {
+				t.Fatalf("IK' = % X, want % X", gotIK, tt.wantIK)
+			}
+		})
+	}
+}
+
+func TestDeriveAKAPrimeKeys(t *testing.T) {
+	tests := []struct {
+		name        string
+		identity    []byte
+		ck          []byte
+		ik          []byte
+		networkName []byte
+		sqnXorAK    []byte
+		want        AKAPrimeKeys
+	}{
+		{
+			name:        "android challenge state vector",
+			identity:    []byte("test@android.net"),
+			ck:          mustHex(t, "00112233445566778899AABBCCDDEEFF"),
+			ik:          mustHex(t, "FFEEDDCCBBAA99887766554433221100"),
+			networkName: []byte("foo:bar"),
+			sqnXorAK:    mustHex(t, "0123456789AB"),
+			want: AKAPrimeKeys{
+				CKPrime: mustHex(t, "3F7B2687E2000F35F4AD0796E579CC90"),
+				IKPrime: mustHex(t, "CCE648C28E26FAD3FC2749B790249F1E"),
+				ENCR:    mustHex(t, "9CD8BDFF999E547B73D127172ADB7881"),
+				AUT:     mustHex(t, "CC3CD1AD2B63D01931D1E48567966ECBA60092C4554C6A60EBD180D0957282BE"),
+				RE:      mustHex(t, "333A148B074FC01B2D0F17ABB741B2EA1968899A152CC9F2B6CBE728A9A31BC1"),
+				MSK: mustHex(t, "A29268E164BB89E741FBEC0301006E34D277758145AD8404EAF2C5414F866E2A"+
+					"D635B0752C3B3D3F14A4BA9A388D338BF5F72161199E5D136CA1E4F7FE95E7FB"),
+				EMSK: mustHex(t, "81B2C0EFB382B7E7749E9FAB6A678605D65F18E440FD997854CCB3FB9FF7CDB1"+
+					"D05D73736650F1A5470FA87F39B3BF584DBB3C27422E536C9C2CB1F985CEBB0B"),
+			},
+		},
+		{
+			name:        "rfc 5448 appendix c case 1",
+			identity:    []byte("0555444333222111"),
+			ck:          mustHex(t, "5349fbe098649f948f5d2e973a81c00f"),
+			ik:          mustHex(t, "9744871ad32bf9bbd1dd5ce54e3e2e5a"),
+			networkName: []byte("WLAN"),
+			sqnXorAK:    mustHex(t, "bb52e91c747a"),
+			want: AKAPrimeKeys{
+				CKPrime: mustHex(t, "0093962d0dd84aa5684b045c9edffa04"),
+				IKPrime: mustHex(t, "ccfc230ca74fcc96c0a5d61164f5a76c"),
+				ENCR:    mustHex(t, "766fa0a6c317174b812d52fbcd11a179"),
+				AUT:     mustHex(t, "0842ea722ff6835bfa2032499fc3ec23c2f0e388b4f07543ffc677f1696d71ea"),
+				RE:      mustHex(t, "cf83aa8bc7e0aced892acc98e76a9b2095b558c7795c7094715cb3393aa7d17a"),
+				MSK: mustHex(t, "67c42d9aa56c1b79e295e3459fc3d187d42be0bf818d3070e362c5e967a4d544"+
+					"e8ecfe19358ab3039aff03b7c930588c055babee58a02650b067ec4e9347c75a"),
+				EMSK: mustHex(t, "f861703cd775590e16c7679ea3874ada866311de290764d760cf76df647ea01c"+
+					"313f69924bdd7650ca9bac141ea075c4ef9e8029c0e290cdbad5638b63bc23fb"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := DeriveAKAPrimeKeys(tt.identity, tt.ck, tt.ik, tt.networkName, tt.sqnXorAK)
+			if err != nil {
+				t.Fatalf("DeriveAKAPrimeKeys() error = %v", err)
+			}
+			assertAKAPrimeKeys(t, got, tt.want)
+		})
+	}
+}
+
+func TestDeriveAKAPrimeFastReauthKeys(t *testing.T) {
+	msk, emsk, err := DeriveAKAPrimeFastReauthKeys(
+		[]byte("reauth@example.net"),
+		7,
+		mustHex(t, "00112233445566778899aabbccddeeff"),
+		mustHex(t, "333A148B074FC01B2D0F17ABB741B2EA1968899A152CC9F2B6CBE728A9A31BC1"),
+	)
+	if err != nil {
+		t.Fatalf("DeriveAKAPrimeFastReauthKeys() error = %v", err)
+	}
+	wantMSK := mustHex(t, "028c0c2df6d9d8da8ad35ba4dc7004280f3c042f3cbbcbfdacaf9bee3366aa59"+
+		"b86bf520171d613eb0927858a2e5b043d3681bfe4e86c71b497cff7eb3d56814")
+	wantEMSK := mustHex(t, "a2a85144a4e8fef8c58d3c0f4ad5ff818c6f65d4a8a1f16725befb7b75f72674"+
+		"afbb0ec2514f0550b5ba592521c541eb205c645c4e4a27f0cfc8ae8fdf9cd7b4")
+	if !bytes.Equal(msk, wantMSK) {
+		t.Fatalf("MSK = % X, want % X", msk, wantMSK)
+	}
+	if !bytes.Equal(emsk, wantEMSK) {
+		t.Fatalf("EMSK = % X, want % X", emsk, wantEMSK)
+	}
+
+	fullMK := bytes.Repeat([]byte{0x77}, akaPrimeKEncrLen+akaPrimeKAutLen+akaPrimeKReLen+akaPrimeMSKLen+akaPrimeEMSKLen)
+	copy(fullMK[akaPrimeKEncrLen+akaPrimeKAutLen:], mustHex(t, "333A148B074FC01B2D0F17ABB741B2EA1968899A152CC9F2B6CBE728A9A31BC1"))
+	fromMKMSK, fromMKEMSK, err := DeriveAKAPrimeFastReauthKeysFromMK([]byte("reauth@example.net"), 7, mustHex(t, "00112233445566778899aabbccddeeff"), fullMK)
+	if err != nil {
+		t.Fatalf("DeriveAKAPrimeFastReauthKeysFromMK() error = %v", err)
+	}
+	if !bytes.Equal(fromMKMSK, wantMSK) || !bytes.Equal(fromMKEMSK, wantEMSK) {
+		t.Fatalf("DeriveAKAPrimeFastReauthKeysFromMK() = % X, % X; want % X, % X", fromMKMSK, fromMKEMSK, wantMSK, wantEMSK)
+	}
+}
+
+func TestEAPPacketUnmarshalBinaryValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		wire    []byte
+		wantErr bool
+	}{
+		{name: "request with type", wire: []byte{eapCodeRequest, 1, 0, 5, eapTypeAKA}},
+		{name: "success length four", wire: []byte{eapCodeSuccess, 1, 0, 4}},
+		{name: "success with type data", wire: []byte{eapCodeSuccess, 1, 0, 5, eapTypeAKA}, wantErr: true},
+		{name: "failure with type data", wire: []byte{eapCodeFailure, 1, 0, 5, eapTypeAKA}, wantErr: true},
+		{name: "request missing type", wire: []byte{eapCodeRequest, 1, 0, 4}, wantErr: true},
+		{name: "trailing bytes", wire: []byte{eapCodeRequest, 1, 0, 5, eapTypeAKA, 0}, wantErr: true},
+		{name: "invalid code", wire: []byte{9, 1, 0, 4}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got EAPPacket
+			err := got.UnmarshalBinary(tt.wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestEAPPacketMarshalBinaryValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		packet  EAPPacket
+		wantErr bool
+	}{
+		{name: "request with type", packet: EAPPacket{Code: eapCodeRequest, Identifier: 1, Type: eapTypeAKA, HasType: true}},
+		{name: "success without type data", packet: EAPPacket{Code: eapCodeSuccess, Identifier: 1}},
+		{name: "request missing type", packet: EAPPacket{Code: eapCodeRequest, Identifier: 1}, wantErr: true},
+		{name: "success with type", packet: EAPPacket{Code: eapCodeSuccess, Identifier: 1, Type: eapTypeAKA, HasType: true}, wantErr: true},
+		{name: "failure with data", packet: EAPPacket{Code: eapCodeFailure, Identifier: 1, Data: []byte{0}}, wantErr: true},
+		{name: "oversized request", packet: EAPPacket{Code: eapCodeRequest, Identifier: 1, Type: eapTypeAKA, HasType: true, Data: make([]byte, eapMaxLen)}, wantErr: true},
+		{name: "invalid code", packet: EAPPacket{Code: 9, Identifier: 1}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.packet.MarshalBinary()
+			if tt.wantErr && err == nil {
+				t.Fatal("MarshalBinary() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildEAPIdentityResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		id       byte
+		identity string
+		wantErr  bool
+	}{
+		{name: "success", id: 4, identity: "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"},
+		{name: "empty identity", id: 4, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := BuildEAPIdentityResponse(tt.id, tt.identity)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("BuildEAPIdentityResponse() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildEAPIdentityResponse() error = %v", err)
+			}
+			var got EAPPacket
+			if err := got.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.Code != eapCodeResponse || got.Identifier != tt.id || !got.HasType || got.Type != eapTypeIdentity {
+				t.Fatalf("EAPPacket = %+v", got)
+			}
+			if string(got.Data) != tt.identity {
+				t.Fatalf("identity = %q, want %q", string(got.Data), tt.identity)
+			}
+		})
+	}
+}
+
+func TestBuildEAPNakResponse(t *testing.T) {
+	tests := []struct {
+		name         string
+		id           byte
+		desiredTypes []byte
+		wantErr      bool
+		wantWire     []byte
+	}{
+		{
+			name:         "aka desired",
+			id:           0x10,
+			desiredTypes: []byte{eapTypeAKA},
+			wantWire:     []byte{eapCodeResponse, 0x10, 0x00, 0x06, eapTypeNak, eapTypeAKA},
+		},
+		{
+			name:    "empty desired types",
+			id:      0x10,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := BuildEAPNakResponse(tt.id, tt.desiredTypes...)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("BuildEAPNakResponse() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildEAPNakResponse() error = %v", err)
+			}
+			if !bytes.Equal(wire, tt.wantWire) {
+				t.Fatalf("wire = % X, want % X", wire, tt.wantWire)
+			}
+		})
+	}
+}
+
+func TestBuildEAPNotificationResponse(t *testing.T) {
+	wire, err := BuildEAPNotificationResponse(0x22)
+	if err != nil {
+		t.Fatalf("BuildEAPNotificationResponse() error = %v", err)
+	}
+	want := []byte{eapCodeResponse, 0x22, 0x00, 0x05, eapTypeNotification}
+	if !bytes.Equal(wire, want) {
+		t.Fatalf("wire = % X, want % X", wire, want)
+	}
+}
+
+func TestAKAAttributeMarshalBinaryValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		attr    AKAAttribute
+		wantErr bool
+	}{
+		{name: "minimum aligned value", attr: AKAAttribute{Type: akaAttrResultInd, Value: []byte{0x00, 0x00}}},
+		{name: "maximum encodable value", attr: AKAAttribute{Type: akaAttrCheckcode, Value: make([]byte, akaAttributeMaxWireLen-2)}},
+		{name: "unaligned value", attr: AKAAttribute{Type: akaAttrCheckcode, Value: []byte{0x00, 0x00, 0x00}}, wantErr: true},
+		{name: "oversized value", attr: AKAAttribute{Type: akaAttrCheckcode, Value: make([]byte, akaAttributeMaxWireLen+2)}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.attr.MarshalBinary()
+			if tt.wantErr && err == nil {
+				t.Fatal("MarshalBinary() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAKAMessageUnmarshalBinaryDuplicateAttributeHandling(t *testing.T) {
+	tests := []struct {
+		name    string
+		attr    AKAAttribute
+		wantErr bool
+	}{
+		{
+			name:    "known duplicate is rejected",
+			attr:    AKAAttribute{Type: akaAttrCheckcode, Value: []byte{0x00, 0x00}},
+			wantErr: true,
+		},
+		{
+			name: "unknown skippable duplicate is preserved for higher layer ignore",
+			attr: AKAAttribute{Type: 200, Value: []byte{0x00, 0x00}},
+		},
+		{
+			name: "kdf duplicate is preserved for aka prime negotiation validation",
+			attr: AKAAttribute{Type: akaAttrKDF, Value: []byte{0x00, byte(akaPrimeKDFDefault)}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			first, err := tt.attr.MarshalBinary()
+			if err != nil {
+				t.Fatalf("first MarshalBinary() error = %v", err)
+			}
+			second, err := tt.attr.MarshalBinary()
+			if err != nil {
+				t.Fatalf("second MarshalBinary() error = %v", err)
+			}
+			packet := EAPPacket{
+				Code:       eapCodeRequest,
+				Identifier: 3,
+				Type:       eapTypeAKA,
+				HasType:    true,
+				Data:       append(append([]byte{akaSubtypeChallenge, 0x00, 0x00}, first...), second...),
+			}
+			wire, err := packet.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+
+			var got AKAMessage
+			err = got.UnmarshalBinary(wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want duplicate attribute error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if len(got.Attributes) != 2 {
+				t.Fatalf("attributes = %d, want 2", len(got.Attributes))
 			}
 		})
 	}
@@ -63,7 +470,7 @@ func TestBuildAKAIdentityResponse(t *testing.T) {
 			if err := got.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			if got.Code != CodeResponse || got.Subtype != SubtypeIdentity {
+			if got.Code != eapCodeResponse || got.Subtype != akaSubtypeIdentity {
 				t.Fatalf("AKAMessage = %+v", got)
 			}
 		})
@@ -91,9 +498,33 @@ func TestBuildAKAResponsePadsATRESValueToFourByteBoundary(t *testing.T) {
 	}
 }
 
+func TestBuildAKAResponseValidatesRESLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		res     []byte
+		wantErr bool
+	}{
+		{name: "minimum", res: bytes.Repeat([]byte{0x11}, akaRESMinLen)},
+		{name: "maximum", res: bytes.Repeat([]byte{0x11}, akaRESMaxLen)},
+		{name: "too short", res: bytes.Repeat([]byte{0x11}, akaRESMinLen-1), wantErr: true},
+		{name: "too long", res: bytes.Repeat([]byte{0x11}, akaRESMaxLen+1), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := BuildAKAResponse(3, tt.res, nil)
+			if tt.wantErr && err == nil {
+				t.Fatal("BuildAKAResponse() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("BuildAKAResponse() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildChallengeResponsePacketWithCheckcode(t *testing.T) {
 	checkcode := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x66}, 20)...)
-	wire, err := BuildChallengeResponsePacketWithCheckcode(3, []byte{0x01, 0x02, 0x03, 0x04}, bytes.Repeat([]byte{0x11}, 16), false, checkcode)
+	wire, err := BuildChallengeResponsePacketWithCheckcode(3, []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, bytes.Repeat([]byte{0x11}, 16), false, checkcode)
 	if err != nil {
 		t.Fatalf("BuildChallengeResponsePacketWithCheckcode() error = %v", err)
 	}
@@ -109,9 +540,113 @@ func TestBuildChallengeResponsePacketWithCheckcode(t *testing.T) {
 	if !bytes.Equal(attr.Value, checkcode) {
 		t.Fatalf("AT_CHECKCODE = % X, want % X", attr.Value, checkcode)
 	}
+	resAttr := FindAttribute(got.Attributes, akaAttrRES)
+	if resAttr == nil {
+		t.Fatal("AT_RES is missing")
+	}
+	if got, want := len(resAttr.Value), 10; got != want {
+		t.Fatalf("len(AT_RES value) = %d, want %d", got, want)
+	}
 }
 
-func TestParseAKAChallenge(t *testing.T) {
+func TestBuildChallengeResponsePacketWithOptionsIPMS(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    ChallengeResponseOptions
+		wantErr bool
+	}{
+		{
+			name: "nbm only",
+			opts: ChallengeResponseOptions{
+				Identifier:   3,
+				RES:          []byte{0x01, 0x02, 0x03, 0x04},
+				AUTKey:       bytes.Repeat([]byte{0x11}, 16),
+				UseResultInd: true,
+				IPMSSupport:  IPMSSupportNBMOnly,
+			},
+		},
+		{
+			name: "requires result indication",
+			opts: ChallengeResponseOptions{
+				Identifier:  3,
+				RES:         []byte{0x01, 0x02, 0x03, 0x04},
+				AUTKey:      bytes.Repeat([]byte{0x11}, 16),
+				IPMSSupport: IPMSSupportNBMOnly,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid ipms support",
+			opts: ChallengeResponseOptions{
+				Identifier:   3,
+				RES:          []byte{0x01, 0x02, 0x03, 0x04},
+				AUTKey:       bytes.Repeat([]byte{0x11}, 16),
+				UseResultInd: true,
+				IPMSSupport:  15,
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := BuildChallengeResponsePacketWithOptions(tt.opts)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("BuildChallengeResponsePacketWithOptions() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildChallengeResponsePacketWithOptions() error = %v", err)
+			}
+			var got AKAMessage
+			if err := got.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if attr := FindAttribute(got.Attributes, akaAttrResultInd); attr == nil {
+				t.Fatal("AT_RESULT_IND is missing")
+			}
+			attr := FindAttribute(got.Attributes, akaAttrIPMSInd)
+			if attr == nil {
+				t.Fatal("AT_IPMS_IND is missing")
+			}
+			if !bytes.Equal(attr.Value, []byte{0x00, byte(IPMSSupportNBMOnly)}) {
+				t.Fatalf("AT_IPMS_IND = % X, want 00 02", attr.Value)
+			}
+		})
+	}
+}
+
+func TestBuildChallengeResponsePacketWithCheckcodeValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		checkcode []byte
+		wantErr   bool
+	}{
+		{name: "omitted"},
+		{name: "empty checkcode marker", checkcode: []byte{0x00, 0x00}},
+		{name: "sha1 checkcode", checkcode: append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x66}, sha1.Size)...)},
+		{name: "short aligned semantic length", checkcode: []byte{0x00, 0x00, 0x66, 0x66, 0x66, 0x66}, wantErr: true},
+		{name: "missing reserved bytes", checkcode: bytes.Repeat([]byte{0x66}, sha1.Size), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := BuildChallengeResponsePacketWithCheckcode(3, []byte{0x01, 0x02, 0x03, 0x04}, bytes.Repeat([]byte{0x11}, 16), false, tt.checkcode)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("BuildChallengeResponsePacketWithCheckcode() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildChallengeResponsePacketWithCheckcode() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAKAChallengeUnmarshalBinary(t *testing.T) {
 	randValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)
 	autnValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x22}, 16)...)
 	macValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x55}, 16)...)
@@ -308,18 +843,176 @@ func TestParseAKAChallenge(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			challenge, err := ParseAKAChallenge(wire)
+			var challenge AKAChallenge
+			err = challenge.UnmarshalBinary(wire)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("ParseAKAChallenge() error = nil, want error")
+					t.Fatal("UnmarshalBinary() error = nil, want error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ParseAKAChallenge() error = %v", err)
+				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			if len(challenge.RAND) != 16 || len(challenge.AUTN) != 16 {
+			if len(challenge.RAND) != akaVectorLen || len(challenge.AUTN) != akaVectorLen {
 				t.Fatalf("challenge = %+v", challenge)
+			}
+		})
+	}
+}
+
+func TestAKAChallengeUnmarshalBinaryAKAPrimeKDFValidation(t *testing.T) {
+	randValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)
+	autnValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x22}, 16)...)
+	macValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x55}, 16)...)
+	networkName := []byte("android.net")
+	kdfInputValue := buildAKAStringAttribute(akaAttrKDFInput, string(networkName)).Value
+	emptyKDFInputValue := buildAKAStringAttribute(akaAttrKDFInput, "").Value
+	kdfValue := []byte{0x00, byte(akaPrimeKDFDefault)}
+	unsupportedKDFValue := []byte{0x00, 0x02}
+
+	tests := []struct {
+		name        string
+		eapType     byte
+		attrs       []AKAAttribute
+		wantNetwork []byte
+		wantKDF     uint16
+		wantErr     bool
+		wantAuthErr bool
+	}{
+		{
+			name:    "valid aka prime challenge",
+			eapType: eapTypeAKAPrime,
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrKDFInput, Value: kdfInputValue},
+				{Type: akaAttrKDF, Value: kdfValue},
+				{Type: akaAttrMAC, Value: macValue},
+			},
+			wantNetwork: networkName,
+			wantKDF:     akaPrimeKDFDefault,
+		},
+		{
+			name:    "missing kdf",
+			eapType: eapTypeAKAPrime,
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrKDFInput, Value: kdfInputValue},
+				{Type: akaAttrMAC, Value: macValue},
+			},
+			wantErr:     true,
+			wantAuthErr: true,
+		},
+		{
+			name:    "missing kdf input",
+			eapType: eapTypeAKAPrime,
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrKDF, Value: kdfValue},
+				{Type: akaAttrMAC, Value: macValue},
+			},
+			wantErr:     true,
+			wantAuthErr: true,
+		},
+		{
+			name:    "unsupported kdf",
+			eapType: eapTypeAKAPrime,
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrKDFInput, Value: kdfInputValue},
+				{Type: akaAttrKDF, Value: unsupportedKDFValue},
+				{Type: akaAttrMAC, Value: macValue},
+			},
+			wantErr:     true,
+			wantAuthErr: true,
+		},
+		{
+			name:    "empty network name",
+			eapType: eapTypeAKAPrime,
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrKDFInput, Value: emptyKDFInputValue},
+				{Type: akaAttrKDF, Value: kdfValue},
+				{Type: akaAttrMAC, Value: macValue},
+			},
+			wantErr:     true,
+			wantAuthErr: true,
+		},
+		{
+			name:    "kdf input is rejected for aka",
+			eapType: eapTypeAKA,
+			attrs: []AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				{Type: akaAttrKDFInput, Value: kdfInputValue},
+				{Type: akaAttrMAC, Value: macValue},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := AKAMessage{
+				Code:       eapCodeRequest,
+				Identifier: 5,
+				EAPType:    tt.eapType,
+				Subtype:    akaSubtypeChallenge,
+				Attributes: tt.attrs,
+			}.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			var challenge AKAChallenge
+			err = challenge.UnmarshalBinary(wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want error")
+				}
+				if got := errors.Is(err, ErrAKAPrimeAuthenticationFailure); got != tt.wantAuthErr {
+					t.Fatalf("errors.Is(ErrAKAPrimeAuthenticationFailure) = %t, want %t", got, tt.wantAuthErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if challenge.EAPType != tt.eapType {
+				t.Fatalf("EAPType = %d, want %d", challenge.EAPType, tt.eapType)
+			}
+			if challenge.KDF != tt.wantKDF {
+				t.Fatalf("KDF = %d, want %d", challenge.KDF, tt.wantKDF)
+			}
+			if !bytes.Equal(challenge.NetworkName, tt.wantNetwork) {
+				t.Fatalf("NetworkName = % X, want % X", challenge.NetworkName, tt.wantNetwork)
+			}
+		})
+	}
+}
+
+func TestAKAChallengeAMFSeparationBitSet(t *testing.T) {
+	tests := []struct {
+		name string
+		autn []byte
+		want bool
+	}{
+		{name: "set", autn: []byte{0, 0, 0, 0, 0, 0, akaAMFSeparationBitMask, 0}, want: true},
+		{name: "clear", autn: []byte{0, 0, 0, 0, 0, 0, 0x7f, 0}},
+		{name: "short"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			autn := append([]byte(nil), tt.autn...)
+			if len(autn) != 0 {
+				autn = append(autn, make([]byte, akaVectorLen-len(autn))...)
+			}
+			got := (AKAChallenge{AUTN: autn}).AMFSeparationBitSet()
+			if got != tt.want {
+				t.Fatalf("AMFSeparationBitSet() = %t, want %t", got, tt.want)
 			}
 		})
 	}
@@ -383,5 +1076,567 @@ func TestBuildNotificationResponsePacket(t *testing.T) {
 				t.Fatalf("HasAttribute(AT_ENCR_DATA) = %v, want %v", hasEncrypted, tt.wantEncrypted)
 			}
 		})
+	}
+}
+
+func TestAKANotificationUnmarshalAttributes(t *testing.T) {
+	tests := []struct {
+		name    string
+		attrs   []AKAAttribute
+		want    AKANotification
+		wantErr bool
+	}{
+		{
+			name:  "success after challenge",
+			attrs: []AKAAttribute{{Type: akaAttrNotification, Value: []byte{0x80, 0x00}}},
+			want:  AKANotification{Code: akaNotificationSuccess, Success: true, Protected: true},
+		},
+		{
+			name:  "pre challenge failure",
+			attrs: []AKAAttribute{{Type: akaAttrNotification, Value: []byte{0x40, 0x00}}},
+			want:  AKANotification{Code: 0x4000, Protected: false},
+		},
+		{
+			name:    "missing",
+			wantErr: true,
+		},
+		{
+			name: "duplicate",
+			attrs: []AKAAttribute{
+				{Type: akaAttrNotification, Value: []byte{0x80, 0x00}},
+				{Type: akaAttrNotification, Value: []byte{0x80, 0x00}},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "invalid length",
+			attrs:   []AKAAttribute{{Type: akaAttrNotification, Value: []byte{0x80, 0x00, 0x00, 0x00}}},
+			wantErr: true,
+		},
+		{
+			name:    "success pre challenge",
+			attrs:   []AKAAttribute{{Type: akaAttrNotification, Value: []byte{0xc0, 0x00}}},
+			wantErr: true,
+		},
+		{
+			name: "unknown non-skippable",
+			attrs: []AKAAttribute{
+				{Type: akaAttrNotification, Value: []byte{0x80, 0x00}},
+				{Type: 9, Value: []byte{0x00, 0x00}},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got AKANotification
+			err := got.UnmarshalAttributes(tt.attrs)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalAttributes() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalAttributes() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("AKANotification = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBiddingMarshalBinary(t *testing.T) {
+	tests := []struct {
+		name string
+		in   Bidding
+		want []byte
+	}{
+		{name: "supports aka prime", in: Bidding{SupportsAKAPrime: true}, want: []byte{akaAttrBidding, 0x01, 0x80, 0x00}},
+		{name: "does not support aka prime", in: Bidding{}, want: []byte{akaAttrBidding, 0x01, 0x00, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.in.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalBinary() = % X, want % X", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBiddingUnmarshalBinary(t *testing.T) {
+	tests := []struct {
+		name        string
+		wire        []byte
+		wantSupport bool
+		wantErr     bool
+	}{
+		{name: "supports aka prime", wire: []byte{akaAttrBidding, 0x01, 0x80, 0x00}, wantSupport: true},
+		{name: "does not support aka prime", wire: []byte{akaAttrBidding, 0x01, 0x00, 0x00}},
+		{name: "reserved bits ignored", wire: []byte{akaAttrBidding, 0x01, 0x40, 0x00}},
+		{name: "wrong attribute", wire: []byte{akaAttrResultInd, 0x01, 0x00, 0x00}, wantErr: true},
+		{name: "invalid length", wire: []byte{akaAttrBidding, 0x02, 0x00, 0x00}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got Bidding
+			err := got.UnmarshalBinary(tt.wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.SupportsAKAPrime != tt.wantSupport {
+				t.Fatalf("SupportsAKAPrime = %t, want %t", got.SupportsAKAPrime, tt.wantSupport)
+			}
+		})
+	}
+}
+
+func TestKDFInputMarshalBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      KDFInput
+		want    []byte
+		wantErr bool
+	}{
+		{
+			name: "android network name vector",
+			in:   KDFInput{NetworkName: []byte("android.net")},
+			want: mustHex(t, "1704000B616E64726F69642E6E657400"),
+		},
+		{
+			name: "empty network name vector",
+			in:   KDFInput{},
+			want: mustHex(t, "17010000"),
+		},
+		{
+			name:    "network name exceeds 24.302 limit",
+			in:      KDFInput{NetworkName: bytes.Repeat([]byte("a"), akaNetworkNameMaxLen+1)},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.in.MarshalBinary()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("MarshalBinary() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalBinary() = % X, want % X", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKDFInputUnmarshalBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		wire    []byte
+		want    []byte
+		wantErr bool
+	}{
+		{name: "android network name vector", wire: mustHex(t, "1704000B616E64726F69642E6E657400"), want: []byte("android.net")},
+		{name: "empty network name vector", wire: mustHex(t, "17010000")},
+		{name: "wrong attribute", wire: mustHex(t, "18010001"), wantErr: true},
+		{name: "truncated actual length", wire: mustHex(t, "1704000D616E64726F69642E6E657400"), wantErr: true},
+		{name: "network name exceeds 24.302 limit", wire: mustKDFInputWire(t, bytes.Repeat([]byte("a"), akaNetworkNameMaxLen+1)), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got KDFInput
+			err := got.UnmarshalBinary(tt.wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got.NetworkName, tt.want) {
+				t.Fatalf("NetworkName = % X, want % X", got.NetworkName, tt.want)
+			}
+		})
+	}
+}
+
+func TestKDFMarshalBinary(t *testing.T) {
+	got, err := (KDF{Version: akaPrimeKDFDefault}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	want := mustHex(t, "18010001")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalBinary() = % X, want % X", got, want)
+	}
+}
+
+func TestKDFUnmarshalBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		wire    []byte
+		want    uint16
+		wantErr bool
+	}{
+		{name: "default kdf", wire: mustHex(t, "18010001"), want: akaPrimeKDFDefault},
+		{name: "wrong attribute", wire: mustHex(t, "17010000"), wantErr: true},
+		{name: "invalid length", wire: mustHex(t, "1802000100000000"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got KDF
+			err := got.UnmarshalBinary(tt.wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalBinary() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.Version != tt.want {
+				t.Fatalf("Version = %d, want %d", got.Version, tt.want)
+			}
+		})
+	}
+}
+
+func TestIPMSIndicationMarshalBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		ind     IPMSIndication
+		want    []byte
+		wantErr bool
+	}{
+		{name: "nbm only", ind: IPMSIndication{Support: IPMSSupportNBMOnly}, want: []byte{akaAttrIPMSInd, 0x01, 0x00, 0x02}},
+		{name: "reserved value", ind: IPMSIndication{Support: 15}, wantErr: true},
+		{name: "empty value", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.ind.MarshalBinary()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("MarshalBinary() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalBinary() = % X, want % X", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIPMSSelectionFromAttributes(t *testing.T) {
+	tests := []struct {
+		name          string
+		attrs         []AKAAttribute
+		wantSelection IPMSSelection
+		wantOK        bool
+		wantErr       bool
+	}{
+		{name: "missing"},
+		{
+			name:          "nbm selected",
+			attrs:         []AKAAttribute{{Type: akaAttrIPMSRes, Value: []byte{0x00, byte(IPMSSelectionNBM)}}},
+			wantSelection: IPMSSelectionNBM,
+			wantOK:        true,
+		},
+		{
+			name:    "invalid length",
+			attrs:   []AKAAttribute{{Type: akaAttrIPMSRes, Value: []byte{0x00, byte(IPMSSelectionNBM), 0x00, 0x00}}},
+			wantOK:  true,
+			wantErr: true,
+		},
+		{
+			name:    "reserved octet",
+			attrs:   []AKAAttribute{{Type: akaAttrIPMSRes, Value: []byte{0x01, byte(IPMSSelectionNBM)}}},
+			wantOK:  true,
+			wantErr: true,
+		},
+		{
+			name:    "reserved selection",
+			attrs:   []AKAAttribute{{Type: akaAttrIPMSRes, Value: []byte{0x00, 0x04}}},
+			wantOK:  true,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := IPMSSelectionFromAttributes(tt.attrs)
+			if ok != tt.wantOK {
+				t.Fatalf("IPMSSelectionFromAttributes() ok = %t, want %t", ok, tt.wantOK)
+			}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("IPMSSelectionFromAttributes() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("IPMSSelectionFromAttributes() error = %v", err)
+			}
+			if got != tt.wantSelection {
+				t.Fatalf("IPMSSelectionFromAttributes() selection = %d, want %d", got, tt.wantSelection)
+			}
+		})
+	}
+}
+
+func mustHex(t *testing.T, value string) []byte {
+	t.Helper()
+	got, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("hex.DecodeString(%q) error = %v", value, err)
+	}
+	return got
+}
+
+func mustKDFInputWire(t *testing.T, networkName []byte) []byte {
+	t.Helper()
+	wire, err := buildAKAStringAttribute(akaAttrKDFInput, string(networkName)).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	return wire
+}
+
+func assertAKAPrimeKeys(t *testing.T, got, want AKAPrimeKeys) {
+	t.Helper()
+	if !bytes.Equal(got.CKPrime, want.CKPrime) {
+		t.Fatalf("CKPrime = % X, want % X", got.CKPrime, want.CKPrime)
+	}
+	if !bytes.Equal(got.IKPrime, want.IKPrime) {
+		t.Fatalf("IKPrime = % X, want % X", got.IKPrime, want.IKPrime)
+	}
+	if !bytes.Equal(got.ENCR, want.ENCR) {
+		t.Fatalf("ENCR = % X, want % X", got.ENCR, want.ENCR)
+	}
+	if !bytes.Equal(got.AUT, want.AUT) {
+		t.Fatalf("AUT = % X, want % X", got.AUT, want.AUT)
+	}
+	if !bytes.Equal(got.RE, want.RE) {
+		t.Fatalf("RE = % X, want % X", got.RE, want.RE)
+	}
+	if !bytes.Equal(got.MSK, want.MSK) {
+		t.Fatalf("MSK = % X, want % X", got.MSK, want.MSK)
+	}
+	if !bytes.Equal(got.EMSK, want.EMSK) {
+		t.Fatalf("EMSK = % X, want % X", got.EMSK, want.EMSK)
+	}
+}
+
+func TestAKAReauthenticationUnmarshalMessageValidatesAttributeLengths(t *testing.T) {
+	encrKey := bytes.Repeat([]byte{0x22}, 16)
+	validCounter := []byte{0x00, 0x03}
+	validNonce := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x33}, akaVectorLen)...)
+
+	tests := []struct {
+		name     string
+		counter  []byte
+		nonce    []byte
+		topAttrs []AKAAttribute
+		wantErr  bool
+	}{
+		{
+			name:    "valid",
+			counter: validCounter,
+			nonce:   validNonce,
+		},
+		{
+			name:    "counter too long",
+			counter: []byte{0x00, 0x03, 0x00, 0x00, 0x00, 0x00},
+			nonce:   validNonce,
+			wantErr: true,
+		},
+		{
+			name:    "nonce too long",
+			counter: validCounter,
+			nonce:   append(validNonce, 0x00, 0x00, 0x00, 0x00),
+			wantErr: true,
+		},
+		{
+			name:     "result indication too long",
+			counter:  validCounter,
+			nonce:    validNonce,
+			topAttrs: []AKAAttribute{{Type: akaAttrResultInd, Value: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}},
+			wantErr:  true,
+		},
+		{
+			name:     "top-level unknown non-skippable",
+			counter:  validCounter,
+			nonce:    validNonce,
+			topAttrs: []AKAAttribute{{Type: 9, Value: []byte{0x00, 0x00}}},
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encrypted, err := encryptAKAAttributes([]AKAAttribute{
+				{Type: akaAttrCounter, Value: tt.counter},
+				{Type: akaAttrNonceS, Value: tt.nonce},
+			}, encrKey)
+			if err != nil {
+				t.Fatalf("encryptAKAAttributes() error = %v", err)
+			}
+			attrs := append([]AKAAttribute(nil), encrypted...)
+			attrs = append(attrs, tt.topAttrs...)
+			message := AKAMessage{
+				Code:       eapCodeRequest,
+				Identifier: 7,
+				Subtype:    akaSubtypeReauthentication,
+				Attributes: attrs,
+			}
+
+			var got AKAReauthentication
+			err = got.UnmarshalMessage(message, encrKey)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalMessage() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalMessage() error = %v", err)
+			}
+			if got.Counter != 3 || !bytes.Equal(got.NonceS, validNonce[akaAttributeReservedLen:]) {
+				t.Fatalf("AKAReauthentication = %+v", got)
+			}
+		})
+	}
+}
+
+func TestDecryptAttributesValidatesEncryptedAttributes(t *testing.T) {
+	encrKey := bytes.Repeat([]byte{0x22}, aes.BlockSize)
+	counterAttr := buildAKAUint16Attribute(akaAttrCounter, 3)
+	validPadding := AKAAttribute{Type: akaAttrPadding, Value: make([]byte, akaPaddingMaxLen-akaAttributeReservedLen)}
+	nonZeroPadding := AKAAttribute{Type: akaAttrPadding, Value: append([]byte{0x01}, make([]byte, akaPaddingMaxLen-akaAttributeReservedLen-1)...)}
+	oversizedPadding := AKAAttribute{Type: akaAttrPadding, Value: make([]byte, aes.BlockSize-akaAttributeReservedLen)}
+	alignedAttrs := []AKAAttribute{
+		counterAttr,
+		buildAKAUint16Attribute(akaAttrCounterTooSmall, 0),
+		buildAKAUint16Attribute(akaAttrClientErrorCode, 0),
+		buildAKAUint16Attribute(akaAttrResultInd, 0),
+	}
+
+	tests := []struct {
+		name       string
+		attrs      []AKAAttribute
+		mutate     func([]AKAAttribute) []AKAAttribute
+		wantErr    bool
+		wantNested int
+	}{
+		{
+			name:       "valid padding last",
+			attrs:      []AKAAttribute{counterAttr, validPadding},
+			wantNested: 1,
+		},
+		{
+			name:    "iv too long",
+			attrs:   []AKAAttribute{counterAttr, validPadding},
+			mutate:  appendToIVForTest,
+			wantErr: true,
+		},
+		{
+			name:    "padding not last",
+			attrs:   []AKAAttribute{validPadding, counterAttr},
+			wantErr: true,
+		},
+		{
+			name:    "padding length too long",
+			attrs:   []AKAAttribute{oversizedPadding},
+			wantErr: true,
+		},
+		{
+			name:    "padding not zero",
+			attrs:   []AKAAttribute{counterAttr, nonZeroPadding},
+			wantErr: true,
+		},
+		{
+			name:    "nested unknown non-skippable",
+			attrs:   []AKAAttribute{{Type: 9, Value: []byte{0x00, 0x00}}, validPadding},
+			wantErr: true,
+		},
+		{
+			name:       "no padding needed",
+			attrs:      alignedAttrs,
+			wantNested: len(alignedAttrs),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encrypted := encryptAKAAttributesForDecryptTest(t, tt.attrs, encrKey)
+			if tt.mutate != nil {
+				encrypted = tt.mutate(encrypted)
+			}
+			got, err := DecryptAttributes(encrypted, encrKey)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("DecryptAttributes() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DecryptAttributes() error = %v", err)
+			}
+			if len(got) != tt.wantNested {
+				t.Fatalf("len(DecryptAttributes()) = %d, want %d", len(got), tt.wantNested)
+			}
+		})
+	}
+}
+
+func appendToIVForTest(attrs []AKAAttribute) []AKAAttribute {
+	for i := range attrs {
+		if attrs[i].Type == akaAttrIV {
+			attrs[i].Value = append(attrs[i].Value, 0x00, 0x00, 0x00, 0x00)
+		}
+	}
+	return attrs
+}
+
+func encryptAKAAttributesForDecryptTest(t *testing.T, attrs []AKAAttribute, encrKey []byte) []AKAAttribute {
+	t.Helper()
+	plain, err := marshalAKAAttributes(attrs)
+	if err != nil {
+		t.Fatalf("marshalAKAAttributes() error = %v", err)
+	}
+	if len(plain)%aes.BlockSize != 0 {
+		t.Fatalf("plain length = %d, want block aligned", len(plain))
+	}
+	iv := bytes.Repeat([]byte{0x44}, aes.BlockSize)
+	block, err := aes.NewCipher(encrKey)
+	if err != nil {
+		t.Fatalf("aes.NewCipher() error = %v", err)
+	}
+	ciphertext := make([]byte, len(plain))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, plain)
+	return []AKAAttribute{
+		{Type: akaAttrIV, Value: append([]byte{0x00, 0x00}, iv...)},
+		{Type: akaAttrEncryptedData, Value: append([]byte{0x00, 0x00}, ciphertext...)},
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const sipTransactionTimeoutMultiplier = 64
+
 func (c *Call) startRingbackTimer() {
 	timeout := c.service.cfg.RingbackTimeout
 	if timeout <= 0 {
@@ -95,7 +97,7 @@ func (c *Call) rejectAfterRingingTimeout() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
 	defer cancel()
-	if err := c.service.writeStatus(ctx, req, 486, "Busy Here"); err != nil {
+	if err := c.service.writeStatus(ctx, req, sipStatusBusyHere, "Busy Here"); err != nil {
 		c.service.emitError(fmt.Errorf("ringing timeout: %w", err))
 		c.finish(CallStateFailed, err.Error())
 		return
@@ -111,6 +113,7 @@ func (c *Call) startInviteOKRetransmit(req session.Request, resp sip.Message) {
 	}
 	stop := make(chan struct{})
 	c.inviteOKStop = stop
+	c.inviteOKCSeq = sip.CSeqNumber(req.Message.Header("CSeq"))
 	c.mu.Unlock()
 
 	go func() {
@@ -118,7 +121,7 @@ func (c *Call) startInviteOKRetransmit(req session.Request, resp sip.Message) {
 		interval := timers.T1
 		timer := time.NewTimer(interval)
 		defer timer.Stop()
-		deadline := time.NewTimer(64 * timers.T1)
+		deadline := time.NewTimer(sipTransactionTimeoutMultiplier * timers.T1)
 		defer deadline.Stop()
 
 		for {
@@ -145,10 +148,55 @@ func (c *Call) stopInviteOKRetransmit() {
 	c.mu.Lock()
 	stop := c.inviteOKStop
 	c.inviteOKStop = nil
+	c.inviteOKCSeq = 0
 	c.mu.Unlock()
 	if stop != nil {
 		close(stop)
 	}
+}
+
+func (c *Call) startReliableProvisionalRetransmit(req session.Request, resp sip.Message, rseq int64) {
+	c.mu.Lock()
+	if c.reliableStop != nil || c.closed || c.pendingReliable.rseq != rseq {
+		c.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	c.reliableStop = stop
+	c.reliableResponse = cloneSIPMessage(resp)
+	c.mu.Unlock()
+
+	go func() {
+		timers := c.service.timers
+		interval := timers.T1
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		deadline := time.NewTimer(sipTransactionTimeoutMultiplier * timers.T1)
+		defer deadline.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-deadline.C:
+				ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
+				if err := c.service.writeStatus(ctx, req, sipStatusServerInternalError, "Reliable Response Timed Out"); err != nil {
+					c.service.emitError(fmt.Errorf("rejecting INVITE after PRACK timeout: %w", err))
+				}
+				cancel()
+				c.finish(CallStateFailed, "prack timeout")
+				return
+			case <-timer.C:
+				ctx, cancel := context.WithTimeout(context.Background(), min(inviteOKWriteTimeout, interval))
+				if err := c.service.sess.WriteResponse(ctx, req, resp); err != nil {
+					c.service.emitError(fmt.Errorf("retransmitting reliable provisional response: %w", err))
+				}
+				cancel()
+				interval = nextReliableProvisionalRetransmitInterval(interval)
+				timer.Reset(interval)
+			}
+		}
+	}()
 }
 
 func resetTimer(timer *time.Timer, timeout time.Duration) {

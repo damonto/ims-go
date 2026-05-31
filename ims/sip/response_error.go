@@ -1,6 +1,8 @@
 package sip
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -66,8 +68,8 @@ func ParseWarningValues(values []string) []WarningValue {
 	warnings := make([]WarningValue, 0, len(values))
 	for _, value := range values {
 		for _, part := range SplitHeaderList(value) {
-			warning, ok := parseWarningValue(part)
-			if ok {
+			var warning WarningValue
+			if err := warning.UnmarshalText([]byte(part)); err == nil {
 				warnings = append(warnings, warning)
 			}
 		}
@@ -78,25 +80,43 @@ func ParseWarningValues(values []string) []WarningValue {
 	return warnings
 }
 
-func parseWarningValue(value string) (WarningValue, bool) {
-	value = strings.TrimSpace(value)
+func (w WarningValue) MarshalText() ([]byte, error) {
+	if w.Code < 100 || w.Code > 999 {
+		return nil, fmt.Errorf("marshaling SIP Warning: code %d is not three digits", w.Code)
+	}
+	if strings.TrimSpace(w.Agent) == "" {
+		return nil, errors.New("marshaling SIP Warning: agent is empty")
+	}
+	return []byte(fmt.Sprintf(`%03d %s "%s"`, w.Code, strings.TrimSpace(w.Agent), quoteSIPString(w.Text))), nil
+}
+
+func (w *WarningValue) UnmarshalText(text []byte) error {
+	value := strings.TrimSpace(string(text))
 	fields := strings.Fields(value)
 	if len(fields) < 3 {
-		return WarningValue{}, false
+		return errors.New("parsing SIP Warning: expected code, agent, and text")
+	}
+	if len(fields[0]) != 3 {
+		return fmt.Errorf("parsing SIP Warning code %q: expected three digits", fields[0])
 	}
 	code, err := strconv.Atoi(fields[0])
 	if err != nil {
-		return WarningValue{}, false
+		return fmt.Errorf("parsing SIP Warning code %q: %w", fields[0], err)
 	}
 	textStart := strings.Index(value, fields[2])
 	if textStart < 0 {
-		return WarningValue{}, false
+		return errors.New("parsing SIP Warning: missing text")
 	}
-	return WarningValue{
+	rawText := strings.TrimSpace(value[textStart:])
+	if len(rawText) < 2 || rawText[0] != '"' || rawText[len(rawText)-1] != '"' {
+		return errors.New("parsing SIP Warning: text must be quoted")
+	}
+	*w = WarningValue{
 		Code:  code,
 		Agent: fields[1],
-		Text:  unquoteSIPString(strings.TrimSpace(value[textStart:])),
-	}, true
+		Text:  unquoteSIPString(rawText),
+	}
+	return nil
 }
 
 func unquoteSIPString(value string) string {
@@ -121,6 +141,19 @@ func unquoteSIPString(value string) string {
 	}
 	if escaped {
 		b.WriteByte('\\')
+	}
+	return b.String()
+}
+
+func quoteSIPString(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\', '"':
+			b.WriteByte('\\')
+		}
+		b.WriteByte(value[i])
 	}
 	return b.String()
 }

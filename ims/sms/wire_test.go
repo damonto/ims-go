@@ -332,6 +332,10 @@ func TestRPMessageMarshalBinaryRoundTrip(t *testing.T) {
 			name: "rp-error",
 			msg:  newRPErrorMessage(9, rpCauseInvalidMandatoryInformation),
 		},
+		{
+			name: "rp-smma",
+			msg:  newRPSMMAMessage(11),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -359,12 +363,28 @@ func TestSMSSubmitTPDUMarshalBinary(t *testing.T) {
 		t.Fatalf("buildUserDataParts() error = %v", err)
 	}
 	tests := []struct {
-		name string
-		tpdu submitTPDU
+		name           string
+		tpdu           submitTPDU
+		wantFirstOctet byte
 	}{
 		{
 			name: "single-part gsm7",
-			tpdu: newSubmitTPDU(7, "+12345", parts[0], false),
+			tpdu: newSubmitTPDU(submitTPDUConfig{
+				Reference:   7,
+				Destination: "+12345",
+				Part:        parts[0],
+			}),
+			wantFirstOctet: tpduMTISubmit,
+		},
+		{
+			name: "status report requested",
+			tpdu: newSubmitTPDU(submitTPDUConfig{
+				Reference:           7,
+				Destination:         "+12345",
+				Part:                parts[0],
+				RequestStatusReport: true,
+			}),
+			wantFirstOctet: tpduMTISubmit | tpduStatusReportRequestFlag,
 		},
 	}
 	for _, tt := range tests {
@@ -375,6 +395,9 @@ func TestSMSSubmitTPDUMarshalBinary(t *testing.T) {
 			}
 			if len(data) == 0 {
 				t.Fatal("MarshalBinary() returned empty TPDU")
+			}
+			if data[0] != tt.wantFirstOctet {
+				t.Fatalf("first octet = 0x%02X, want 0x%02X", data[0], tt.wantFirstOctet)
 			}
 		})
 	}
@@ -408,7 +431,39 @@ func TestSMSDeliverTPDURoundTrip(t *testing.T) {
 			if deliver.Message.Text != tt.text {
 				t.Fatalf("Message.Text = %q, want %q", deliver.Message.Text, tt.text)
 			}
+			if !bytes.Equal(deliver.Message.RawTPDU, data) {
+				t.Fatalf("Message.RawTPDU = % X, want original % X", deliver.Message.RawTPDU, data)
+			}
+			if deliver.Message.ReservedMTI {
+				t.Fatal("Message.ReservedMTI = true, want false")
+			}
 		})
+	}
+}
+
+func TestSMSDeliverTPDUPreservesReservedMTIRawTPDU(t *testing.T) {
+	parts, err := buildUserDataParts("hello")
+	if err != nil {
+		t.Fatalf("buildUserDataParts() error = %v", err)
+	}
+	data, err := newDeliverTPDU("+12345", parts[0]).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	data[0] = data[0]&^tpduMTIMask | tpduMTIReserved
+
+	var deliver deliverTPDU
+	if err := deliver.UnmarshalBinary(data); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+	if deliver.Message.Text != "hello" || deliver.Message.From != "+12345" {
+		t.Fatalf("Message = %+v, want decoded deliver fields", deliver.Message)
+	}
+	if !deliver.Message.ReservedMTI {
+		t.Fatal("Message.ReservedMTI = false, want true")
+	}
+	if !bytes.Equal(deliver.Message.RawTPDU, data) {
+		t.Fatalf("Message.RawTPDU = % X, want original % X", deliver.Message.RawTPDU, data)
 	}
 }
 

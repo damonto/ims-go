@@ -70,6 +70,9 @@ func (t tunnelDatagramTransport) Close() error {
 
 const defaultCloseTimeout = 5 * time.Second
 const defaultReconnectDelay = 3 * time.Second
+const defaultReconnectMaxDelay = time.Minute
+const defaultIMSRegistrationRetryBase = 120 * time.Second
+const defaultIMSRegistrationRetryMax = 300 * time.Second
 
 var reconnectAttemptTimeout = 30 * time.Second
 
@@ -116,14 +119,32 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	c.emitState(StateConnecting)
 	tunnelInfo, err := c.openTunnel(setup)
 	if err != nil {
+		c.recordSWUBackoff(err, time.Now())
+		c.emitConnectFailure(ctx, err)
+		return nil, err
+	}
+	c.clearCurrentSWUBackoff()
+
+	if err := c.openIMSRuntime(setup, tunnelInfo); err != nil {
 		c.emitConnectFailure(ctx, err)
 		return nil, err
 	}
 
-	transport, err := c.buildIMSTransport(setup, tunnelInfo)
+	active, err := c.commitConnect(setup)
 	if err != nil {
 		c.emitConnectFailure(ctx, err)
 		return nil, err
+	}
+
+	c.logger.Info("IMS registered")
+	c.emitState(StateRegistered)
+	return active, nil
+}
+
+func (c *Client) openIMSRuntime(setup *connectSetup, tunnelInfo swutunnel.Info) error {
+	transport, err := c.buildIMSTransport(setup, tunnelInfo)
+	if err != nil {
+		return err
 	}
 
 	imsSession, err := imssession.Open(imssession.Config{
@@ -132,44 +153,36 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		TransactionTimers: setup.imsCfg.SIPTimers,
 	}, transport)
 	if err != nil {
-		wrapped := fmt.Errorf("opening IMS session: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("opening IMS session: %w", err)
 	}
 	setup.imsSession = imsSession
 
 	reg, err := registration.New(c.buildRegistrationConfig(setup.imsCfg), imsSession, c.card)
 	if err != nil {
-		wrapped := fmt.Errorf("creating registration service: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("creating registration service: %w", err)
 	}
 	setup.reg = reg
 
 	c.logger.Info("registering IMS")
 	if err := reg.Establish(setup.setupCtx); err != nil {
-		wrapped := fmt.Errorf("establishing IMS registration: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("establishing IMS registration: %w", err)
 	}
 	if err := reg.Subscribe(setup.setupCtx); err != nil {
-		wrapped := fmt.Errorf("subscribing IMS registration: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("subscribing IMS registration: %w", err)
 	}
 
 	sms, err := imssms.New(imssms.Config{
-		ServiceCenter:       setup.imsCfg.ServiceCenter,
-		SubmitReportTimeout: setup.imsCfg.SMSSubmitReportTimeout,
-		OnIncoming:          c.handleSMS,
-		OnStatusReport:      c.handleSMSStatusReport,
-		OnError:             c.emitError,
-		Logger:              c.cfg.Logger,
+		ServiceCenter:         setup.imsCfg.ServiceCenter,
+		SubmitReportTimeout:   setup.imsCfg.SMSSubmitReportTimeout,
+		DeliveryReportTimeout: setup.imsCfg.SMSDeliveryReportTimeout,
+		RequestStatusReport:   c.cfg.smsRequestStatusReport,
+		OnIncoming:            c.handleSMS,
+		OnStatusReport:        c.handleSMSStatusReport,
+		OnError:               c.emitError,
+		Logger:                c.cfg.Logger,
 	}, imsSession, reg, c.card)
 	if err != nil {
-		wrapped := fmt.Errorf("creating SMS service: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("creating SMS service: %w", err)
 	}
 	setup.sms = sms
 
@@ -180,9 +193,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		Logger:             c.cfg.Logger,
 	}, imsSession, reg)
 	if err != nil {
-		wrapped := fmt.Errorf("creating USSD service: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("creating USSD service: %w", err)
 	}
 	setup.ussd = ussd
 
@@ -199,21 +210,10 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	voiceCfg.Logger = c.cfg.Logger
 	voice, err := imsvoice.New(voiceCfg, imsSession, reg)
 	if err != nil {
-		wrapped := fmt.Errorf("creating voice service: %w", err)
-		c.emitConnectFailure(ctx, wrapped)
-		return nil, wrapped
+		return fmt.Errorf("creating voice service: %w", err)
 	}
 	setup.voice = voice
-
-	active, err := c.commitConnect(setup)
-	if err != nil {
-		c.emitConnectFailure(ctx, err)
-		return nil, err
-	}
-
-	c.logger.Info("IMS registered")
-	c.emitState(StateRegistered)
-	return active, nil
+	return nil
 }
 
 func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSetup, error) {
@@ -236,6 +236,11 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 	setupCtx, setupStop := c.newSetupContext(ctx, internal)
 
 	if err := c.ensureReady(setupCtx); err != nil {
+		setupStop()
+		c.finishConnectAttempt()
+		return nil, err
+	}
+	if err := c.waitSWUBackoff(setupCtx); err != nil {
 		setupStop()
 		c.finishConnectAttempt()
 		return nil, err
@@ -337,16 +342,18 @@ func (c *Client) openTunnel(setup *connectSetup) (swutunnel.Info, error) {
 		return swutunnel.Info{}, fmt.Errorf("connecting swu: %w", err)
 	}
 	tunnelInfo := session.Info()
-	c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.InnerIP, "pcscf_ip", tunnelInfo.PCSCFIP, "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
+	c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.InnerIP, "pcscf_ip", tunnelInfo.PCSCFIP, "pcscf_ips", tunnelInfo.PCSCFIPs, "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
 	return tunnelInfo, nil
 }
 
-func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imssession.Transport, error) {
+func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Info) (imssession.Transport, error) {
 	setup.imsCfg.dialSecureTCP = nil
 	setup.imsCfg.dialSecureUDP = nil
 	setup.imsCfg.listenSecureTCP = nil
 	setup.imsCfg.listenSecureUDP = nil
 
+	pcscfIPs := pcscfCandidateIPs(tunnelInfo)
+	selectedPCSCF := firstPCSCFIP(pcscfIPs)
 	var transport imssession.Transport = tunnelDatagramTransport{session: setup.session}
 	if setup.imsCfg.Transport != "tcp" {
 		setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
@@ -354,6 +361,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 				TCPConfig: swutransport.TCPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
+					RemoteIP:   selectedPCSCF,
 				},
 				OutboundSPI:   cfg.OutboundSPI,
 				InboundSPI:    cfg.InboundSPI,
@@ -369,6 +377,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 				TCPConfig: swutransport.TCPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
+					RemoteIP:   selectedPCSCF,
 				},
 				OutboundSPI:   cfg.OutboundSPI,
 				InboundSPI:    cfg.InboundSPI,
@@ -381,18 +390,18 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 		return transport, nil
 	}
 
-	tcpTransport, err := swutransport.DialTCP(setup.setupCtx, setup.session, swutransport.TCPConfig{
-		RemotePort: setup.tunnelCfg.SIPPort,
-	})
+	tcpTransport, selectedIP, err := c.dialPCSCFTCP(setup, pcscfIPs)
 	if err != nil {
 		return nil, fmt.Errorf("dialing ims tcp transport: %w", err)
 	}
 	transport = tcpTransport
+	selectedPCSCF = selectedIP
 	setup.imsCfg.dialSecureTCP = func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
 		return swutransport.DialSecureTCP(ctx, setup.session, swutransport.SecureTCPConfig{
 			TCPConfig: swutransport.TCPConfig{
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
+				RemoteIP:   selectedPCSCF,
 			},
 			OutboundSPI:   cfg.OutboundSPI,
 			InboundSPI:    cfg.InboundSPI,
@@ -408,6 +417,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 			TCPConfig: swutransport.TCPConfig{
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
+				RemoteIP:   selectedPCSCF,
 			},
 			OutboundSPI:   cfg.OutboundSPI,
 			InboundSPI:    cfg.InboundSPI,
@@ -423,6 +433,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 			TCPConfig: swutransport.TCPConfig{
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
+				RemoteIP:   selectedPCSCF,
 			},
 			OutboundSPI:   cfg.OutboundSPI,
 			InboundSPI:    cfg.InboundSPI,
@@ -435,6 +446,72 @@ func (c *Client) buildIMSTransport(setup *connectSetup, _ swutunnel.Info) (imsse
 	return transport, nil
 }
 
+func (c *Client) dialPCSCFTCP(setup *connectSetup, pcscfIPs []net.IP) (*swutransport.TCPConn, net.IP, error) {
+	candidates := pcscfIPs
+	if len(candidates) == 0 {
+		candidates = []net.IP{nil}
+	}
+	var errs error
+	for _, ip := range candidates {
+		tcpTransport, err := swutransport.DialTCP(setup.setupCtx, setup.session, swutransport.TCPConfig{
+			RemotePort: setup.tunnelCfg.SIPPort,
+			RemoteIP:   ip,
+		})
+		if err == nil {
+			return tcpTransport, tcpRemoteIP(tcpTransport), nil
+		}
+		errs = errors.Join(errs, fmt.Errorf("dialing P-CSCF %s: %w", ipLabel(ip), err))
+	}
+	return nil, nil, errs
+}
+
+func pcscfCandidateIPs(info swutunnel.Info) []net.IP {
+	candidates := info.PCSCFIPs
+	if len(candidates) == 0 && len(info.PCSCFIP) != 0 {
+		candidates = []net.IP{append(net.IP(nil), info.PCSCFIP...)}
+	}
+	return uniqueIPs(candidates)
+}
+
+func firstPCSCFIP(ips []net.IP) net.IP {
+	if len(ips) == 0 {
+		return nil
+	}
+	return append(net.IP(nil), ips[0]...)
+}
+
+func tcpRemoteIP(conn *swutransport.TCPConn) net.IP {
+	remote := conn.RemoteAddr().(*net.TCPAddr)
+	return append(net.IP(nil), remote.IP...)
+}
+
+func uniqueIPs(ips []net.IP) []net.IP {
+	unique := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if len(ip) == 0 {
+			continue
+		}
+		seen := false
+		for _, existing := range unique {
+			if existing.Equal(ip) {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			unique = append(unique, append(net.IP(nil), ip...))
+		}
+	}
+	return unique
+}
+
+func ipLabel(ip net.IP) string {
+	if len(ip) == 0 {
+		return "default"
+	}
+	return ip.String()
+}
+
 func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 	return registration.Config{
 		PrivateIdentity:         cfg.PrivateIdentity,
@@ -445,6 +522,7 @@ func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 		WLANNodeID:              cfg.WLANNodeID,
 		RegisterExpires:         cfg.RegisterExpires,
 		IMEI:                    cfg.IMEI,
+		AuthAlgorithm:           cfg.AuthAlgorithm,
 		GeolocationPIDFRegister: cfg.GeolocationPIDFRegister,
 		GeolocationCountry:      cfg.GeolocationCountry,
 		UseTelURIForPIDFXML:     cfg.UseTelURIForPIDFXML,
@@ -622,13 +700,23 @@ func (c *Client) runIMSLoop(active *activeConn, done func()) {
 			return
 		}
 
+		if swutunnel.PCSCFReselectionRequested(err) {
+			next, restoreErr := c.restoreIMSAfterPCSCFReselection(active, err)
+			if restoreErr == nil {
+				c.logger.Info("IMS restored after P-CSCF reselection")
+				active = next
+				continue
+			}
+			err = fmt.Errorf("restoring IMS after P-CSCF reselection: %w", restoreErr)
+		}
+
 		active.cancel()
 		if !c.detachActive(active) {
 			return
 		}
 
 		closeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
-		_ = c.closeActive(closeCtx, active)
+		_ = c.closeActiveRuntime(closeCtx, active)
 		cancel()
 		c.emitError(fmt.Errorf("running IMS loop: %w", err))
 		c.emitState(StateFailed)
@@ -636,8 +724,8 @@ func (c *Client) runIMSLoop(active *activeConn, done func()) {
 		if !c.startReconnect() {
 			return
 		}
-		c.logger.Info("reconnecting client", "delay", c.cfg.ReconnectDelay)
-		next, reconnectErr := c.reconnect()
+		c.logger.Info("reconnecting client", "cause", err)
+		next, reconnectErr := c.reconnectFn(err)
 		c.finishReconnect()
 		if reconnectErr != nil {
 			if !errors.Is(reconnectErr, context.Canceled) {
@@ -647,6 +735,101 @@ func (c *Client) runIMSLoop(active *activeConn, done func()) {
 		}
 		c.logger.Info("client reconnected")
 		active = next
+	}
+}
+
+func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error) (*activeConn, error) {
+	if active.session == nil {
+		return nil, errors.New("restoring IMS after P-CSCF reselection: session is missing")
+	}
+	tunnelInfo, ok := swutunnel.PCSCFReselectionInfo(cause)
+	if !ok {
+		tunnelInfo = active.session.Info()
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+	closeErr := c.closeIMSRuntime(closeCtx, active)
+	closeCancel()
+	if closeErr != nil {
+		return nil, closeErr
+	}
+
+	setupCtx, setupStop := c.newIMSRestoreContext(active.runCtx)
+	defer setupStop()
+
+	tunnelCfg := c.cfg.Tunnel
+	tunnelCfg.RemoteAddr = c.cfg.EPDG
+	tunnelCfg, err := tunnelCfg.Normalized()
+	if err != nil {
+		return nil, fmt.Errorf("normalizing tunnel config: %w", err)
+	}
+	imsCfg, err := c.cfg.IMS.Normalized()
+	if err != nil {
+		return nil, fmt.Errorf("normalizing IMS config: %w", err)
+	}
+
+	setup := &connectSetup{
+		setupCtx:  setupCtx,
+		setupStop: setupStop,
+		runCtx:    active.runCtx,
+		cancel:    active.cancel,
+		tunnelCfg: tunnelCfg,
+		imsCfg:    imsCfg,
+		session:   active.session,
+	}
+	if err := c.openIMSRuntime(setup, tunnelInfo); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+		_ = setup.closeIMSRuntime(ctx)
+		cancel()
+		return nil, err
+	}
+	if err := c.commitIMSRestore(active, setup); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+		_ = setup.closeIMSRuntime(ctx)
+		cancel()
+		return nil, err
+	}
+	c.emitState(StateRegistered)
+	return active, nil
+}
+
+func (c *Client) commitIMSRestore(active *activeConn, setup *connectSetup) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return fmt.Errorf("connecting client: %w", ErrClientClosed)
+	}
+	if c.active != active {
+		return errors.New("restoring IMS after P-CSCF reselection: active connection changed")
+	}
+	active.imsSession = setup.imsSession
+	active.reg = setup.reg
+	active.sms = setup.sms
+	active.ussd = setup.ussd
+	active.voice = setup.voice
+	setup.imsSession = nil
+	setup.reg = nil
+	setup.sms = nil
+	setup.ussd = nil
+	setup.voice = nil
+	c.ussdSessions = make(map[*imsussd.Session]*Session)
+	return nil
+}
+
+func (c *Client) newIMSRestoreContext(parent context.Context) (context.Context, context.CancelFunc) {
+	setupCtx, setupCancel := context.WithCancel(parent)
+	stopLifecycle := context.AfterFunc(c.lifecycleCtx, setupCancel)
+	stop := func() {
+		stopLifecycle()
+		setupCancel()
+	}
+	if reconnectAttemptTimeout <= 0 {
+		return setupCtx, stop
+	}
+	timeoutCtx, timeoutCancel := context.WithTimeout(setupCtx, reconnectAttemptTimeout)
+	return timeoutCtx, func() {
+		timeoutCancel()
+		stop()
 	}
 }
 
@@ -705,8 +888,14 @@ func (c *Client) finishReconnect() {
 	c.mu.Unlock()
 }
 
-func (c *Client) reconnect() (*activeConn, error) {
-	if err := sleepContext(c.lifecycleCtx, c.cfg.ReconnectDelay); err != nil {
+func (c *Client) reconnect(cause error) (*activeConn, error) {
+	c.recordSWUBackoff(cause, time.Now())
+	if terminalReconnectError(cause) {
+		return nil, cause
+	}
+	backoff := newReconnectBackoff(c.cfg.ReconnectDelay, c.cfg.ReconnectMaxDelay)
+	registrationBackoff := newReconnectBackoff(c.cfg.IMS.RegistrationRetryBase, c.cfg.IMS.RegistrationRetryMax)
+	if err := sleepContext(c.lifecycleCtx, c.reconnectDelay(cause, backoff, registrationBackoff)); err != nil {
 		return nil, err
 	}
 	for {
@@ -717,11 +906,65 @@ func (c *Client) reconnect() (*activeConn, error) {
 		if c.lifecycleCtx.Err() != nil {
 			return nil, c.lifecycleCtx.Err()
 		}
-		c.logger.Warn("reconnect attempt", "err", err, "next_delay", c.cfg.ReconnectDelay)
-		if err := sleepContext(c.lifecycleCtx, c.cfg.ReconnectDelay); err != nil {
+		if terminalReconnectError(err) {
+			return nil, err
+		}
+		nextDelay := c.reconnectDelay(err, backoff, registrationBackoff)
+		c.logger.Warn("reconnect attempt", "err", err, "next_delay", nextDelay)
+		if err := sleepContext(c.lifecycleCtx, nextDelay); err != nil {
 			return nil, err
 		}
 	}
+}
+
+func terminalReconnectError(err error) bool {
+	return swutunnel.AccessRejected(err) || swutunnel.BackoffDeactivated(err) || errors.Is(err, errSWUBackoffDeactivated)
+}
+
+func (c *Client) reconnectDelay(err error, backoff, registrationBackoff *reconnectBackoff) time.Duration {
+	if swutunnel.ReactivationRequested(err) || swutunnel.PCSCFReselectionRequested(err) {
+		return 0
+	}
+	if registration.InitialRegistrationRequired(err) {
+		delay := registrationBackoff.Next()
+		if retryAfter, ok := registration.RetryAfterDelay(err); ok {
+			delay = max(delay, retryAfter)
+		}
+		if tunnelBackoff, ok := swutunnel.BackoffDelay(err); ok {
+			delay = max(delay, tunnelBackoff)
+		}
+		return delay
+	}
+	delay := backoff.Next()
+	if retryAfter, ok := registration.RetryAfterDelay(err); ok {
+		delay = max(delay, retryAfter)
+	}
+	if tunnelBackoff, ok := swutunnel.BackoffDelay(err); ok {
+		delay = max(delay, tunnelBackoff)
+	}
+	return delay
+}
+
+type reconnectBackoff struct {
+	next time.Duration
+	max  time.Duration
+}
+
+func newReconnectBackoff(first, maxDelay time.Duration) *reconnectBackoff {
+	return &reconnectBackoff{next: first, max: maxDelay}
+}
+
+func (b *reconnectBackoff) Next() time.Duration {
+	delay := b.next
+	if delay <= 0 {
+		return 0
+	}
+	next := delay * 2
+	if next < delay || next > b.max {
+		next = b.max
+	}
+	b.next = next
+	return delay
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {
@@ -837,20 +1080,51 @@ func (c *Client) closeActiveRuntime(ctx context.Context, active *activeConn) err
 	if active == nil {
 		return nil
 	}
+	err := c.closeIMSRuntime(ctx, active)
+	if active.session != nil {
+		err = errors.Join(err, wrapCloseError("closing session", normalizeCloseError(active.session.CloseContext(ctx))))
+	}
+	return err
+}
+
+func (c *Client) closeIMSRuntime(ctx context.Context, active *activeConn) error {
 	c.clearUSSDSessionBindings()
 
 	var err error
+	if active.ussd != nil {
+		active.ussd.Abort()
+	}
 	if active.voice != nil {
 		err = errors.Join(err, wrapCloseError("closing voice service", active.voice.Close()))
 	}
 	if active.sms != nil {
 		err = errors.Join(err, wrapCloseError("closing SMS service", active.sms.Close()))
 	}
+	if active.reg != nil {
+		active.reg.Abort()
+	}
 	if active.imsSession != nil {
 		err = errors.Join(err, wrapCloseError("closing IMS session", normalizeCloseError(active.imsSession.CloseContext(ctx))))
 	}
-	if active.session != nil {
-		err = errors.Join(err, wrapCloseError("closing session", normalizeCloseError(active.session.CloseContext(ctx))))
+	return err
+}
+
+func (s *connectSetup) closeIMSRuntime(ctx context.Context) error {
+	var err error
+	if s.ussd != nil {
+		s.ussd.Abort()
+	}
+	if s.voice != nil {
+		err = errors.Join(err, wrapCloseError("closing voice service", s.voice.Close()))
+	}
+	if s.sms != nil {
+		err = errors.Join(err, wrapCloseError("closing SMS service", s.sms.Close()))
+	}
+	if s.reg != nil {
+		s.reg.Abort()
+	}
+	if s.imsSession != nil {
+		err = errors.Join(err, wrapCloseError("closing IMS session", normalizeCloseError(s.imsSession.CloseContext(ctx))))
 	}
 	return err
 }

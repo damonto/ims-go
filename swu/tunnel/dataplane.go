@@ -1,7 +1,9 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -9,14 +11,16 @@ import (
 	"time"
 
 	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/ike"
 	"github.com/damonto/vowifi-go/swu/packet"
 )
 
 type innerWriteState struct {
-	connected bool
-	codec     esp.Codec
-	outer     *net.UDPAddr
-	seq       uint32
+	connected      bool
+	codec          esp.Codec
+	outer          *net.UDPAddr
+	seq            uint32
+	protectedBytes uint64
 }
 
 func (s *Session) WritePacket(ctx context.Context, data []byte) error {
@@ -48,7 +52,7 @@ func (s *Session) WritePacket(ctx context.Context, data []byte) error {
 	})
 }
 
-func (s *Session) prepareInnerWrite() (innerWriteState, error) {
+func (s *Session) prepareInnerWrite(payloadLen int) (innerWriteState, error) {
 	if s.isClosed() {
 		return innerWriteState{}, errors.New("writing packet: session is closed")
 	}
@@ -65,7 +69,22 @@ func (s *Session) prepareInnerWrite() (innerWriteState, error) {
 		}
 		return innerWriteState{outer: outer}, nil
 	}
+	if s.childSAExpiredLocked(time.Now()) {
+		s.mu.Unlock()
+		s.discardChildSecurityAssociations(errChildSAExpired)
+		return innerWriteState{}, fmt.Errorf("writing packet: %w", errChildSAExpired)
+	}
 	codec := s.outboundESP
+	protectedBytes, err := codec.CryptoPayloadBytes(payloadLen)
+	if err != nil {
+		s.mu.Unlock()
+		return innerWriteState{}, fmt.Errorf("writing packet: %w", err)
+	}
+	if s.childSAByteExpiredLocked(protectedBytes) {
+		s.mu.Unlock()
+		s.discardChildSecurityAssociations(errChildSAExpired)
+		return innerWriteState{}, fmt.Errorf("writing packet: %w", errChildSAExpired)
+	}
 	outer := cloneUDPAddr(s.outerNAT)
 	seq, ok := esp.NextSequence(&s.espSeq)
 	s.mu.Unlock()
@@ -73,7 +92,7 @@ func (s *Session) prepareInnerWrite() (innerWriteState, error) {
 		s.failSecurityAssociations(errors.New("esp sequence number overflow"))
 		return innerWriteState{}, errors.New("writing packet: esp sequence number overflow")
 	}
-	return innerWriteState{connected: true, codec: codec, outer: outer, seq: seq}, nil
+	return innerWriteState{connected: true, codec: codec, outer: outer, seq: seq, protectedBytes: protectedBytes}, nil
 }
 
 func sealInnerPacket(state innerWriteState, innerPacket []byte, nextHeader byte) ([]byte, error) {
@@ -81,7 +100,7 @@ func sealInnerPacket(state innerWriteState, innerPacket []byte, nextHeader byte)
 }
 
 func (s *Session) writeInner(ctx context.Context, innerPacket []byte, nextHeader byte) error {
-	state, err := s.prepareInnerWrite()
+	state, err := s.prepareInnerWrite(len(innerPacket))
 	if err != nil {
 		return err
 	}
@@ -97,7 +116,11 @@ func (s *Session) writeInner(ctx context.Context, innerPacket []byte, nextHeader
 	if err := s.writeOuter(ctx, sealed, state.outer); err != nil {
 		return err
 	}
-	s.markProtectedTx(time.Now())
+	now := time.Now()
+	if s.addCurrentChildSAOutboundBytes(state.protectedBytes, now) {
+		s.discardChildSecurityAssociations(errChildSAExpired)
+	}
+	s.markProtectedTx(now)
 	return nil
 }
 
@@ -159,7 +182,7 @@ func (s *Session) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 func (s *Session) readLoop() {
 	defer s.wg.Done()
 	defer close(s.readCh)
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, maxUDPPacketSize)
 	for {
 		packet, addr, ok := s.readLoopPacket(buf)
 		if !ok {
@@ -173,10 +196,10 @@ func (s *Session) readLoop() {
 }
 
 func (s *Session) readLoopPacket(buf []byte) ([]byte, net.Addr, bool) {
-	if s.closeCtx != nil && s.closeCtx.Err() != nil {
+	if s.closeCtx.Err() != nil {
 		return nil, nil, false
 	}
-	if err := s.conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+	if err := s.conn.SetReadDeadline(time.Now().Add(outerReadPollDelay)); err != nil {
 		s.tryDeliverError(fmt.Errorf("reading packet: setting read deadline: %w", err))
 		return nil, nil, false
 	}
@@ -186,7 +209,7 @@ func (s *Session) readLoopPacket(buf []byte) ([]byte, net.Addr, bool) {
 			return nil, nil, false
 		}
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			if s.closeCtx != nil && s.closeCtx.Err() != nil {
+			if s.closeCtx.Err() != nil {
 				return nil, nil, false
 			}
 			return nil, nil, true
@@ -204,7 +227,7 @@ func (s *Session) handleOuterPacket(packet []byte, addr net.Addr) {
 		return
 	}
 	if hasNonESPMarker(packet) {
-		s.handleNonESPPacket(packet[4:], addr)
+		s.handleNonESPPacket(packet[nonESPMarkerLen:], addr)
 		return
 	}
 	s.handleESPPacket(packet)
@@ -225,15 +248,61 @@ func (s *Session) handleNonESPPacket(packet []byte, addr net.Addr) {
 	s.logger.Debug("ignoring unexpected non-ESP marker packet")
 }
 
-func (s *Session) inboundPacketContext() (esp.Codec, int) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.inboundESP, s.cfg.LocalSIPPort
+type inboundESPContext struct {
+	codec        esp.Codec
+	info         Info
+	localUDPPort int
+}
+
+func (s *Session) inboundPacketContexts(spi uint32) []inboundESPContext {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneRetiredChildSAsLocked(time.Now())
+	contexts := make([]inboundESPContext, 0, 1+len(s.retiredChildSAs))
+	if s.inboundESP.SPI == spi {
+		contexts = append(contexts, inboundESPContext{codec: s.inboundESP, info: cloneInfo(s.tunnel), localUDPPort: s.cfg.LocalSIPPort})
+	}
+	for _, child := range s.retiredChildSAs {
+		if child.inbound.SPI == spi {
+			contexts = append(contexts, inboundESPContext{codec: child.inbound, info: cloneInfo(child.info), localUDPPort: s.cfg.LocalSIPPort})
+		}
+	}
+	return contexts
 }
 
 func (s *Session) handleESPPacket(data []byte) {
-	codec, localUDPPort := s.inboundPacketContext()
-	espPacket, err := codec.Decode(data)
+	if err := s.expireChildSAIfNeeded("reading packet"); err != nil {
+		s.logger.Debug("dropping ESP packet after child SA expiry", "err", err)
+		return
+	}
+	spi, ok := espPacketSPI(data)
+	if !ok {
+		s.logger.Debug("dropping truncated ESP packet", "packet_len", len(data))
+		return
+	}
+	contexts := s.inboundPacketContexts(spi)
+	if len(contexts) == 0 {
+		s.logger.Debug("dropping ESP packet for unknown SPI", "spi", spi)
+		return
+	}
+	var espPacket esp.ESPPacket
+	var localUDPPort int
+	var info Info
+	var protectedBytes uint64
+	var err error
+	for _, context := range contexts {
+		espPacket, err = context.codec.Decode(data)
+		if err == nil {
+			protectedBytes, err = context.codec.CryptoPacketBytes(len(data))
+			if err != nil {
+				s.logger.Debug("counting ESP packet bytes failed", "err", err)
+				return
+			}
+			info = context.info
+			localUDPPort = context.localUDPPort
+			break
+		}
+	}
 	if err != nil {
 		if len(data) <= 16 {
 			s.logger.Debug("decoding ESP packet failed", "err", err, "packet_hex", shortPacketHex(data))
@@ -242,18 +311,120 @@ func (s *Session) handleESPPacket(data []byte) {
 		}
 		return
 	}
-	if !s.acceptInboundESPSequence(espPacket.Sequence) {
+	accept := s.acceptESPSequence(espPacket.SPI, espPacket.Sequence, protectedBytes)
+	if !accept.accepted {
+		if accept.expireCurrent {
+			s.discardChildSecurityAssociations(errChildSAExpired)
+		}
 		s.logger.Debug("dropping replayed ESP packet", "esp_sequence", espPacket.Sequence)
 		return
 	}
+	s.promoteOutboundAfterInboundESP(espPacket.SPI)
 	s.markProtectedRx(time.Now())
+	if espPacket.NextHeader == esp.NextHeaderNoNext {
+		s.logger.Debug("dropping ESP dummy packet", "esp_sequence", espPacket.Sequence)
+		return
+	}
+	if espPacket.NextHeader != packet.OuterIPv4 && espPacket.NextHeader != packet.OuterIPv6 {
+		s.logger.Debug("dropping ESP packet with unsupported next header", "next_header", espPacket.NextHeader)
+		return
+	}
 	var inner packet.InnerPacket
 	err = inner.UnmarshalBinary(espPacket.Payload)
 	if err != nil {
 		s.logger.Debug("parsing inner IP packet failed", "err", err)
 		return
 	}
+	nextHeader, err := inner.OuterNextHeader()
+	if err != nil {
+		s.logger.Debug("resolving inner IP next header failed", "err", err)
+		return
+	}
+	if nextHeader != espPacket.NextHeader {
+		s.logger.Debug("dropping ESP packet with mismatched inner IP version", "next_header", espPacket.NextHeader, "inner_next_header", nextHeader)
+		return
+	}
+	if !innerPacketMatchesChildSASelectors(inner, info) {
+		s.logger.Debug("dropping ESP packet outside child sa traffic selectors", "src_ip", inner.IP.SrcIP, "dst_ip", inner.IP.DstIP, "protocol", inner.IP.Protocol)
+		return
+	}
 	s.handleInnerPacket(inner, localUDPPort)
+	if accept.expireCurrent {
+		s.discardChildSecurityAssociations(errChildSAExpired)
+	}
+}
+
+func innerPacketMatchesChildSASelectors(pkt packet.InnerPacket, info Info) bool {
+	if len(info.InitiatorTrafficSelectors) == 0 || len(info.ResponderTrafficSelectors) == 0 {
+		return true
+	}
+	srcPort, dstPort := innerPacketPorts(pkt)
+	return ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, pkt.IP.SrcIP, pkt.IP.Protocol, srcPort) &&
+		ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, pkt.IP.DstIP, pkt.IP.Protocol, dstPort)
+}
+
+func innerPacketPorts(pkt packet.InnerPacket) (int, int) {
+	switch {
+	case pkt.UDP != nil:
+		return pkt.UDP.Src.Port, pkt.UDP.Dst.Port
+	case pkt.TCP != nil:
+		return pkt.TCP.Src.Port, pkt.TCP.Dst.Port
+	default:
+		return 0, 0
+	}
+}
+
+func ipMatchesTrafficSelectors(selectors []ike.TrafficSelector, ip net.IP, protocol byte, port int) bool {
+	for _, selector := range selectors {
+		if trafficSelectorMatchesPacket(selector, ip, protocol, port) {
+			return true
+		}
+	}
+	return false
+}
+
+func trafficSelectorMatchesPacket(selector ike.TrafficSelector, ip net.IP, protocol byte, port int) bool {
+	if selector.ProtocolID != 0 && selector.ProtocolID != protocol {
+		return false
+	}
+	if len(selector.Data) < 4 {
+		return false
+	}
+	startPort := int(binary.BigEndian.Uint16(selector.Data[0:2]))
+	endPort := int(binary.BigEndian.Uint16(selector.Data[2:4]))
+	if port < startPort || port > endPort {
+		return false
+	}
+	addressLen := (len(selector.Data) - 4) / 2
+	if addressLen != net.IPv4len && addressLen != net.IPv6len {
+		return false
+	}
+	normalized := ip.To4()
+	if addressLen == net.IPv6len {
+		normalized = ip.To16()
+	}
+	if len(normalized) != addressLen {
+		return false
+	}
+	start := selector.Data[4 : 4+addressLen]
+	end := selector.Data[4+addressLen : 4+addressLen*2]
+	return bytes.Compare(normalized, start) >= 0 && bytes.Compare(normalized, end) <= 0
+}
+
+func (s *Session) promoteOutboundAfterInboundESP(spi uint32) {
+	s.mu.RLock()
+	promote := s.pendingChildSA.ready && s.inboundESP.SPI == spi
+	s.mu.RUnlock()
+	if promote {
+		s.promotePendingChildSecurityAssociation()
+	}
+}
+
+func espPacketSPI(data []byte) (uint32, bool) {
+	if len(data) < 4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(data[:4]), true
 }
 
 func (s *Session) handleInnerPacket(pkt packet.InnerPacket, localUDPPort int) {
@@ -303,7 +474,7 @@ func (s *Session) tryDeliverError(err error) {
 }
 
 func hasNonESPMarker(data []byte) bool {
-	return len(data) >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 0
+	return len(data) >= nonESPMarkerLen && bytes.Equal(data[:nonESPMarkerLen], nonESPMarker[:])
 }
 
 func isNATKeepalive(data []byte) bool {

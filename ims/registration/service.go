@@ -2,16 +2,17 @@ package registration
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"mime"
 	"net"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/damonto/vowifi-go/ims/pidf"
@@ -19,6 +20,20 @@ import (
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
 	"github.com/damonto/vowifi-go/usim"
+)
+
+const (
+	sipStatusOK                          = 200
+	sipStatusBadRequest                  = 400
+	sipStatusUnauthorized                = 401
+	sipStatusForbidden                   = 403
+	sipStatusRequestTimeout              = 408
+	sipStatusIntervalTooBrief            = 423
+	sipStatusCallTransactionDoesNotExist = 481
+	sipStatusBadEvent                    = 489
+	sipStatusServerInternalError         = 500
+	sipStatusServiceUnavailable          = 503
+	sipStatusServerTimeout               = 504
 )
 
 type Config struct {
@@ -30,6 +45,7 @@ type Config struct {
 	WLANNodeID              string
 	RegisterExpires         time.Duration
 	IMEI                    string
+	AuthAlgorithm           string
 	GeolocationPIDFRegister []int
 	GeolocationCountry      string
 	UseTelURIForPIDFXML     bool
@@ -66,6 +82,7 @@ type State struct {
 	Flow                Flow
 	ServiceRoutes       []string
 	SecurityClient      security.Param
+	SecurityClients     security.Params
 	SecurityVerify      *security.Param
 	RegisterExpires     time.Duration
 	ContactHost         string
@@ -85,19 +102,23 @@ type Service struct {
 	logger     *slog.Logger
 	attachment session.Attachment
 
-	mu             sync.Mutex
-	state          State
-	flow           Flow
-	authCK         []byte
-	authIK         []byte
-	authNonce      string
-	authRealm      string
-	authQOP        string
-	authNonceCount uint32
-	callID         string
-	sessionID      string
-	tag            string
-	cseq           int64
+	mu                  sync.Mutex
+	state               State
+	flow                Flow
+	authCK              []byte
+	authIK              []byte
+	authNonce           string
+	authRealm           string
+	authAlgorithm       string
+	authQOP             string
+	authNonceCount      uint32
+	authDigestNonce     string
+	authDigestAlgorithm string
+	authDigestPassword  string
+	callID              string
+	sessionID           string
+	tag                 string
+	cseq                int64
 
 	subscribeExpires     time.Duration
 	subscribeUnsupported bool
@@ -107,17 +128,58 @@ type Service struct {
 
 	registrationEvents       chan error
 	subscribeRefreshRequests chan struct{}
+	registrationGate         chan struct{}
+	secureServerAttachments  []session.Attachment
+	drainTimers              []*attachmentDrain
+	activeSecureSAExpiresAt  time.Time
+	activeSecureSATimer      *time.Timer
 }
 
 const defaultIMSExpires = 600000 * time.Second
+const secureAssociationLifetimeGrace = 30 * time.Second
+const maxSIPCSeq = 1<<31 - 1
 
-var errNetworkDeregistered = errors.New("ims registration terminated by network")
+var (
+	errNetworkDeregistered       = errors.New("ims registration terminated by network")
+	errInitialRegistrationNeeded = errors.New("initial registration required")
+	errSecureSAExpired           = errors.New("ims security association lifetime expired")
+	errSecurityAgreementInvalid  = errors.New("security agreement is invalid")
+)
+
+type initialRegistrationRequired struct {
+	retryAfter time.Duration
+}
+
+func (e *initialRegistrationRequired) Error() string {
+	return errInitialRegistrationNeeded.Error()
+}
+
+func (e *initialRegistrationRequired) Is(target error) bool {
+	return target == errInitialRegistrationNeeded
+}
+
+func (e *initialRegistrationRequired) retryAfterDelay() time.Duration {
+	return e.retryAfter
+}
+
+type subscriptionRetryAfter struct {
+	retryAfter time.Duration
+}
+
+func (e *subscriptionRetryAfter) Error() string {
+	return "registration event subscription retry after"
+}
+
+func (e *subscriptionRetryAfter) retryAfterDelay() time.Duration {
+	return e.retryAfter
+}
 
 type subscriptionDialog struct {
 	active       bool
 	callID       string
 	sessionID    string
 	cseq         int64
+	remoteCSeq   int64
 	localHeader  string
 	remoteHeader string
 	localTag     string
@@ -126,13 +188,14 @@ type subscriptionDialog struct {
 	routeSet     []string
 }
 
+type attachmentDrain struct {
+	cancel      context.CancelFunc
+	done        chan struct{}
+	closeOnce   sync.Once
+	attachments []session.Attachment
+}
+
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
-	if sess == nil {
-		return nil, errors.New("creating registration service: session is nil")
-	}
-	if card == nil {
-		return nil, errors.New("creating registration service: card is nil")
-	}
 	cfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating registration service: %w", err)
@@ -165,17 +228,13 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 			GeolocationCountry:  cfg.GeolocationCountry,
 			UseTelURIForPIDFXML: cfg.UseTelURIForPIDFXML,
 		},
-		flow: Flow{
-			ContactHost:    host,
-			RegisterPort:   port,
-			MessagePort:    port,
-			SecurityClient: newSecurityClient(port),
-		},
+		flow:                     newFlow(host, port),
 		callID:                   callID,
 		sessionID:                sessionID,
 		tag:                      tag,
 		registrationEvents:       make(chan error, 1),
 		subscribeRefreshRequests: make(chan struct{}, 1),
+		registrationGate:         make(chan struct{}, 1),
 	}
 	attachment, err := sess.Attach(svc)
 	if err != nil {
@@ -186,6 +245,12 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 }
 
 func (s *Service) Register(ctx context.Context) error {
+	release, err := s.beginRegistrationProcedure(ctx, "registering IMS")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	s.logger.Info("registering IMS", "public_identity", s.State().PublicIdentity)
 	challengeMsg, err := s.awaitRegisterChallenge(ctx)
 	if err != nil {
@@ -193,11 +258,39 @@ func (s *Service) Register(ctx context.Context) error {
 	}
 	challenge, err := s.applyRegisterChallenge(challengeMsg)
 	if err != nil {
-		return fmt.Errorf("registering IMS: %w", err)
+		if !errors.Is(err, errSecurityAgreementInvalid) {
+			return fmt.Errorf("registering IMS: %w", err)
+		}
+		s.logger.Info("retrying initial IMS registration after invalid Security-Server", "err", err)
+		s.resetRegisterTransaction()
+		challengeMsg, err = s.awaitRegisterChallenge(ctx)
+		if err != nil {
+			return err
+		}
+		challenge, err = s.applyRegisterChallenge(challengeMsg)
+		if err != nil {
+			return fmt.Errorf("registering IMS: %w", err)
+		}
 	}
-	initialAuth, err := s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.QOP)
-	if err != nil {
-		return fmt.Errorf("registering IMS: %w", err)
+	var initialAuth *security.Authorization
+	resynchronized := false
+	for {
+		initialAuth, err = s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP)
+		if err == nil {
+			break
+		}
+		resp, err := s.exchangeAKAFailure(ctx, "registering IMS", challenge, err)
+		if err != nil {
+			return err
+		}
+		if resynchronized {
+			return errors.New("registering IMS: repeated AKA synchronization failure")
+		}
+		challenge, err = s.applyRegisterChallenge(resp)
+		if err != nil {
+			return fmt.Errorf("registering IMS: %w", err)
+		}
+		resynchronized = true
 	}
 	if err := s.upgradeSecureTransport(ctx); err != nil {
 		return fmt.Errorf("registering IMS: %w", err)
@@ -228,21 +321,26 @@ func (s *Service) subscribe(ctx context.Context, retried bool) error {
 		}
 		return fmt.Errorf("subscribing IMS registration: %w", err)
 	}
-	if subscription.active && resp.StatusCode() != 481 {
+	if subscription.active && resp.StatusCode() != sipStatusCallTransactionDoesNotExist {
 		s.applySubscribeRequestCSeq(msg)
 	}
-	if resp.StatusCode() == 489 {
+	if resp.StatusCode() == sipStatusBadEvent {
 		s.setSubscribeUnsupported(true)
 		s.resetSubscription()
 		s.logger.Info("registration event subscription unavailable", "status", resp.StatusCode())
 		return nil
 	}
-	if subscription.active && resp.StatusCode() == 481 && !retried {
+	if subscription.active && resp.StatusCode() == sipStatusCallTransactionDoesNotExist && !retried {
 		s.resetSubscription()
 		s.resetRegInfoVersion()
 		return s.subscribe(ctx, true)
 	}
-	if resp.StatusCode() != 200 {
+	if resp.StatusCode() == sipStatusServiceUnavailable {
+		if retryAfter, ok := retryAfterDelay(resp); ok {
+			return fmt.Errorf("subscribing IMS registration: %w after %w", &subscriptionRetryAfter{retryAfter: retryAfter}, sip.NewResponseError(resp))
+		}
+	}
+	if resp.StatusCode() != sipStatusOK {
 		return fmt.Errorf("subscribing IMS registration: expected 200, got %w", sip.NewResponseError(resp))
 	}
 	s.setSubscribeUnsupported(false)
@@ -257,17 +355,34 @@ func (s *Service) Establish(ctx context.Context) error {
 }
 
 func (s *Service) Refresh(ctx context.Context) error {
+	release, err := s.beginRegistrationProcedure(ctx, "refreshing IMS registration")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	state := refreshRegisterState{}
 	for range 6 {
-		req, err := s.buildRefreshRegister(ctx)
+		req, auth, err := s.buildRefreshRegister(ctx)
 		if err != nil {
-			return err
+			resp, err := s.exchangeCurrentAKAFailure(ctx, "refreshing IMS registration", err)
+			if err != nil {
+				return err
+			}
+			done, err := s.handleRefreshRegistration(ctx, resp, &state, nil)
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+			continue
 		}
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
-		done, err := s.handleRefreshRegistration(resp, &state)
+		done, err := s.handleRefreshRegistration(ctx, resp, &state, auth)
 		if err != nil {
 			return err
 		}
@@ -294,6 +409,9 @@ func (s *Service) Maintain(ctx context.Context) error {
 			resetTimer(subscribeTimer, s.subscribeRefreshInterval())
 		case <-registerTimer.C:
 			if err := s.Refresh(ctx); err != nil {
+				if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+					return ctx.Err()
+				}
 				return err
 			}
 			s.logger.Info("IMS registration refreshed", "next_refresh", s.refreshInterval())
@@ -306,14 +424,20 @@ func (s *Service) Maintain(ctx context.Context) error {
 }
 
 func (s *Service) Deregister(ctx context.Context) error {
+	release, err := s.beginRegistrationProcedure(ctx, "deregistering IMS")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	if !s.isRegistered() {
 		return nil
 	}
 	verify := s.currentSecurityVerify()
-	realm, nonce, qop := s.currentAuthState()
+	realm, nonce, algorithm, qop := s.currentAuthState()
 	challenged := false
 	for range 2 {
-		req, err := s.buildDeregisterMessage(ctx, verify, realm, nonce, qop)
+		req, err := s.buildDeregisterMessage(ctx, verify, realm, nonce, algorithm, qop)
 		if err != nil {
 			return err
 		}
@@ -321,7 +445,7 @@ func (s *Service) Deregister(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("deregistering IMS: %w", err)
 		}
-		done, err := s.handleDeregisterResponse(resp, &challenged, &realm, &nonce, &qop)
+		done, err := s.handleDeregisterResponse(resp, &challenged, &realm, &nonce, &algorithm, &qop)
 		if err != nil {
 			return err
 		}
@@ -341,6 +465,7 @@ func (s *Service) State() State {
 	state.Flow = s.flow.clone()
 	state.ServiceRoutes = append([]string(nil), state.Flow.ServiceRoutes...)
 	state.SecurityClient = state.Flow.SecurityClient
+	state.SecurityClients = append(security.Params(nil), state.Flow.SecurityClients...)
 	state.SecurityVerify = nil
 	if state.Flow.SecurityVerify != nil {
 		verify := *state.Flow.SecurityVerify
@@ -364,7 +489,7 @@ func (s *Service) SecurityVerifyValue() string {
 
 func (s *Service) RequestPolicy() sip.ClientRequestPolicy {
 	state := s.State()
-	return state.Flow.RequestPolicy(state.UserAgent, state.AccessNetworkInfo)
+	return state.Flow.requestPolicy(s.preloadedRoutes(state.Flow), state.UserAgent, state.AccessNetworkInfo)
 }
 
 func (s *Service) DialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
@@ -383,6 +508,103 @@ func parsePositiveSeconds(value string) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(seconds) * time.Second, true
+}
+
+func (s *Service) preloadedRoutes(flow Flow) []string {
+	routes := make([]string, 0, len(flow.ServiceRoutes)+1)
+	if route := pcscfRoute(s.sess.RemoteAddr(), flow); route != "" {
+		routes = append(routes, route)
+	}
+	for _, route := range flow.ServiceRoutes {
+		route = strings.TrimSpace(route)
+		if route == "" || slices.ContainsFunc(routes, func(existing string) bool {
+			return strings.EqualFold(existing, route)
+		}) {
+			continue
+		}
+		routes = append(routes, route)
+	}
+	return routes
+}
+
+func pcscfRoute(addr net.Addr, flow Flow) string {
+	host, port := addrHostPort(addr)
+	if host == "" || port == 0 {
+		return ""
+	}
+	if flow.SecurityVerify != nil && flow.SecurityVerify.PortS != 0 {
+		port = flow.SecurityVerify.PortS
+	}
+	return fmt.Sprintf("<%s;lr>", contactURI(host, port))
+}
+
+func addrHostPort(addr net.Addr) (string, int) {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		if a == nil {
+			return "", 0
+		}
+		return sanitizeHost(a.IP.String()), a.Port
+	case *net.TCPAddr:
+		if a == nil {
+			return "", 0
+		}
+		return sanitizeHost(a.IP.String()), a.Port
+	}
+	if addr == nil {
+		return "", 0
+	}
+	host, portText, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", 0
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return "", 0
+	}
+	return sanitizeHost(host), port
+}
+
+func retryAfterDelay(msg sip.Message) (time.Duration, bool) {
+	value := strings.TrimSpace(msg.Header("Retry-After"))
+	if value == "" {
+		return 0, false
+	}
+	if cut := strings.IndexAny(value, ";("); cut >= 0 {
+		value = value[:cut]
+	}
+	return parsePositiveSeconds(value)
+}
+
+func statusClass(status int) int {
+	return status / 100
+}
+
+// InitialRegistrationRetryAfter returns the Retry-After delay carried by an
+// initial registration error. The caller owns scheduling; registration only
+// reports the protocol constraint.
+func InitialRegistrationRetryAfter(err error) (time.Duration, bool) {
+	var initial *initialRegistrationRequired
+	if !errors.As(err, &initial) || initial.retryAfter <= 0 {
+		return 0, false
+	}
+	return initial.retryAfter, true
+}
+
+func RetryAfterDelay(err error) (time.Duration, bool) {
+	var retryAfter interface {
+		retryAfterDelay() time.Duration
+	}
+	if !errors.As(err, &retryAfter) {
+		return 0, false
+	}
+	delay := retryAfter.retryAfterDelay()
+	return delay, delay > 0
+}
+
+func InitialRegistrationRequired(err error) bool {
+	var initial *initialRegistrationRequired
+	return errors.As(err, &initial)
 }
 
 func associatedURIsFromMessage(msg sip.Message) []string {
@@ -445,8 +667,14 @@ func (s *Service) currentRegisterContactURI() string {
 }
 
 func (s *Service) CloseContext(ctx context.Context) error {
+	defer s.closeSecureResources()
 	defer s.setRegistered(false)
 	return s.Deregister(ctx)
+}
+
+func (s *Service) Abort() {
+	s.closeSecureResources()
+	s.setRegistered(false)
 }
 
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
@@ -454,11 +682,14 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 		return false, nil
 	}
 	if !s.notifyMatchesSubscription(req.Message) {
-		return true, s.sess.WriteStatus(ctx, req, 481, "Call/Transaction Does Not Exist")
+		return true, s.sess.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
+	}
+	if status, reason := s.recordNotifyCSeq(req.Message); status != 0 {
+		return true, s.sess.WriteStatus(ctx, req, status, reason)
 	}
 	s.applySubscriptionStateFromNotify(req.Message)
 	notifyErr := s.applyRegInfoNotify(req.Message)
-	if err := s.sess.WriteStatus(ctx, req, 200, "OK"); err != nil {
+	if err := s.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return true, err
 	}
 	if notifyErr != nil {
@@ -476,13 +707,21 @@ func (s *Service) HandleError(err error) {
 
 type refreshRegisterState struct {
 	adjustedExpires bool
-	challenged      bool
 }
 
 type clientIdentity struct {
 	realm           string
 	privateIdentity string
 	publicIdentity  string
+}
+
+func (s *Service) beginRegistrationProcedure(ctx context.Context, action string) (func(), error) {
+	select {
+	case s.registrationGate <- struct{}{}:
+		return func() { <-s.registrationGate }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%s: %w", action, ctx.Err())
+	}
 }
 
 func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, error) {
@@ -492,13 +731,16 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 		if err != nil {
 			return sip.Message{}, fmt.Errorf("registering IMS: %w", err)
 		}
-		if resp.StatusCode() == 423 {
+		if resp.StatusCode() == sipStatusIntervalTooBrief {
 			if err := s.adjustRegisterExpiresFrom423("registering IMS", resp, &adjustedExpires); err != nil {
 				return sip.Message{}, err
 			}
 			continue
 		}
-		if resp.StatusCode() != 401 {
+		if resp.StatusCode() != sipStatusUnauthorized {
+			if initialRegistrationRetryResponse(resp) {
+				return sip.Message{}, initialRegistrationRequiredError("registering IMS", resp)
+			}
 			return sip.Message{}, fmt.Errorf("registering IMS: expected 401, got %d", resp.StatusCode())
 		}
 		return resp, nil
@@ -508,20 +750,36 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 func (s *Service) completeRegistration(ctx context.Context, challenge security.Challenge, initialAuth *security.Authorization) error {
 	adjustedExpires := false
 	rechallenged := false
+	resynchronized := false
 	auth := initialAuth
 	for {
 		if auth == nil {
 			var err error
-			auth, err = s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.QOP)
+			auth, err = s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP)
 			if err != nil {
-				return fmt.Errorf("registering IMS: %w", err)
+				resp, err := s.exchangeAKAFailure(ctx, "registering IMS", challenge, err)
+				if err != nil {
+					return err
+				}
+				if resynchronized {
+					return errors.New("registering IMS: repeated AKA synchronization failure")
+				}
+				nextChallenge, err := s.applyRegisterChallenge(resp)
+				if err != nil {
+					return fmt.Errorf("registering IMS: %w", err)
+				}
+				challenge = nextChallenge
+				resynchronized = true
+				rechallenged = true
+				auth = nil
+				continue
 			}
 		}
 		resp, err := s.sess.Exchange(ctx, s.buildRegister(auth, s.currentSecurityVerify()))
 		if err != nil {
 			return fmt.Errorf("registering IMS: %w", err)
 		}
-		if resp.StatusCode() == 423 {
+		if resp.StatusCode() == sipStatusIntervalTooBrief {
 			if err := s.adjustRegisterExpiresFrom423("registering IMS", resp, &adjustedExpires); err != nil {
 				return err
 			}
@@ -529,7 +787,7 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			auth = nil
 			continue
 		}
-		if resp.StatusCode() == 401 {
+		if resp.StatusCode() == sipStatusUnauthorized {
 			if rechallenged {
 				return errors.New("registering IMS: repeated 401 response")
 			}
@@ -542,8 +800,14 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			auth = nil
 			continue
 		}
-		if resp.StatusCode() != 200 {
+		if resp.StatusCode() != sipStatusOK {
+			if initialRegistrationRetryResponse(resp) {
+				return initialRegistrationRequiredError("registering IMS", resp)
+			}
 			return fmt.Errorf("registering IMS: expected 200, got %w", sip.NewResponseError(resp))
+		}
+		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
+			return fmt.Errorf("registering IMS: %w", err)
 		}
 		s.applyRegisterSuccess(resp)
 		return nil
@@ -572,10 +836,23 @@ func (s *Service) applyAssociatedURI(msg sip.Message) {
 }
 
 func (s *Service) applyServiceRoutes(msg sip.Message) {
-	routes := msg.HeadersByName("Service-Route")
+	routes := serviceRoutesFromMessage(msg)
 	s.mu.Lock()
 	s.flow.ServiceRoutes = append([]string(nil), routes...)
 	s.mu.Unlock()
+}
+
+func serviceRoutesFromMessage(msg sip.Message) []string {
+	routes := make([]string, 0)
+	for _, value := range msg.HeadersByName("Service-Route") {
+		for _, route := range sip.SplitHeaderList(value) {
+			uri := strings.ToLower(strings.TrimSpace(sip.AddressURI(route)))
+			if strings.HasPrefix(uri, "sip:") || strings.HasPrefix(uri, "sips:") {
+				routes = append(routes, route)
+			}
+		}
+	}
+	return routes
 }
 
 func (s *Service) currentRegisterExpires() time.Duration {
@@ -773,30 +1050,46 @@ func (s *Service) currentSecurityVerify() *security.Param {
 	return &verify
 }
 
-func (s *Service) securityVerifyValue(verify *security.Param) string {
+func securityVerifyValueForFlow(flow Flow, verify *security.Param) string {
 	if verify == nil {
 		return ""
 	}
-	flow := s.CurrentFlow()
 	if value := flow.SecurityVerifyValue(); value != "" {
 		return value
 	}
 	return verify.String()
 }
 
-func (s *Service) applySecurityServer(headerValues []string) error {
-	verify, raw, err := selectSecurityServer(headerValues)
-	if err != nil {
-		return err
-	}
-	if verify == nil {
-		return errors.New("applying Security-Server: header is empty")
-	}
+func (s *Service) applySelectedSecurityServer(verify *security.Param, raw []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flow.SecurityServerRaw = append([]string(nil), raw...)
 	s.flow.SecurityVerify = verify
+	if verify == nil {
+		s.flow.MessagePort = s.flow.RegisterPort
+		return
+	}
 	s.flow.MessagePort = s.flow.SecurityClient.PortS
+}
+
+func (s *Service) verifyAuthenticationInfo(msg sip.Message, auth *security.Authorization) error {
+	var info security.Info
+	if err := info.UnmarshalText([]byte(msg.Header("Authentication-Info"))); err != nil {
+		return err
+	}
+	if info.RSPAuth == "" {
+		return nil
+	}
+	if auth == nil {
+		return errors.New("authentication-info rspauth without authorization")
+	}
+	password, ok := s.currentDigestCredential(auth.Nonce, auth.Algorithm)
+	if !ok {
+		return errors.New("authentication-info rspauth without digest credential")
+	}
+	if err := security.VerifyAuthenticationInfo(*auth, info, password); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -808,6 +1101,9 @@ func (s *Service) applyAuthenticationInfo(msg sip.Message) {
 	s.mu.Lock()
 	s.authNonce = info.NextNonce
 	s.authNonceCount = 0
+	if s.authDigestPassword != "" {
+		s.authDigestNonce = info.NextNonce
+	}
 	s.mu.Unlock()
 }
 
@@ -839,40 +1135,47 @@ func (s *Service) notifyMatchesSubscription(msg sip.Message) bool {
 	}.Matches(msg)
 }
 
+func (s *Service) recordNotifyCSeq(msg sip.Message) (int, string) {
+	if !s.currentSubscription().active {
+		return 0, ""
+	}
+	cseq := sip.CSeqNumber(msg.Header("CSeq"))
+	if cseq <= 0 || !strings.EqualFold(sip.CSeqMethod(msg.Header("CSeq")), "NOTIFY") {
+		return sipStatusBadRequest, "Bad Request"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cseq <= s.subscription.remoteCSeq {
+		return sipStatusServerInternalError, "Server Internal Error"
+	}
+	s.subscription.remoteCSeq = cseq
+	return 0, ""
+}
+
 func (s *Service) applySubscriptionStateFromNotify(msg sip.Message) {
-	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), "reg") {
+	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), regEventPackage) {
 		return
 	}
-	state, expires, ok := subscriptionState(msg.Header("Subscription-State"))
-	if !ok {
+	var subscription subscriptionStateHeader
+	if err := subscription.UnmarshalText([]byte(msg.Header("Subscription-State"))); err != nil {
 		return
 	}
-	if expires > 0 {
-		s.setSubscribeExpires(expires)
+	if subscription.expires > 0 {
+		s.setSubscribeExpires(subscription.expires)
 	}
-	if strings.EqualFold(state, "terminated") {
+	if strings.EqualFold(subscription.state, subscriptionStateTerminated) {
 		s.resetSubscription()
 		s.resetRegInfoVersion()
 		s.requestSubscribeRefresh()
 	}
 }
 
-func subscriptionState(value string) (state string, expires time.Duration, ok bool) {
-	state, params, _ := strings.Cut(strings.TrimSpace(value), ";")
-	state = strings.TrimSpace(state)
-	if state == "" {
-		return "", 0, false
-	}
-	expires, _ = parsePositiveSeconds(sip.HeaderParam(params, "expires"))
-	return state, expires, true
-}
-
 func (s *Service) applyRegInfoNotify(msg sip.Message) error {
-	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), "reg") {
+	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), regEventPackage) {
 		return nil
 	}
 	contentType := strings.TrimSpace(msg.Header("Content-Type"))
-	if contentType != "" && !strings.EqualFold(strings.TrimSpace(strings.Split(contentType, ";")[0]), "application/reginfo+xml") {
+	if contentType != "" && !regInfoContentTypeMatches(contentType) {
 		return nil
 	}
 	info, ok, err := parseRegInfo(msg.Body)
@@ -891,6 +1194,32 @@ func (s *Service) applyRegInfoNotify(msg sip.Message) error {
 		return nil
 	}
 	return s.applyRegInfo(info)
+}
+
+const subscriptionStateTerminated = "terminated"
+
+type subscriptionStateHeader struct {
+	state   string
+	expires time.Duration
+}
+
+func (h *subscriptionStateHeader) UnmarshalText(text []byte) error {
+	state, params, _ := strings.Cut(strings.TrimSpace(string(text)), ";")
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return errors.New("parsing Subscription-State: state is empty")
+	}
+	expires, _ := parsePositiveSeconds(sip.HeaderParam(params, "expires"))
+	*h = subscriptionStateHeader{state: state, expires: expires}
+	return nil
+}
+
+func regInfoContentTypeMatches(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediaType, regInfoContentType)
 }
 
 func (s *Service) shouldApplyRegInfo(info regInfo) (apply bool, refresh bool) {
@@ -946,7 +1275,7 @@ func (s *Service) applyRegInfo(info regInfo) error {
 		}
 	}
 
-	if strings.EqualFold(strings.TrimSpace(info.State), "full") {
+	if strings.EqualFold(strings.TrimSpace(info.State), regInfoStateFull) {
 		if !foundRegistration || !foundActiveContact {
 			s.setRegistered(false)
 			return errNetworkDeregistered
@@ -984,6 +1313,7 @@ func (s *Service) applyRegisterSuccess(msg sip.Message) {
 	s.applyServiceRoutes(msg)
 	s.applyAuthenticationInfo(msg)
 	s.applyRegisterExpires(msg)
+	s.extendActiveSecureAssociationLifetime(s.secureAssociationExpiresAt(time.Now()))
 	s.setRegistered(true)
 }
 
@@ -993,21 +1323,27 @@ func (s *Service) storeAuthChallenge(challenge security.Challenge) {
 		realm = strings.TrimPrefix(s.State().RegisterURI, "sip:")
 	}
 	s.mu.Lock()
+	if s.authDigestNonce != challenge.Nonce || !strings.EqualFold(s.authDigestAlgorithm, challenge.Algorithm) {
+		s.authDigestNonce = ""
+		s.authDigestAlgorithm = ""
+		s.authDigestPassword = ""
+	}
 	s.authRealm = realm
 	s.authNonce = challenge.Nonce
+	s.authAlgorithm = challenge.Algorithm
 	s.authQOP = challenge.QOP
 	s.authNonceCount = 0
 	s.mu.Unlock()
 }
 
-func (s *Service) currentAuthState() (string, string, string) {
+func (s *Service) currentAuthState() (string, string, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	realm := s.authRealm
 	if realm == "" {
 		realm = strings.TrimPrefix(s.state.RegisterURI, "sip:")
 	}
-	return realm, s.authNonce, s.authQOP
+	return realm, s.authNonce, s.authAlgorithm, s.authQOP
 }
 
 func (s *Service) nextAuthNonceCount() uint32 {
@@ -1029,46 +1365,151 @@ func (s *Service) isRegistered() bool {
 	return s.state.Registered
 }
 
-func (s *Service) buildRegisterAuthorization(ctx context.Context, realm, nonce, qop string) (*security.Authorization, error) {
+func (s *Service) buildRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string) (*security.Authorization, error) {
 	if nonce == "" {
 		return nil, nil
+	}
+	nonceCount := s.nextAuthNonceCount()
+	if password, ok := s.currentDigestCredential(nonce, algorithm); ok {
+		auth, err := s.calculateDigestRegisterAuthorization(realm, nonce, algorithm, qop, nonceCount, password)
+		if err != nil {
+			return nil, err
+		}
+		return auth, nil
+	}
+	auth, ck, ik, password, err := s.calculateRegisterAuthorization(ctx, realm, nonce, algorithm, qop, nonceCount)
+	if err != nil {
+		return nil, err
+	}
+	s.storeDigestCredential(auth.Algorithm, auth.Nonce, password, ck, ik)
+	return auth, nil
+}
+
+func (s *Service) calculateRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string, nonceCount uint32) (*security.Authorization, []byte, []byte, string, error) {
+	if nonce == "" {
+		return nil, nil, nil, "", nil
 	}
 	result, err := security.BuildAKAAuthorization(ctx, akaProvider{s.card}, security.Identity{
 		PrivateIdentity: s.State().PrivateIdentity,
 		RegisterURI:     s.State().RegisterURI,
 		Realm:           defaultRealm(realm, s.State().RegisterURI),
 	}, security.Challenge{
-		Realm: realm,
-		Nonce: nonce,
-		QOP:   qop,
-	}, s.nextAuthNonceCount())
+		Realm:     realm,
+		Nonce:     nonce,
+		Algorithm: algorithm,
+		QOP:       qop,
+	}, nonceCount)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	auth := result.Authorization
+	auth.IntegrityProtected = registerIntegrityProtectedValue(auth.Algorithm)
+	return &auth, result.EncryptionKey, result.IntegrityKey, result.DigestPassword, nil
+}
+
+func (s *Service) calculateDigestRegisterAuthorization(realm, nonce, algorithm, qop string, nonceCount uint32, password string) (*security.Authorization, error) {
+	result, err := security.BuildDigestAuthorization(security.Identity{
+		PrivateIdentity: s.State().PrivateIdentity,
+		RegisterURI:     s.State().RegisterURI,
+		Realm:           defaultRealm(realm, s.State().RegisterURI),
+	}, security.Challenge{
+		Realm:     realm,
+		Nonce:     nonce,
+		Algorithm: algorithm,
+		QOP:       qop,
+	}, nonceCount, password)
 	if err != nil {
 		return nil, err
 	}
-	if len(result.IntegrityKey) != 0 {
-		s.authIK = append([]byte(nil), result.IntegrityKey...)
+	result.IntegrityProtected = registerIntegrityProtectedValue(result.Algorithm)
+	return &result, nil
+}
+
+func (s *Service) currentDigestCredential(nonce, algorithm string) (string, bool) {
+	normalized, ok := security.NormalizeAKAAlgorithm(algorithm)
+	if !ok {
+		return "", false
 	}
-	if len(result.EncryptionKey) != 0 {
-		s.authCK = append([]byte(nil), result.EncryptionKey...)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.authDigestPassword == "" || s.authDigestNonce != nonce || !strings.EqualFold(s.authDigestAlgorithm, normalized) {
+		return "", false
 	}
-	auth := result.Authorization
-	auth.IntegrityProtected = "yes"
-	return &auth, nil
+	return s.authDigestPassword, true
+}
+
+func (s *Service) storeDigestCredential(algorithm, nonce, password string, ck, ik []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if password != "" {
+		s.authDigestAlgorithm = algorithm
+		s.authDigestNonce = nonce
+		s.authDigestPassword = password
+	}
+	if !registerUsesTLSAKA(algorithm) && len(ik) != 0 {
+		s.authIK = append([]byte(nil), ik...)
+	}
+	if !registerUsesTLSAKA(algorithm) && len(ck) != 0 {
+		s.authCK = append([]byte(nil), ck...)
+	}
 }
 
 func (s *Service) applyRegisterChallenge(resp sip.Message) (security.Challenge, error) {
-	var challenge security.Challenge
-	if err := challenge.UnmarshalText([]byte(resp.Header("WWW-Authenticate"))); err != nil {
+	challenge, verify, raw, err := parseRegisterChallenge(resp)
+	if err != nil {
 		return security.Challenge{}, err
 	}
-	if _, err := challenge.SelectedQOP(); err != nil {
-		return security.Challenge{}, err
-	}
-	if err := s.applySecurityServer(resp.HeadersByName("Security-Server")); err != nil {
-		return security.Challenge{}, err
-	}
+	s.applySelectedSecurityServer(verify, raw)
 	s.storeAuthChallenge(challenge)
 	return challenge, nil
+}
+
+func parseRegisterChallenge(resp sip.Message) (security.Challenge, *security.Param, []string, error) {
+	challenge, err := selectRegisterChallenge(resp.HeadersByName("WWW-Authenticate"))
+	if err != nil {
+		return security.Challenge{}, nil, nil, err
+	}
+	if challenge.Algorithm == security.AlgorithmAKAv2SHA256 {
+		if !securityServerSupportsTLS(resp.HeadersByName("Security-Server")) {
+			return security.Challenge{}, nil, nil, errors.New("applying Security-Server: AKAv2-SHA-256 requires tls security mechanism")
+		}
+		return security.Challenge{}, nil, nil, errors.New("applying Security-Server: AKAv2-SHA-256 over TLS is not supported by this SIP transport")
+	}
+	verify, raw, err := selectSecurityServer(resp.HeadersByName("Security-Server"))
+	if err != nil {
+		return security.Challenge{}, nil, nil, fmt.Errorf("%w: %w", errSecurityAgreementInvalid, err)
+	}
+	return challenge, verify, raw, nil
+}
+
+func selectRegisterChallenge(values []string) (security.Challenge, error) {
+	var firstErr error
+	seen := false
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		seen = true
+		var challenge security.Challenge
+		if err := challenge.UnmarshalText([]byte(value)); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if _, err := challenge.SelectedQOP(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return challenge, nil
+	}
+	if !seen {
+		return security.Challenge{}, errors.New("selecting auth challenge: WWW-Authenticate header is empty")
+	}
+	return security.Challenge{}, fmt.Errorf("selecting auth challenge: %w", firstErr)
 }
 
 func (s *Service) adjustRegisterExpiresFrom423(action string, resp sip.Message, adjusted *bool) error {
@@ -1084,67 +1525,453 @@ func (s *Service) adjustRegisterExpiresFrom423(action string, resp sip.Message, 
 	return nil
 }
 
-func (s *Service) buildRefreshRegister(ctx context.Context) (sip.Message, error) {
-	realm, nonce, qop := s.currentAuthState()
-	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, qop)
+func (s *Service) buildRefreshRegister(ctx context.Context) (sip.Message, *security.Authorization, error) {
+	realm, nonce, algorithm, qop := s.currentAuthState()
+	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, algorithm, qop)
 	if err != nil {
-		return sip.Message{}, err
+		return sip.Message{}, nil, err
 	}
-	return s.buildRegister(auth, s.currentSecurityVerify()), nil
+	return s.buildRegister(auth, s.currentSecurityVerify()), auth, nil
 }
 
-func (s *Service) handleRefreshRegistration(resp sip.Message, state *refreshRegisterState) (bool, error) {
+func (s *Service) handleRefreshRegistration(ctx context.Context, resp sip.Message, state *refreshRegisterState, auth *security.Authorization) (bool, error) {
 	switch resp.StatusCode() {
-	case 200:
-		s.applyRegisterSuccess(resp)
-		return true, nil
-	case 401:
-		if state.challenged {
-			return false, errors.New("refreshing IMS registration: repeated 401 response")
-		}
-		if _, err := s.applyRegisterChallenge(resp); err != nil {
+	case sipStatusOK:
+		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
 			return false, fmt.Errorf("refreshing IMS registration: %w", err)
 		}
-		state.challenged = true
-		return false, nil
-	case 423:
+		s.applyRegisterSuccess(resp)
+		return true, nil
+	case sipStatusUnauthorized:
+		if err := s.reauthenticateRefresh(ctx, resp); err != nil {
+			return false, err
+		}
+		return true, nil
+	case sipStatusIntervalTooBrief:
 		if err := s.adjustRegisterExpiresFrom423("refreshing IMS registration", resp, &state.adjustedExpires); err != nil {
 			return false, err
 		}
 		return false, nil
-	case 403, 408, 500, 504:
-		return false, fmt.Errorf("refreshing IMS registration: initial registration required after %w", sip.NewResponseError(resp))
 	default:
+		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
+			return false, initialRegistrationRequiredError("refreshing IMS registration", resp)
+		}
 		return false, fmt.Errorf("refreshing IMS registration: unexpected response: %w", sip.NewResponseError(resp))
 	}
 }
 
-func (s *Service) buildDeregisterMessage(ctx context.Context, verify *security.Param, realm, nonce, qop string) (sip.Message, error) {
-	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, qop)
+func initialRegistrationRetryResponse(resp sip.Message) bool {
+	return statusClass(resp.StatusCode()) == 4 || statusClass(resp.StatusCode()) == 5 || statusClass(resp.StatusCode()) == 6
+}
+
+func reregistrationInitialRequiredStatus(status int) bool {
+	switch status {
+	case sipStatusForbidden, sipStatusRequestTimeout, sipStatusServerInternalError, sipStatusServerTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func initialRegistrationRequiredError(action string, resp sip.Message) error {
+	initial := &initialRegistrationRequired{}
+	if retryAfter, ok := retryAfterDelay(resp); ok {
+		initial.retryAfter = retryAfter
+	}
+	return fmt.Errorf("%s: %w after %w", action, initial, sip.NewResponseError(resp))
+}
+
+func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.Message) error {
+	challenge, verify, raw, err := parseRegisterChallenge(challengeResp)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
+	var auth *security.Authorization
+	var ck, ik []byte
+	var password string
+	resynchronized := false
+	for {
+		auth, ck, ik, password, err = s.calculateRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP, 1)
+		if err == nil {
+			break
+		}
+		resp, err := s.exchangeAKAFailure(ctx, "refreshing IMS registration", challenge, err)
+		if err != nil {
+			return err
+		}
+		if resynchronized {
+			return errors.New("refreshing IMS registration: repeated AKA synchronization failure")
+		}
+		challenge, verify, raw, err = parseRegisterChallenge(resp)
+		if err != nil {
+			return fmt.Errorf("refreshing IMS registration: %w", err)
+		}
+		resynchronized = true
+	}
+
+	nextFlow := s.CurrentFlow()
+	nextFlow.SecurityVerify = verify
+	nextFlow.SecurityServerRaw = append([]string(nil), raw...)
+	if verify == nil {
+		nextFlow.MessagePort = nextFlow.RegisterPort
+		req := s.buildRegisterForFlow(auth, nil, nextFlow)
+		resp, err := s.sess.Exchange(ctx, req)
+		if err != nil {
+			return fmt.Errorf("refreshing IMS registration: completing AKAv2 re-authentication: %w", err)
+		}
+		if resp.StatusCode() != sipStatusOK {
+			if reregistrationInitialRequiredStatus(resp.StatusCode()) {
+				return initialRegistrationRequiredError("refreshing IMS registration", resp)
+			}
+			return fmt.Errorf("refreshing IMS registration: expected 200 after AKAv2 re-authentication, got %w", sip.NewResponseError(resp))
+		}
+		s.commitReauthentication(challenge, nextFlow, nil, nil, password)
+		s.applyRegisterSuccess(resp)
+		return nil
+	}
+	nextFlow.SecurityClient = reauthSecurityClient(nextFlow.SecurityClient, nextFlow.RegisterPort)
+	nextFlow.SecurityClients = securityClientCapabilities(nextFlow.SecurityClient)
+	nextFlow.MessagePort = nextFlow.SecurityClient.PortS
+
+	outbound, err := s.dialSecureTransport(ctx, verify, nextFlow, ck, ik)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
+	outboundAttachment, err := s.sess.AddTransport(outbound)
+	if err != nil {
+		outbound.Close()
+		return fmt.Errorf("refreshing IMS registration: adding secure IMS transport: %w", err)
+	}
+	cleanup := []session.Attachment{outboundAttachment}
+	committed := false
+	defer func() {
+		if !committed {
+			closeAttachments(cleanup)
+		}
+	}()
+
+	inboundTransports, inboundAttachments, err := s.startSecureServerTransportsWithKeys(ctx, verify, nextFlow, ck, ik)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
+	if len(inboundTransports) == 0 {
+		return errors.New("refreshing IMS registration: secure inbound transport is not configured")
+	}
+	cleanup = append(cleanup, inboundAttachments...)
+
+	req := s.buildRegisterForFlow(auth, verify, nextFlow)
+	responseTransports := reauthResponseTransports(outbound, inboundTransports)
+	resp, err := s.sess.ExchangeWithTransport(ctx, outbound, req, session.ExchangeOptions{
+		AcceptResponseTransport: acceptResponseFrom(responseTransports),
+		ResponseTransports:      responseTransports,
+	})
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: completing re-authentication: %w", err)
+	}
+	if resp.StatusCode() != sipStatusOK {
+		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
+			return initialRegistrationRequiredError("refreshing IMS registration", resp)
+		}
+		return fmt.Errorf("refreshing IMS registration: expected 200 after re-authentication, got %w", sip.NewResponseError(resp))
+	}
+	oldExpiresAt := s.currentSecureAssociationExpiresAt()
+	oldAttachment, err := s.sess.PromotePrimary(outbound)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: promoting secure IMS transport: %w", err)
+	}
+	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
+	s.closeAttachmentsAfter(append(oldServerAttachments, oldAttachment), saDrainDelayBefore(oldExpiresAt, s.sess.TransactionTimers()))
+	s.commitReauthentication(challenge, nextFlow, ck, ik, password)
+	s.applyRegisterSuccess(resp)
+	committed = true
+	return nil
+}
+
+func acceptResponseFrom(inbound []session.Transport) func(session.Transport) bool {
+	allowed := make(map[session.Transport]struct{}, len(inbound))
+	for _, transport := range inbound {
+		allowed[transport] = struct{}{}
+	}
+	return func(transport session.Transport) bool {
+		_, ok := allowed[transport]
+		return ok
+	}
+}
+
+func reauthResponseTransports(outbound session.Transport, inbound []session.Transport) []session.Transport {
+	transports := append([]session.Transport(nil), inbound...)
+	if strings.EqualFold(sip.TransportToken(outbound.LocalAddr()), "TCP") {
+		transports = append([]session.Transport{outbound}, transports...)
+	}
+	return uniqueSessionTransports(transports)
+}
+
+func uniqueSessionTransports(transports []session.Transport) []session.Transport {
+	unique := transports[:0]
+	for _, transport := range transports {
+		if slices.Contains(unique, transport) {
+			continue
+		}
+		unique = append(unique, transport)
+	}
+	return unique
+}
+
+func (s *Service) exchangeAKAFailure(ctx context.Context, action string, challenge security.Challenge, cause error) (sip.Message, error) {
+	var failure *security.AKAChallengeFailure
+	if !errors.As(cause, &failure) {
+		return sip.Message{}, fmt.Errorf("%s: %w", action, cause)
+	}
+	auth := s.akaFailureAuthorization(challenge, failure)
+	req := s.buildRegister(&auth, s.currentSecurityVerify())
+	if !failure.SynchronizationFailure() {
+		if err := s.sess.Send(ctx, req); err != nil {
+			return sip.Message{}, fmt.Errorf("%s: reporting AKA failure: %w", action, err)
+		}
+		return sip.Message{}, fmt.Errorf("%s: %w", action, cause)
+	}
+	resp, err := s.sess.Exchange(ctx, req)
+	if err != nil {
+		return sip.Message{}, fmt.Errorf("%s: reporting AKA synchronization failure: %w", action, err)
+	}
+	if resp.StatusCode() != sipStatusUnauthorized {
+		return sip.Message{}, fmt.Errorf("%s: expected 401 after AKA synchronization failure, got %w", action, sip.NewResponseError(resp))
+	}
+	return resp, nil
+}
+
+func (s *Service) exchangeCurrentAKAFailure(ctx context.Context, action string, cause error) (sip.Message, error) {
+	realm, nonce, algorithm, qop := s.currentAuthState()
+	return s.exchangeAKAFailure(ctx, action, security.Challenge{
+		Realm:     realm,
+		Nonce:     nonce,
+		Algorithm: algorithm,
+		QOP:       qop,
+	}, cause)
+}
+
+func (s *Service) akaFailureAuthorization(challenge security.Challenge, failure *security.AKAChallengeFailure) security.Authorization {
+	auth := security.Authorization{
+		Nonce:              challenge.Nonce,
+		URI:                s.State().RegisterURI,
+		Response:           "",
+		Username:           s.State().PrivateIdentity,
+		Realm:              defaultRealm(challenge.Realm, s.State().RegisterURI),
+		Algorithm:          challenge.Algorithm,
+		IntegrityProtected: registerIntegrityProtectedValue(challenge.Algorithm),
+	}
+	if failure.SynchronizationFailure() {
+		auth.AUTS = base64.StdEncoding.EncodeToString(failure.AUTS)
+	}
+	return auth
+}
+
+func closeAttachments(attachments []session.Attachment) {
+	for _, attachment := range attachments {
+		if attachment != nil {
+			_ = attachment.Close()
+		}
+	}
+}
+
+func (s *Service) replaceSecureServerAttachments(next []session.Attachment) []session.Attachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.secureServerAttachments
+	s.secureServerAttachments = append([]session.Attachment(nil), next...)
+	return old
+}
+
+func (s *Service) closeAttachmentsAfter(attachments []session.Attachment, delay time.Duration) {
+	attachments = compactAttachments(attachments)
+	if len(attachments) == 0 {
+		return
+	}
+	if delay <= 0 {
+		closeAttachments(attachments)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), delay)
+	drain := &attachmentDrain{
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		attachments: append([]session.Attachment(nil), attachments...),
+	}
+	transports := attachmentTransports(attachments)
+	s.mu.Lock()
+	s.drainTimers = append(s.drainTimers, drain)
+	s.mu.Unlock()
+	go func() {
+		defer close(drain.done)
+		defer cancel()
+		if len(transports) == 0 {
+			<-ctx.Done()
+		} else {
+			_ = s.sess.WaitTransportsIdle(ctx, transports...)
+		}
+		drain.close()
+		s.forgetDrain(drain)
+	}()
+}
+
+func compactAttachments(attachments []session.Attachment) []session.Attachment {
+	kept := attachments[:0]
+	for _, attachment := range attachments {
+		if attachment != nil {
+			kept = append(kept, attachment)
+		}
+	}
+	return kept
+}
+
+func attachmentTransports(attachments []session.Attachment) []session.Transport {
+	transports := make([]session.Transport, 0, len(attachments))
+	for _, attachment := range attachments {
+		transportAttachment, ok := attachment.(session.TransportAttachment)
+		if !ok {
+			continue
+		}
+		transports = append(transports, transportAttachment.Transport())
+	}
+	return transports
+}
+
+func (d *attachmentDrain) close() {
+	d.closeOnce.Do(func() {
+		closeAttachments(d.attachments)
+	})
+}
+
+func (s *Service) forgetDrain(drain *attachmentDrain) {
+	s.mu.Lock()
+	s.drainTimers = slices.DeleteFunc(s.drainTimers, func(candidate *attachmentDrain) bool {
+		return candidate == drain
+	})
+	s.mu.Unlock()
+}
+
+func (s *Service) closeSecureResources() {
+	s.mu.Lock()
+	attachments := s.secureServerAttachments
+	s.secureServerAttachments = nil
+	drains := s.drainTimers
+	s.drainTimers = nil
+	expiryTimer := s.activeSecureSATimer
+	s.activeSecureSATimer = nil
+	s.activeSecureSAExpiresAt = time.Time{}
+	s.mu.Unlock()
+	if expiryTimer != nil {
+		expiryTimer.Stop()
+	}
+	for _, drain := range drains {
+		drain.cancel()
+		drain.close()
+	}
+	closeAttachments(attachments)
+}
+
+func saDrainDelay(timers session.TransactionTimers) time.Duration {
+	return max(timers.TB, timers.TD, timers.TF, timers.TH, timers.TJ, timers.T4)
+}
+
+func saDrainDelayBefore(expiresAt time.Time, timers session.TransactionTimers) time.Duration {
+	delay := saDrainDelay(timers)
+	if expiresAt.IsZero() {
+		return delay
+	}
+	remaining := time.Until(expiresAt)
+	if remaining <= 0 {
+		return 0
+	}
+	return min(delay, remaining)
+}
+
+func (s *Service) secureAssociationExpiresAt(now time.Time) time.Time {
+	if s.currentSecurityVerify() == nil {
+		return time.Time{}
+	}
+	return now.Add(s.currentRegisterExpires() + secureAssociationLifetimeGrace)
+}
+
+func (s *Service) currentSecureAssociationExpiresAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activeSecureSAExpiresAt
+}
+
+func (s *Service) extendActiveSecureAssociationLifetime(expiresAt time.Time) {
+	if expiresAt.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	if !s.activeSecureSAExpiresAt.IsZero() && !expiresAt.After(s.activeSecureSAExpiresAt) {
+		s.mu.Unlock()
+		return
+	}
+	s.activeSecureSAExpiresAt = expiresAt
+	delay := time.Until(expiresAt)
+	if delay < 0 {
+		delay = 0
+	}
+	if s.activeSecureSATimer == nil {
+		s.activeSecureSATimer = time.AfterFunc(delay, s.expireActiveSecureAssociation)
+		s.mu.Unlock()
+		return
+	}
+	s.activeSecureSATimer.Reset(delay)
+	s.mu.Unlock()
+}
+
+func (s *Service) expireActiveSecureAssociation() {
+	s.closeSecureResources()
+	s.setRegistered(false)
+	s.publishRegistrationEvent(errSecureSAExpired)
+}
+
+func (s *Service) commitReauthentication(challenge security.Challenge, flow Flow, ck, ik []byte, password string) {
+	realm := strings.TrimSpace(challenge.Realm)
+	if realm == "" {
+		realm = strings.TrimPrefix(s.State().RegisterURI, "sip:")
+	}
+	s.mu.Lock()
+	s.flow = flow.clone()
+	s.authRealm = realm
+	s.authNonce = challenge.Nonce
+	s.authAlgorithm = challenge.Algorithm
+	s.authQOP = challenge.QOP
+	s.authNonceCount = 1
+	s.authDigestNonce = challenge.Nonce
+	s.authDigestAlgorithm = challenge.Algorithm
+	s.authDigestPassword = password
+	s.authCK = append([]byte(nil), ck...)
+	s.authIK = append([]byte(nil), ik...)
+	s.mu.Unlock()
+}
+
+func (s *Service) buildDeregisterMessage(ctx context.Context, verify *security.Param, realm, nonce, algorithm, qop string) (sip.Message, error) {
+	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, algorithm, qop)
 	if err != nil {
 		return sip.Message{}, fmt.Errorf("deregistering IMS: %w", err)
 	}
 	return s.buildDeregister(auth, verify), nil
 }
 
-func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, realm, nonce, qop *string) (bool, error) {
+func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, realm, nonce, algorithm, qop *string) (bool, error) {
 	switch resp.StatusCode() {
-	case 200:
+	case sipStatusOK:
 		return true, nil
-	case 401:
+	case sipStatusUnauthorized:
 		if *challenged {
 			return false, errors.New("deregistering IMS: repeated 401 response")
 		}
-		var challenge security.Challenge
-		if err := challenge.UnmarshalText([]byte(resp.Header("WWW-Authenticate"))); err != nil {
-			return false, fmt.Errorf("deregistering IMS: %w", err)
-		}
-		if _, err := challenge.SelectedQOP(); err != nil {
+		challenge, err := selectRegisterChallenge(resp.HeadersByName("WWW-Authenticate"))
+		if err != nil {
 			return false, fmt.Errorf("deregistering IMS: %w", err)
 		}
 		s.storeAuthChallenge(challenge)
 		*realm = challenge.Realm
 		*nonce = challenge.Nonce
+		*algorithm = challenge.Algorithm
 		*qop = challenge.QOP
 		*challenged = true
 		return false, nil
@@ -1159,101 +1986,121 @@ func (s *Service) upgradeSecureTransport(ctx context.Context) error {
 		return nil
 	}
 	flow := s.CurrentFlow()
-	var (
-		secureTransport session.Transport
-		err             error
-	)
-	switch sip.TransportToken(s.sess.LocalAddr()) {
-	case "TCP":
-		if s.cfg.DialSecureTCP == nil {
-			return nil
-		}
-		secureTransport, err = s.cfg.DialSecureTCP(ctx, s.secureTransportConfig(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC))
-		if err != nil {
-			return fmt.Errorf("dialing secure IMS transport: %w", err)
-		}
-	default:
-		if s.cfg.DialSecureUDP == nil {
-			return nil
-		}
-		secureTransport, err = s.cfg.DialSecureUDP(ctx, s.secureDatagramTransportConfig(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC))
-		if err != nil {
-			return fmt.Errorf("dialing secure IMS datagram transport: %w", err)
-		}
-	}
-	if err := s.sess.ReplacePrimary(secureTransport); err != nil {
-		return fmt.Errorf("replacing secure IMS transport: %w", err)
-	}
-	if err := s.startSecureServerTransports(ctx, verify); err != nil {
+	secureTransport, err := s.dialSecureTransport(ctx, verify, flow, s.authCK, s.authIK)
+	if err != nil {
 		return err
 	}
+	_, serverAttachments, err := s.startSecureServerTransports(ctx, verify)
+	if err != nil {
+		secureTransport.Close()
+		return err
+	}
+	if err := s.sess.ReplacePrimary(secureTransport); err != nil {
+		secureTransport.Close()
+		closeAttachments(serverAttachments)
+		return fmt.Errorf("replacing secure IMS transport: %w", err)
+	}
+	oldServerAttachments := s.replaceSecureServerAttachments(serverAttachments)
+	closeAttachments(oldServerAttachments)
 	return nil
 }
 
-func (s *Service) secureTransportConfig(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32) session.SecureTCPConfig {
+func secureTransportConfigWithKeys(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32, ck, ik []byte) session.SecureTCPConfig {
 	return session.SecureTCPConfig{
 		LocalPort:     localPort,
 		RemotePort:    remotePort,
 		OutboundSPI:   outboundSPI,
 		InboundSPI:    inboundSPI,
 		Encryption:    verify.EAlg,
-		EncryptionKey: append([]byte(nil), s.authCK...),
+		EncryptionKey: append([]byte(nil), ck...),
 		Integrity:     verify.Alg,
-		IntegrityKey:  append([]byte(nil), s.authIK...),
+		IntegrityKey:  append([]byte(nil), ik...),
 	}
 }
 
-func (s *Service) secureDatagramTransportConfig(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32) session.SecureUDPConfig {
-	return session.SecureUDPConfig{
-		LocalPort:     localPort,
-		RemotePort:    remotePort,
-		OutboundSPI:   outboundSPI,
-		InboundSPI:    inboundSPI,
-		Encryption:    verify.EAlg,
-		EncryptionKey: append([]byte(nil), s.authCK...),
-		Integrity:     verify.Alg,
-		IntegrityKey:  append([]byte(nil), s.authIK...),
-	}
-}
-
-func (s *Service) startSecureServerTransports(ctx context.Context, verify *security.Param) error {
-	flow := s.CurrentFlow()
-	if s.cfg.ListenSecureTCP != nil {
-		serverTransport, err := s.cfg.ListenSecureTCP(ctx, s.secureTransportConfig(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS))
+func (s *Service) dialSecureTransport(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) (session.Transport, error) {
+	switch sip.TransportToken(s.sess.LocalAddr()) {
+	case "TCP":
+		if s.cfg.DialSecureTCP == nil {
+			return nil, errors.New("dialing secure IMS transport: TCP dialer is not configured")
+		}
+		secureTransport, err := s.cfg.DialSecureTCP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
 		if err != nil {
-			return fmt.Errorf("listening secure IMS transport: %w", err)
+			return nil, fmt.Errorf("dialing secure IMS transport: %w", err)
 		}
-		if _, err := s.sess.AddTransport(serverTransport); err != nil {
-			return fmt.Errorf("adding secure IMS transport: %w", err)
+		return secureTransport, nil
+	default:
+		if s.cfg.DialSecureUDP == nil {
+			return nil, errors.New("dialing secure IMS datagram transport: UDP dialer is not configured")
 		}
+		secureTransport, err := s.cfg.DialSecureUDP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
+		if err != nil {
+			return nil, fmt.Errorf("dialing secure IMS datagram transport: %w", err)
+		}
+		return secureTransport, nil
+	}
+}
+
+func (s *Service) startSecureServerTransports(ctx context.Context, verify *security.Param) ([]session.Transport, []session.Attachment, error) {
+	flow := s.CurrentFlow()
+	return s.startSecureServerTransportsWithKeys(ctx, verify, flow, s.authCK, s.authIK)
+}
+
+func (s *Service) startSecureServerTransportsWithKeys(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) ([]session.Transport, []session.Attachment, error) {
+	transports := make([]session.Transport, 0, 2)
+	attachments := make([]session.Attachment, 0, 2)
+	if s.cfg.ListenSecureTCP != nil {
+		serverTransport, err := s.cfg.ListenSecureTCP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS, ck, ik))
+		if err != nil {
+			closeAttachments(attachments)
+			return nil, nil, fmt.Errorf("listening secure IMS transport: %w", err)
+		}
+		attachment, err := s.sess.AddTransport(serverTransport)
+		if err != nil {
+			serverTransport.Close()
+			closeAttachments(attachments)
+			return nil, nil, fmt.Errorf("adding secure IMS transport: %w", err)
+		}
+		transports = append(transports, serverTransport)
+		attachments = append(attachments, attachment)
 	}
 	if s.cfg.ListenSecureUDP != nil {
-		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, s.secureDatagramTransportConfig(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS))
+		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS, ck, ik))
 		if err != nil {
-			return fmt.Errorf("listening secure IMS datagram transport: %w", err)
+			closeAttachments(attachments)
+			return nil, nil, fmt.Errorf("listening secure IMS datagram transport: %w", err)
 		}
-		if _, err := s.sess.AddTransport(serverDatagramTransport); err != nil {
-			return fmt.Errorf("adding secure IMS datagram transport: %w", err)
+		attachment, err := s.sess.AddTransport(serverDatagramTransport)
+		if err != nil {
+			serverDatagramTransport.Close()
+			closeAttachments(attachments)
+			return nil, nil, fmt.Errorf("adding secure IMS datagram transport: %w", err)
 		}
+		transports = append(transports, serverDatagramTransport)
+		attachments = append(attachments, attachment)
 	}
-	return nil
+	return transports, attachments, nil
 }
 
 func (s *Service) buildRegister(auth *security.Authorization, verify *security.Param) sip.Message {
+	return s.buildRegisterForFlow(auth, verify, s.CurrentFlow())
+}
+
+func (s *Service) buildRegisterForFlow(auth *security.Authorization, verify *security.Param, flow Flow) sip.Message {
 	port := s.State().RegisterPort
-	if verify != nil || auth != nil {
-		port = s.State().SecurityClient.PortS
+	if registerUsesProtectedPort(auth, verify) {
+		port = flow.SecurityClient.PortS
 	}
 	legacyAuthorization := ""
 	if auth == nil {
-		legacyAuthorization = s.legacyEmptyAuthorizationValue()
+		legacyAuthorization = s.initialAuthorizationValue()
 	}
-	return s.buildRegisterRequest(auth, legacyAuthorization, verify, s.registerContactValue(port), s.registerExpiresSeconds(), port)
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(port), s.registerExpiresSeconds(), port)
 }
 
 func (s *Service) buildDeregister(auth *security.Authorization, verify *security.Param) sip.Message {
 	port := s.State().RegisterPort
-	if verify != nil || auth != nil {
+	if registerUsesProtectedPort(auth, verify) {
 		port = s.State().SecurityClient.PortS
 	}
 	return s.buildRegisterRequest(auth, "", verify, "*", 0, port)
@@ -1267,49 +2114,202 @@ func (s *Service) registerRealm(auth *security.Authorization) string {
 	return auth.Realm
 }
 
-func (s *Service) legacyEmptyAuthorizationValue() string {
+func (s *Service) initialAuthorizationValue() string {
 	text, _ := (security.Authorization{
 		Nonce:              "",
 		URI:                s.State().RegisterURI,
 		Response:           "",
 		Username:           s.State().PrivateIdentity,
 		Realm:              s.registerRealm(nil),
-		IntegrityProtected: "no",
+		Algorithm:          s.cfg.AuthAlgorithm,
+		IntegrityProtected: registerInitialIntegrityProtectedValue(s.cfg.AuthAlgorithm),
 	}).MarshalText()
 	return string(text)
 }
 
+func (s *Service) nextRegisterTransaction() (int64, string, string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cseq++
+	if s.cseq > maxSIPCSeq {
+		callID, sessionID, tag, _ := sip.NewTransaction()
+		s.callID = callID
+		s.sessionID = sessionID
+		s.tag = tag
+		s.cseq = 1
+	}
+	return s.cseq, s.callID, s.sessionID, s.tag
+}
+
+func (s *Service) nextStandaloneCSeq() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.cseq++
+	if s.cseq > maxSIPCSeq {
+		s.cseq = 1
+	}
+	return s.cseq
+}
+
+func (s *Service) resetRegisterTransaction() {
+	callID, sessionID, tag, _ := sip.NewTransaction()
+	s.mu.Lock()
+	s.callID = callID
+	s.sessionID = sessionID
+	s.tag = tag
+	s.cseq = 0
+	s.mu.Unlock()
+}
+
 func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int) sip.Message {
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, port)
+}
+
+func (s *Service) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, port int) sip.Message {
 	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
+	cseq, callID, sessionID, tag := s.nextRegisterTransaction()
+	state.Flow = flow.clone()
+	state.SecurityClient = flow.SecurityClient
+	state.SecurityClients = append(security.Params(nil), flow.SecurityClients...)
+	state.SecurityVerify = nil
+	if flow.SecurityVerify != nil {
+		verifyCopy := *flow.SecurityVerify
+		state.SecurityVerify = &verifyCopy
+	}
+	state.ContactHost = flow.ContactHost
+	state.RegisterPort = flow.RegisterPort
+	state.MessagePort = flow.MessagePort
 	msg := sip.NewRequest("REGISTER", state.RegisterURI)
 	msg.Headers.Add("To", fmt.Sprintf("<%s>", state.PublicIdentity))
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, s.tag))
+	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", state.PublicIdentity, tag))
 	msg.Headers.Add("Expires", strconv.Itoa(expiresSeconds))
-	verifyValue := s.securityVerifyValue(verify)
-	sip.SecurityAgreement{Verify: verifyValue, Required: true}.Apply(&msg)
-	msg.Headers.Add("Security-Client", state.SecurityClient.String())
-	msg.Headers.Add("Call-ID", s.callID)
-	msg.Headers.Add("Session-ID", s.sessionID)
+	if registerUsesIPSec(auth, verify, authorizationAlgorithm(legacyAuthorization, s.cfg.AuthAlgorithm)) {
+		verifyValue := securityVerifyValueForFlow(flow, verify)
+		sip.SecurityAgreement{Verify: verifyValue, Required: true}.Apply(&msg)
+		msg.Headers.Add("Security-Client", state.Flow.SecurityClientValue())
+	}
+	msg.Headers.Add("Call-ID", callID)
+	msg.Headers.Add("Session-ID", sessionID)
 	msg.Headers.Add("Contact", contact)
+	msg.Headers.Add("Supported", "path")
 	if auth != nil {
 		msg.Headers.Add("Authorization", auth.String())
 	} else if legacyAuthorization != "" {
 		msg.Headers.Add("Authorization", legacyAuthorization)
 	}
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d REGISTER", atomic.AddInt64(&s.cseq, 1)))
+	msg.Headers.Add("CSeq", fmt.Sprintf("%d REGISTER", cseq))
 	transport := sip.TransportToken(s.sess.LocalAddr())
 	msg.Headers.Add("Via", sip.BuildViaWithOptions(transport, state.ContactHost, port, branch, sip.ViaOptions{
 		Keep: strings.EqualFold(transport, "UDP"),
 	}))
+	accessNetworkInfo := ""
+	if registerCanCarryAccessNetworkInfo(auth, verify, flow) {
+		accessNetworkInfo = state.AccessNetworkInfo
+	}
 	sip.ClientRequestPolicy{
 		UserAgent:         state.UserAgent,
-		AccessNetworkInfo: state.AccessNetworkInfo,
+		AccessNetworkInfo: accessNetworkInfo,
 	}.Apply(&msg)
 	if s.includePIDFForRegister() {
 		s.setRegisterPIDFBody(&msg, state)
 	}
 	return msg
+}
+
+func registerCanCarryAccessNetworkInfo(auth *security.Authorization, verify *security.Param, flow Flow) bool {
+	return auth != nil || verify != nil || flow.SecurityVerify != nil
+}
+
+func registerUsesIPSec(auth *security.Authorization, verify *security.Param, algorithm string) bool {
+	if verify != nil {
+		return true
+	}
+	if auth != nil {
+		return !registerUsesTLSAKA(auth.Algorithm)
+	}
+	return !registerUsesTLSAKA(algorithm)
+}
+
+func registerUsesProtectedPort(auth *security.Authorization, verify *security.Param) bool {
+	if verify != nil {
+		return true
+	}
+	if auth == nil {
+		return false
+	}
+	return !registerUsesTLSAKA(auth.Algorithm)
+}
+
+func authorizationAlgorithm(authorization, fallback string) string {
+	if authorization == "" {
+		return fallback
+	}
+	for _, field := range splitAuthorizationFields(authorization) {
+		name, value, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if ok && strings.EqualFold(strings.TrimSpace(name), "algorithm") {
+			return strings.Trim(strings.TrimSpace(value), `"`)
+		}
+	}
+	return fallback
+}
+
+func splitAuthorizationFields(value string) []string {
+	if strings.HasPrefix(strings.ToLower(value), "digest ") {
+		value = value[len("Digest "):]
+	}
+	fields := make([]string, 0, strings.Count(value, ",")+1)
+	start := 0
+	inQuotes := false
+	for i := range len(value) {
+		switch value[i] {
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if inQuotes {
+				continue
+			}
+			fields = append(fields, value[start:i])
+			start = i + 1
+		}
+	}
+	fields = append(fields, value[start:])
+	return fields
+}
+
+func registerInitialIntegrityProtectedValue(algorithm string) string {
+	if registerUsesTLSAKA(algorithm) {
+		return "tls-connected"
+	}
+	return "no"
+}
+
+func registerIntegrityProtectedValue(algorithm string) string {
+	if registerUsesTLSAKA(algorithm) {
+		return "tls-connected"
+	}
+	return "yes"
+}
+
+func registerUsesTLSAKA(algorithm string) bool {
+	return strings.EqualFold(strings.TrimSpace(algorithm), security.AlgorithmAKAv2SHA256)
+}
+
+func securityServerSupportsTLS(values []string) bool {
+	var params security.Params
+	for _, value := range values {
+		if err := params.UnmarshalText([]byte(value)); err != nil {
+			continue
+		}
+		for _, param := range params {
+			if strings.EqualFold(param.Mechanism, "tls") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) includePIDFForRegister() bool {
@@ -1365,16 +2365,16 @@ func (s *Service) buildSubscribeWithDialog(subscription subscriptionDialog) sip.
 	if cseq > 0 {
 		cseq++
 	} else {
-		cseq = atomic.AddInt64(&s.cseq, 1)
+		cseq = s.nextStandaloneCSeq()
 	}
 	requestURI := publicID
 	if subscription.active && strings.TrimSpace(subscription.targetURI) != "" {
 		requestURI = subscription.targetURI
 	}
 	msg := sip.NewRequest("SUBSCRIBE", requestURI)
-	msg.Headers.Add("Accept", "application/reginfo+xml")
+	msg.Headers.Add("Accept", regInfoContentType)
 	msg.Headers.Add("Expires", strconv.Itoa(expiresSeconds(s.currentSubscribeExpires())))
-	msg.Headers.Add("Event", "reg")
+	msg.Headers.Add("Event", regEventPackage)
 	msg.Headers.Add("From", subscribeHeaderWithTag(subscription.localHeader, publicID, localTag))
 	msg.Headers.Add("To", subscribeHeaderWithTag(subscription.remoteHeader, publicID, subscription.remoteTag))
 	msg.Headers.Add("Call-ID", callID)
@@ -1417,9 +2417,6 @@ func (s *Service) messagePort() int {
 
 func (s *Service) subscribeContactValue(port int) string {
 	params := []string{"text"}
-	if s.cfg.IMEI != "" {
-		params = append([]string{fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, s.cfg.IMEI)}, params...)
-	}
 	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
 }
 
@@ -1452,6 +2449,7 @@ func (s *Service) registerContactValue(port int) string {
 		`+g.3gpp.nw-init-ussi`,
 		`+g.3gpp.ps2cs-srvcc-orig-pre-alerting`,
 		`+g.3gpp.smsip`,
+		`+g.3gpp.smsip-msisdn-less`,
 		`+g.3gpp.srvcc-alerting`,
 	}
 	if s.cfg.IMEI != "" {
@@ -1538,6 +2536,19 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
+	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
+	if cfg.AuthAlgorithm == "" {
+		cfg.AuthAlgorithm = security.AlgorithmAKAv1MD5
+	} else {
+		algorithm, ok := security.NormalizeAKAAlgorithm(cfg.AuthAlgorithm)
+		if !ok {
+			return Config{}, fmt.Errorf("normalizing registration config: unsupported AKA algorithm %q", cfg.AuthAlgorithm)
+		}
+		if algorithm == security.AlgorithmAKAv2SHA256 {
+			return Config{}, errors.New("normalizing registration config: AKAv2-SHA-256 requires TLS SIP transport")
+		}
+		cfg.AuthAlgorithm = algorithm
+	}
 	cfg.GeolocationPIDFRegister = pidf.NormalizeTypes(cfg.GeolocationPIDFRegister)
 	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
 	if len(cfg.GeolocationPIDFRegister) > 0 && cfg.GeolocationCountry == "" {
@@ -1652,6 +2663,17 @@ func sanitizeHost(host string) string {
 	return host
 }
 
+func newFlow(host string, port int) Flow {
+	client := newSecurityClient(port)
+	return Flow{
+		ContactHost:     host,
+		RegisterPort:    port,
+		MessagePort:     port,
+		SecurityClient:  client,
+		SecurityClients: securityClientCapabilities(client),
+	}
+}
+
 func newSecurityClient(registerPort int) security.Param {
 	clientPort := randomIMSPort()
 	serverPort := randomIMSPort()
@@ -1666,9 +2688,39 @@ func newSecurityClient(registerPort int) security.Param {
 		PortC:     clientPort,
 		PortS:     serverPort,
 		Prot:      "esp",
-		SPIC:      sip.RandomUint32(),
-		SPIS:      sip.RandomUint32(),
+		SPIC:      randomNonZeroUint32Except(0),
+		SPIS:      randomNonZeroUint32Except(0),
 	}
+}
+
+func securityClientCapabilities(base security.Param) security.Params {
+	ealgs := []string{"null", "aes-cbc"}
+	params := make(security.Params, 0, len(ealgs))
+	for _, ealg := range ealgs {
+		param := base
+		param.EAlg = ealg
+		params = append(params, param)
+	}
+	return params
+}
+
+func reauthSecurityClient(current security.Param, registerPort int) security.Param {
+	next := current
+	next.PortC = randomIMSPort()
+	for next.PortC == current.PortC || next.PortC == current.PortS || next.PortC == registerPort {
+		next.PortC = randomIMSPort()
+	}
+	next.SPIC = randomNonZeroUint32Except(current.SPIC)
+	next.SPIS = randomNonZeroUint32Except(current.SPIS)
+	return next
+}
+
+func randomNonZeroUint32Except(except uint32) uint32 {
+	value := sip.RandomUint32()
+	for value == 0 || value == except {
+		value = sip.RandomUint32()
+	}
+	return value
 }
 
 type akaProvider struct{ card Card }

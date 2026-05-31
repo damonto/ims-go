@@ -19,13 +19,11 @@ func (c *Call) Media() NegotiatedMedia {
 	defer c.mu.Unlock()
 	media := c.media
 	media.RemoteIP = append(net.IP(nil), media.RemoteIP...)
+	media.RemoteRTCPIP = append(net.IP(nil), media.RemoteRTCPIP...)
 	return media
 }
 
 func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := c.waitForReliableProvisionalAnswer(ctx); err != nil {
 		return err
 	}
@@ -89,7 +87,7 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 
 func (c *Call) Reject(ctx context.Context, code int, reason string) error {
 	if code == 0 {
-		code = 486
+		code = sipStatusBusyHere
 	}
 	if reason == "" {
 		reason = "Busy Here"
@@ -124,7 +122,7 @@ func (c *Call) Hangup(ctx context.Context) error {
 	c.mu.Unlock()
 
 	if direction == CallDirectionIncoming && state == CallStateRinging {
-		return c.Reject(ctx, 486, "Busy Here")
+		return c.Reject(ctx, sipStatusBusyHere, "Busy Here")
 	}
 	if direction == CallDirectionOutgoing && (state == CallStateDialing || state == CallStateRinging || state == CallStateEarlyMedia) {
 		return c.cancelOutgoingInvite(ctx)
@@ -152,7 +150,7 @@ func byeReleaseCompleted(resp sip.Message, err error) bool {
 		return errors.Is(err, context.DeadlineExceeded)
 	}
 	code := resp.StatusCode()
-	return (code >= 200 && code < 300) || code == 408 || code == 481
+	return (code >= sipStatusOK && code < sipStatusMultipleChoices) || code == sipStatusRequestTimeout || code == sipStatusCallTransactionDoesNotExist
 }
 
 func byeReleaseError(action string, resp sip.Message, err error) error {
@@ -201,7 +199,7 @@ func (c *Call) exchangeCancel(ctx context.Context, cancel sip.Message) error {
 	if err != nil {
 		return fmt.Errorf("cancelling call: %w", err)
 	}
-	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+	if resp.StatusCode() < sipStatusOK || resp.StatusCode() >= sipStatusMultipleChoices {
 		return fmt.Errorf("cancelling call: expected 2xx, got %w", sip.NewResponseError(resp))
 	}
 	return nil

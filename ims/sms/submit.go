@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
 	"time"
+
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 func (s *Service) registerPending(callID string, rpRef byte) (<-chan rpMessage, error) {
@@ -139,31 +140,30 @@ func (s *Service) activatePendingAsync(segment outboundSegment, response submitR
 	}
 }
 
-func (s *Service) completePending(ctx context.Context, msg sip.Message, report rpMessage) bool {
-	callID := strings.TrimSpace(msg.Header("In-Reply-To"))
-	if callID == "" {
-		s.logger.Debug("submit report missing In-Reply-To", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference)
-		return false
-	}
+func (s *Service) completePending(msg sip.Message, report rpMessage) bool {
 	now := time.Now()
+	inReplyTo := strings.TrimSpace(msg.Header("In-Reply-To"))
+	if inReplyTo != "" {
+		return s.completePendingByCallID(msg, report, inReplyTo, now)
+	}
 	s.mu.Lock()
-	entry, ok := s.pending[callID]
+	callID, entry, ok := s.pendingByReferenceLocked(report.Reference)
 	if ok {
-		if entry.rpRef != report.Reference {
+		if submitReportRequiresInReplyTo(entry.segment) {
 			s.mu.Unlock()
-			s.handleUnexpectedSubmitReference(ctx, msg, report, entry.rpRef)
-			return true
+			s.logger.Debug("submit report missing In-Reply-To", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference)
+			return false
 		}
 		if entry.async {
 			delete(s.pending, callID)
 			s.mu.Unlock()
 			s.completeSubmitted(callID)
 			s.releaseReference(entry.rpRef)
-			s.completeMOPending()
 			if err := s.handleAsyncSegmentReport(entry.segment, entry.response, report); err != nil {
 				s.logger.Warn("submit report", "to", entry.segment.to, "smsc", entry.segment.smscAddress, "call_id", entry.segment.msg.Header("Call-ID"), "cseq", entry.segment.msg.Header("CSeq"), "rp_ref", entry.segment.rpRef, "err", err)
 				s.emitAsyncError(err)
 			}
+			s.completeMOPending()
 			return true
 		}
 		select {
@@ -173,16 +173,12 @@ func (s *Service) completePending(ctx context.Context, msg sip.Message, report r
 		s.mu.Unlock()
 		return true
 	}
-	submitted, ok := s.submitted[callID]
-	if ok && !submitted.expiresAt.After(now) {
-		delete(s.submitted, callID)
-		ok = false
-	}
+	callID, submitted, ok := s.submittedByReferenceLocked(report.Reference, now)
 	s.mu.Unlock()
 	if ok {
-		if submitted.rpRef != report.Reference {
-			s.handleUnexpectedSubmitReference(ctx, msg, report, submitted.rpRef)
-			return true
+		if submitReportRequiresInReplyTo(submitted.segment) {
+			s.logger.Debug("submit report missing In-Reply-To", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference)
+			return false
 		}
 		if submitted.completed {
 			return true
@@ -195,35 +191,110 @@ func (s *Service) completePending(ctx context.Context, msg sip.Message, report r
 		}
 		return true
 	}
-	s.logger.Debug("submit report not matched", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", callID, "rp_ref", report.Reference)
+	s.logger.Debug("submit report not matched", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference)
 	return false
 }
 
-func (s *Service) handleUnexpectedSubmitReference(ctx context.Context, msg sip.Message, report rpMessage, expected byte) {
-	s.logger.Debug("submit report reference mismatch", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", msg.Header("In-Reply-To"), "rp_ref", report.Reference, "expected_rp_ref", expected)
-	if report.Type == rpAckNetworkToMS {
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidShortMessageTransferReference))
-	}
-}
-
-func (s *Service) knowsSubmit(callID string, now time.Time) bool {
-	if callID == "" {
-		return false
-	}
+func (s *Service) completePendingByCallID(msg sip.Message, report rpMessage, inReplyTo string, now time.Time) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.pending[callID]; ok {
+	entry, ok := s.pending[inReplyTo]
+	if ok {
+		if entry.rpRef != report.Reference {
+			s.mu.Unlock()
+			s.logger.Debug("submit report reference mismatch", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", inReplyTo, "rp_ref", report.Reference)
+			return false
+		}
+		if entry.async {
+			delete(s.pending, inReplyTo)
+			s.mu.Unlock()
+			s.completeSubmitted(inReplyTo)
+			s.releaseReference(entry.rpRef)
+			if err := s.handleAsyncSegmentReport(entry.segment, entry.response, report); err != nil {
+				s.logger.Warn("submit report", "to", entry.segment.to, "smsc", entry.segment.smscAddress, "call_id", entry.segment.msg.Header("Call-ID"), "cseq", entry.segment.msg.Header("CSeq"), "rp_ref", entry.segment.rpRef, "err", err)
+				s.emitAsyncError(err)
+			}
+			s.completeMOPending()
+			return true
+		}
+		select {
+		case entry.reportCh <- report:
+		default:
+		}
+		s.mu.Unlock()
 		return true
 	}
-	submitted, ok := s.submitted[callID]
-	if !ok {
-		return false
+	submitted, ok := s.submitted[inReplyTo]
+	if ok && !submitted.expiresAt.After(now) {
+		delete(s.submitted, inReplyTo)
+		ok = false
 	}
-	if !submitted.expiresAt.After(now) {
-		delete(s.submitted, callID)
-		return false
+	s.mu.Unlock()
+	if ok {
+		if submitted.rpRef != report.Reference {
+			s.logger.Debug("submit report reference mismatch", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", inReplyTo, "rp_ref", report.Reference)
+			return false
+		}
+		if submitted.completed {
+			return true
+		}
+		s.completeSubmitted(inReplyTo)
+		s.releaseReference(submitted.rpRef)
+		if err := s.handleAsyncSegmentReport(submitted.segment, submitted.response, report); err != nil {
+			s.logger.Warn("submit report", "to", submitted.segment.to, "smsc", submitted.segment.smscAddress, "call_id", submitted.segment.msg.Header("Call-ID"), "cseq", submitted.segment.msg.Header("CSeq"), "rp_ref", submitted.segment.rpRef, "err", err)
+			s.emitAsyncError(err)
+		}
+		return true
 	}
-	return true
+	s.logger.Debug("submit report In-Reply-To not matched", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "in_reply_to", inReplyTo, "rp_ref", report.Reference)
+	return false
+}
+
+func submitReportRequiresInReplyTo(segment outboundSegment) bool {
+	return isSIPURI(segment.to)
+}
+
+func (s *Service) pendingByReferenceLocked(ref byte) (string, pendingEntry, bool) {
+	for callID, entry := range s.pending {
+		if entry.rpRef == ref {
+			return callID, entry, true
+		}
+	}
+	return "", pendingEntry{}, false
+}
+
+func (s *Service) submittedByReferenceLocked(ref byte, now time.Time) (string, submittedEntry, bool) {
+	var completedCallID string
+	var completed submittedEntry
+	for callID, entry := range s.submitted {
+		if !entry.expiresAt.After(now) {
+			delete(s.submitted, callID)
+			continue
+		}
+		if entry.rpRef != ref {
+			continue
+		}
+		if !entry.completed {
+			return callID, entry, true
+		}
+		if completedCallID == "" {
+			completedCallID = callID
+			completed = entry
+		}
+	}
+	if completedCallID != "" {
+		return completedCallID, completed, true
+	}
+	return "", submittedEntry{}, false
+}
+
+func (s *Service) knowsSubmit(ref byte, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, _, ok := s.pendingByReferenceLocked(ref); ok {
+		return true
+	}
+	_, _, ok := s.submittedByReferenceLocked(ref, now)
+	return ok
 }
 
 func malformedNetworkSubmitReport(body []byte) (rpMessage, bool) {

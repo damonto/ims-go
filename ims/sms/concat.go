@@ -7,7 +7,11 @@ import (
 )
 
 func newConcatState(total int) concatState {
-	return concatState{total: total, parts: make(map[int]string, max(total, 0))}
+	return concatState{
+		total:    total,
+		parts:    make(map[int]string, max(total, 0)),
+		rawTPDUs: make(map[int][]byte, max(total, 0)),
+	}
 }
 
 func (state concatState) expired(now time.Time) bool {
@@ -18,11 +22,16 @@ func (state *concatState) reset(total int) {
 	*state = newConcatState(total)
 }
 
-func (state *concatState) addPart(sequence int, text string, now time.Time) {
+func (state *concatState) addPart(sequence int, msg Incoming, now time.Time) {
 	if state.parts == nil {
 		state.parts = make(map[int]string, max(state.total, 0))
 	}
-	state.parts[sequence] = text
+	if state.rawTPDUs == nil {
+		state.rawTPDUs = make(map[int][]byte, max(state.total, 0))
+	}
+	state.parts[sequence] = msg.Text
+	state.rawTPDUs[sequence] = append([]byte(nil), msg.RawTPDU...)
+	state.reservedMTI = state.reservedMTI || msg.ReservedMTI
 	state.updatedAt = now
 }
 
@@ -39,6 +48,16 @@ func (state concatState) joinedText() (string, bool) {
 		parts[i-1] = part
 	}
 	return strings.Join(parts, ""), true
+}
+
+func (state concatState) joinedRawTPDUs() [][]byte {
+	raw := make([][]byte, 0, state.total)
+	for i := 1; i <= state.total; i++ {
+		if part := state.rawTPDUs[i]; len(part) != 0 {
+			raw = append(raw, append([]byte(nil), part...))
+		}
+	}
+	return raw
 }
 
 func (s *Service) deliverConcat(msg Incoming, concat concatInfo) {
@@ -79,7 +98,7 @@ func (s *Service) appendConcat(msg Incoming, concat concatInfo) (Incoming, bool,
 	if state.parts == nil || state.total != int(concat.Total) {
 		state.reset(int(concat.Total))
 	}
-	state.addPart(int(concat.Sequence), msg.Text, now)
+	state.addPart(int(concat.Sequence), msg, now)
 	text, ok := state.joinedText()
 	if !ok {
 		s.concat[key] = state
@@ -89,5 +108,7 @@ func (s *Service) appendConcat(msg Incoming, concat concatInfo) (Incoming, bool,
 	delete(s.concat, key)
 	s.mu.Unlock()
 	msg.Text = text
+	msg.RawTPDUs = state.joinedRawTPDUs()
+	msg.ReservedMTI = state.reservedMTI
 	return msg, true, key
 }

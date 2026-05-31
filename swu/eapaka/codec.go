@@ -3,18 +3,30 @@ package eapaka
 import (
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 )
 
 const (
-	eapCodeRequest  byte = 1
-	eapCodeResponse byte = 2
-	eapCodeSuccess  byte = 3
-	eapCodeFailure  byte = 4
-	eapTypeAKA      byte = 23
+	eapCodeRequest      byte = 1
+	eapCodeResponse     byte = 2
+	eapCodeSuccess      byte = 3
+	eapCodeFailure      byte = 4
+	eapTypeIdentity     byte = 1
+	eapTypeNotification byte = 2
+	eapTypeNak          byte = 3
+	eapTypeAKA          byte = 23
+	eapTypeAKAPrime     byte = 50
+
+	eapHeaderLen = 4
+	eapTypeLen   = 1
+	eapMaxLen    = 1<<16 - 1
+
+	akaAttributeMaxWireLen = 255 * 4
 
 	akaSubtypeChallenge              byte = 1
 	akaSubtypeAuthenticationReject   byte = 2
@@ -33,6 +45,25 @@ const (
 	akaAttrEncryptedData byte = 130
 )
 
+const (
+	akaAttributeReservedLen    = 2
+	akaVectorLen               = 16
+	akaVectorAttributeLen      = akaAttributeReservedLen + akaVectorLen
+	akaMACLen                  = 16
+	akaMACAttributeLen         = akaAttributeReservedLen + akaMACLen
+	akaRESMinLen               = 4
+	akaRESMaxLen               = 16
+	akaAUTSLen                 = 14
+	akaAUTNAMFOffset           = 6
+	akaAMFSeparationBitMask    = 0x80
+	akaAttributeBlockSize      = 4
+	akaCheckcodeEmptyLen       = akaAttributeReservedLen
+	akaCheckcodeSHA1Len        = akaAttributeReservedLen + sha1.Size
+	akaCheckcodeSHA256Len      = akaAttributeReservedLen + sha256.Size
+	akaResultIndAttributeLen   = akaAttributeReservedLen
+	akaSkippableAttributeStart = 128
+)
+
 var (
 	_ encoding.BinaryMarshaler   = EAPPacket{}
 	_ encoding.BinaryUnmarshaler = (*EAPPacket)(nil)
@@ -40,6 +71,7 @@ var (
 	_ encoding.BinaryUnmarshaler = (*AKAAttribute)(nil)
 	_ encoding.BinaryMarshaler   = AKAMessage{}
 	_ encoding.BinaryUnmarshaler = (*AKAMessage)(nil)
+	_ encoding.BinaryUnmarshaler = (*AKAChallenge)(nil)
 )
 
 type EAPPacket struct {
@@ -50,15 +82,35 @@ type EAPPacket struct {
 	Data       []byte
 }
 
+func (p EAPPacket) IsIdentityRequest() bool {
+	return p.Code == eapCodeRequest && p.HasType && p.Type == eapTypeIdentity
+}
+
 func (p EAPPacket) MarshalBinary() ([]byte, error) {
-	length := 4 + len(p.Data)
-	if p.HasType {
-		length++
+	switch p.Code {
+	case eapCodeRequest, eapCodeResponse:
+		if !p.HasType {
+			return nil, errors.New("marshalling eap packet: request and response require type")
+		}
+	case eapCodeSuccess, eapCodeFailure:
+		if p.HasType || len(p.Data) != 0 {
+			return nil, errors.New("marshalling eap packet: success and failure must not include type data")
+		}
+	default:
+		return nil, fmt.Errorf("marshalling eap packet: invalid code %d", p.Code)
 	}
-	buf := make([]byte, 4)
+
+	length := eapHeaderLen + len(p.Data)
+	if p.HasType {
+		length += eapTypeLen
+	}
+	if length > eapMaxLen {
+		return nil, fmt.Errorf("marshalling eap packet: length %d exceeds uint16", length)
+	}
+	buf := make([]byte, eapHeaderLen)
 	buf[0] = p.Code
 	buf[1] = p.Identifier
-	binary.BigEndian.PutUint16(buf[2:4], uint16(length))
+	binary.BigEndian.PutUint16(buf[2:eapHeaderLen], uint16(length))
 	if p.HasType {
 		buf = append(buf, p.Type)
 	}
@@ -67,27 +119,74 @@ func (p EAPPacket) MarshalBinary() ([]byte, error) {
 }
 
 func (p *EAPPacket) UnmarshalBinary(data []byte) error {
-	if len(data) < 4 {
+	if len(data) < eapHeaderLen {
 		return errors.New("parsing eap packet: packet too short")
 	}
-	length := int(binary.BigEndian.Uint16(data[2:4]))
-	if length < 4 || len(data) < length {
+	length := int(binary.BigEndian.Uint16(data[2:eapHeaderLen]))
+	if length < eapHeaderLen || len(data) < length {
 		return fmt.Errorf("parsing eap packet: invalid length %d", length)
 	}
+	if len(data) != length {
+		return fmt.Errorf("parsing eap packet: length %d does not match packet size %d", length, len(data))
+	}
 	packet := EAPPacket{Code: data[0], Identifier: data[1]}
-	if packet.Code == eapCodeSuccess || packet.Code == eapCodeFailure {
-		packet.Data = append([]byte(nil), data[4:length]...)
+	switch packet.Code {
+	case eapCodeSuccess, eapCodeFailure:
+		if length != eapHeaderLen {
+			return fmt.Errorf("parsing eap packet: success and failure length %d, want %d", length, eapHeaderLen)
+		}
 		*p = packet
 		return nil
-	}
-	if length < 5 {
-		return errors.New("parsing eap packet: missing type field")
+	case eapCodeRequest, eapCodeResponse:
+		if length < eapHeaderLen+eapTypeLen {
+			return errors.New("parsing eap packet: missing type field")
+		}
+	default:
+		return fmt.Errorf("parsing eap packet: invalid code %d", packet.Code)
 	}
 	packet.HasType = true
 	packet.Type = data[4]
-	packet.Data = append([]byte(nil), data[5:length]...)
+	packet.Data = append([]byte(nil), data[eapHeaderLen+eapTypeLen:length]...)
 	*p = packet
 	return nil
+}
+
+func BuildEAPIdentityResponse(id byte, identity string) ([]byte, error) {
+	if identity == "" {
+		return nil, errors.New("building eap identity response: identity is empty")
+	}
+	packet := EAPPacket{
+		Code:       eapCodeResponse,
+		Identifier: id,
+		Type:       eapTypeIdentity,
+		HasType:    true,
+		Data:       []byte(identity),
+	}
+	return packet.MarshalBinary()
+}
+
+func BuildEAPNakResponse(id byte, desiredTypes ...byte) ([]byte, error) {
+	if len(desiredTypes) == 0 {
+		return nil, errors.New("building eap nak response: desired types are empty")
+	}
+	packet := EAPPacket{
+		Code:       eapCodeResponse,
+		Identifier: id,
+		Type:       eapTypeNak,
+		HasType:    true,
+		Data:       append([]byte(nil), desiredTypes...),
+	}
+	return packet.MarshalBinary()
+}
+
+func BuildEAPNotificationResponse(id byte) ([]byte, error) {
+	packet := EAPPacket{
+		Code:       eapCodeResponse,
+		Identifier: id,
+		Type:       eapTypeNotification,
+		HasType:    true,
+	}
+	return packet.MarshalBinary()
 }
 
 type AKAAttribute struct {
@@ -96,10 +195,14 @@ type AKAAttribute struct {
 }
 
 func (a AKAAttribute) MarshalBinary() ([]byte, error) {
-	if (len(a.Value)+2)%4 != 0 {
-		return nil, fmt.Errorf("marshalling aka attribute: unaligned attribute length %d", len(a.Value)+2)
+	wireLen := len(a.Value) + 2
+	if wireLen%4 != 0 {
+		return nil, fmt.Errorf("marshalling aka attribute: unaligned attribute length %d", wireLen)
 	}
-	buf := []byte{a.Type, byte((len(a.Value) + 2) / 4)}
+	if wireLen > akaAttributeMaxWireLen {
+		return nil, fmt.Errorf("marshalling aka attribute: length %d exceeds encodable maximum %d", wireLen, akaAttributeMaxWireLen)
+	}
+	buf := []byte{a.Type, byte(wireLen / 4)}
 	buf = append(buf, a.Value...)
 	return buf, nil
 }
@@ -130,10 +233,18 @@ func decodeAKAAttribute(data []byte) (AKAAttribute, int, error) {
 
 func decodeAKAAttributes(data []byte) ([]AKAAttribute, error) {
 	attrs := make([]AKAAttribute, 0)
+	var seen [256]bool
 	for len(data) > 0 {
 		attr, size, err := decodeAKAAttribute(data)
 		if err != nil {
 			return nil, err
+		}
+		known := isKnownAKAAttribute(attr.Type)
+		if known && seen[attr.Type] && !repeatableAKAAttributeType(attr.Type) {
+			return nil, fmt.Errorf("parsing aka attributes: duplicate attribute %d", attr.Type)
+		}
+		if known {
+			seen[attr.Type] = true
 		}
 		attrs = append(attrs, attr)
 		data = data[size:]
@@ -141,9 +252,14 @@ func decodeAKAAttributes(data []byte) ([]AKAAttribute, error) {
 	return attrs, nil
 }
 
+func repeatableAKAAttributeType(attrType byte) bool {
+	return attrType == akaAttrKDF
+}
+
 type AKAMessage struct {
 	Code       byte
 	Identifier byte
+	EAPType    byte
 	Subtype    byte
 	Attributes []AKAAttribute
 }
@@ -155,41 +271,57 @@ func (m AKAMessage) marshalWithAttributes(attrs []AKAAttribute) ([]byte, error) 
 }
 
 func (m AKAMessage) zeroedMAC() (AKAMessage, []byte, bool, error) {
-	clone := AKAMessage{Code: m.Code, Identifier: m.Identifier, Subtype: m.Subtype, Attributes: append([]AKAAttribute(nil), m.Attributes...)}
+	clone := AKAMessage{Code: m.Code, Identifier: m.Identifier, EAPType: m.EAPType, Subtype: m.Subtype, Attributes: append([]AKAAttribute(nil), m.Attributes...)}
 	for i := range clone.Attributes {
 		if clone.Attributes[i].Type != akaAttrMAC {
 			continue
 		}
-		if len(clone.Attributes[i].Value) < 18 {
+		if len(clone.Attributes[i].Value) < akaMACAttributeLen {
 			return AKAMessage{}, nil, false, errors.New("verifying aka mac: AT_MAC is truncated")
 		}
-		expected := append([]byte(nil), clone.Attributes[i].Value[2:18]...)
-		clone.Attributes[i].Value = append([]byte{0x00, 0x00}, make([]byte, 16)...)
+		expected := append([]byte(nil), clone.Attributes[i].Value[akaAttributeReservedLen:akaMACAttributeLen]...)
+		clone.Attributes[i].Value = append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)
 		return clone, expected, true, nil
 	}
 	return clone, nil, false, nil
 }
 
 func (m AKAMessage) MarshalSigned(autKey, extra []byte) ([]byte, error) {
+	return m.marshalSigned(autKey, extra, sha1.New)
+}
+
+func (m AKAMessage) MarshalSignedSHA256(autKey, extra []byte) ([]byte, error) {
+	return m.marshalSigned(autKey, extra, sha256.New)
+}
+
+func (m AKAMessage) marshalSigned(autKey, extra []byte, newHash func() hash.Hash) ([]byte, error) {
 	if len(autKey) == 0 {
 		return m.MarshalBinary()
 	}
 	attrs := append([]AKAAttribute(nil), m.Attributes...)
-	attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append([]byte{0x00, 0x00}, make([]byte, 16)...)})
+	attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)})
 	packet, err := m.marshalWithAttributes(attrs)
 	if err != nil {
 		return nil, err
 	}
-	mac := hmac.New(sha1.New, autKey)
+	mac := hmac.New(newHash, autKey)
 	_, _ = mac.Write(packet)
 	if len(extra) != 0 {
 		_, _ = mac.Write(extra)
 	}
-	attrs[len(attrs)-1].Value = append([]byte{0x00, 0x00}, mac.Sum(nil)[:16]...)
+	attrs[len(attrs)-1].Value = append(make([]byte, akaAttributeReservedLen), mac.Sum(nil)[:akaMACLen]...)
 	return m.marshalWithAttributes(attrs)
 }
 
 func (m AKAMessage) VerifyMAC(autKey, extra []byte) error {
+	return m.verifyMAC(autKey, extra, sha1.New)
+}
+
+func (m AKAMessage) VerifyMACSHA256(autKey, extra []byte) error {
+	return m.verifyMAC(autKey, extra, sha256.New)
+}
+
+func (m AKAMessage) verifyMAC(autKey, extra []byte, newHash func() hash.Hash) error {
 	if len(autKey) == 0 {
 		return errors.New("verifying aka mac: key is empty")
 	}
@@ -204,12 +336,12 @@ func (m AKAMessage) VerifyMAC(autKey, extra []byte) error {
 	if err != nil {
 		return err
 	}
-	mac := hmac.New(sha1.New, autKey)
+	mac := hmac.New(newHash, autKey)
 	_, _ = mac.Write(packet)
 	if len(extra) != 0 {
 		_, _ = mac.Write(extra)
 	}
-	if !hmac.Equal(expected, mac.Sum(nil)[:16]) {
+	if !hmac.Equal(expected, mac.Sum(nil)[:akaMACLen]) {
 		return errors.New("verifying aka mac: mismatch")
 	}
 	return nil
@@ -224,8 +356,15 @@ func (m AKAMessage) MarshalBinary() ([]byte, error) {
 		}
 		data = append(data, encoded...)
 	}
-	packet := EAPPacket{Code: m.Code, Identifier: m.Identifier, Type: eapTypeAKA, HasType: true, Data: data}
+	packet := EAPPacket{Code: m.Code, Identifier: m.Identifier, Type: m.eapType(), HasType: true, Data: data}
 	return packet.MarshalBinary()
+}
+
+func (m AKAMessage) eapType() byte {
+	if m.EAPType == 0 {
+		return eapTypeAKA
+	}
+	return m.EAPType
 }
 
 func (m *AKAMessage) UnmarshalBinary(data []byte) error {
@@ -233,7 +372,7 @@ func (m *AKAMessage) UnmarshalBinary(data []byte) error {
 	if err := packet.UnmarshalBinary(data); err != nil {
 		return err
 	}
-	if !packet.HasType || packet.Type != eapTypeAKA {
+	if !packet.HasType || packet.Type != eapTypeAKA && packet.Type != eapTypeAKAPrime {
 		return fmt.Errorf("parsing aka message: unexpected eap type %d", packet.Type)
 	}
 	if len(packet.Data) < 3 {
@@ -243,30 +382,39 @@ func (m *AKAMessage) UnmarshalBinary(data []byte) error {
 	if err != nil {
 		return err
 	}
-	*m = AKAMessage{Code: packet.Code, Identifier: packet.Identifier, Subtype: packet.Data[0], Attributes: attrs}
+	*m = AKAMessage{Code: packet.Code, Identifier: packet.Identifier, EAPType: packet.Type, Subtype: packet.Data[0], Attributes: attrs}
 	return nil
 }
 
 type AKAChallenge struct {
 	Identifier    byte
+	EAPType       byte
 	RAND          []byte
 	AUTN          []byte
+	KDF           uint16
+	NetworkName   []byte
 	IV            []byte
 	EncryptedData []byte
 }
 
-func ParseAKAChallenge(data []byte) (AKAChallenge, error) {
+func (c AKAChallenge) AMFSeparationBitSet() bool {
+	return len(c.AUTN) == akaVectorLen && c.AUTN[akaAUTNAMFOffset]&akaAMFSeparationBitMask != 0
+}
+
+func (c *AKAChallenge) UnmarshalBinary(data []byte) error {
 	var message AKAMessage
 	if err := message.UnmarshalBinary(data); err != nil {
-		return AKAChallenge{}, err
+		return err
 	}
 	if message.Code != eapCodeRequest || message.Subtype != akaSubtypeChallenge {
-		return AKAChallenge{}, errors.New("parsing aka challenge: unsupported packet")
+		return errors.New("parsing aka challenge: unsupported packet")
 	}
-	challenge := AKAChallenge{Identifier: message.Identifier}
+	challenge := AKAChallenge{Identifier: message.Identifier, EAPType: message.EAPType}
 	seenRAND := false
 	seenAUTN := false
 	seenMAC := false
+	seenKDFInput := false
+	seenKDF := false
 	seenIV := false
 	seenEncryptedData := false
 	seenResultInd := false
@@ -274,100 +422,139 @@ func ParseAKAChallenge(data []byte) (AKAChallenge, error) {
 		switch attr.Type {
 		case akaAttrRAND:
 			if seenRAND {
-				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate rand attribute")
+				return errors.New("parsing aka challenge: duplicate rand attribute")
 			}
-			if len(attr.Value) != 18 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid rand length %d", len(attr.Value))
+			if len(attr.Value) != akaVectorAttributeLen {
+				return fmt.Errorf("parsing aka challenge: invalid rand length %d", len(attr.Value))
 			}
-			challenge.RAND = append([]byte(nil), attr.Value[2:]...)
+			challenge.RAND = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
 			seenRAND = true
 		case akaAttrAUTN:
 			if seenAUTN {
-				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate autn attribute")
+				return errors.New("parsing aka challenge: duplicate autn attribute")
 			}
-			if len(attr.Value) != 18 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid autn length %d", len(attr.Value))
+			if len(attr.Value) != akaVectorAttributeLen {
+				return fmt.Errorf("parsing aka challenge: invalid autn length %d", len(attr.Value))
 			}
-			challenge.AUTN = append([]byte(nil), attr.Value[2:]...)
+			challenge.AUTN = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
 			seenAUTN = true
 		case akaAttrMAC:
 			if seenMAC {
-				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate mac attribute")
+				return errors.New("parsing aka challenge: duplicate mac attribute")
 			}
-			if len(attr.Value) != 18 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid mac length %d", len(attr.Value))
+			if len(attr.Value) != akaMACAttributeLen {
+				return fmt.Errorf("parsing aka challenge: invalid mac length %d", len(attr.Value))
 			}
 			seenMAC = true
+		case akaAttrKDFInput:
+			if message.EAPType != eapTypeAKAPrime {
+				return errors.New("parsing aka challenge: kdf input is only valid for aka prime")
+			}
+			if seenKDFInput {
+				return errors.New("parsing aka challenge: duplicate kdf input attribute")
+			}
+			kdfInput, err := KDFInputFromAttribute(&attr)
+			if err != nil {
+				return fmt.Errorf("parsing aka challenge: %w", err)
+			}
+			challenge.NetworkName = kdfInput.NetworkName
+			seenKDFInput = true
+		case akaAttrKDF:
+			if message.EAPType != eapTypeAKAPrime {
+				return errors.New("parsing aka challenge: kdf is only valid for aka prime")
+			}
+			if seenKDF {
+				return fmt.Errorf("parsing aka challenge: %w: duplicate kdf attribute", ErrAKAPrimeAuthenticationFailure)
+			}
+			kdf, err := KDFFromAttribute(&attr)
+			if err != nil {
+				return fmt.Errorf("parsing aka challenge: %w", err)
+			}
+			challenge.KDF = kdf.Version
+			seenKDF = true
 		case akaAttrIV:
 			if seenIV {
-				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate iv attribute")
+				return errors.New("parsing aka challenge: duplicate iv attribute")
 			}
-			if len(attr.Value) != 18 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid iv length %d", len(attr.Value))
+			if len(attr.Value) != akaVectorAttributeLen {
+				return fmt.Errorf("parsing aka challenge: invalid iv length %d", len(attr.Value))
 			}
-			challenge.IV = append([]byte(nil), attr.Value[2:]...)
+			challenge.IV = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
 			seenIV = true
 		case akaAttrEncryptedData:
 			if seenEncryptedData {
-				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate encrypted data attribute")
+				return errors.New("parsing aka challenge: duplicate encrypted data attribute")
 			}
-			if len(attr.Value) < 2 || (len(attr.Value)-2)%16 != 0 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid encrypted data length %d", len(attr.Value))
+			if len(attr.Value) < akaAttributeReservedLen || (len(attr.Value)-akaAttributeReservedLen)%akaVectorLen != 0 {
+				return fmt.Errorf("parsing aka challenge: invalid encrypted data length %d", len(attr.Value))
 			}
-			challenge.EncryptedData = append([]byte(nil), attr.Value[2:]...)
+			challenge.EncryptedData = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
 			seenEncryptedData = true
 		case akaAttrCheckcode:
-			if len(attr.Value) != 2 && len(attr.Value) != 22 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid checkcode length %d", len(attr.Value))
+			switch {
+			case message.EAPType == eapTypeAKAPrime && len(attr.Value) != akaCheckcodeEmptyLen && len(attr.Value) != akaCheckcodeSHA256Len:
+				return fmt.Errorf("parsing aka challenge: invalid checkcode length %d", len(attr.Value))
+			case message.EAPType != eapTypeAKAPrime && len(attr.Value) != akaCheckcodeEmptyLen && len(attr.Value) != akaCheckcodeSHA1Len:
+				return fmt.Errorf("parsing aka challenge: invalid checkcode length %d", len(attr.Value))
 			}
 		case akaAttrResultInd:
 			if seenResultInd {
-				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate result indication attribute")
+				return errors.New("parsing aka challenge: duplicate result indication attribute")
 			}
-			if len(attr.Value) != 2 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid result indication length %d", len(attr.Value))
+			if len(attr.Value) != akaResultIndAttributeLen {
+				return fmt.Errorf("parsing aka challenge: invalid result indication length %d", len(attr.Value))
 			}
 			seenResultInd = true
 		case akaAttrBidding:
-			if len(attr.Value) != 2 {
-				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid bidding length %d", len(attr.Value))
+			if _, err := BiddingFromAttribute(&attr); err != nil {
+				return fmt.Errorf("parsing aka challenge: %w", err)
 			}
 		default:
 			// RFC 4187 section 8.1 requires peers to ignore unknown skippable
 			// attributes (128..255) while still rejecting unknown
 			// non-skippable ones.
-			if attr.Type >= 128 {
+			if attr.Type >= akaSkippableAttributeStart {
 				continue
 			}
-			return AKAChallenge{}, fmt.Errorf("parsing aka challenge: unexpected attribute %d", attr.Type)
+			return fmt.Errorf("parsing aka challenge: unexpected attribute %d", attr.Type)
 		}
 	}
 	if !seenRAND || !seenAUTN {
-		return AKAChallenge{}, errors.New("parsing aka challenge: missing rand or autn")
+		return errors.New("parsing aka challenge: missing rand or autn")
 	}
 	if !seenMAC {
-		return AKAChallenge{}, errors.New("parsing aka challenge: missing mac")
+		return errors.New("parsing aka challenge: missing mac")
+	}
+	if message.EAPType == eapTypeAKAPrime {
+		if !seenKDF {
+			return fmt.Errorf("parsing aka challenge: %w: missing kdf", ErrAKAPrimeAuthenticationFailure)
+		}
+		if challenge.KDF != akaPrimeKDFDefault {
+			return fmt.Errorf("parsing aka challenge: %w: unsupported kdf %d", ErrAKAPrimeAuthenticationFailure, challenge.KDF)
+		}
+		if !seenKDFInput {
+			return fmt.Errorf("parsing aka challenge: %w: missing kdf input", ErrAKAPrimeAuthenticationFailure)
+		}
+		if len(challenge.NetworkName) == 0 {
+			return fmt.Errorf("parsing aka challenge: %w: network name is empty", ErrAKAPrimeAuthenticationFailure)
+		}
 	}
 	if seenIV != seenEncryptedData {
-		return AKAChallenge{}, errors.New("parsing aka challenge: iv and encrypted data must appear together")
+		return errors.New("parsing aka challenge: iv and encrypted data must appear together")
 	}
-	return challenge, nil
+	*c = challenge
+	return nil
 }
 
 func BuildAKAResponse(id byte, res, autKey []byte) ([]byte, error) {
-	if len(res) == 0 {
-		return nil, errors.New("building aka response: res is empty")
+	resAttr, err := buildAKARESAttribute(res)
+	if err != nil {
+		return nil, err
 	}
-	value := make([]byte, 2+len(res))
-	binary.BigEndian.PutUint16(value[:2], uint16(len(res)*8))
-	copy(value[2:], res)
-	if rem := (len(value) + 2) % 4; rem != 0 {
-		value = append(value, make([]byte, 4-rem)...)
-	}
-	attrs := []AKAAttribute{{Type: akaAttrRES, Value: value}}
+	attrs := []AKAAttribute{resAttr}
 	macIndex := -1
 	if len(autKey) != 0 {
-		attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append([]byte{0x00, 0x00}, make([]byte, 16)...)})
+		attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)})
 		macIndex = len(attrs) - 1
 	}
 	message := AKAMessage{Code: eapCodeResponse, Identifier: id, Subtype: akaSubtypeChallenge, Attributes: attrs}
@@ -380,25 +567,62 @@ func BuildAKAResponse(id byte, res, autKey []byte) ([]byte, error) {
 	}
 	mac := hmac.New(sha1.New, autKey)
 	_, _ = mac.Write(packet)
-	attrs[macIndex].Value = append([]byte{0x00, 0x00}, mac.Sum(nil)[:16]...)
+	attrs[macIndex].Value = append(make([]byte, akaAttributeReservedLen), mac.Sum(nil)[:akaMACLen]...)
 	message.Attributes = attrs
 	return message.MarshalBinary()
 }
 
+func buildAKARESAttribute(res []byte) (AKAAttribute, error) {
+	if len(res) < akaRESMinLen || len(res) > akaRESMaxLen {
+		return AKAAttribute{}, fmt.Errorf("building aka response: res length %d, want %d..%d", len(res), akaRESMinLen, akaRESMaxLen)
+	}
+	value := make([]byte, akaAttributeReservedLen+len(res))
+	binary.BigEndian.PutUint16(value[:2], uint16(len(res)*8))
+	copy(value[akaAttributeReservedLen:], res)
+	if rem := (len(value) + akaAttributeReservedLen) % akaAttributeBlockSize; rem != 0 {
+		value = append(value, make([]byte, akaAttributeBlockSize-rem)...)
+	}
+	return AKAAttribute{Type: akaAttrRES, Value: value}, nil
+}
+
 func BuildAKAIdentityResponse(id byte, identity string) ([]byte, error) {
+	return buildAKAIdentityResponse(id, eapTypeAKA, identity)
+}
+
+func BuildAKAPrimeIdentityResponse(id byte, identity string) ([]byte, error) {
+	return buildAKAIdentityResponse(id, eapTypeAKAPrime, identity)
+}
+
+func buildAKAIdentityResponse(id, eapType byte, identity string) ([]byte, error) {
 	if identity == "" {
 		return nil, errors.New("building aka identity response: identity is empty")
 	}
-	return buildAKAMessage(eapCodeResponse, id, akaSubtypeIdentity, []AKAAttribute{buildAKAStringAttribute(akaAttrIdentity, identity)}, nil, nil)
+	message := AKAMessage{Code: eapCodeResponse, Identifier: id, EAPType: eapType, Subtype: akaSubtypeIdentity, Attributes: []AKAAttribute{buildAKAStringAttribute(akaAttrIdentity, identity)}}
+	return message.MarshalBinary()
 }
 
 func BuildAKAAuthenticationReject(id byte) ([]byte, error) {
-	return buildAKAMessage(eapCodeResponse, id, akaSubtypeAuthenticationReject, nil, nil, nil)
+	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKA, akaSubtypeAuthenticationReject, nil, nil, nil)
+}
+
+func BuildAKAPrimeAuthenticationReject(id byte) ([]byte, error) {
+	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKAPrime, akaSubtypeAuthenticationReject, nil, nil, nil)
 }
 
 func BuildAKASynchronizationFailure(id byte, auts []byte) ([]byte, error) {
-	if len(auts) != 14 {
-		return nil, fmt.Errorf("building aka synchronization failure: auts length %d, want 14", len(auts))
+	if len(auts) != akaAUTSLen {
+		return nil, fmt.Errorf("building aka synchronization failure: auts length %d, want %d", len(auts), akaAUTSLen)
 	}
-	return buildAKAMessage(eapCodeResponse, id, akaSubtypeSynchronizationFailure, []AKAAttribute{{Type: akaAttrAUTS, Value: append([]byte(nil), auts...)}}, nil, nil)
+	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKA, akaSubtypeSynchronizationFailure, []AKAAttribute{{Type: akaAttrAUTS, Value: append([]byte(nil), auts...)}}, nil, nil)
+}
+
+func BuildAKAPrimeSynchronizationFailure(id byte, auts []byte, kdf uint16) ([]byte, error) {
+	if len(auts) != akaAUTSLen {
+		return nil, fmt.Errorf("building aka synchronization failure: auts length %d, want %d", len(auts), akaAUTSLen)
+	}
+	attrs := []AKAAttribute{
+		{Type: akaAttrAUTS, Value: append([]byte(nil), auts...)},
+		buildAKAUint16Attribute(akaAttrKDF, kdf),
+	}
+	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKAPrime, akaSubtypeSynchronizationFailure, attrs, nil, nil)
 }

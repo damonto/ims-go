@@ -33,6 +33,81 @@ func TestRTPPacketRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseRTPPacketHeaderOptions(t *testing.T) {
+	tests := []struct {
+		name        string
+		wire        []byte
+		wantPayload []byte
+		wantErr     bool
+	}{
+		{
+			name: "skips csrc extension and padding",
+			wire: []byte{
+				byte(rtpVersion<<rtpVersionShift | rtpPaddingFlag | rtpExtensionFlag | 2),
+				byte(rtpMarkerFlag | 104),
+				0x12, 0x34,
+				0x01, 0x02, 0x03, 0x04,
+				0xa0, 0xb0, 0xc0, 0xd0,
+				0x10, 0x10, 0x10, 0x10,
+				0x20, 0x20, 0x20, 0x20,
+				0xbe, 0xde, 0x00, 0x01,
+				0x99, 0x88, 0x77, 0x66,
+				0xde, 0xad, 0xbe, 0xef,
+				0x00, 0x00, 0x03,
+			},
+			wantPayload: []byte{0xde, 0xad, 0xbe, 0xef},
+		},
+		{
+			name: "rejects invalid padding",
+			wire: []byte{
+				byte(rtpVersion<<rtpVersionShift | rtpPaddingFlag),
+				104,
+				0x12, 0x34,
+				0x01, 0x02, 0x03, 0x04,
+				0xa0, 0xb0, 0xc0, 0xd0,
+				0xde, 0xad, 0xbe, 0xef,
+				0x00,
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects truncated extension payload",
+			wire: []byte{
+				byte(rtpVersion<<rtpVersionShift | rtpExtensionFlag),
+				104,
+				0x12, 0x34,
+				0x01, 0x02, 0x03, 0x04,
+				0xa0, 0xb0, 0xc0, 0xd0,
+				0xbe, 0xde, 0x00, 0x01,
+				0x99, 0x88, 0x77,
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseRTPPacket(tt.wire)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseRTPPacket() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseRTPPacket() error = %v", err)
+			}
+			if got.PayloadType != 104 ||
+				got.SequenceNumber != 0x1234 ||
+				got.Timestamp != 0x01020304 ||
+				got.SSRC != 0xa0b0c0d0 ||
+				!got.Marker ||
+				!bytes.Equal(got.Payload, tt.wantPayload) {
+				t.Fatalf("ParseRTPPacket() = %+v, want payload %x", got, tt.wantPayload)
+			}
+		})
+	}
+}
+
 func TestBuildRTCPReceiverReport(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -5,7 +5,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +41,58 @@ type smsppDownloadStubCard struct {
 	serviceStubCard
 	req  usim.SMSPPDownloadRequest
 	resp usim.SMSPPDownloadResponse
+}
+
+func TestNormalizeConfigSubmitReportTimeout(t *testing.T) {
+	tests := []struct {
+		name               string
+		cfg                Config
+		wantSubmitReport   time.Duration
+		wantDeliveryReport time.Duration
+		wantErr            bool
+	}{
+		{
+			name:               "android rp timer defaults",
+			wantSubmitReport:   40 * time.Second,
+			wantDeliveryReport: 15 * time.Second,
+		},
+		{
+			name:               "explicit timeouts",
+			cfg:                Config{SubmitReportTimeout: 45 * time.Second, DeliveryReportTimeout: 17 * time.Second},
+			wantSubmitReport:   45 * time.Second,
+			wantDeliveryReport: 17 * time.Second,
+		},
+		{
+			name:    "negative submit report timeout",
+			cfg:     Config{SubmitReportTimeout: -time.Second},
+			wantErr: true,
+		},
+		{
+			name:    "negative delivery report timeout",
+			cfg:     Config{DeliveryReportTimeout: -time.Second},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := normalizeConfig(tt.cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("normalizeConfig() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeConfig() error = %v", err)
+			}
+			if cfg.SubmitReportTimeout != tt.wantSubmitReport {
+				t.Fatalf("SubmitReportTimeout = %v, want %v", cfg.SubmitReportTimeout, tt.wantSubmitReport)
+			}
+			if cfg.DeliveryReportTimeout != tt.wantDeliveryReport {
+				t.Fatalf("DeliveryReportTimeout = %v, want %v", cfg.DeliveryReportTimeout, tt.wantDeliveryReport)
+			}
+		})
+	}
 }
 
 func (t *serviceStubTransport) LocalAddr() net.Addr  { return t.local }
@@ -107,11 +162,14 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 		if req.Method() != "MESSAGE" {
 			return
 		}
-		if got := req.HeadersByName("Route"); len(got) != 1 || got[0] != "<sip:pcscf.example.com;lr>" {
+		if got := req.HeadersByName("Route"); len(got) != 2 || got[0] != "<sip:127.0.0.1:4060;lr>" || got[1] != "<sip:pcscf.example.com;lr>" {
 			t.Fatalf("Route = %v", got)
 		}
 		if got := req.Header("P-Preferred-Identity"); got != "<tel:+15551234567>" {
 			t.Fatalf("P-Preferred-Identity = %q", got)
+		}
+		if got := req.Header("Accept-Contact"); got != smsAcceptContact {
+			t.Fatalf("Accept-Contact = %q, want %q", got, smsAcceptContact)
 		}
 		if got := req.Header("User-Agent"); got == "" {
 			t.Fatal("User-Agent = empty")
@@ -175,6 +233,174 @@ func TestSendUsesServiceCentrePSIForSIPTargetAndAddressForRP(t *testing.T) {
 
 	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
 		t.Fatalf("Send() error = %v", err)
+	}
+}
+
+func TestSendRequestsStatusReportWhenConfigured(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            Config
+		wantFirstOctet byte
+	}{
+		{
+			name:           "disabled by default",
+			wantFirstOctet: tpduMTISubmit,
+		},
+		{
+			name:           "enabled",
+			cfg:            Config{RequestStatusReport: true},
+			wantFirstOctet: tpduMTISubmit | tpduStatusReportRequestFlag,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			tt.cfg.Logger = testLogger()
+			svc, err := New(tt.cfg, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				var rp rpMessage
+				if err := rp.UnmarshalBinary(req.Body); err != nil {
+					t.Fatalf("RP unmarshal error = %v", err)
+				}
+				if len(rp.TPDU) == 0 {
+					t.Fatal("RP TPDU = empty")
+				}
+				if got := rp.TPDU[0]; got != tt.wantFirstOctet {
+					t.Fatalf("SMS-SUBMIT first octet = 0x%02X, want 0x%02X", got, tt.wantFirstOctet)
+				}
+				transport.queue(newResponse(req, 202, "Accepted"))
+			}
+
+			if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestNotifyMemoryAvailableSendsRPSMMA(t *testing.T) {
+	tests := []struct {
+		name        string
+		reportType  byte
+		reportCause byte
+		wantErr     string
+	}{
+		{name: "rp-ack", reportType: rpAckNetworkToMS},
+		{name: "rp-error", reportType: rpErrorNetworkToMS, reportCause: rpCauseMemoryCapacityExceeded, wantErr: "memory capacity exceeded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger(), SubmitReportTimeout: time.Second}, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				if got := sip.RequestURI(req); got != "sip:ipsmgw.example.net" {
+					t.Fatalf("Request-URI = %q, want sip:ipsmgw.example.net", got)
+				}
+				var rp rpMessage
+				if err := rp.UnmarshalBinary(req.Body); err != nil {
+					t.Fatalf("RP unmarshal error = %v", err)
+				}
+				if rp.Type != rpSMMAMSToNetwork {
+					t.Fatalf("RP type = 0x%02X, want RP-SMMA", rp.Type)
+				}
+				transport.queue(newResponse(req, 202, "Accepted"))
+
+				report := rpMessage{Type: tt.reportType, Reference: rp.Reference, Cause: tt.reportCause, HasCause: tt.reportType == rpErrorNetworkToMS}
+				reportBody, err := report.MarshalBinary()
+				if err != nil {
+					t.Fatalf("report MarshalBinary() error = %v", err)
+				}
+				go func() {
+					msg := newInboundRequest("smma-report", "2 MESSAGE", reportBody)
+					msg.Headers.Add("In-Reply-To", req.Header("Call-ID"))
+					if _, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: transport}); err != nil {
+						t.Errorf("HandleRequest(report) error = %v", err)
+					}
+				}()
+			}
+
+			err = svc.NotifyMemoryAvailable(context.Background(), "sip:ipsmgw.example.net")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("NotifyMemoryAvailable() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("NotifyMemoryAvailable() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSendSIPURIUsesMSISDNLessMultipart(t *testing.T) {
+	tests := []struct {
+		name string
+		to   string
+	}{
+		{name: "sip uri", to: "sip:bob@example.net"},
+		{name: "sips uri", to: "sips:bob@example.net"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				if got := req.Header("Content-Transfer-Encoding"); got != "" {
+					t.Fatalf("Content-Transfer-Encoding = %q, want empty for multipart", got)
+				}
+				info, rpdu := multipartSMSReport(t, req)
+				if info.To != tt.to {
+					t.Fatalf("SMS XML To = %q, want %q", info.To, tt.to)
+				}
+				var rp rpMessage
+				if err := rp.UnmarshalBinary(rpdu); err != nil {
+					t.Fatalf("RP unmarshal error = %v", err)
+				}
+				if rp.Destination != "+15550000000" {
+					t.Fatalf("RP Destination = %q, want +15550000000", rp.Destination)
+				}
+				gotTPDA, _, err := decodeTPAddress(rp.TPDU[2:])
+				if err != nil {
+					t.Fatalf("decode TP-DA error = %v", err)
+				}
+				if gotTPDA != dummyMSISDN {
+					t.Fatalf("TP-DA = %q, want %q", gotTPDA, dummyMSISDN)
+				}
+				transport.queue(newResponse(req, 202, "Accepted"))
+			}
+
+			if _, err := svc.Send(context.Background(), tt.to, "BAL"); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -268,8 +494,353 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 		if got.Text != "hello" || got.From != "+15551234567" || got.ServiceCenter != "+15550000000" {
 			t.Fatalf("Incoming = %+v", got)
 		}
+		if !bytes.Equal(got.RawTPDU, tpdu) {
+			t.Fatalf("Incoming.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
+		}
+		if got.ReservedMTI {
+			t.Fatal("Incoming.ReservedMTI = true, want false")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
+	}
+}
+
+func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	gotCh := make(chan Incoming, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ackReports(t, transport)
+
+	inboundTransport := newServiceTransport()
+	tpdu, err := buildDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildDeliver() error = %v", err)
+	}
+	tpdu[0] = tpdu[0]&^tpduMTIMask | tpduMTIReserved
+	rpdu, err := (rpMessage{
+		Type:       rpDataNetworkToMS,
+		Reference:  0x01,
+		Originator: "+15550000000",
+		TPDU:       tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	select {
+	case got := <-gotCh:
+		if got.Text != "hello" || got.From != "+15551234567" {
+			t.Fatalf("Incoming = %+v, want decoded reserved-MTI deliver", got)
+		}
+		if !got.ReservedMTI {
+			t.Fatal("Incoming.ReservedMTI = false, want true")
+		}
+		if !bytes.Equal(got.RawTPDU, tpdu) {
+			t.Fatalf("Incoming.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for incoming sms callback")
+	}
+}
+
+func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) {
+	tests := []struct {
+		name    string
+		xmlFrom string
+		tpFrom  string
+		want    string
+	}{
+		{
+			name:    "xml from overrides dummy originator",
+			xmlFrom: "sip:sender@example.net",
+			tpFrom:  dummyMSISDN,
+			want:    "sip:sender@example.net",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			gotCh := make(chan Incoming, 1)
+			reportCh := make(chan sip.Message, 1)
+			svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				reportCh <- req
+				transport.queue(newResponse(req, 202, "Accepted"))
+			}
+
+			tpdu, err := buildDeliver(tt.tpFrom, "hello")
+			if err != nil {
+				t.Fatalf("buildDeliver() error = %v", err)
+			}
+			rpdu, err := (rpMessage{
+				Type:       rpDataNetworkToMS,
+				Reference:  0x34,
+				Originator: "+15550000000",
+				TPDU:       tpdu,
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			body, contentType := multipartSMSBody(t, `<short-message-info><From>`+tt.xmlFrom+`</From></short-message-info>`, rpdu)
+
+			inboundTransport := newServiceTransport()
+			msg := newInboundRequest("call-1", "1 MESSAGE", body)
+			msg.Headers.Set("Content-Type", contentType)
+			msg.Headers.Add("Feature-Caps", "*;+g.3gpp.smsip-msisdn-less")
+			req := session.Request{Message: msg, Transport: inboundTransport}
+			handled, err := svc.HandleRequest(context.Background(), req)
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			select {
+			case got := <-gotCh:
+				if got.From != tt.want || got.Text != "hello" {
+					t.Fatalf("Incoming = %+v, want From %q text hello", got, tt.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for incoming sms callback")
+			}
+
+			select {
+			case report := <-reportCh:
+				if sip.RequestURI(report) != "sip:ipsmgw.example.net" {
+					t.Fatalf("delivery report Request-URI = %q, want sip:ipsmgw.example.net", sip.RequestURI(report))
+				}
+				info, reportRPDU := multipartSMSReport(t, report)
+				if info.To != tt.xmlFrom {
+					t.Fatalf("delivery report XML To = %q, want %q", info.To, tt.xmlFrom)
+				}
+				var got rpMessage
+				if err := got.UnmarshalBinary(reportRPDU); err != nil {
+					t.Fatalf("report RP unmarshal error = %v", err)
+				}
+				if got.Type != rpAckMSToNetwork || got.Reference != 0x34 {
+					t.Fatalf("report RP = %+v, want RP-ACK ref 0x34", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for multipart delivery report")
+			}
+		})
+	}
+}
+
+func TestHandleInboundMSISDNLessSMSRequiresFeatureCaps(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	gotCh := make(chan Incoming, 1)
+	reportCh := make(chan sip.Message, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() == "MESSAGE" {
+			reportCh <- req
+		}
+	}
+
+	tpdu, err := buildDeliver(dummyMSISDN, "hello")
+	if err != nil {
+		t.Fatalf("buildDeliver() error = %v", err)
+	}
+	rpdu, err := (rpMessage{
+		Type:       rpDataNetworkToMS,
+		Reference:  0x35,
+		Originator: "+15550000000",
+		TPDU:       tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	body, contentType := multipartSMSBody(t, `<short-message-info><From>sip:sender@example.net</From></short-message-info>`, rpdu)
+
+	inboundTransport := newServiceTransport()
+	msg := newInboundRequest("call-1", "1 MESSAGE", body)
+	msg.Headers.Set("Content-Type", contentType)
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	select {
+	case got := <-gotCh:
+		t.Fatalf("unexpected incoming sms without Feature-Caps: %+v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case report := <-reportCh:
+		t.Fatalf("unexpected delivery report without Feature-Caps: %s", report.StartLine)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	gotCh := make(chan Incoming, 1)
+	reportCh := make(chan sip.Message, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		reportCh <- req
+		transport.queue(newResponse(req, 202, "Accepted"))
+	}
+
+	tpdu, err := buildDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildDeliver() error = %v", err)
+	}
+	rpdu, err := (rpMessage{
+		Type:       rpDataNetworkToMS,
+		Reference:  0x36,
+		Originator: "+15550000000",
+		TPDU:       tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	body, contentType := multipartSMSBody(t, `<short-message-info><From>sip:sender@example.net</From></short-message-info>`, rpdu)
+
+	inboundTransport := newServiceTransport()
+	msg := newInboundRequest("call-1", "1 MESSAGE", body)
+	msg.Headers.Set("Content-Type", contentType)
+	msg.Headers.Add("Feature-Caps", "*;+g.3gpp.smsip-msisdn-less")
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	select {
+	case got := <-gotCh:
+		if got.From != "+15551234567" || got.Text != "hello" {
+			t.Fatalf("Incoming = %+v, want TP-OA +15551234567 text hello", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for incoming sms callback")
+	}
+	select {
+	case report := <-reportCh:
+		mediaType, _, err := mime.ParseMediaType(report.Header("Content-Type"))
+		if err != nil {
+			t.Fatalf("ParseMediaType() error = %v", err)
+		}
+		if mediaType != smsContentType {
+			t.Fatalf("delivery report Content-Type = %q, want %q", mediaType, smsContentType)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for delivery report")
+	}
+}
+
+func TestHandleInboundMSISDNLessStatusReportUsesPlainDeliveryReport(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	statusCh := make(chan StatusReport, 1)
+	reportCh := make(chan sip.Message, 1)
+	svc, err := New(Config{Logger: testLogger(), OnStatusReport: func(report StatusReport) { statusCh <- report }}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		reportCh <- req
+		transport.queue(newResponse(req, 202, "Accepted"))
+	}
+
+	tpdu, err := (statusReportTPDU{Message: StatusReport{
+		Recipient:         dummyMSISDN,
+		MessageReference:  0x27,
+		Status:            0x00,
+		ServiceCenterTime: time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+		DischargeTime:     time.Date(2026, 5, 30, 12, 1, 0, 0, time.UTC),
+	}}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(status report) error = %v", err)
+	}
+	rpdu, err := (rpMessage{
+		Type:       rpDataNetworkToMS,
+		Reference:  0x39,
+		Originator: "+15550000000",
+		TPDU:       tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(RP-DATA) error = %v", err)
+	}
+	body, contentType := multipartSMSBody(t, `<short-message-info><From>sip:sender@example.net</From></short-message-info>`, rpdu)
+
+	inboundTransport := newServiceTransport()
+	msg := newInboundRequest("call-status", "1 MESSAGE", body)
+	msg.Headers.Set("Content-Type", contentType)
+	msg.Headers.Add("Feature-Caps", "*;+g.3gpp.smsip-msisdn-less")
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	select {
+	case got := <-statusCh:
+		if got.MessageReference != 0x27 || got.Recipient != dummyMSISDN {
+			t.Fatalf("StatusReport = %+v, want ref 0x27 recipient dummy MSISDN", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for status report callback")
+	}
+	select {
+	case report := <-reportCh:
+		mediaType, _, err := mime.ParseMediaType(report.Header("Content-Type"))
+		if err != nil {
+			t.Fatalf("ParseMediaType() error = %v", err)
+		}
+		if mediaType != smsContentType {
+			t.Fatalf("delivery report Content-Type = %q, want %q", mediaType, smsContentType)
+		}
+		var got rpMessage
+		if err := got.UnmarshalBinary(report.Body); err != nil {
+			t.Fatalf("report RP unmarshal error = %v", err)
+		}
+		if got.Type != rpAckMSToNetwork || got.Reference != 0x39 {
+			t.Fatalf("report RP = %+v, want RP-ACK ref 0x39", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for delivery report")
 	}
 }
 
@@ -408,6 +979,12 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 
 	select {
 	case req := <-reportCh:
+		if sip.RequestURI(req) != "sip:ipsmgw.example.net" {
+			t.Fatalf("delivery report Request-URI = %q, want sip:ipsmgw.example.net", sip.RequestURI(req))
+		}
+		if req.Header("To") != "<sip:ipsmgw.example.net>" {
+			t.Fatalf("delivery report To = %q, want <sip:ipsmgw.example.net>", req.Header("To"))
+		}
 		if req.Header("In-Reply-To") != "call-1" {
 			t.Fatalf("In-Reply-To = %q, want call-1", req.Header("In-Reply-To"))
 		}
@@ -416,15 +993,631 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 	}
 }
 
-func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
-	oldTimeout := currentSubmitReportTimeout()
-	setSubmitReportTimeout(20 * time.Millisecond)
-	defer setSubmitReportTimeout(oldTimeout)
+func TestReportTargetUsesIPSMGWAssertedIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  sip.Message
+		want string
+	}{
+		{
+			name: "p asserted identity",
+			msg: sip.Message{Headers: sip.Headers{
+				{Name: "P-Asserted-Identity", Value: "<sip:ipsmgw.example.net>"},
+				{Name: "From", Value: "<sip:user@example.net>;tag=remote"},
+				{Name: "Via", Value: "SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1"},
+			}},
+			want: "sip:ipsmgw.example.net",
+		},
+		{
+			name: "missing p asserted identity",
+			msg: sip.Message{Headers: sip.Headers{
+				{Name: "From", Value: "<sip:user@example.net>;tag=remote"},
+				{Name: "Via", Value: "SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-1"},
+			}},
+			want: "",
+		},
+		{
+			name: "tel asserted identity rejected for request uri",
+			msg: sip.Message{Headers: sip.Headers{
+				{Name: "P-Asserted-Identity", Value: "<tel:+15551234567>"},
+			}},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &Service{}
+			if got := svc.reportTarget(tt.msg); got != tt.want {
+				t.Fatalf("reportTarget() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
+func TestDecodeSMSXMLInfoRejectsDuplicateElements(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+	}{
+		{
+			name: "duplicate empty To",
+			xml:  `<short-message-info><To></To><To>sip:bob@example.net</To></short-message-info>`,
+		},
+		{
+			name: "duplicate empty From",
+			xml:  `<short-message-info><From></From><From>sip:alice@example.net</From></short-message-info>`,
+		},
+		{
+			name: "duplicate Correlation-ID",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:a@example.net</Sender></Correlation-ID><Correlation-ID><Sender>sip:b@example.net</Sender></Correlation-ID></short-message-info>`,
+		},
+		{
+			name: "duplicate Delivery-Outcome",
+			xml:  `<short-message-info><Delivery-Outcome>SuccessfulTransfer</Delivery-Outcome><Delivery-Outcome>SMDeliveryFailure</Delivery-Outcome></short-message-info>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeSMSXMLInfo() error = nil, want duplicate element error")
+			}
+		})
+	}
+}
+
+func TestDecodeSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+	}{
+		{
+			name: "To tel URI",
+			xml:  `<short-message-info><To>tel:+15551234567</To></short-message-info>`,
+		},
+		{
+			name: "From plain string",
+			xml:  `<short-message-info><From>alice@example.net</From></short-message-info>`,
+		},
+		{
+			name: "Correlation Sender tel URI",
+			xml:  `<short-message-info><Correlation-ID><Sender>tel:+15551234567</Sender><Receiver>sip:bob@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+		{
+			name: "Correlation Receiver plain string",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:alice@example.net</Sender><Receiver>bob@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeSMSXMLInfo() error = nil, want SIP URI validation error")
+			}
+		})
+	}
+}
+
+func TestMarshalSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
+	tests := []struct {
+		name string
+		info smsXMLInfo
+	}{
+		{
+			name: "To tel URI",
+			info: smsXMLInfo{To: "tel:+15551234567"},
+		},
+		{
+			name: "From plain string",
+			info: smsXMLInfo{From: "alice@example.net"},
+		},
+		{
+			name: "Correlation Sender tel URI",
+			info: smsXMLInfo{
+				CorrelationID: smsXMLCorrelationID{
+					Sender:   "tel:+15551234567",
+					Receiver: "sip:bob@example.net",
+					HLRID:    "hlr",
+				},
+				HasCorrelationID: true,
+			},
+		},
+		{
+			name: "Correlation Receiver plain string",
+			info: smsXMLInfo{
+				CorrelationID: smsXMLCorrelationID{
+					Sender:   "sip:alice@example.net",
+					Receiver: "bob@example.net",
+					HLRID:    "hlr",
+				},
+				HasCorrelationID: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.info.MarshalText(); err == nil {
+				t.Fatal("MarshalText() error = nil, want SIP URI validation error")
+			}
+		})
+	}
+}
+
+func TestSMSXMLInfoRoundTripIncludesCorrelationAndOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		info smsXMLInfo
+	}{
+		{
+			name: "addressing",
+			info: smsXMLInfo{
+				To:   "sip:bob@example.net",
+				From: "sip:alice@example.net",
+			},
+		},
+		{
+			name: "correlation and delivery outcome",
+			info: smsXMLInfo{
+				CorrelationID: smsXMLCorrelationID{
+					Sender:   "sip:alice@example.net",
+					Receiver: "sip:bob@example.net",
+					HLRID:    "hlr.example.net",
+				},
+				HasCorrelationID: true,
+				DeliveryOutcome:  "SMDeliveryFailure",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			text, err := tt.info.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			var got smsXMLInfo
+			if err := got.UnmarshalText(text); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			if got != tt.info {
+				t.Fatalf("UnmarshalText() = %+v, want %+v body=%s", got, tt.info, text)
+			}
+		})
+	}
+}
+
+func TestDecodeSMSXMLInfoNormalizesUnknownDeliveryOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+		want string
+	}{
+		{
+			name: "known outcome",
+			xml:  `<short-message-info><Delivery-Outcome>SuccessfulTransfer</Delivery-Outcome></short-message-info>`,
+			want: smsDeliveryOutcomeSuccessfulTransfer,
+		},
+		{
+			name: "unknown outcome",
+			xml:  `<short-message-info><Delivery-Outcome>FutureOutcome</Delivery-Outcome></short-message-info>`,
+			want: smsDeliveryOutcomeSMDeliveryFailure,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeSMSXMLInfo([]byte(tt.xml))
+			if err != nil {
+				t.Fatalf("decodeSMSXMLInfo() error = %v", err)
+			}
+			if got.DeliveryOutcome != tt.want {
+				t.Fatalf("DeliveryOutcome = %q, want %q", got.DeliveryOutcome, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeSMSXMLInfoAcceptsDocumentNamespace(t *testing.T) {
+	got, err := decodeSMSXMLInfo([]byte(`<short-message-info xmlns="urn:vendor"><To>sip:bob@example.net</To><From>sip:alice@example.net</From><Correlation-ID><Sender>sip:a@example.net</Sender><Receiver>sip:b@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID><Delivery-Outcome>SuccessfulTransfer</Delivery-Outcome></short-message-info>`))
+	if err != nil {
+		t.Fatalf("decodeSMSXMLInfo() error = %v", err)
+	}
+	if got.To != "sip:bob@example.net" || got.From != "sip:alice@example.net" {
+		t.Fatalf("To/From = %q/%q, want namespaced values", got.To, got.From)
+	}
+	if !got.HasCorrelationID || got.CorrelationID.Sender != "sip:a@example.net" || got.CorrelationID.Receiver != "sip:b@example.net" || got.CorrelationID.HLRID != "hlr" {
+		t.Fatalf("CorrelationID = %+v has=%t, want namespaced correlation id", got.CorrelationID, got.HasCorrelationID)
+	}
+	if got.DeliveryOutcome != smsDeliveryOutcomeSuccessfulTransfer {
+		t.Fatalf("DeliveryOutcome = %q, want %q", got.DeliveryOutcome, smsDeliveryOutcomeSuccessfulTransfer)
+	}
+}
+
+func TestMarshalSMSXMLInfoRejectsUnknownDeliveryOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		info smsXMLInfo
+	}{
+		{
+			name: "unknown outcome",
+			info: smsXMLInfo{DeliveryOutcome: "FutureOutcome"},
+		},
+		{
+			name: "case mismatch",
+			info: smsXMLInfo{DeliveryOutcome: "smdeliveryfailure"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.info.MarshalText(); err == nil {
+				t.Fatal("MarshalText() error = nil, want delivery outcome validation error")
+			}
+		})
+	}
+}
+
+func TestDecodeSMSXMLInfoRejectsDuplicateCorrelationIDChildren(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+	}{
+		{
+			name: "duplicate Sender",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:a@example.net</Sender><Sender>sip:b@example.net</Sender><Receiver>sip:c@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+		{
+			name: "duplicate Receiver",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:a@example.net</Sender><Receiver>sip:b@example.net</Receiver><Receiver>sip:c@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+		{
+			name: "duplicate HLR-ID",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:a@example.net</Sender><Receiver>sip:b@example.net</Receiver><HLR-ID>hlr1</HLR-ID><HLR-ID>hlr2</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeSMSXMLInfo() error = nil, want duplicate child error")
+			}
+		})
+	}
+}
+
+func TestDecodeSMSXMLInfoRejectsIncompleteCorrelationID(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+	}{
+		{
+			name: "missing Sender",
+			xml:  `<short-message-info><Correlation-ID><Receiver>sip:b@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+		{
+			name: "missing Receiver",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:a@example.net</Sender><HLR-ID>hlr</HLR-ID></Correlation-ID></short-message-info>`,
+		},
+		{
+			name: "missing HLR-ID",
+			xml:  `<short-message-info><Correlation-ID><Sender>sip:a@example.net</Sender><Receiver>sip:b@example.net</Receiver></Correlation-ID></short-message-info>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeSMSXMLInfo() error = nil, want incomplete Correlation-ID error")
+			}
+		})
+	}
+}
+
+func TestDecodeMultipartSMSPayloadRejectsDuplicateXMLPart(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, xmlBody := range []string{
+		`<short-message-info><From>sip:alice@example.net</From></short-message-info>`,
+		`<short-message-info><From>sip:bob@example.net</From></short-message-info>`,
+	} {
+		part, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Type":        {smsXMLContentType},
+			"Content-Disposition": {smsXMLDisposition},
+		})
+		if err != nil {
+			t.Fatalf("CreatePart(xml) error = %v", err)
+		}
+		if _, err := part.Write([]byte(xmlBody)); err != nil {
+			t.Fatalf("Write(xml) error = %v", err)
+		}
+	}
+	smsPart, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {smsContentType},
+		"Content-Transfer-Encoding": {binaryTransferValue},
+	})
+	if err != nil {
+		t.Fatalf("CreatePart(sms) error = %v", err)
+	}
+	if _, err := smsPart.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
+		t.Fatalf("Write(sms) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	msg := sip.NewRequest("MESSAGE", "sip:user@example.net")
+	msg.Headers.Add("Content-Type", mixedMultipartType+"; boundary="+writer.Boundary())
+	msg.Body = body.Bytes()
+	if _, err := decodeMessagePayload(msg); err == nil {
+		t.Fatal("decodeMessagePayload() error = nil, want duplicate XML part error")
+	}
+}
+
+func TestDecodeMultipartSMSPayloadRejectsInvalidXMLDisposition(t *testing.T) {
+	tests := []struct {
+		name        string
+		disposition string
+	}{
+		{name: "missing disposition"},
+		{name: "wrong disposition type", disposition: "attachment;handling=optional"},
+		{name: "missing handling", disposition: "render"},
+		{name: "wrong handling", disposition: "render;handling=required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			xmlHeader := textproto.MIMEHeader{
+				"Content-Type": {smsXMLContentType},
+			}
+			if tt.disposition != "" {
+				xmlHeader.Set("Content-Disposition", tt.disposition)
+			}
+			xmlPart, err := writer.CreatePart(xmlHeader)
+			if err != nil {
+				t.Fatalf("CreatePart(xml) error = %v", err)
+			}
+			if _, err := xmlPart.Write([]byte(`<short-message-info><From>sip:alice@example.net</From></short-message-info>`)); err != nil {
+				t.Fatalf("Write(xml) error = %v", err)
+			}
+			smsPart, err := writer.CreatePart(textproto.MIMEHeader{
+				"Content-Type":              {smsContentType},
+				"Content-Transfer-Encoding": {binaryTransferValue},
+			})
+			if err != nil {
+				t.Fatalf("CreatePart(sms) error = %v", err)
+			}
+			if _, err := smsPart.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
+				t.Fatalf("Write(sms) error = %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			msg := sip.NewRequest("MESSAGE", "sip:user@example.net")
+			msg.Headers.Add("Content-Type", mixedMultipartType+"; boundary="+writer.Boundary())
+			msg.Body = body.Bytes()
+			if _, err := decodeMessagePayload(msg); err == nil {
+				t.Fatal("decodeMessagePayload() error = nil, want invalid XML disposition error")
+			}
+		})
+	}
+}
+
+func TestDecodeMultipartSMSPayloadUnsupportedBodyPartHandling(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  textproto.MIMEHeader
+		wantErr bool
+	}{
+		{
+			name: "optional unsupported part ignored",
+			header: textproto.MIMEHeader{
+				"Content-Type":        {"text/plain"},
+				"Content-Disposition": {"render;handling=optional"},
+			},
+		},
+		{
+			name: "optional malformed content type ignored",
+			header: textproto.MIMEHeader{
+				"Content-Type":        {"%%%"},
+				"Content-Disposition": {"render;handling=optional"},
+			},
+		},
+		{
+			name: "missing disposition is required",
+			header: textproto.MIMEHeader{
+				"Content-Type": {"text/plain"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "explicit required unsupported part rejected",
+			header: textproto.MIMEHeader{
+				"Content-Type":        {"text/plain"},
+				"Content-Disposition": {"render;handling=required"},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rpdu := []byte{rpDataNetworkToMS, 0x01}
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			unknownPart, err := writer.CreatePart(tt.header)
+			if err != nil {
+				t.Fatalf("CreatePart(unknown) error = %v", err)
+			}
+			if _, err := unknownPart.Write([]byte("ignored")); err != nil {
+				t.Fatalf("Write(unknown) error = %v", err)
+			}
+			smsPart, err := writer.CreatePart(textproto.MIMEHeader{
+				"Content-Type":              {smsContentType},
+				"Content-Transfer-Encoding": {binaryTransferValue},
+			})
+			if err != nil {
+				t.Fatalf("CreatePart(sms) error = %v", err)
+			}
+			if _, err := smsPart.Write(rpdu); err != nil {
+				t.Fatalf("Write(sms) error = %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			msg := sip.NewRequest("MESSAGE", "sip:user@example.net")
+			msg.Headers.Add("Content-Type", mixedMultipartType+"; boundary="+writer.Boundary())
+			msg.Body = body.Bytes()
+			got, err := decodeMessagePayload(msg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("decodeMessagePayload() error = nil, want unsupported body part error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeMessagePayload() error = %v", err)
+			}
+			if !bytes.Equal(got.RPDU, rpdu) {
+				t.Fatalf("decodeMessagePayload() RPDU = % X, want % X", got.RPDU, rpdu)
+			}
+		})
+	}
+}
+
+func TestDecodeMessagePayloadRejectsNonBinaryTransferEncoding(t *testing.T) {
+	tests := []struct {
+		name    string
+		message func(t *testing.T) sip.Message
+	}{
+		{
+			name: "single sms body",
+			message: func(t *testing.T) sip.Message {
+				t.Helper()
+				msg := newInboundRequest("call-cte-single", "1 MESSAGE", []byte{rpDataNetworkToMS, 0x01})
+				msg.Headers.Set("Content-Transfer-Encoding", "base64")
+				return msg
+			},
+		},
+		{
+			name: "multipart sms part",
+			message: func(t *testing.T) sip.Message {
+				t.Helper()
+				var body bytes.Buffer
+				writer := multipart.NewWriter(&body)
+				smsPart, err := writer.CreatePart(textproto.MIMEHeader{
+					"Content-Type":              {smsContentType},
+					"Content-Transfer-Encoding": {"quoted-printable"},
+				})
+				if err != nil {
+					t.Fatalf("CreatePart(sms) error = %v", err)
+				}
+				if _, err := smsPart.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
+					t.Fatalf("Write(sms) error = %v", err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+				msg := sip.NewRequest("MESSAGE", "sip:user@example.net")
+				msg.Headers.Add("Content-Type", mixedMultipartType+"; boundary="+writer.Boundary())
+				msg.Body = body.Bytes()
+				return msg
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decodeMessagePayload(tt.message(t))
+			if err == nil {
+				t.Fatal("decodeMessagePayload() error = nil, want non-binary transfer encoding error")
+			}
+			if !strings.Contains(err.Error(), "content transfer encoding") {
+				t.Fatalf("decodeMessagePayload() error = %v, want content transfer encoding", err)
+			}
+		})
+	}
+}
+
+func TestHandleMessageRejectsNonBinaryTransferEncoding(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	inboundTransport := newServiceTransport()
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+	msg := newInboundRequest("call-cte-status", "1 MESSAGE", []byte{rpDataNetworkToMS, 0x01})
+	msg.Headers.Set("Content-Transfer-Encoding", "base64")
+
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("inbound response count = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
+		t.Fatalf("response status = %d, want %d", got, sipStatusUnsupportedMediaType)
+	}
+	if got := resp.Header("Accept"); got != smsAcceptHeader {
+		t.Fatalf("Accept = %q, want %q", got, smsAcceptHeader)
+	}
+	for _, data := range transport.writes {
+		req := mustParseMessage(t, data)
+		if req.Method() == "MESSAGE" {
+			t.Fatalf("unexpected outbound MESSAGE: %s", req.StartLine)
+		}
+	}
+}
+
+func TestHandleMessageRejectsUnsupportedContentType(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	inboundTransport := newServiceTransport()
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+	msg := newInboundRequest("call-content-type-status", "1 MESSAGE", []byte("hello"))
+	msg.Headers.Set("Content-Type", "text/plain")
+
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest() handled = false, want true")
+	}
+	if len(inboundTransport.writes) != 1 {
+		t.Fatalf("inbound response count = %d, want 1", len(inboundTransport.writes))
+	}
+	resp := mustParseMessage(t, inboundTransport.writes[0])
+	if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
+		t.Fatalf("response status = %d, want %d", got, sipStatusUnsupportedMediaType)
+	}
+	if got := resp.Header("Accept"); got != smsAcceptHeader {
+		t.Fatalf("Accept = %q, want %q", got, smsAcceptHeader)
+	}
+}
+
+func TestSendDoesNotRetrySubmitReportTimeout(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	errCh := make(chan error, 1)
-	svc, err := New(Config{Logger: testLogger(), OnError: func(err error) { errCh <- err }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{
+		Logger:              testLogger(),
+		SubmitReportTimeout: 20 * time.Millisecond,
+		OnError:             func(err error) { errCh <- err },
+	}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -436,10 +1629,7 @@ func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
 
 	requests := make(chan []byte, 4)
 	transport.onWrite = func(data []byte) {
-		req, err := sip.ParseMessage(data)
-		if err != nil {
-			panic(err)
-		}
+		req := mustParseMessage(t, data)
 		if req.Method() != "MESSAGE" {
 			return
 		}
@@ -450,59 +1640,140 @@ func TestSendReportsSubmitReportTimeoutWithoutRetry(t *testing.T) {
 	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
-
-	first := mustParseMessage(t, <-requests)
-	var firstRP rpMessage
-	if err := firstRP.UnmarshalBinary(first.Body); err != nil {
-		t.Fatalf("first RP unmarshal error = %v", err)
-	}
+	_ = nextSMSRequest(t, requests)
 
 	select {
-	case data := <-requests:
-		t.Fatalf("unexpected retried MESSAGE: %s", mustParseMessage(t, data).StartLine)
 	case err := <-errCh:
 		if !strings.Contains(err.Error(), "submit report not received") {
 			t.Fatalf("OnError = %v, want submit report timeout", err)
 		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("waiting for submit report timeout")
+	case <-time.After(time.Second):
+		t.Fatal("OnError not called for submit report timeout")
+	}
+	select {
+	case retry := <-requests:
+		t.Fatalf("unexpected retry MESSAGE after submit report timeout:\n%s", retry)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
-func TestHandleInboundReservedRPDirectionReturnsRPError97(t *testing.T) {
+func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "rp ack without in-reply-to"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			errCh := make(chan error, 1)
+			svc, err := New(Config{
+				Logger:              testLogger(),
+				SubmitReportTimeout: time.Second,
+				OnError:             func(err error) { errCh <- err },
+			}, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				if err := svc.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			}()
+
+			requests := make(chan []byte, 1)
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				requests <- append([]byte(nil), data...)
+				transport.queue(newResponse(req, 202, "Accepted"))
+			}
+
+			if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+			first := nextSMSRequest(t, requests)
+			var firstRP rpMessage
+			if err := firstRP.UnmarshalBinary(first.Body); err != nil {
+				t.Fatalf("first RP unmarshal error = %v", err)
+			}
+			ackBody, err := (rpMessage{Type: rpAckNetworkToMS, Reference: firstRP.Reference}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary(ack) error = %v", err)
+			}
+
+			inbound := newServiceTransport()
+			ack := newInboundRequest("submit-report", "2 MESSAGE", ackBody)
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: inbound})
+			if err != nil {
+				t.Fatalf("HandleRequest(ack) error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest(ack) handled = false, want true")
+			}
+			if len(inbound.writes) != 1 {
+				t.Fatalf("inbound response count = %d, want 1", len(inbound.writes))
+			}
+			resp := mustParseMessage(t, inbound.writes[0])
+			if got := resp.StatusCode(); got != sipStatusOK {
+				t.Fatalf("response status = %d, want %d", got, sipStatusOK)
+			}
+			select {
+			case err := <-errCh:
+				t.Fatalf("OnError = %v, want none", err)
+			default:
+			}
+		})
+	}
+}
+
+func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+	errCh := make(chan error, 1)
+	svc, err := New(Config{
+		Logger:              testLogger(),
+		SubmitReportTimeout: time.Second,
+		OnError:             func(err error) { errCh <- err },
+	}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
 
-	reports := make(chan sip.Message, 1)
+	requests := make(chan []byte, 4)
 	transport.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
 		if req.Method() != "MESSAGE" {
 			return
 		}
-		reports <- req
+		requests <- append([]byte(nil), data...)
 		transport.queue(newResponse(req, 202, "Accepted"))
 	}
 
-	tpdu, err := buildDeliver("+15551234567", "hello")
-	if err != nil {
-		t.Fatalf("buildDeliver() error = %v", err)
+	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+		t.Fatalf("Send() error = %v", err)
 	}
-	rpdu, err := (rpMessage{
-		Type:      rpDataMSToNetwork,
-		Reference: 0x22,
-		TPDU:      tpdu,
-	}).MarshalBinary()
+	first := nextSMSRequest(t, requests)
+	var firstRP rpMessage
+	if err := firstRP.UnmarshalBinary(first.Body); err != nil {
+		t.Fatalf("first RP unmarshal error = %v", err)
+	}
+	reportBody, err := (rpMessage{Type: rpErrorNetworkToMS, Reference: firstRP.Reference, Cause: rpCauseTemporaryFailure, HasCause: true}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
-
-	inboundTransport := newServiceTransport()
-	req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport}
-	handled, err := svc.HandleRequest(context.Background(), req)
+	report := newInboundRequest("submit-report", "2 MESSAGE", reportBody)
+	report.Headers.Add("In-Reply-To", first.Header("Call-ID"))
+	inbound := newServiceTransport()
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: report, Transport: inbound})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -511,16 +1782,165 @@ func TestHandleInboundReservedRPDirectionReturnsRPError97(t *testing.T) {
 	}
 
 	select {
-	case report := <-reports:
-		var got rpMessage
-		if err := got.UnmarshalBinary(report.Body); err != nil {
-			t.Fatalf("report RP unmarshal error = %v", err)
+	case data := <-requests:
+		t.Fatalf("unexpected retried MESSAGE: %s", mustParseMessage(t, data).StartLine)
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "temporary failure") {
+			t.Fatalf("OnError = %v, want temporary failure", err)
 		}
-		if got.Type != rpErrorMSToNetwork || got.Reference != 0x22 || got.Cause != rpCauseMessageTypeNotImplemented {
-			t.Fatalf("report RP = %+v, want RP-ERROR ref 0x22 cause 97", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("waiting for RP-ERROR report")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("waiting for RP-ERROR")
+	}
+}
+
+func TestHandleInboundReservedRPDirectionReturnsRPError97(t *testing.T) {
+	tpdu, err := buildDeliver("+15551234567", "hello")
+	if err != nil {
+		t.Fatalf("buildDeliver() error = %v", err)
+	}
+	msToNetworkRPDU, err := (rpMessage{
+		Type:      rpDataMSToNetwork,
+		Reference: 0x22,
+		TPDU:      tpdu,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		rpdu []byte
+		ref  byte
+	}{
+		{name: "wrong direction RP-DATA", rpdu: msToNetworkRPDU, ref: 0x22},
+		{name: "reserved RP MTI", rpdu: []byte{0x07, 0x23}, ref: 0x23},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			reports := make(chan sip.Message, 1)
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				reports <- req
+				transport.queue(newResponse(req, 202, "Accepted"))
+			}
+
+			inboundTransport := newServiceTransport()
+			req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", tt.rpdu), Transport: inboundTransport}
+			handled, err := svc.HandleRequest(context.Background(), req)
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+
+			select {
+			case report := <-reports:
+				var got rpMessage
+				if err := got.UnmarshalBinary(report.Body); err != nil {
+					t.Fatalf("report RP unmarshal error = %v", err)
+				}
+				if got.Type != rpErrorMSToNetwork || got.Reference != tt.ref || got.Cause != rpCauseMessageTypeNotImplemented {
+					t.Fatalf("report RP = %+v, want RP-ERROR ref 0x%02X cause 97", got, tt.ref)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for RP-ERROR report")
+			}
+		})
+	}
+}
+
+func TestHandleMalformedInboundRPDataReturnsRPError96(t *testing.T) {
+	tests := []struct {
+		name string
+		rpdu []byte
+		ref  byte
+	}{
+		{
+			name: "trailing octet after RP user data",
+			rpdu: func() []byte {
+				raw := append([]byte{rpDataNetworkToMS, 0x44}, encodeRPAddress("+15550000000")...)
+				raw = append(raw, encodeRPAddress("")...)
+				raw = append(raw, 0x01, 0x00, 0xFF)
+				return raw
+			}(),
+			ref: 0x44,
+		},
+		{
+			name: "RP user data over maximum",
+			rpdu: func() []byte {
+				raw := append([]byte{rpDataNetworkToMS, 0x45}, encodeRPAddress("+15550000000")...)
+				raw = append(raw, encodeRPAddress("")...)
+				raw = append(raw, byte(maxRPDataUserDataOctets+1))
+				raw = append(raw, bytes.Repeat([]byte{0x00}, maxRPDataUserDataOctets+1)...)
+				return raw
+			}(),
+			ref: 0x45,
+		},
+		{
+			name: "missing TPDU in mandatory RP user data",
+			rpdu: func() []byte {
+				raw := append([]byte{rpDataNetworkToMS, 0x46}, encodeRPAddress("+15550000000")...)
+				raw = append(raw, encodeRPAddress("")...)
+				raw = append(raw, 0x00)
+				return raw
+			}(),
+			ref: 0x46,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newServiceTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			reports := make(chan sip.Message, 1)
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "MESSAGE" {
+					return
+				}
+				reports <- req
+				transport.queue(newResponse(req, 202, "Accepted"))
+			}
+
+			inboundTransport := newServiceTransport()
+			req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", tt.rpdu), Transport: inboundTransport}
+			handled, err := svc.HandleRequest(context.Background(), req)
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+
+			select {
+			case report := <-reports:
+				var got rpMessage
+				if err := got.UnmarshalBinary(report.Body); err != nil {
+					t.Fatalf("report RP unmarshal error = %v", err)
+				}
+				if got.Type != rpErrorMSToNetwork || got.Reference != tt.ref || got.Cause != rpCauseInvalidMandatoryInformation {
+					t.Fatalf("report RP = %+v, want RP-ERROR ref 0x%02X cause 96", got, tt.ref)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for RP-ERROR report")
+			}
+		})
 	}
 }
 
@@ -548,7 +1968,7 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), UserAgent: "test-agent", AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	reg, err := registration.New(testRegistrationConfig(transport), sess, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -581,7 +2001,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(), UserAgent: "test-agent", AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa"}, sess, serviceStubCard{})
+	reg, err := registration.New(testRegistrationConfig(transport), sess, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
@@ -609,12 +2029,27 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 	return sess, reg
 }
 
+func testRegistrationConfig(transport *serviceStubTransport) registration.Config {
+	return registration.Config{
+		Logger:            testLogger(),
+		UserAgent:         "test-agent",
+		AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa",
+		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			return transport, nil
+		},
+		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			return transport, nil
+		},
+	}
+}
+
 func newInboundRequest(callID, cseq string, body []byte) sip.Message {
 	msg := sip.NewRequest("MESSAGE", "sip:test@example.com")
 	msg.Headers = sip.Headers{
 		{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1"},
 		{Name: "From", Value: "<tel:+15551234567>;tag=remote"},
 		{Name: "To", Value: "<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>"},
+		{Name: "P-Asserted-Identity", Value: "<sip:ipsmgw.example.net>"},
 		{Name: "Call-ID", Value: callID},
 		{Name: "CSeq", Value: cseq},
 		{Name: "Content-Type", Value: "application/vnd.3gpp.sms"},
@@ -637,4 +2072,95 @@ func mustParseMessage(t *testing.T, data []byte) sip.Message {
 		t.Fatalf("ParseMessage() error = %v", err)
 	}
 	return msg
+}
+
+func nextSMSRequest(t *testing.T, requests <-chan []byte) sip.Message {
+	t.Helper()
+	select {
+	case data := <-requests:
+		return mustParseMessage(t, data)
+	case <-time.After(time.Second):
+		t.Fatal("waiting for outbound SMS MESSAGE")
+		return sip.Message{}
+	}
+}
+
+func multipartSMSBody(t *testing.T, xmlBody string, rpdu []byte) ([]byte, string) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	xmlPart, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":        {smsXMLContentType},
+		"Content-Disposition": {smsXMLDisposition},
+	})
+	if err != nil {
+		t.Fatalf("CreatePart(xml) error = %v", err)
+	}
+	if _, err := xmlPart.Write([]byte(xmlBody)); err != nil {
+		t.Fatalf("Write(xml) error = %v", err)
+	}
+	smsPart, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {smsContentType},
+		"Content-Transfer-Encoding": {binaryTransferValue},
+	})
+	if err != nil {
+		t.Fatalf("CreatePart(sms) error = %v", err)
+	}
+	if _, err := smsPart.Write(rpdu); err != nil {
+		t.Fatalf("Write(sms) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return body.Bytes(), mixedMultipartType + "; boundary=" + writer.Boundary()
+}
+
+func multipartSMSReport(t *testing.T, msg sip.Message) (smsXMLInfo, []byte) {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(msg.Header("Content-Type"))
+	if err != nil {
+		t.Fatalf("ParseMediaType() error = %v", err)
+	}
+	if mediaType != mixedMultipartType {
+		t.Fatalf("Content-Type = %q, want %q", mediaType, mixedMultipartType)
+	}
+	reader := multipart.NewReader(bytes.NewReader(msg.Body), params["boundary"])
+	var info smsXMLInfo
+	var rpdu []byte
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextPart() error = %v", err)
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatalf("ReadAll(part) error = %v", err)
+		}
+		mediaType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("part ParseMediaType() error = %v", err)
+		}
+		switch mediaType {
+		case smsXMLContentType:
+			if err := validateSMSXMLDisposition(part.Header.Get("Content-Disposition")); err != nil {
+				t.Fatalf("XML Content-Disposition error = %v", err)
+			}
+			info, err = decodeSMSXMLInfo(data)
+			if err != nil {
+				t.Fatalf("decodeSMSXMLInfo() error = %v", err)
+			}
+		case smsContentType:
+			rpdu = append([]byte(nil), data...)
+		}
+	}
+	if info.To == "" {
+		t.Fatal("delivery report XML To = empty")
+	}
+	if rpdu == nil {
+		t.Fatal("delivery report RPDU = nil")
+	}
+	return info, rpdu
 }

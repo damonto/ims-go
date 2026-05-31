@@ -24,21 +24,160 @@ const (
 
 const (
 	akaAttrNotification    byte = 12
+	akaAttrPermanentIDReq  byte = 10
 	akaAttrAnyIDReq        byte = 13
 	akaAttrIdentity        byte = 14
+	akaAttrFullAuthIDReq   byte = 17
 	akaAttrCounter         byte = 19
 	akaAttrCounterTooSmall byte = 20
 	akaAttrNonceS          byte = 21
 	akaAttrClientErrorCode byte = 22
+	akaAttrKDFInput        byte = 23
+	akaAttrKDF             byte = 24
+	akaAttrNextPseudonym   byte = 132
 	akaAttrNextReauthID    byte = 133
 	akaAttrCheckcode       byte = 134
 	akaAttrResultInd       byte = 135
 	akaAttrBidding         byte = 136
+	akaAttrIPMSInd         byte = 137
+	akaAttrIPMSRes         byte = 138
 )
 
 const (
 	akaNotificationSuccess uint16 = 32768
+
+	akaNotificationSuccessMask      uint16 = 0x8000
+	akaNotificationPreChallengeMask uint16 = 0x4000
+	akaNotificationAttributeLen            = 2
+	akaBiddingSupportsAKAPrimeMask  uint16 = 0x8000
+	akaNetworkNameMaxLen                   = 253
 )
+
+const (
+	akaPaddingMinLen = 4
+	akaPaddingMaxLen = 12
+)
+
+type IPMSSupport byte
+
+const (
+	IPMSSupportNBMOnly IPMSSupport = 2
+)
+
+type IPMSSelection byte
+
+const (
+	IPMSSelectionDSMIPv6 IPMSSelection = 1
+	IPMSSelectionNBM     IPMSSelection = 2
+	IPMSSelectionMIPv4   IPMSSelection = 3
+)
+
+type IPMSIndication struct {
+	Support IPMSSupport
+}
+
+func (i IPMSIndication) MarshalBinary() ([]byte, error) {
+	if !validIPMSSupport(i.Support) {
+		return nil, fmt.Errorf("marshalling ipms indication: invalid support %d", i.Support)
+	}
+	return AKAAttribute{Type: akaAttrIPMSInd, Value: []byte{0x00, byte(i.Support)}}.MarshalBinary()
+}
+
+type IPMSResult struct {
+	Selection IPMSSelection
+}
+
+type Bidding struct {
+	SupportsAKAPrime bool
+}
+
+type KDFInput struct {
+	NetworkName []byte
+}
+
+type KDF struct {
+	Version uint16
+}
+
+func (i KDFInput) MarshalBinary() ([]byte, error) {
+	if len(i.NetworkName) > akaNetworkNameMaxLen {
+		return nil, fmt.Errorf("marshalling kdf input: network name length %d exceeds %d", len(i.NetworkName), akaNetworkNameMaxLen)
+	}
+	value := make([]byte, akaAttributeReservedLen+len(i.NetworkName))
+	binary.BigEndian.PutUint16(value[:2], uint16(len(i.NetworkName)))
+	copy(value[akaAttributeReservedLen:], i.NetworkName)
+	for (len(value)+akaAttributeReservedLen)%akaAttributeBlockSize != 0 {
+		value = append(value, 0x00)
+	}
+	return AKAAttribute{Type: akaAttrKDFInput, Value: value}.MarshalBinary()
+}
+
+func (i *KDFInput) UnmarshalBinary(data []byte) error {
+	var attr AKAAttribute
+	if err := attr.UnmarshalBinary(data); err != nil {
+		return err
+	}
+	parsed, err := KDFInputFromAttribute(&attr)
+	if err != nil {
+		return err
+	}
+	*i = parsed
+	return nil
+}
+
+func (k KDF) MarshalBinary() ([]byte, error) {
+	return buildAKAUint16Attribute(akaAttrKDF, k.Version).MarshalBinary()
+}
+
+func (k *KDF) UnmarshalBinary(data []byte) error {
+	var attr AKAAttribute
+	if err := attr.UnmarshalBinary(data); err != nil {
+		return err
+	}
+	parsed, err := KDFFromAttribute(&attr)
+	if err != nil {
+		return err
+	}
+	*k = parsed
+	return nil
+}
+
+func (b Bidding) MarshalBinary() ([]byte, error) {
+	flags := uint16(0)
+	if b.SupportsAKAPrime {
+		flags = akaBiddingSupportsAKAPrimeMask
+	}
+	return buildAKAUint16Attribute(akaAttrBidding, flags).MarshalBinary()
+}
+
+func (b *Bidding) UnmarshalBinary(data []byte) error {
+	var attr AKAAttribute
+	if err := attr.UnmarshalBinary(data); err != nil {
+		return err
+	}
+	parsed, err := BiddingFromAttribute(&attr)
+	if err != nil {
+		return err
+	}
+	*b = parsed
+	return nil
+}
+
+func (r *IPMSResult) UnmarshalBinary(data []byte) error {
+	var attr AKAAttribute
+	if err := attr.UnmarshalBinary(data); err != nil {
+		return err
+	}
+	if attr.Type != akaAttrIPMSRes {
+		return fmt.Errorf("parsing ipms result: unexpected attribute %d", attr.Type)
+	}
+	selection, err := ipmsSelectionValue(&attr)
+	if err != nil {
+		return err
+	}
+	*r = IPMSResult{Selection: selection}
+	return nil
+}
 
 type AKANotification struct {
 	Code      uint16
@@ -54,6 +193,16 @@ type AKAReauthentication struct {
 	UseResultInd bool
 }
 
+type ChallengeResponseOptions struct {
+	Identifier   byte
+	EAPType      byte
+	RES          []byte
+	AUTKey       []byte
+	UseResultInd bool
+	Checkcode    []byte
+	IPMSSupport  IPMSSupport
+}
+
 func FindAttribute(attrs []AKAAttribute, attrType byte) *AKAAttribute {
 	for i := range attrs {
 		if attrs[i].Type == attrType {
@@ -65,6 +214,49 @@ func FindAttribute(attrs []AKAAttribute, attrType byte) *AKAAttribute {
 
 func HasAttribute(attrs []AKAAttribute, attrType byte) bool {
 	return FindAttribute(attrs, attrType) != nil
+}
+
+func isKnownAKAAttribute(attrType byte) bool {
+	switch attrType {
+	case akaAttrRAND,
+		akaAttrAUTN,
+		akaAttrRES,
+		akaAttrAUTS,
+		akaAttrPadding,
+		akaAttrMAC,
+		akaAttrNotification,
+		akaAttrPermanentIDReq,
+		akaAttrAnyIDReq,
+		akaAttrIdentity,
+		akaAttrFullAuthIDReq,
+		akaAttrCounter,
+		akaAttrCounterTooSmall,
+		akaAttrNonceS,
+		akaAttrClientErrorCode,
+		akaAttrKDFInput,
+		akaAttrKDF,
+		akaAttrIV,
+		akaAttrEncryptedData,
+		akaAttrNextPseudonym,
+		akaAttrNextReauthID,
+		akaAttrCheckcode,
+		akaAttrResultInd,
+		akaAttrBidding,
+		akaAttrIPMSInd,
+		akaAttrIPMSRes:
+		return true
+	default:
+		return false
+	}
+}
+
+func rejectUnsupportedAKAAttributes(action string, attrs []AKAAttribute) error {
+	for _, attr := range attrs {
+		if attr.Type < akaSkippableAttributeStart && !isKnownAKAAttribute(attr.Type) {
+			return fmt.Errorf("%s: unrecognized non-skippable attribute %d", action, attr.Type)
+		}
+	}
+	return nil
 }
 
 func marshalAKAAttributes(attrs []AKAAttribute) ([]byte, error) {
@@ -85,65 +277,185 @@ func buildAKAUint16Attribute(attrType byte, value uint16) AKAAttribute {
 	return AKAAttribute{Type: attrType, Value: buf}
 }
 
+func validIPMSSupport(value IPMSSupport) bool {
+	return value >= 1 && value <= 14
+}
+
+func validIPMSSelection(value IPMSSelection) bool {
+	switch value {
+	case IPMSSelectionDSMIPv6, IPMSSelectionNBM, IPMSSelectionMIPv4:
+		return true
+	default:
+		return false
+	}
+}
+
+func buildIPMSIndicationAttribute(support IPMSSupport) (AKAAttribute, error) {
+	if !validIPMSSupport(support) {
+		return AKAAttribute{}, fmt.Errorf("building ipms indication: invalid support %d", support)
+	}
+	return buildAKAUint16Attribute(akaAttrIPMSInd, uint16(support)), nil
+}
+
+func BiddingFromAttribute(attr *AKAAttribute) (Bidding, error) {
+	if attr == nil {
+		return Bidding{}, errors.New("parsing aka bidding: AT_BIDDING is missing")
+	}
+	if attr.Type != akaAttrBidding {
+		return Bidding{}, fmt.Errorf("parsing aka bidding: unexpected attribute %d", attr.Type)
+	}
+	flags, err := Uint16Value(attr)
+	if err != nil {
+		return Bidding{}, fmt.Errorf("parsing aka bidding: %w", err)
+	}
+	return Bidding{SupportsAKAPrime: flags&akaBiddingSupportsAKAPrimeMask != 0}, nil
+}
+
+func KDFInputFromAttribute(attr *AKAAttribute) (KDFInput, error) {
+	if attr == nil {
+		return KDFInput{}, errors.New("parsing kdf input: AT_KDF_INPUT is missing")
+	}
+	if attr.Type != akaAttrKDFInput {
+		return KDFInput{}, fmt.Errorf("parsing kdf input: unexpected attribute %d", attr.Type)
+	}
+	networkName, err := BytesValue(attr)
+	if err != nil {
+		return KDFInput{}, fmt.Errorf("parsing kdf input: %w", err)
+	}
+	if len(networkName) > akaNetworkNameMaxLen {
+		return KDFInput{}, fmt.Errorf("parsing kdf input: network name length %d exceeds %d", len(networkName), akaNetworkNameMaxLen)
+	}
+	return KDFInput{NetworkName: networkName}, nil
+}
+
+func KDFFromAttribute(attr *AKAAttribute) (KDF, error) {
+	if attr == nil {
+		return KDF{}, errors.New("parsing kdf: AT_KDF is missing")
+	}
+	if attr.Type != akaAttrKDF {
+		return KDF{}, fmt.Errorf("parsing kdf: unexpected attribute %d", attr.Type)
+	}
+	version, err := Uint16Value(attr)
+	if err != nil {
+		return KDF{}, fmt.Errorf("parsing kdf: %w", err)
+	}
+	return KDF{Version: version}, nil
+}
+
+func ipmsSelectionValue(attr *AKAAttribute) (IPMSSelection, error) {
+	if attr == nil {
+		return 0, errors.New("parsing ipms result: AT_IPMS_RES is missing")
+	}
+	if len(attr.Value) != akaAttributeReservedLen {
+		return 0, fmt.Errorf("parsing ipms result: invalid value length %d", len(attr.Value))
+	}
+	if attr.Value[0] != 0 {
+		return 0, fmt.Errorf("parsing ipms result: reserved octet is %d, want 0", attr.Value[0])
+	}
+	selection := IPMSSelection(attr.Value[1])
+	if !validIPMSSelection(selection) {
+		return 0, fmt.Errorf("parsing ipms result: invalid selection %d", selection)
+	}
+	return selection, nil
+}
+
+func IPMSSelectionFromAttributes(attrs []AKAAttribute) (IPMSSelection, bool, error) {
+	attr := FindAttribute(attrs, akaAttrIPMSRes)
+	if attr == nil {
+		return 0, false, nil
+	}
+	selection, err := ipmsSelectionValue(attr)
+	if err != nil {
+		return 0, true, err
+	}
+	return selection, true, nil
+}
+
 func Uint16Value(attr *AKAAttribute) (uint16, error) {
 	if attr == nil {
 		return 0, errors.New("parsing aka uint16 attribute: attribute is nil")
 	}
-	if len(attr.Value) < 2 {
-		return 0, errors.New("parsing aka uint16 attribute: value too short")
+	if len(attr.Value) != akaAttributeReservedLen {
+		return 0, fmt.Errorf("parsing aka uint16 attribute: invalid value length %d", len(attr.Value))
 	}
 	return binary.BigEndian.Uint16(attr.Value[:2]), nil
 }
 
 func buildAKAStringAttribute(attrType byte, value string) AKAAttribute {
 	length := len(value)
-	buf := make([]byte, 2+length)
+	buf := make([]byte, akaAttributeReservedLen+length)
 	binary.BigEndian.PutUint16(buf[:2], uint16(length))
-	copy(buf[2:], value)
-	for (len(buf)+2)%4 != 0 {
+	copy(buf[akaAttributeReservedLen:], value)
+	for (len(buf)+akaAttributeReservedLen)%akaAttributeBlockSize != 0 {
 		buf = append(buf, 0x00)
 	}
 	return AKAAttribute{Type: attrType, Value: buf}
 }
 
 func StringValue(attr *AKAAttribute) (string, error) {
+	value, err := BytesValue(attr)
+	if err != nil {
+		return "", err
+	}
+	return string(value), nil
+}
+
+func BytesValue(attr *AKAAttribute) ([]byte, error) {
 	if attr == nil {
-		return "", errors.New("parsing aka string attribute: attribute is nil")
+		return nil, errors.New("parsing aka bytes attribute: attribute is nil")
 	}
 	if len(attr.Value) < 2 {
-		return "", errors.New("parsing aka string attribute: value too short")
+		return nil, errors.New("parsing aka bytes attribute: value too short")
 	}
 	length := int(binary.BigEndian.Uint16(attr.Value[:2]))
 	if len(attr.Value) < 2+length {
-		return "", fmt.Errorf("parsing aka string attribute: value length %d is too short for %d", len(attr.Value), length)
+		return nil, fmt.Errorf("parsing aka bytes attribute: value length %d is too short for %d", len(attr.Value), length)
 	}
-	return string(attr.Value[2 : 2+length]), nil
+	return append([]byte(nil), attr.Value[2:2+length]...), nil
 }
 
 func (n *AKANotification) UnmarshalAttributes(attrs []AKAAttribute) error {
-	attr := FindAttribute(attrs, akaAttrNotification)
+	if err := rejectUnsupportedAKAAttributes("parsing aka notification", attrs); err != nil {
+		return err
+	}
+	var attr *AKAAttribute
+	for i := range attrs {
+		if attrs[i].Type != akaAttrNotification {
+			continue
+		}
+		if attr != nil {
+			return errors.New("parsing aka notification: duplicate AT_NOTIFICATION")
+		}
+		attr = &attrs[i]
+	}
 	if attr == nil {
 		return errors.New("parsing aka notification: AT_NOTIFICATION is missing")
+	}
+	if len(attr.Value) != akaNotificationAttributeLen {
+		return fmt.Errorf("parsing aka notification: invalid AT_NOTIFICATION length %d", len(attr.Value))
 	}
 	code, err := Uint16Value(attr)
 	if err != nil {
 		return err
 	}
-	*n = AKANotification{Code: code, Success: code&0x8000 != 0, Protected: code&0x4000 == 0}
-	return nil
-}
-
-func DecodeNotification(attrs []AKAAttribute) (AKANotification, error) {
-	var notification AKANotification
-	if err := notification.UnmarshalAttributes(attrs); err != nil {
-		return AKANotification{}, err
+	success := code&akaNotificationSuccessMask != 0
+	preChallenge := code&akaNotificationPreChallengeMask != 0
+	if success && preChallenge {
+		return errors.New("parsing aka notification: success code cannot be pre-challenge")
 	}
-	return notification, nil
+	*n = AKANotification{Code: code, Success: success, Protected: !preChallenge}
+	return nil
 }
 
 func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byte) error {
 	if message.Code != eapCodeRequest || message.Subtype != akaSubtypeReauthentication {
 		return errors.New("parsing aka reauthentication: unsupported packet")
+	}
+	if err := rejectUnsupportedAKAAttributes("parsing aka reauthentication", message.Attributes); err != nil {
+		return err
+	}
+	if attr := FindAttribute(message.Attributes, akaAttrResultInd); attr != nil && len(attr.Value) != akaResultIndAttributeLen {
+		return fmt.Errorf("parsing aka reauthentication: invalid result indication length %d", len(attr.Value))
 	}
 	nested, err := DecryptAttributes(message.Attributes, encrKey)
 	if err != nil {
@@ -154,13 +466,16 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 		return fmt.Errorf("parsing aka reauthentication: %w", err)
 	}
 	nonceAttr := FindAttribute(nested, akaAttrNonceS)
-	if nonceAttr == nil || len(nonceAttr.Value) < 18 {
+	if nonceAttr == nil {
 		return errors.New("parsing aka reauthentication: AT_NONCE_S is missing")
+	}
+	if len(nonceAttr.Value) != akaVectorAttributeLen {
+		return fmt.Errorf("parsing aka reauthentication: invalid AT_NONCE_S length %d", len(nonceAttr.Value))
 	}
 	req := AKAReauthentication{
 		Identifier:   message.Identifier,
 		Counter:      counter,
-		NonceS:       append([]byte(nil), nonceAttr.Value[2:18]...),
+		NonceS:       append([]byte(nil), nonceAttr.Value[akaAttributeReservedLen:akaVectorAttributeLen]...),
 		UseResultInd: HasAttribute(message.Attributes, akaAttrResultInd),
 	}
 	if attr := FindAttribute(nested, akaAttrNextReauthID); attr != nil {
@@ -174,20 +489,11 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 	return nil
 }
 
-func DecodeReauthentication(data []byte, encrKey []byte) (AKAReauthentication, error) {
-	var message AKAMessage
-	if err := message.UnmarshalBinary(data); err != nil {
-		return AKAReauthentication{}, err
+func buildAKAMessageWithType(code, identifier, eapType, subtype byte, attrs []AKAAttribute, autKey, extra []byte) ([]byte, error) {
+	message := AKAMessage{Code: code, Identifier: identifier, EAPType: eapType, Subtype: subtype, Attributes: append([]AKAAttribute(nil), attrs...)}
+	if eapType == eapTypeAKAPrime {
+		return message.MarshalSignedSHA256(autKey, extra)
 	}
-	var req AKAReauthentication
-	if err := req.UnmarshalMessage(message, encrKey); err != nil {
-		return AKAReauthentication{}, err
-	}
-	return req, nil
-}
-
-func buildAKAMessage(code, identifier, subtype byte, attrs []AKAAttribute, autKey, extra []byte) ([]byte, error) {
-	message := AKAMessage{Code: code, Identifier: identifier, Subtype: subtype, Attributes: append([]AKAAttribute(nil), attrs...)}
 	return message.MarshalSigned(autKey, extra)
 }
 
@@ -199,19 +505,27 @@ func VerifyMessageMAC(data, autKey, extra []byte) error {
 	return message.VerifyMAC(autKey, extra)
 }
 
+func VerifyMessageMACSHA256(data, autKey, extra []byte) error {
+	var message AKAMessage
+	if err := message.UnmarshalBinary(data); err != nil {
+		return err
+	}
+	return message.VerifyMACSHA256(autKey, extra)
+}
+
 func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, error) {
 	ivAttr := FindAttribute(attrs, akaAttrIV)
 	encrAttr := FindAttribute(attrs, akaAttrEncryptedData)
 	if ivAttr == nil || encrAttr == nil {
 		return nil, errors.New("decrypting aka attributes: AT_IV or AT_ENCR_DATA is missing")
 	}
-	if len(ivAttr.Value) < 18 {
-		return nil, errors.New("decrypting aka attributes: AT_IV is truncated")
+	if len(ivAttr.Value) != akaVectorAttributeLen {
+		return nil, fmt.Errorf("decrypting aka attributes: invalid AT_IV length %d", len(ivAttr.Value))
 	}
-	if len(encrAttr.Value) < 2 {
+	if len(encrAttr.Value) < akaAttributeReservedLen {
 		return nil, errors.New("decrypting aka attributes: AT_ENCR_DATA is truncated")
 	}
-	ciphertext := encrAttr.Value[2:]
+	ciphertext := encrAttr.Value[akaAttributeReservedLen:]
 	if len(ciphertext)%aes.BlockSize != 0 {
 		return nil, errors.New("decrypting aka attributes: ciphertext is not block aligned")
 	}
@@ -220,16 +534,26 @@ func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, er
 		return nil, fmt.Errorf("decrypting aka attributes: %w", err)
 	}
 	plain := make([]byte, len(ciphertext))
-	cipher.NewCBCDecrypter(block, ivAttr.Value[2:18]).CryptBlocks(plain, ciphertext)
+	cipher.NewCBCDecrypter(block, ivAttr.Value[akaAttributeReservedLen:akaVectorAttributeLen]).CryptBlocks(plain, ciphertext)
 	parsed, err := decodeAKAAttributes(plain)
 	if err != nil {
 		return nil, fmt.Errorf("decrypting aka attributes: %w", err)
 	}
+	if err := rejectUnsupportedAKAAttributes("decrypting aka attributes", parsed); err != nil {
+		return nil, err
+	}
 	filtered := make([]AKAAttribute, 0, len(parsed))
-	for _, attr := range parsed {
+	for i, attr := range parsed {
 		if attr.Type != akaAttrPadding {
 			filtered = append(filtered, attr)
 			continue
+		}
+		attrLen := len(attr.Value) + akaAttributeReservedLen
+		if attrLen < akaPaddingMinLen || attrLen > akaPaddingMaxLen {
+			return nil, fmt.Errorf("decrypting aka attributes: invalid padding length %d", attrLen)
+		}
+		if i != len(parsed)-1 {
+			return nil, errors.New("decrypting aka attributes: padding is not last")
 		}
 		for _, b := range attr.Value {
 			if b != 0 {
@@ -247,7 +571,7 @@ func encryptAKAAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute,
 	}
 	if rem := len(plain) % aes.BlockSize; rem != 0 {
 		padLen := aes.BlockSize - rem
-		if padLen < 4 || padLen > 12 || padLen%4 != 0 {
+		if padLen < akaPaddingMinLen || padLen > akaPaddingMaxLen || padLen%akaAttributeBlockSize != 0 {
 			return nil, fmt.Errorf("encrypting aka attributes: unsupported padding length %d", padLen)
 		}
 		padding := AKAAttribute{Type: akaAttrPadding, Value: make([]byte, padLen-2)}
@@ -273,32 +597,71 @@ func encryptAKAAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute,
 	}, nil
 }
 
-func akaUint16Bytes(value uint16) []byte {
-	buf := make([]byte, 2)
-	binary.BigEndian.PutUint16(buf, value)
-	return buf
-}
-
 func BuildChallengeResponsePacket(identifier byte, res, autKey []byte, useResultInd bool) ([]byte, error) {
-	return BuildChallengeResponsePacketWithCheckcode(identifier, res, autKey, useResultInd, nil)
+	return BuildChallengeResponsePacketWithOptions(ChallengeResponseOptions{
+		Identifier:   identifier,
+		RES:          res,
+		AUTKey:       autKey,
+		UseResultInd: useResultInd,
+	})
 }
 
 func BuildChallengeResponsePacketWithCheckcode(identifier byte, res, autKey []byte, useResultInd bool, checkcode []byte) ([]byte, error) {
-	attrs := []AKAAttribute{{Type: akaAttrRES, Value: append(akaUint16Bytes(uint16(len(res)*8)), res...)}}
-	if len(checkcode) != 0 {
-		attrs = append(attrs, AKAAttribute{Type: akaAttrCheckcode, Value: append([]byte(nil), checkcode...)})
+	return BuildChallengeResponsePacketWithOptions(ChallengeResponseOptions{
+		Identifier:   identifier,
+		RES:          res,
+		AUTKey:       autKey,
+		UseResultInd: useResultInd,
+		Checkcode:    checkcode,
+	})
+}
+
+func BuildChallengeResponsePacketWithOptions(opts ChallengeResponseOptions) ([]byte, error) {
+	resAttr, err := buildAKARESAttribute(opts.RES)
+	if err != nil {
+		return nil, err
 	}
-	if useResultInd {
+	attrs := []AKAAttribute{resAttr}
+	if len(opts.Checkcode) != 0 {
+		wantCheckcodeLen := akaCheckcodeSHA1Len
+		if opts.EAPType == eapTypeAKAPrime {
+			wantCheckcodeLen = akaCheckcodeSHA256Len
+		}
+		if len(opts.Checkcode) != akaCheckcodeEmptyLen && len(opts.Checkcode) != wantCheckcodeLen {
+			return nil, fmt.Errorf("building aka response: invalid checkcode length %d", len(opts.Checkcode))
+		}
+		attrs = append(attrs, AKAAttribute{Type: akaAttrCheckcode, Value: append([]byte(nil), opts.Checkcode...)})
+	}
+	if opts.UseResultInd {
 		attrs = append(attrs, buildAKAUint16Attribute(akaAttrResultInd, 0))
 	}
-	return buildAKAMessage(eapCodeResponse, identifier, akaSubtypeChallenge, attrs, autKey, nil)
+	if opts.IPMSSupport != 0 {
+		if !opts.UseResultInd {
+			return nil, errors.New("building aka response: ipms indication requires result indication")
+		}
+		attr, err := buildIPMSIndicationAttribute(opts.IPMSSupport)
+		if err != nil {
+			return nil, err
+		}
+		attrs = append(attrs, attr)
+	}
+	message := AKAMessage{Code: eapCodeResponse, Identifier: opts.Identifier, EAPType: opts.EAPType, Subtype: akaSubtypeChallenge, Attributes: attrs}
+	if opts.EAPType == eapTypeAKAPrime {
+		return message.MarshalSignedSHA256(opts.AUTKey, nil)
+	}
+	return message.MarshalSigned(opts.AUTKey, nil)
 }
 
 func BuildReauthenticationResponsePacket(identifier byte, counter uint16, counterTooSmall bool, useResultInd bool, autKey, encrKey, nonceS []byte) ([]byte, error) {
-	nested := []AKAAttribute{buildAKAUint16Attribute(akaAttrCounter, counter)}
+	return BuildReauthenticationResponsePacketForType(identifier, eapTypeAKA, counter, counterTooSmall, useResultInd, autKey, encrKey, nonceS)
+}
+
+func BuildReauthenticationResponsePacketForType(identifier, eapType byte, counter uint16, counterTooSmall bool, useResultInd bool, autKey, encrKey, nonceS []byte) ([]byte, error) {
+	nested := []AKAAttribute{}
 	if counterTooSmall {
 		nested = append(nested, buildAKAUint16Attribute(akaAttrCounterTooSmall, 0))
 	}
+	nested = append(nested, buildAKAUint16Attribute(akaAttrCounter, counter))
 	encrypted, err := encryptAKAAttributes(nested, encrKey)
 	if err != nil {
 		return nil, err
@@ -307,10 +670,14 @@ func BuildReauthenticationResponsePacket(identifier byte, counter uint16, counte
 	if useResultInd {
 		attrs = append(attrs, buildAKAUint16Attribute(akaAttrResultInd, 0))
 	}
-	return buildAKAMessage(eapCodeResponse, identifier, akaSubtypeReauthentication, attrs, autKey, nonceS)
+	return buildAKAMessageWithType(eapCodeResponse, identifier, eapType, akaSubtypeReauthentication, attrs, autKey, nonceS)
 }
 
 func BuildNotificationResponsePacket(identifier byte, notification AKANotification, fastReauth bool, counter uint16, autKey, encrKey []byte) ([]byte, error) {
+	return BuildNotificationResponsePacketForType(identifier, eapTypeAKA, notification, fastReauth, counter, autKey, encrKey)
+}
+
+func BuildNotificationResponsePacketForType(identifier, eapType byte, notification AKANotification, fastReauth bool, counter uint16, autKey, encrKey []byte) ([]byte, error) {
 	attrs := make([]AKAAttribute, 0, 2)
 	if notification.Protected && fastReauth {
 		encrypted, err := encryptAKAAttributes([]AKAAttribute{buildAKAUint16Attribute(akaAttrCounter, counter)}, encrKey)
@@ -320,17 +687,21 @@ func BuildNotificationResponsePacket(identifier byte, notification AKANotificati
 		attrs = append(attrs, encrypted...)
 	}
 	if notification.Protected {
-		return buildAKAMessage(eapCodeResponse, identifier, akaSubtypeNotification, attrs, autKey, nil)
+		return buildAKAMessageWithType(eapCodeResponse, identifier, eapType, akaSubtypeNotification, attrs, autKey, nil)
 	}
-	return buildAKAMessage(eapCodeResponse, identifier, akaSubtypeNotification, attrs, nil, nil)
+	return buildAKAMessageWithType(eapCodeResponse, identifier, eapType, akaSubtypeNotification, attrs, nil, nil)
 }
 
 func BuildClientErrorPacket(identifier byte, code uint16) ([]byte, error) {
-	return buildAKAMessage(eapCodeResponse, identifier, akaSubtypeClientError, []AKAAttribute{buildAKAUint16Attribute(akaAttrClientErrorCode, code)}, nil, nil)
+	return BuildClientErrorPacketForType(identifier, eapTypeAKA, code)
+}
+
+func BuildClientErrorPacketForType(identifier, eapType byte, code uint16) ([]byte, error) {
+	return buildAKAMessageWithType(eapCodeResponse, identifier, eapType, akaSubtypeClientError, []AKAAttribute{buildAKAUint16Attribute(akaAttrClientErrorCode, code)}, nil, nil)
 }
 
 func DeriveFastReauthKeys(identity []byte, counter uint16, nonceS, mk []byte) ([]byte, []byte, error) {
-	if len(identity) == 0 || len(nonceS) != 16 || len(mk) == 0 {
+	if len(identity) == 0 || len(nonceS) != akaVectorLen || len(mk) == 0 {
 		return nil, nil, errors.New("deriving fast reauth keys: invalid inputs")
 	}
 	seed := make([]byte, 0, len(identity)+2+len(nonceS)+len(mk))

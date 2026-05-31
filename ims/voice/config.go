@@ -23,34 +23,36 @@ const (
 )
 
 type Config struct {
-	Codecs                []AudioCodecConfig
-	RTPProfile            string
-	PTime                 time.Duration
-	MaxPTime              time.Duration
-	GeolocationPIDFInvite []int
-	GeolocationCountry    string
-	PIDFShortCodes        []string
-	UseTelURIForPIDFXML   bool
-	Preconditions         bool
-	ReliableProvisional   bool
-	SessionTimer          bool
-	SessionExpires        time.Duration
-	MinSessionExpires     time.Duration
-	MOCallRequestTimeout  time.Duration
-	RingbackTimeout       time.Duration
-	RingingTimeout        time.Duration
-	AudioASBandwidthKbps  int
-	RTPInactivityTimeout  time.Duration
-	RTCPInactivityTimeout time.Duration
-	RTCPSendInterval      time.Duration
-	LocalRTPPortMin       int
-	LocalRTPPortMax       int
-	PrepareMedia          func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
-	OpenMedia             func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
-	OnIncomingCall        func(IncomingCall)
-	OnCallEvent           func(CallEvent)
-	OnError               func(error)
-	Logger                *slog.Logger
+	Codecs                        []AudioCodecConfig
+	RTPProfile                    string
+	PTime                         time.Duration
+	MaxPTime                      time.Duration
+	GeolocationPIDFInvite         []int
+	GeolocationCountry            string
+	PIDFShortCodes                []string
+	UseTelURIForPIDFXML           bool
+	Preconditions                 bool
+	ReliableProvisional           bool
+	SessionTimer                  bool
+	SessionExpires                time.Duration
+	MinSessionExpires             time.Duration
+	SessionRefresher              string
+	MOCallRequestTimeout          time.Duration
+	RingbackTimeout               time.Duration
+	RingingTimeout                time.Duration
+	AudioASBandwidthKbps          int
+	RTPInactivityTimeout          time.Duration
+	RTCPInactivityTimeout         time.Duration
+	AudioInactivityCallEndReasons []AudioInactivityCallEndReason
+	RTCPSendInterval              time.Duration
+	LocalRTPPortMin               int
+	LocalRTPPortMax               int
+	PrepareMedia                  func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
+	OpenMedia                     func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
+	OnIncomingCall                func(IncomingCall)
+	OnCallEvent                   func(CallEvent)
+	OnError                       func(error)
+	Logger                        *slog.Logger
 }
 
 type AudioCodecConfig struct {
@@ -65,12 +67,25 @@ type AudioCodecConfig struct {
 	ChAwRecv     *int
 }
 
+type AudioInactivityCallEndReason int
+
+const (
+	AudioInactivityRTCPOnHold      AudioInactivityCallEndReason = 0
+	AudioInactivityRTCPOnConnected AudioInactivityCallEndReason = 1
+	AudioInactivityRTPOnConnected  AudioInactivityCallEndReason = 2
+	AudioInactivityE911RTCP        AudioInactivityCallEndReason = 3
+	AudioInactivityE911RTP         AudioInactivityCallEndReason = 4
+)
+
 type MediaConfig struct {
-	LocalPort  int
-	RemoteIP   net.IP
-	RemotePort int
-	Media      NegotiatedMedia
-	OnPacket   func(MediaPacket)
+	LocalPort      int
+	RemoteIP       net.IP
+	RemotePort     int
+	RemoteRTCPIP   net.IP
+	RemoteRTCPPort int
+	RTCPMux        bool
+	Media          NegotiatedMedia
+	OnPacket       func(MediaPacket)
 }
 
 type MediaPacket struct {
@@ -92,16 +107,24 @@ type RTCPMediaTransport interface {
 }
 
 const (
-	defaultRTPProfile      = "RTP/AVP"
-	defaultPTime           = 20 * time.Millisecond
-	defaultMaxPTime        = 240 * time.Millisecond
-	defaultSessionExpires  = 1800 * time.Second
-	defaultRTPInactivity   = 20 * time.Second
-	defaultRTCPInactivity  = 20 * time.Second
-	defaultRTCPSend        = 5 * time.Second
-	defaultLocalRTPPortMin = 40000
-	defaultLocalRTPPortMax = 40100
+	defaultRTPProfile        = "RTP/AVP"
+	defaultPTime             = 20 * time.Millisecond
+	defaultMaxPTime          = 240 * time.Millisecond
+	defaultSessionExpires    = 1800 * time.Second
+	defaultMinSessionExpires = 90 * time.Second
+	defaultRTPInactivity     = 20 * time.Second
+	defaultRTCPInactivity    = 20 * time.Second
+	defaultRTCPSend          = 5 * time.Second
+	defaultLocalRTPPortMin   = 40000
+	defaultLocalRTPPortMax   = 40100
 )
+
+var defaultAudioInactivityCallEndReasons = []AudioInactivityCallEndReason{
+	AudioInactivityRTCPOnHold,
+	AudioInactivityRTCPOnConnected,
+	AudioInactivityRTPOnConnected,
+	AudioInactivityE911RTCP,
+}
 
 const (
 	GeolocationPIDFNonEmergencyWiFi = pidf.GeolocationPIDFNonEmergencyWiFi
@@ -111,12 +134,12 @@ const (
 )
 
 func (cfg Config) Normalized() (Config, error) {
-	if cfg.Preconditions {
-		return Config{}, errors.New("normalizing voice config: sip preconditions are not supported")
-	}
 	cfg.RTPProfile = strings.TrimSpace(cfg.RTPProfile)
 	if cfg.RTPProfile == "" {
 		cfg.RTPProfile = defaultRTPProfile
+	}
+	if cfg.Preconditions {
+		cfg.ReliableProvisional = true
 	}
 	cfg.GeolocationPIDFInvite = pidf.NormalizeTypes(cfg.GeolocationPIDFInvite)
 	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
@@ -161,7 +184,16 @@ func (cfg Config) Normalized() (Config, error) {
 		return Config{}, errors.New("normalizing voice config: min session expires must be at least 1s")
 	}
 	if cfg.SessionExpires > 0 && cfg.MinSessionExpires > cfg.SessionExpires {
-		return Config{}, errors.New("normalizing voice config: session expires must be >= min session expires")
+		cfg.SessionExpires = cfg.MinSessionExpires
+	}
+	cfg.SessionRefresher = strings.ToLower(strings.TrimSpace(cfg.SessionRefresher))
+	if cfg.SessionRefresher == "" {
+		cfg.SessionRefresher = sessionRefresherNone
+	}
+	switch cfg.SessionRefresher {
+	case sessionRefresherNone, sessionRefresherUAC, sessionRefresherUAS:
+	default:
+		return Config{}, fmt.Errorf("normalizing voice config: unsupported session refresher %q", cfg.SessionRefresher)
 	}
 	if cfg.MOCallRequestTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: mo call request timeout must be >= 0")
@@ -183,6 +215,16 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	if cfg.RTCPInactivityTimeout == 0 {
 		cfg.RTCPInactivityTimeout = defaultRTCPInactivity
+	}
+	if cfg.AudioInactivityCallEndReasons == nil {
+		cfg.AudioInactivityCallEndReasons = append([]AudioInactivityCallEndReason(nil), defaultAudioInactivityCallEndReasons...)
+	}
+	for _, reason := range cfg.AudioInactivityCallEndReasons {
+		switch reason {
+		case AudioInactivityRTCPOnHold, AudioInactivityRTCPOnConnected, AudioInactivityRTPOnConnected, AudioInactivityE911RTCP, AudioInactivityE911RTP:
+		default:
+			return Config{}, fmt.Errorf("normalizing voice config: unsupported audio inactivity call end reason %d", reason)
+		}
 	}
 	if cfg.RTCPSendInterval < 0 {
 		return Config{}, errors.New("normalizing voice config: rtcp send interval must be >= 0")
@@ -208,6 +250,10 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	cfg.Codecs = codecs
 	return cfg, nil
+}
+
+func (cfg Config) endsCallOnAudioInactivity(reason AudioInactivityCallEndReason) bool {
+	return slices.Contains(cfg.AudioInactivityCallEndReasons, reason)
 }
 
 func normalizeShortCodes(values []string) []string {

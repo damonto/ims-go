@@ -351,8 +351,8 @@ func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context
 
 func wfcRetryAfter(err error, fallback time.Duration) time.Duration {
 	var entitlementErr *vowifi.WFCEntitlementError
-	if errors.As(err, &entitlementErr) && entitlementErr.RetryAfter > 0 {
-		return entitlementErr.RetryAfter
+	if errors.As(err, &entitlementErr) && entitlementErr.Result.RetryAfter > 0 {
+		return entitlementErr.Result.RetryAfter
 	}
 	return fallback
 }
@@ -474,26 +474,19 @@ func wfcUserActionFromError(err error) (wfcUserAction, bool) {
 		return wfcUserAction{}, false
 	}
 
-	var nsdsErr *vowifi.NSDSWFCEntitlementError
-	if errors.As(err, &nsdsErr) {
+	var entitlementErr *vowifi.WFCEntitlementError
+	if errors.As(err, &entitlementErr) {
+		websheet := entitlementErr.Result.Websheet
+		if websheet == nil {
+			return wfcUserAction{Source: string(entitlementErr.Result.Scheme), Carrier: entitlementErr.Result.Carrier}, true
+		}
 		return wfcUserAction{
-			Source:     "nsds",
-			Carrier:    nsdsErr.Carrier,
-			URL:        nsdsErr.Websheet.URL,
-			Data:       nsdsErr.Websheet.Data,
-			Title:      nsdsErr.Websheet.Title,
-			ClientName: nsdsErr.Websheet.ClientName,
-		}, true
-	}
-
-	var ts43Err *vowifi.WFCEntitlementError
-	if errors.As(err, &ts43Err) {
-		return wfcUserAction{
-			Source:  "ts43",
-			Carrier: ts43Err.Config.CarrierName,
-			URL:     ts43Err.Status.ServiceFlowURL,
-			Data:    ts43Err.Status.ServiceFlowUserData,
-			Title:   "Wi-Fi Calling",
+			Source:     string(entitlementErr.Result.Scheme),
+			Carrier:    entitlementErr.Result.Carrier,
+			URL:        websheet.URL,
+			Data:       websheet.Data,
+			Title:      websheet.Title,
+			ClientName: websheet.ClientName,
 		}, true
 	}
 

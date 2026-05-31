@@ -32,13 +32,16 @@ func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, 
 	}
 	for _, segment := range segments {
 		submission.Segments = append(submission.Segments, SMSSubmissionSegment{
-			Index:       segment.Index,
-			SubmittedAt: segment.SubmittedAt,
-			CallID:      segment.CallID,
-			RPReference: segment.RPReference,
-			TPReference: segment.TPReference,
+			Index:         segment.Index,
+			SubmittedAt:   segment.SubmittedAt,
+			Recipient:     segment.Recipient,
+			ServiceCenter: segment.ServiceCenter,
+			CallID:        segment.CallID,
+			RPReference:   segment.RPReference,
+			TPReference:   segment.TPReference,
 		})
 	}
+	s.client.trackSMSSubmission(submission)
 	s.client.logger.Info("SMS submitted", "id", submission.ID, "to", submission.To, "segments", submission.SegmentCount)
 	return submission, nil
 }
@@ -65,7 +68,15 @@ func (c *Client) handleSMS(msg imssms.Incoming) {
 }
 
 func (c *Client) handleSMSStatusReport(report imssms.StatusReport) {
+	link, matched := c.smsReportLink(report)
+	if matched && report.Status.Final() {
+		c.forgetSMSReportLink(report.MessageReference, link)
+	}
+
 	c.emitSMSReport(SMSReport{
+		SubmissionID:          link.submissionID,
+		SegmentIndex:          link.segmentIndex,
+		SegmentCount:          link.segmentCount,
 		ServiceCenter:         report.ServiceCenter,
 		Recipient:             report.Recipient,
 		MessageReference:      report.MessageReference,
@@ -83,4 +94,87 @@ func (c *Client) handleSMSStatusReport(report imssms.StatusReport) {
 		UserData:              append([]byte(nil), report.UserData...),
 		ReceivedAt:            time.Now(),
 	})
+}
+
+func (c *Client) trackSMSSubmission(submission SMSSubmission) {
+	c.smsReportsMu.Lock()
+	defer c.smsReportsMu.Unlock()
+
+	for _, segment := range submission.Segments {
+		link := smsReportLink{
+			submissionID:  submission.ID,
+			segmentIndex:  segment.Index,
+			segmentCount:  submission.SegmentCount,
+			recipient:     segment.Recipient,
+			serviceCenter: segment.ServiceCenter,
+		}
+		links := c.smsReports[segment.TPReference]
+		replaced := false
+		for i, existing := range links {
+			if sameSMSReportRoute(existing, link) {
+				links[i] = link
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			links = append(links, link)
+		}
+		c.smsReports[segment.TPReference] = links
+	}
+}
+
+func (c *Client) smsReportLink(report imssms.StatusReport) (smsReportLink, bool) {
+	c.smsReportsMu.Lock()
+	defer c.smsReportsMu.Unlock()
+
+	links := c.smsReports[report.MessageReference]
+	return smsReportLinkFromCandidates(links, report)
+}
+
+func smsReportLinkFromCandidates(links []smsReportLink, report imssms.StatusReport) (smsReportLink, bool) {
+	var match smsReportLink
+	matched := false
+	for _, link := range links {
+		if smsReportLinkMatches(link, report) {
+			if matched {
+				return smsReportLink{}, false
+			}
+			match = link
+			matched = true
+		}
+	}
+	return match, matched
+}
+
+func (c *Client) forgetSMSReportLink(messageReference byte, link smsReportLink) {
+	c.smsReportsMu.Lock()
+	defer c.smsReportsMu.Unlock()
+
+	links := c.smsReports[messageReference]
+	for i, existing := range links {
+		if existing == link {
+			links = append(links[:i], links[i+1:]...)
+			break
+		}
+	}
+	if len(links) == 0 {
+		delete(c.smsReports, messageReference)
+	} else {
+		c.smsReports[messageReference] = links
+	}
+}
+
+func sameSMSReportRoute(a, b smsReportLink) bool {
+	return a.recipient == b.recipient && a.serviceCenter == b.serviceCenter
+}
+
+func smsReportLinkMatches(link smsReportLink, report imssms.StatusReport) bool {
+	if link.recipient != "" && report.Recipient != "" && link.recipient != report.Recipient {
+		return false
+	}
+	if link.serviceCenter != "" && report.ServiceCenter != "" && link.serviceCenter != report.ServiceCenter {
+		return false
+	}
+	return true
 }

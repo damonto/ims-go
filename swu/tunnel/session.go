@@ -13,28 +13,44 @@ import (
 
 	"github.com/damonto/vowifi-go/swu/esp"
 	"github.com/damonto/vowifi-go/swu/handshake"
+	"github.com/damonto/vowifi-go/swu/ike"
 	"github.com/damonto/vowifi-go/usim"
 )
 
 type Config struct {
-	LocalAddr                string
-	RemoteAddr               string
-	PacketConn               net.PacketConn
-	InitialPort              int
-	NATTPort                 int
-	LocalSIPPort             int
-	SIPPort                  int
-	DHGroups                 []uint16
-	IKEEncryptionKeyLens     []uint16
-	IKEIntegrity             []uint16
-	IKEPRF                   []uint16
-	ChildEncryptionKeyLens   []uint16
-	ChildIntegrity           []uint16
-	PCSCFIPv4ConfigAttribute uint16
-	PCSCFIPv6ConfigAttribute uint16
-	NATKeepaliveInterval     time.Duration
-	IKERetransmitDelays      []time.Duration
-	Logger                   *slog.Logger
+	LocalAddr                        string
+	RemoteAddr                       string
+	APN                              string
+	AKAPrimeNetworkName              string
+	AllowAKAPrimeNetworkNameMismatch bool
+	PacketConn                       net.PacketConn
+	InitialPort                      int
+	NATTPort                         int
+	LocalSIPPort                     int
+	SIPPort                          int
+	DHGroups                         []uint16
+	IKEEncryptionKeyLens             []uint16
+	IKEIntegrity                     []uint16
+	IKEPRF                           []uint16
+	ChildEncryptionKeyLens           []uint16
+	ChildIntegrity                   []uint16
+	PCSCFIPv4ConfigAttribute         uint16
+	PCSCFIPv6ConfigAttribute         uint16
+	DisablePCSCFRestoration          bool
+	PDUSessionID                     byte
+	NATKeepaliveInterval             time.Duration
+	LivenessTimeout                  time.Duration
+	IKERetransmitDelays              []time.Duration
+	IKESALifetime                    time.Duration
+	IKESARekeyMargin                 time.Duration
+	IKESAByteLifetime                uint64
+	IKESAByteRekeyMargin             uint64
+	ChildSALifetime                  time.Duration
+	ChildSARekeyMargin               time.Duration
+	ChildSAByteLifetime              uint64
+	ChildSAByteRekeyMargin           uint64
+	AddKEToChildSARekey              bool
+	Logger                           *slog.Logger
 }
 
 type Card interface {
@@ -45,13 +61,19 @@ type Card interface {
 }
 
 type Info struct {
-	InnerIP          net.IP
-	PCSCFIP          net.IP
-	ESPInitiatorSPI  uint32
-	ESPResponderSPI  uint32
-	Encryption       uint16
-	EncryptionKeyLen uint16
-	Integrity        uint16
+	InnerIP                   net.IP
+	PCSCFIP                   net.IP
+	PCSCFIPs                  []net.IP
+	ESPInitiatorSPI           uint32
+	ESPResponderSPI           uint32
+	Encryption                uint16
+	EncryptionKeyLen          uint16
+	Integrity                 uint16
+	InitiatorTrafficSelectors []ike.TrafficSelector
+	ResponderTrafficSelectors []ike.TrafficSelector
+	PDUSessionID              byte
+	SNSSAI                    []byte
+	SNSSAIPlmnID              []byte
 }
 
 type Session struct {
@@ -72,18 +94,45 @@ type Session struct {
 	inboundESP           esp.Codec
 	espSeq               uint32
 	inboundReplay        esp.ReplayWindow
+	retiredChildSAs      []retiredChildSA
+	pendingChildSA       pendingChildSA
 	ike                  *ikeCrypto
+	pendingIKESA         ikeSARekeyResult
+	pendingIKESAReady    bool
+	retiredIKESAs        []retiredIKESA
+	ikeLocalInitiator    bool
 	tunnelErr            error
 	initiatorSPI         uint64
 	responderSPI         uint64
 	deviceIdentity       string
 	nextMessageID        uint32
+	nextPeerMessageID    uint32
+	lastInvalidMessageID time.Time
 	lastProtectedRx      time.Time
 	lastProtectedTx      time.Time
+	ikeSAExpiresAt       time.Time
+	ikeSARekeyAt         time.Time
+	ikeSAByteRekeyAt     uint64
+	ikeSAByteExpiresAt   uint64
+	ikeSAInboundBytes    uint64
+	ikeSAOutboundBytes   uint64
+	ikeSARekeying        bool
+	simultaneousIKESA    simultaneousIKESARekey
+	childSAExpiresAt     time.Time
+	childSARekeyAt       time.Time
+	childSAByteRekeyAt   uint64
+	childSAByteExpiresAt uint64
+	childSAInboundBytes  uint64
+	childSAOutboundBytes uint64
+	childSARekeying      bool
+	simultaneousChildSA  simultaneousChildSARekey
 	livenessTimeout      time.Duration
 	natKeepaliveInterval time.Duration
-	informWaiters        map[uint32]chan inboundIKE
+	informWaiters        map[ikeMessageKey]chan inboundIKE
 	informResponses      map[uint32][]byte
+	informResponseReqs   map[uint32][]byte
+	ikeRequestGate       chan struct{}
+	rekeyWake            chan struct{}
 
 	attachmentsMu sync.RWMutex
 	attachments   []*sessionAttachment
@@ -104,11 +153,54 @@ type inboundPacket struct {
 type inboundIKE struct {
 	data []byte
 	addr *net.UDPAddr
+	err  error
+}
+
+type retiredChildSA struct {
+	inbound        esp.Codec
+	info           Info
+	outboundSPI    uint32
+	replay         esp.ReplayWindow
+	expiresAt      time.Time
+	protectedBytes uint64
+	byteExpiresAt  uint64
+}
+
+type retiredIKESA struct {
+	ike               *ikeCrypto
+	localInitiator    bool
+	initiatorSPI      uint64
+	responderSPI      uint64
+	peer              *net.UDPAddr
+	nextPeerMessageID uint32
+	responses         map[uint32][]byte
+	responseReqs      map[uint32][]byte
+	expiresAt         time.Time
+}
+
+type pendingChildSA struct {
+	ready      bool
+	info       Info
+	outbound   esp.Codec
+	oldInbound uint32
+}
+
+type simultaneousChildSARekey struct {
+	ready bool
+	peer  childSARekeyResult
+}
+
+type simultaneousIKESARekey struct {
+	ready bool
+	peer  ikeSARekeyResult
 }
 
 const (
 	defaultCloseTimeout = 5 * time.Second
 	outerReadPollDelay  = 250 * time.Millisecond
+	maxUDPPacketSize    = 64 * 1024
+	childSADrainWindow  = 2 * time.Minute
+	ikeSADrainWindow    = 2 * time.Minute
 )
 
 func Dial(ctx context.Context, cfg Config) (*Session, error) {
@@ -134,6 +226,7 @@ func handshakeConfig(cfg Config) handshake.Config {
 	return handshake.Config{
 		LocalAddr:                cfg.LocalAddr,
 		RemoteAddr:               cfg.RemoteAddr,
+		APN:                      cfg.APN,
 		InitialPort:              cfg.InitialPort,
 		NATTPort:                 cfg.NATTPort,
 		LocalSIPPort:             cfg.LocalSIPPort,
@@ -146,33 +239,59 @@ func handshakeConfig(cfg Config) handshake.Config {
 		ChildIntegrity:           append([]uint16(nil), cfg.ChildIntegrity...),
 		PCSCFIPv4ConfigAttribute: cfg.PCSCFIPv4ConfigAttribute,
 		PCSCFIPv6ConfigAttribute: cfg.PCSCFIPv6ConfigAttribute,
+		PCSCFRestoration:         !cfg.DisablePCSCFRestoration,
+		PDUSessionID:             cfg.PDUSessionID,
 		NATKeepaliveInterval:     cfg.NATKeepaliveInterval,
+		LivenessTimeout:          cfg.LivenessTimeout,
 		IKERetransmitDelays:      append([]time.Duration(nil), cfg.IKERetransmitDelays...),
 	}
 }
 
 func handshakeInfo(info Info) handshake.Info {
 	return handshake.Info{
-		InnerIP:          append(net.IP(nil), info.InnerIP...),
-		PCSCFIP:          append(net.IP(nil), info.PCSCFIP...),
-		ESPInitiatorSPI:  info.ESPInitiatorSPI,
-		ESPResponderSPI:  info.ESPResponderSPI,
-		Encryption:       info.Encryption,
-		EncryptionKeyLen: info.EncryptionKeyLen,
-		Integrity:        info.Integrity,
+		InnerIP:                   append(net.IP(nil), info.InnerIP...),
+		PCSCFIP:                   append(net.IP(nil), info.PCSCFIP...),
+		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
+		ESPInitiatorSPI:           info.ESPInitiatorSPI,
+		ESPResponderSPI:           info.ESPResponderSPI,
+		Encryption:                info.Encryption,
+		EncryptionKeyLen:          info.EncryptionKeyLen,
+		Integrity:                 info.Integrity,
+		InitiatorTrafficSelectors: cloneTrafficSelectors(info.InitiatorTrafficSelectors),
+		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
+		PDUSessionID:              info.PDUSessionID,
+		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
+		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
 	}
 }
 
 func infoFromHandshake(info handshake.Info) Info {
 	return Info{
-		InnerIP:          append(net.IP(nil), info.InnerIP...),
-		PCSCFIP:          append(net.IP(nil), info.PCSCFIP...),
-		ESPInitiatorSPI:  info.ESPInitiatorSPI,
-		ESPResponderSPI:  info.ESPResponderSPI,
-		Encryption:       info.Encryption,
-		EncryptionKeyLen: info.EncryptionKeyLen,
-		Integrity:        info.Integrity,
+		InnerIP:                   append(net.IP(nil), info.InnerIP...),
+		PCSCFIP:                   append(net.IP(nil), info.PCSCFIP...),
+		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
+		ESPInitiatorSPI:           info.ESPInitiatorSPI,
+		ESPResponderSPI:           info.ESPResponderSPI,
+		Encryption:                info.Encryption,
+		EncryptionKeyLen:          info.EncryptionKeyLen,
+		Integrity:                 info.Integrity,
+		InitiatorTrafficSelectors: cloneTrafficSelectors(info.InitiatorTrafficSelectors),
+		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
+		PDUSessionID:              info.PDUSessionID,
+		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
+		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
 	}
+}
+
+func cloneIPList(ips []net.IP) []net.IP {
+	if len(ips) == 0 {
+		return nil
+	}
+	cloned := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		cloned = append(cloned, append(net.IP(nil), ip...))
+	}
+	return cloned
 }
 
 func handshakeESPKeys(keys ESPKeys) handshake.ESPKeys {
@@ -185,7 +304,7 @@ func handshakeESPKeys(keys ESPKeys) handshake.ESPKeys {
 }
 
 func resolveDialRemote(cfg Config) (*net.UDPAddr, error) {
-	return resolveUDPAddr(cfg.RemoteAddr, defaultValue(cfg.InitialPort, 500))
+	return resolveUDPAddr(cfg.RemoteAddr, defaultValue(cfg.InitialPort, defaultIKEPort))
 }
 
 func openSessionPacketConn(cfg Config) (net.PacketConn, bool, error) {
@@ -218,15 +337,17 @@ func ensureDialContext(ctx context.Context, conn net.PacketConn, owned bool) err
 func newSession(cfg Config, conn net.PacketConn, owned bool, remote *net.UDPAddr) *Session {
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &Session{
-		conn:        conn,
-		owned:       owned,
-		outerRemote: remote,
-		outerNAT:    &net.UDPAddr{IP: append(net.IP(nil), remote.IP...), Port: cfg.NATTPort, Zone: remote.Zone},
-		cfg:         cfg,
-		logger:      cfg.Logger.With("component", "swu"),
-		closeCtx:    closeCtx,
-		closeCancel: closeCancel,
-		readCh:      make(chan inboundPacket, 16),
+		conn:           conn,
+		owned:          owned,
+		outerRemote:    remote,
+		outerNAT:       &net.UDPAddr{IP: append(net.IP(nil), remote.IP...), Port: cfg.NATTPort, Zone: remote.Zone},
+		cfg:            cfg,
+		logger:         cfg.Logger.With("component", "swu"),
+		closeCtx:       closeCtx,
+		closeCancel:    closeCancel,
+		readCh:         make(chan inboundPacket, 16),
+		ikeRequestGate: make(chan struct{}, 1),
+		rekeyWake:      make(chan struct{}, 1),
 	}
 }
 

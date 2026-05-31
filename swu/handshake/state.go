@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/damonto/vowifi-go/swu/ike"
 	"github.com/damonto/vowifi-go/usim"
 )
 
@@ -22,6 +23,7 @@ type Card interface {
 type Config struct {
 	LocalAddr                string
 	RemoteAddr               string
+	APN                      string
 	InitialPort              int
 	NATTPort                 int
 	LocalSIPPort             int
@@ -34,18 +36,27 @@ type Config struct {
 	ChildIntegrity           []uint16
 	PCSCFIPv4ConfigAttribute uint16
 	PCSCFIPv6ConfigAttribute uint16
+	PCSCFRestoration         bool
+	PDUSessionID             byte
 	NATKeepaliveInterval     time.Duration
+	LivenessTimeout          time.Duration
 	IKERetransmitDelays      []time.Duration
 }
 
 type Info struct {
-	InnerIP          net.IP
-	PCSCFIP          net.IP
-	ESPInitiatorSPI  uint32
-	ESPResponderSPI  uint32
-	Encryption       uint16
-	EncryptionKeyLen uint16
-	Integrity        uint16
+	InnerIP                   net.IP
+	PCSCFIP                   net.IP
+	PCSCFIPs                  []net.IP
+	ESPInitiatorSPI           uint32
+	ESPResponderSPI           uint32
+	Encryption                uint16
+	EncryptionKeyLen          uint16
+	Integrity                 uint16
+	InitiatorTrafficSelectors []ike.TrafficSelector
+	ResponderTrafficSelectors []ike.TrafficSelector
+	PDUSessionID              byte
+	SNSSAI                    []byte
+	SNSSAIPlmnID              []byte
 }
 
 type ESPKeys struct {

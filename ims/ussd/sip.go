@@ -48,7 +48,7 @@ func (s *Service) startBackgroundTask(task func()) {
 func buildCancel(invite sip.Message) sip.Message {
 	cancelMsg := sip.NewRequest("CANCEL", sip.RequestURI(invite))
 	cancelMsg.Headers.Add("Via", invite.Header("Via"))
-	cancelMsg.Headers.Add("Max-Forwards", nonEmpty(invite.Header("Max-Forwards"), "70"))
+	cancelMsg.Headers.Add("Max-Forwards", nonEmpty(invite.Header("Max-Forwards"), strconv.Itoa(sip.DefaultMaxForwards)))
 	for _, route := range invite.HeadersByName("Route") {
 		cancelMsg.Headers.Add("Route", route)
 	}
@@ -86,17 +86,16 @@ func defaultValue(value, fallback string) string {
 	return strings.TrimSpace(value)
 }
 
-func contactValue(state registration.State) string {
+func contactValue(state registration.State, networkInitiatedSupported bool) string {
 	params := []string{
-		`+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
-		`+g.3gpp.mid-call`,
-		`+g.3gpp.nw-init-ussi`,
-		`+g.3gpp.ps2cs-srvcc-orig-pre-alerting`,
-		`+g.3gpp.smsip`,
-		`+g.3gpp.srvcc-alerting`,
+		icsiRefFeatureTag,
+		midCallFeatureTag,
+		ps2csSRVCCOrigPreAlerting,
+		smsIPFeatureTag,
+		srvccAlertingFeatureTag,
 	}
-	if state.IMEI != "" {
-		params = append(params, fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, state.IMEI))
+	if networkInitiatedSupported {
+		params = append(params, nwInitUSSI)
 	}
 	params = append(params, "text")
 	return fmt.Sprintf("<%s>;%s", sipContactURI(state.ContactHost, state.MessagePort), strings.Join(params, ";"))

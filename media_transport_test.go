@@ -79,9 +79,36 @@ func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {
 
 func TestTunnelMediaTransportConfiguresRemoteAfterPrepare(t *testing.T) {
 	tests := []struct {
-		name string
+		name           string
+		cfg            imsvoice.MediaConfig
+		wantRTCPPort   int
+		wantRTCPMux    bool
+		wantRemoteRTCP *net.UDPAddr
 	}{
-		{name: "remote is initially empty then configured"},
+		{
+			name:         "remote is initially empty then configured",
+			cfg:          mediaConfigForTest(net.IPv4(192, 0, 2, 10), 50000),
+			wantRTCPPort: 50001,
+		},
+		{
+			name:           "explicit remote rtcp port",
+			cfg:            imsvoice.MediaConfig{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000, RemoteRTCPPort: 51000},
+			wantRTCPPort:   51000,
+			wantRemoteRTCP: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 51000},
+		},
+		{
+			name:           "explicit remote rtcp address",
+			cfg:            imsvoice.MediaConfig{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000, RemoteRTCPIP: net.IPv4(192, 0, 2, 20), RemoteRTCPPort: 51000},
+			wantRTCPPort:   51000,
+			wantRemoteRTCP: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 51000},
+		},
+		{
+			name:           "rtcp mux uses rtp remote",
+			cfg:            imsvoice.MediaConfig{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000, RemoteRTCPPort: 51000, RTCPMux: true},
+			wantRTCPPort:   50000,
+			wantRTCPMux:    true,
+			wantRemoteRTCP: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -95,7 +122,7 @@ func TestTunnelMediaTransportConfiguresRemoteAfterPrepare(t *testing.T) {
 			if got, ok := transport.RemoteAddr().(*net.UDPAddr); ok && got != nil {
 				t.Fatalf("RemoteAddr() = %v, want nil", got)
 			}
-			err := transport.ConfigureRemote(context.Background(), mediaConfigForTest(net.IPv4(192, 0, 2, 10), 50000))
+			err := transport.ConfigureRemote(context.Background(), tt.cfg)
 			if err != nil {
 				t.Fatalf("ConfigureRemote() error = %v", err)
 			}
@@ -105,6 +132,72 @@ func TestTunnelMediaTransportConfiguresRemoteAfterPrepare(t *testing.T) {
 			}
 			if remote.Port != 50000 || !remote.IP.Equal(net.IPv4(192, 0, 2, 10)) {
 				t.Fatalf("RemoteAddr() = %v, want 192.0.2.10:50000", remote)
+			}
+			transport.mu.Lock()
+			rtcpRemote := transport.remoteMediaAddrLocked(true)
+			rtcpMux := transport.rtcpMux
+			transport.mu.Unlock()
+			if rtcpMux != tt.wantRTCPMux {
+				t.Fatalf("rtcpMux = %v, want %v", rtcpMux, tt.wantRTCPMux)
+			}
+			if rtcpRemote.Port != tt.wantRTCPPort {
+				t.Fatalf("remote rtcp port = %d, want %d", rtcpRemote.Port, tt.wantRTCPPort)
+			}
+			if tt.wantRemoteRTCP != nil && !mediaAddrMatches(rtcpRemote, tt.wantRemoteRTCP) {
+				t.Fatalf("remote rtcp addr = %v, want %v", rtcpRemote, tt.wantRemoteRTCP)
+			}
+		})
+	}
+}
+
+func TestTunnelMediaTransportHandlesRTCPMux(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  []byte
+		wantRTCP bool
+		wantBye  bool
+	}{
+		{name: "rtp on mux port", payload: []byte{0x80, 104, 0, 1, 0, 0, 0, 1}},
+		{name: "rtcp on mux port", payload: []byte{0x80, 201, 0, 1, 0, 0, 0, 1}, wantRTCP: true},
+		{name: "rtcp bye on mux port", payload: []byte{0x81, 203, 0, 1, 0, 0, 0, 1}, wantRTCP: true, wantBye: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan imsvoice.MediaPacket, 1)
+			transport := &tunnelMediaTransport{
+				logger:   testMediaLogger(),
+				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+				remote:   &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
+				rtcpMux:  true,
+				readCh:   make(chan tunnelMediaPacket, 1),
+				rtcpCh:   make(chan tunnelMediaPacket, 1),
+				done:     make(chan struct{}),
+				onPacket: func(packet imsvoice.MediaPacket) { events <- packet },
+			}
+			if !transport.HandleInnerPacket(packet.InnerPacket{
+				UDP: &packet.UDPSegment{
+					Src:     &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
+					Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+					Payload: tt.payload,
+				},
+			}) {
+				t.Fatal("HandleInnerPacket() = false, want true")
+			}
+			got := <-events
+			if got.RTCP != tt.wantRTCP {
+				t.Fatalf("MediaPacket.RTCP = %v, want %v", got.RTCP, tt.wantRTCP)
+			}
+			if got.RTCPBye != tt.wantBye {
+				t.Fatalf("MediaPacket.RTCPBye = %v, want %v", got.RTCPBye, tt.wantBye)
+			}
+			if tt.wantRTCP {
+				if len(transport.rtcpCh) != 1 || len(transport.readCh) != 0 {
+					t.Fatalf("queues = rtp:%d rtcp:%d, want rtcp only", len(transport.readCh), len(transport.rtcpCh))
+				}
+				return
+			}
+			if len(transport.readCh) != 1 || len(transport.rtcpCh) != 0 {
+				t.Fatalf("queues = rtp:%d rtcp:%d, want rtp only", len(transport.readCh), len(transport.rtcpCh))
 			}
 		})
 	}

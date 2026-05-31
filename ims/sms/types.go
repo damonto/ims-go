@@ -13,12 +13,14 @@ import (
 )
 
 type Config struct {
-	ServiceCenter       string
-	SubmitReportTimeout time.Duration
-	OnIncoming          func(Incoming)
-	OnStatusReport      func(StatusReport)
-	OnError             func(error)
-	Logger              *slog.Logger
+	ServiceCenter         string
+	SubmitReportTimeout   time.Duration
+	DeliveryReportTimeout time.Duration
+	RequestStatusReport   bool
+	OnIncoming            func(Incoming)
+	OnStatusReport        func(StatusReport)
+	OnError               func(error)
+	Logger                *slog.Logger
 }
 
 type Card interface {
@@ -53,28 +55,29 @@ type Service struct {
 }
 
 type SubmissionSegment struct {
-	Index       int
-	Count       int
-	CallID      string
-	RPReference byte
-	TPReference byte
-	SubmittedAt time.Time
+	Index         int
+	Count         int
+	Recipient     string
+	ServiceCenter string
+	CallID        string
+	RPReference   byte
+	TPReference   byte
+	SubmittedAt   time.Time
 }
 
 type outboundSegment struct {
-	index            int
-	count            int
-	to               string
-	smscAddress      string
-	target           string
-	part             userDataPart
-	rpRef            byte
-	tpRef            byte
-	retryCount       int
-	rejectDuplicates bool
-	callID           string
-	msg              sip.Message
-	reportCh         <-chan rpMessage
+	index       int
+	count       int
+	to          string
+	recipient   string
+	smscAddress string
+	target      string
+	part        userDataPart
+	rpRef       byte
+	tpRef       byte
+	callID      string
+	msg         sip.Message
+	reportCh    <-chan rpMessage
 }
 
 type pendingEntry struct {
@@ -100,9 +103,11 @@ type submitResponse struct {
 }
 
 type concatState struct {
-	total     int
-	parts     map[int]string
-	updatedAt time.Time
+	total       int
+	parts       map[int]string
+	rawTPDUs    map[int][]byte
+	reservedMTI bool
+	updatedAt   time.Time
 }
 
 type serviceCentre struct {
@@ -119,11 +124,21 @@ type ppDownloader interface {
 }
 
 const (
-	concatRetention       = 10 * time.Minute
-	submitRetention       = 5 * time.Minute
-	deliveryReportTimeout = 30 * time.Second
+	concatRetention   = 10 * time.Minute
+	submitRetention   = 5 * time.Minute
+	defaultTR1Timeout = 40 * time.Second
+	defaultTR2Timeout = 15 * time.Second
+)
+
+const smsAcceptContact = "*;+g.3gpp.smsip;require;explicit"
+
+const (
+	sipStatusOK                   = 200
+	sipStatusAccepted             = 202
+	sipStatusUnsupportedMediaType = 415
+	sipStatusNotAcceptableHere    = 488
 )
 
 var submitReportTimeoutNanos atomic.Int64
 
-const defaultSubmitReportTimeout = 130 * time.Second
+const defaultSubmitReportTimeout = defaultTR1Timeout

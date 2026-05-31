@@ -15,16 +15,52 @@ import (
 const (
 	infoPackage                 = "g.3gpp.ussd"
 	xmlContentType              = "application/vnd.3gpp.ussd+xml"
+	sdpContentType              = "application/sdp"
 	mixedMultipartType          = "multipart/mixed"
+	ussdAcceptHeader            = xmlContentType + ", " + sdpContentType + ", " + mixedMultipartType
+	infoPackageDisposition      = "info-package"
+	renderOptionalDisposition   = "render;handling=optional"
+	handlingDispositionParam    = "handling"
+	optionalHandlingDisposition = "optional"
+	mmtelICSIEncoded            = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+	icsiRefFeatureTag           = `+g.3gpp.icsi-ref="` + mmtelICSIEncoded + `"`
+	midCallFeatureTag           = "+g.3gpp.mid-call"
+	nwInitUSSI                  = "+g.3gpp.nw-init-ussi"
+	ps2csSRVCCOrigPreAlerting   = "+g.3gpp.ps2cs-srvcc-orig-pre-alerting"
+	smsIPFeatureTag             = "+g.3gpp.smsip"
+	srvccAlertingFeatureTag     = "+g.3gpp.srvcc-alerting"
 	defaultLang                 = "en"
+	androidUndefinedLang        = "undefined"
 	defaultQueuedRequestTimeout = 30 * time.Second
+	inviteOKWriteTimeout        = 5 * time.Second
+	inviteOKTimeoutMultiplier   = 64
+)
+
+const (
+	ErrorCodeUnspecified         = 1
+	ErrorCodeLanguageUnsupported = 2
+	ErrorCodeUnexpectedDataValue = 3
+)
+
+const (
+	sipStatusTrying                      = 100
+	sipStatusOK                          = 200
+	sipStatusBadRequest                  = 400
+	sipStatusNotFound                    = 404
+	sipStatusUnsupportedMediaType        = 415
+	sipStatusBadInfoPackage              = 469
+	sipStatusCallTransactionDoesNotExist = 481
+	sipStatusBusyHere                    = 486
+	sipStatusNotAcceptableHere           = 488
+	sipStatusServerInternalError         = 500
 )
 
 type Config struct {
-	Language           string
-	PhoneContextDomain string
-	OnIncoming         func(*Session, Message)
-	Logger             *slog.Logger
+	Language                  string
+	PhoneContextDomain        string
+	NetworkInitiatedSupported bool
+	OnIncoming                func(*Session, Message)
+	Logger                    *slog.Logger
 }
 
 type Message struct {
@@ -68,14 +104,17 @@ type Session struct {
 	targetURI        string
 	routeSet         []string
 	inviteSeq        int64
+	localCSeq        int64
 	language         string
 	networkInitiated bool
 	responseKind     dialogKind
 	inviteOK         sip.Message
+	inviteOKStop     chan struct{}
 	ackCh            chan struct{}
 	acked            bool
 	awaitingInfo     bool
 	events           chan Message
+	remoteCSeq       int64
 	remoteCSeqs      map[string]struct{}
 	pendingInitial   *queuedRequest
 	deliveringInvite bool
@@ -98,7 +137,7 @@ type xmlPayload struct {
 	XMLName   xml.Name `xml:"ussd-data"`
 	Language  string   `xml:"language,omitempty"`
 	String    string   `xml:"ussd-string,omitempty"`
-	ErrorCode int      `xml:"error-code,omitempty"`
+	ErrorCode *int     `xml:"error-code,omitempty"`
 	AnyExt    *anyExt  `xml:"anyExt,omitempty"`
 }
 
