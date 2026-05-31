@@ -112,15 +112,14 @@ type Session struct {
 	inviteOKStop     chan struct{}
 	ackCh            chan struct{}
 	acked            bool
-	awaitingInfo     bool
+	state            sessionState
 	events           chan Message
 	remoteCSeq       int64
 	remoteCSeqs      map[string]struct{}
 	pendingInitial   *queuedRequest
 	deliveringInvite bool
 
-	mu     sync.Mutex
-	closed bool
+	mu sync.Mutex
 }
 
 type USSDSession = Session
@@ -131,6 +130,16 @@ const (
 	dialogKindNone dialogKind = iota
 	dialogKindRequest
 	dialogKindNotify
+)
+
+type sessionState uint8
+
+const (
+	sessionStateActive sessionState = iota
+	sessionStateWaitingACK
+	sessionStateInfoInFlight
+	sessionStateWaitingACKInfoInFlight
+	sessionStateClosed
 )
 
 type xmlPayload struct {

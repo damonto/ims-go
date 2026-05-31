@@ -549,6 +549,181 @@ func TestRekeyReleaseWakesLifecycleWaiters(t *testing.T) {
 	}
 }
 
+func TestIKESALifecycleState(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*Session)
+		want    ikeSALifecycleState
+	}{
+		{
+			name: "none without ike crypto",
+			want: ikeSALifecycleNone,
+		},
+		{
+			name: "active",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+			},
+			want: ikeSALifecycleActive,
+		},
+		{
+			name: "rekeying",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+				session.ikeSARekeying = true
+			},
+			want: ikeSALifecycleRekeying,
+		},
+		{
+			name: "pending install wins over rekeying",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+				session.ikeSARekeying = true
+				session.pendingIKESAReady = true
+			},
+			want: ikeSALifecyclePendingInstall,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := &Session{}
+			if tt.prepare != nil {
+				tt.prepare(session)
+			}
+			if got := session.ikeSALifecycleLocked(); got != tt.want {
+				t.Fatalf("ikeSALifecycleLocked() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChildSALifecycleState(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*Session)
+		want    childSALifecycleState
+	}{
+		{
+			name: "none without connected child sa",
+			want: childSALifecycleNone,
+		},
+		{
+			name: "active",
+			prepare: func(session *Session) {
+				session.connected = true
+			},
+			want: childSALifecycleActive,
+		},
+		{
+			name: "rekeying",
+			prepare: func(session *Session) {
+				session.connected = true
+				session.childSARekeying = true
+			},
+			want: childSALifecycleRekeying,
+		},
+		{
+			name: "pending outbound wins over rekeying",
+			prepare: func(session *Session) {
+				session.connected = true
+				session.childSARekeying = true
+				session.pendingChildSA.ready = true
+			},
+			want: childSALifecyclePendingOutbound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := &Session{}
+			if tt.prepare != nil {
+				tt.prepare(session)
+			}
+			if got := session.childSALifecycleLocked(); got != tt.want {
+				t.Fatalf("childSALifecycleLocked() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBeginRekeyRejectsPendingLifecycleState(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*Session)
+		begin   func(*Session) (func(), error)
+		wantErr error
+	}{
+		{
+			name: "ike rekey rejects pending ike install",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+				session.pendingIKESAReady = true
+			},
+			begin: func(session *Session) (func(), error) {
+				_, release, err := session.beginIKESARekey()
+				return release, err
+			},
+			wantErr: errIKESARekeyInProgress,
+		},
+		{
+			name: "ike rekey rejects pending child outbound",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+				session.connected = true
+				session.pendingChildSA.ready = true
+			},
+			begin: func(session *Session) (func(), error) {
+				_, release, err := session.beginIKESARekey()
+				return release, err
+			},
+			wantErr: errChildSARekeyInProgress,
+		},
+		{
+			name: "child rekey rejects pending ike install",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+				session.pendingIKESAReady = true
+			},
+			begin: func(session *Session) (func(), error) {
+				_, release, err := session.beginChildSARekey()
+				return release, err
+			},
+			wantErr: errIKESARekeyInProgress,
+		},
+		{
+			name: "child rekey rejects pending child outbound",
+			prepare: func(session *Session) {
+				session.ike = testIKECrypto()
+				session.connected = true
+				session.pendingChildSA.ready = true
+			},
+			begin: func(session *Session) (func(), error) {
+				_, release, err := session.beginChildSARekey()
+				return release, err
+			},
+			wantErr: errChildSARekeyInProgress,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
+			session.mu.Lock()
+			tt.prepare(session)
+			session.mu.Unlock()
+
+			release, err := tt.begin(session)
+			if release != nil {
+				release()
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("begin rekey error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestNextRekeyLoopDeadline(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	tests := []struct {

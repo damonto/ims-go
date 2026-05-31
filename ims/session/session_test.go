@@ -2053,6 +2053,62 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 	}
 }
 
+func TestInviteTransactionTimerBStopsAfterProvisional(t *testing.T) {
+	timers := TransactionTimers{
+		T1: 10 * time.Millisecond,
+		T2: 20 * time.Millisecond,
+		T4: 10 * time.Millisecond,
+		TB: 30 * time.Millisecond,
+		TD: 30 * time.Millisecond,
+	}
+
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{TransactionTimers: timers}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sess.Run(runCtx)
+	}()
+	if err := sess.WaitStarted(context.Background()); err != nil {
+		t.Fatalf("WaitStarted() error = %v", err)
+	}
+
+	req := newRequest("INVITE", "call-proceeding", "1 INVITE")
+	transport.onWrite = func(data []byte) {
+		msg, err := sip.ParseMessage(data)
+		if err != nil {
+			t.Fatalf("ParseMessage() error = %v", err)
+		}
+		if msg.Method() != "INVITE" {
+			return
+		}
+		transport.queueRead(newResponse(req, 180, "Ringing"))
+		time.AfterFunc(2*timers.TB, func() {
+			transport.queueRead(newResponse(req, 200, "OK"))
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := sess.Exchange(ctx, req)
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	if resp.StatusCode() != 200 {
+		t.Fatalf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+
+	runCancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestInviteTransactionDefaultTimerDUsesIMSProfile(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
 	sess, err := Open(Config{}, transport)

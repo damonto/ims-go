@@ -220,20 +220,20 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.childSARekeying {
-		return childSARekeyState{}, nil, errChildSARekeyInProgress
-	}
-	if s.ikeSARekeying {
+	if state := s.ikeSALifecycleLocked(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
 		return childSARekeyState{}, nil, errIKESARekeyInProgress
 	}
-	if s.ikeSAExpiredLocked(time.Now()) {
-		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errIKESAExpired)
-	}
-	if !s.connected {
+	switch state := s.childSALifecycleLocked(); state {
+	case childSALifecycleRekeying, childSALifecyclePendingOutbound:
+		return childSARekeyState{}, nil, errChildSARekeyInProgress
+	case childSALifecycleNone:
 		if err := s.disconnectedTunnelErrLocked(); err != nil {
 			return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", err)
 		}
 		return childSARekeyState{}, nil, errors.New("rekeying child sa: child sa is not established")
+	}
+	if s.ikeSAExpiredLocked(time.Now()) {
+		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errIKESAExpired)
 	}
 	if s.childSAExpiredLocked(time.Now()) {
 		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errChildSAExpired)

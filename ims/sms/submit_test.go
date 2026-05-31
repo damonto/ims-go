@@ -68,6 +68,116 @@ func TestCompletePendingAllowsReferenceFallbackForTelURI(t *testing.T) {
 	}
 }
 
+func TestMOTransferStateMachine(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps func(*testing.T, *Service)
+	}{
+		{
+			name: "send without pending returns idle",
+			steps: func(t *testing.T, svc *Service) {
+				if err := svc.beginMOTransfer(); err != nil {
+					t.Fatalf("beginMOTransfer() error = %v", err)
+				}
+				if svc.moState != moTransferSending {
+					t.Fatalf("moState after begin = %v, want %v", svc.moState, moTransferSending)
+				}
+				if err := svc.beginMOTransfer(); err == nil {
+					t.Fatal("second beginMOTransfer() error = nil, want in-progress error")
+				}
+				svc.finishMOSend()
+				if svc.moState != moTransferIdle {
+					t.Fatalf("moState after finish = %v, want %v", svc.moState, moTransferIdle)
+				}
+			},
+		},
+		{
+			name: "pending reports keep transfer active",
+			steps: func(t *testing.T, svc *Service) {
+				if err := svc.beginMOTransfer(); err != nil {
+					t.Fatalf("beginMOTransfer() error = %v", err)
+				}
+				svc.moPending = 2
+				svc.finishMOSend()
+				if svc.moState != moTransferWaitingReports {
+					t.Fatalf("moState after finish = %v, want %v", svc.moState, moTransferWaitingReports)
+				}
+				svc.completeMOPending()
+				if svc.moState != moTransferWaitingReports {
+					t.Fatalf("moState after first report = %v, want %v", svc.moState, moTransferWaitingReports)
+				}
+				svc.completeMOPending()
+				if svc.moState != moTransferIdle {
+					t.Fatalf("moState after final report = %v, want %v", svc.moState, moTransferIdle)
+				}
+			},
+		},
+		{
+			name: "report during send waits for send completion",
+			steps: func(t *testing.T, svc *Service) {
+				if err := svc.beginMOTransfer(); err != nil {
+					t.Fatalf("beginMOTransfer() error = %v", err)
+				}
+				svc.moPending = 1
+				svc.completeMOPending()
+				if svc.moState != moTransferSending {
+					t.Fatalf("moState after early report = %v, want %v", svc.moState, moTransferSending)
+				}
+				svc.finishMOSend()
+				if svc.moState != moTransferIdle {
+					t.Fatalf("moState after finish = %v, want %v", svc.moState, moTransferIdle)
+				}
+			},
+		},
+		{
+			name: "closed rejects begin",
+			steps: func(t *testing.T, svc *Service) {
+				svc.closed = true
+				if err := svc.beginMOTransfer(); err == nil {
+					t.Fatal("beginMOTransfer() error = nil, want closed error")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.steps(t, &Service{})
+		})
+	}
+}
+
+func TestMTTransferStateMachine(t *testing.T) {
+	tests := []struct {
+		name   string
+		closed bool
+		want   bool
+		state  mtTransferState
+	}{
+		{name: "idle starts", want: true, state: mtTransferActive},
+		{name: "closed rejects", closed: true, state: mtTransferIdle},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &Service{closed: tt.closed}
+			if got := svc.beginMTTransfer(); got != tt.want {
+				t.Fatalf("beginMTTransfer() = %t, want %t", got, tt.want)
+			}
+			if svc.mtState != tt.state {
+				t.Fatalf("mtState after begin = %v, want %v", svc.mtState, tt.state)
+			}
+			if tt.want && svc.beginMTTransfer() {
+				t.Fatal("second beginMTTransfer() = true, want false")
+			}
+			svc.endMTTransfer()
+			if svc.mtState != mtTransferIdle {
+				t.Fatalf("mtState after end = %v, want %v", svc.mtState, mtTransferIdle)
+			}
+		})
+	}
+}
+
 func submitReportMessage(inReplyTo string) sip.Message {
 	msg := sip.NewRequest("MESSAGE", "sip:alice@example.net")
 	msg.Headers.Add("Call-ID", "submit-report")

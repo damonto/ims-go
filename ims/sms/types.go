@@ -47,10 +47,9 @@ type Service struct {
 	submitted map[string]submittedEntry
 	recent    map[string]time.Time
 	concat    map[string]concatState
-	moActive  bool
-	moSending bool
+	moState   moTransferState
 	moPending int
-	mtActive  bool
+	mtState   mtTransferState
 	closed    bool
 }
 
@@ -114,6 +113,21 @@ type serviceCentre struct {
 	target  string
 	address string
 }
+
+type moTransferState uint8
+
+const (
+	moTransferIdle moTransferState = iota
+	moTransferSending
+	moTransferWaitingReports
+)
+
+type mtTransferState uint8
+
+const (
+	mtTransferIdle mtTransferState = iota
+	mtTransferActive
+)
 
 type serviceCentreProvider interface {
 	ServiceCentre() usim.ServiceCentre

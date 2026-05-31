@@ -185,6 +185,24 @@ type pendingChildSA struct {
 	oldInbound uint32
 }
 
+type ikeSALifecycleState uint8
+
+const (
+	ikeSALifecycleNone ikeSALifecycleState = iota
+	ikeSALifecycleActive
+	ikeSALifecycleRekeying
+	ikeSALifecyclePendingInstall
+)
+
+type childSALifecycleState uint8
+
+const (
+	childSALifecycleNone childSALifecycleState = iota
+	childSALifecycleActive
+	childSALifecycleRekeying
+	childSALifecyclePendingOutbound
+)
+
 type simultaneousChildSARekey struct {
 	ready bool
 	peer  childSARekeyResult

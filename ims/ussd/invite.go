@@ -180,7 +180,7 @@ func (s *Service) handleExistingInvite(ctx context.Context, req session.Request)
 
 func (s *Session) startInviteOKRetransmit(req session.Request, resp sip.Message) {
 	s.mu.Lock()
-	if s.inviteOKStop != nil || s.closed {
+	if s.inviteOKStop != nil || s.state == sessionStateClosed {
 		s.mu.Unlock()
 		return
 	}
@@ -243,6 +243,7 @@ func (s *Service) newIncomingSession(msg sip.Message, payload Message) *Session 
 		networkInitiated: true,
 		responseKind:     kindFromPayload(payload),
 		ackCh:            make(chan struct{}),
+		state:            sessionStateWaitingACK,
 		events:           make(chan Message, 16),
 		remoteCSeqs:      map[string]struct{}{"INVITE|" + msg.Header("CSeq"): {}},
 	}

@@ -41,6 +41,16 @@ type clientTransaction struct {
 	opts       ExchangeOptions
 }
 
+type clientTransactionState uint8
+
+const (
+	clientTransactionCalling clientTransactionState = iota
+	clientTransactionTrying
+	clientTransactionProceeding
+	clientTransactionCompleted
+	clientTransactionTerminated
+)
+
 type transactionResult struct {
 	msg sip.Message
 	err error
@@ -209,7 +219,7 @@ func (tx *clientTransaction) runNonInvite() {
 	defer timerF.Stop()
 
 	retransmitDelay := tx.timers.T1
-	proceeding := false
+	state := clientTransactionTrying
 	var timerEC <-chan time.Time
 	timerE := (*time.Timer)(nil)
 	if !tx.reliable {
@@ -229,7 +239,7 @@ func (tx *clientTransaction) runNonInvite() {
 			if !tx.resend() {
 				return
 			}
-			if proceeding {
+			if state == clientTransactionProceeding {
 				retransmitDelay = tx.timers.T2
 			} else if retransmitDelay < tx.timers.T2 {
 				retransmitDelay *= 2
@@ -248,9 +258,10 @@ func (tx *clientTransaction) runNonInvite() {
 					tx.abort(err)
 					return
 				}
-				proceeding = true
+				state = clientTransactionProceeding
 				continue
 			}
+			state = clientTransactionCompleted
 			tx.deliverResponse(resp)
 			if tx.reliable {
 				tx.terminate()
@@ -267,6 +278,8 @@ func (tx *clientTransaction) runInvite() {
 	defer timerB.Stop()
 
 	retransmitDelay := tx.timers.T1
+	state := clientTransactionCalling
+	timerBC := timerB.C
 	var timerAC <-chan time.Time
 	timerA := (*time.Timer)(nil)
 	if !tx.reliable {
@@ -279,7 +292,10 @@ func (tx *clientTransaction) runInvite() {
 		select {
 		case <-tx.cancelCh:
 			return
-		case <-timerB.C:
+		case <-timerBC:
+			if state != clientTransactionCalling {
+				continue
+			}
 			tx.abort(fmt.Errorf("waiting for %s response: transaction timeout", tx.method))
 			return
 		case <-timerAC:
@@ -299,17 +315,23 @@ func (tx *clientTransaction) runInvite() {
 					tx.abort(err)
 					return
 				}
+				state = clientTransactionProceeding
 				timerAC = nil
 				stopTimer(timerA)
+				timerBC = nil
+				stopTimer(timerB)
 			case resp.StatusCode() >= 200 && resp.StatusCode() < 300:
+				state = clientTransactionTerminated
 				tx.deliverResponse(resp)
 				tx.terminate()
 				return
 			default:
+				state = clientTransactionCompleted
 				ack := buildInviteErrorACK(tx.request, resp)
 				tx.deliverResponse(resp)
 				tx.sendACK(ack)
 				if tx.reliable {
+					state = clientTransactionTerminated
 					tx.terminate()
 					return
 				}

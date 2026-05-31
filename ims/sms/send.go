@@ -131,20 +131,20 @@ func (s *Service) beginMOTransfer() error {
 	if s.closed {
 		return errors.New("sending SMS: service is closed")
 	}
-	if s.moActive {
+	if s.moState != moTransferIdle {
 		return errors.New("sending SMS: mobile originated transfer in progress")
 	}
-	s.moActive = true
-	s.moSending = true
+	s.moState = moTransferSending
 	s.moPending = 0
 	return nil
 }
 
 func (s *Service) finishMOSend() {
 	s.mu.Lock()
-	s.moSending = false
 	if s.moPending == 0 {
-		s.moActive = false
+		s.moState = moTransferIdle
+	} else {
+		s.moState = moTransferWaitingReports
 	}
 	s.mu.Unlock()
 }
@@ -154,8 +154,8 @@ func (s *Service) completeMOPending() {
 	if s.moPending > 0 {
 		s.moPending--
 	}
-	if !s.moSending && s.moPending == 0 {
-		s.moActive = false
+	if s.moState == moTransferWaitingReports && s.moPending == 0 {
+		s.moState = moTransferIdle
 	}
 	s.mu.Unlock()
 }
@@ -163,16 +163,16 @@ func (s *Service) completeMOPending() {
 func (s *Service) beginMTTransfer() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.mtActive {
+	if s.closed || s.mtState != mtTransferIdle {
 		return false
 	}
-	s.mtActive = true
+	s.mtState = mtTransferActive
 	return true
 }
 
 func (s *Service) endMTTransfer() {
 	s.mu.Lock()
-	s.mtActive = false
+	s.mtState = mtTransferIdle
 	s.mu.Unlock()
 }
 

@@ -716,11 +716,48 @@ func (c *Call) setState(state CallState, cause string) {
 		c.mu.Unlock()
 		return
 	}
+	if !callCanTransition(c.state, state) {
+		from := c.state
+		id := c.id
+		c.mu.Unlock()
+		c.service.logger.Warn("ignoring invalid call state transition", "call_id", id, "from", from, "to", state, "cause", cause)
+		return
+	}
 	c.state = state
 	id := c.id
 	hold := normalizeHoldState(c.hold)
 	c.mu.Unlock()
 	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause, At: time.Now()})
+}
+
+func callCanTransition(from, to CallState) bool {
+	if from == "" || from == to {
+		return true
+	}
+	if from == CallStateEnded || from == CallStateFailed {
+		return false
+	}
+	if to == CallStateEnded || to == CallStateFailed {
+		return true
+	}
+	switch from {
+	case CallStateDialing:
+		return to == CallStateRinging || to == CallStateEarlyMedia || to == CallStateConfirmed || to == CallStateEnding
+	case CallStateRinging:
+		return to == CallStateEarlyMedia || to == CallStateAnswering || to == CallStateConfirmed || to == CallStateActive || to == CallStateEnding
+	case CallStateEarlyMedia:
+		return to == CallStateRinging || to == CallStateConfirmed || to == CallStateActive || to == CallStateEnding
+	case CallStateAnswering:
+		return to == CallStateActive || to == CallStateEnding
+	case CallStateConfirmed:
+		return to == CallStateActive || to == CallStateEnding
+	case CallStateActive:
+		return to == CallStateEnding
+	case CallStateEnding:
+		return false
+	default:
+		return true
+	}
 }
 
 func (c *Call) finish(state CallState, cause string) {

@@ -38,8 +38,8 @@ const (
 	backoffTimerDataLen byte = 2
 	backoffTimerLen     byte = 1
 
-	gprsTimer3ValueMask byte = 0x1f
-	gprsTimer3UnitShift      = 5
+	gprsTimer3ValueMask = 0x1f
+	gprsTimer3UnitShift = 5
 
 	gprsTimer3Unit10Minutes byte = 0
 	gprsTimer3Unit1Hour     byte = 1

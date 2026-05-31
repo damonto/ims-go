@@ -1359,6 +1359,64 @@ func TestStartUSSDSessionINFOGate(t *testing.T) {
 	}
 }
 
+func TestUSSDSessionInfoExchangeStateTransitions(t *testing.T) {
+	tests := []struct {
+		name         string
+		start        sessionState
+		wantBeginErr bool
+		wantBegin    sessionState
+		wantRelease  sessionState
+	}{
+		{name: "active starts info", start: sessionStateActive, wantBegin: sessionStateInfoInFlight, wantRelease: sessionStateActive},
+		{name: "waiting ack keeps ack gate", start: sessionStateWaitingACK, wantBegin: sessionStateWaitingACKInfoInFlight, wantRelease: sessionStateWaitingACK},
+		{name: "info in flight rejects second info", start: sessionStateInfoInFlight, wantBeginErr: true, wantBegin: sessionStateInfoInFlight, wantRelease: sessionStateActive},
+		{name: "closed rejects info", start: sessionStateClosed, wantBeginErr: true, wantBegin: sessionStateClosed, wantRelease: sessionStateClosed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			us := &Session{state: tt.start}
+			err := us.beginInfoExchange("replying USSD")
+			if gotErr := err != nil; gotErr != tt.wantBeginErr {
+				t.Fatalf("beginInfoExchange() error = %v, wantErr %t", err, tt.wantBeginErr)
+			}
+			if us.state != tt.wantBegin {
+				t.Fatalf("state after begin = %v, want %v", us.state, tt.wantBegin)
+			}
+			us.releaseInfoExchange()
+			if us.state != tt.wantRelease {
+				t.Fatalf("state after release = %v, want %v", us.state, tt.wantRelease)
+			}
+		})
+	}
+}
+
+func TestUSSDSessionACKStateTransitions(t *testing.T) {
+	tests := []struct {
+		name  string
+		start sessionState
+		want  sessionState
+	}{
+		{name: "waiting ack becomes active", start: sessionStateWaitingACK, want: sessionStateActive},
+		{name: "waiting ack with info keeps info gate", start: sessionStateWaitingACKInfoInFlight, want: sessionStateInfoInFlight},
+		{name: "active stays active", start: sessionStateActive, want: sessionStateActive},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			us := &Session{
+				state:  tt.start,
+				ackCh:  make(chan struct{}),
+				events: make(chan Message, 1),
+			}
+			us.markACK()
+			if us.state != tt.want {
+				t.Fatalf("state after ACK = %v, want %v", us.state, tt.want)
+			}
+		})
+	}
+}
+
 func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)

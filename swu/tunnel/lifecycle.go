@@ -239,6 +239,32 @@ func (s *Session) currentDisconnectedTunnelErr(action string) error {
 	return nil
 }
 
+func (s *Session) ikeSALifecycleLocked() ikeSALifecycleState {
+	if s.ike == nil {
+		return ikeSALifecycleNone
+	}
+	if s.pendingIKESAReady {
+		return ikeSALifecyclePendingInstall
+	}
+	if s.ikeSARekeying {
+		return ikeSALifecycleRekeying
+	}
+	return ikeSALifecycleActive
+}
+
+func (s *Session) childSALifecycleLocked() childSALifecycleState {
+	if !s.connected {
+		return childSALifecycleNone
+	}
+	if s.pendingChildSA.ready {
+		return childSALifecyclePendingOutbound
+	}
+	if s.childSARekeying {
+		return childSALifecycleRekeying
+	}
+	return childSALifecycleActive
+}
+
 func childSAExpiry(now time.Time, lifetime time.Duration) time.Time {
 	if lifetime <= 0 {
 		return time.Time{}

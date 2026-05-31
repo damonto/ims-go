@@ -148,7 +148,7 @@ func (s *Session) setLanguage(language string) {
 func (s *Session) ensureActive(action string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.state == sessionStateClosed {
 		return fmt.Errorf("%s: session is closed", action)
 	}
 	return nil
@@ -157,7 +157,7 @@ func (s *Session) ensureActive(action string) error {
 func (s *Session) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closed
+	return s.state == sessionStateClosed
 }
 
 func (s *Session) waitForACK(ctx context.Context, action string) error {
@@ -206,15 +206,26 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action string) 
 func (s *Session) beginInfoExchange(action string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.awaitingInfo {
+	switch s.state {
+	case sessionStateClosed:
+		return fmt.Errorf("%s: session is closed", action)
+	case sessionStateInfoInFlight, sessionStateWaitingACKInfoInFlight:
 		return fmt.Errorf("%s: awaiting remote INFO", action)
+	case sessionStateWaitingACK:
+		s.state = sessionStateWaitingACKInfoInFlight
+	default:
+		s.state = sessionStateInfoInFlight
 	}
-	s.awaitingInfo = true
 	return nil
 }
 
 func (s *Session) releaseInfoExchange() {
 	s.mu.Lock()
-	s.awaitingInfo = false
+	switch s.state {
+	case sessionStateInfoInFlight:
+		s.state = sessionStateActive
+	case sessionStateWaitingACKInfoInFlight:
+		s.state = sessionStateWaitingACK
+	}
 	s.mu.Unlock()
 }

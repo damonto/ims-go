@@ -325,13 +325,15 @@ func (s *Session) currentInformationalState() informationalState {
 }
 
 func (s *Session) currentInformationalStateLocked() informationalState {
+	ikeLifecycle := s.ikeSALifecycleLocked()
+	childLifecycle := s.childSALifecycleLocked()
 	return informationalState{
 		connected:         s.connected,
 		ike:               s.ike,
 		localInitiator:    s.ikeLocalInitiator,
-		ikeRekeying:       s.ikeSARekeying,
-		pendingIKESA:      s.pendingIKESAReady,
-		childRekeying:     s.childSARekeying,
+		ikeRekeying:       ikeLifecycle == ikeSALifecycleRekeying,
+		pendingIKESA:      ikeLifecycle == ikeSALifecyclePendingInstall,
+		childRekeying:     childLifecycle == childSALifecycleRekeying,
 		cfg:               s.cfg,
 		initiatorSPI:      s.initiatorSPI,
 		responderSPI:      s.responderSPI,
@@ -340,7 +342,7 @@ func (s *Session) currentInformationalStateLocked() informationalState {
 		info:              cloneInfo(s.tunnel),
 		inboundSPI:        s.tunnel.ESPInitiatorSPI,
 		outboundSPI:       s.tunnel.ESPResponderSPI,
-		pendingChild:      s.pendingChildSA.ready,
+		pendingChild:      childLifecycle == childSALifecyclePendingOutbound,
 		oldInboundSPI:     s.pendingChildSA.oldInbound,
 		retiredChildSAs:   retiredChildSAStates(s.retiredChildSAs),
 		nextPeerMessageID: s.nextPeerMessageID,
