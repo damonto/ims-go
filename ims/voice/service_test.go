@@ -3536,8 +3536,8 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:  timeout,
-				RTCPInactivityTimeout: time.Second,
+				RTPInactivityTimeout:  Duration(timeout),
+				RTCPInactivityTimeout: Duration(time.Second),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
 						t.Fatal("OpenMedia OnPacket is nil")
@@ -3671,8 +3671,8 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 			errCh := make(chan error, 1)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:  time.Second,
-				RTCPInactivityTimeout: time.Second,
+				RTPInactivityTimeout:  Duration(time.Second),
+				RTCPInactivityTimeout: Duration(time.Second),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket
@@ -5697,9 +5697,9 @@ func TestDialSendsRTCPReports(t *testing.T) {
 				rtcpCh: rtcpCh,
 			}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:  time.Second,
-				RTCPInactivityTimeout: time.Second,
-				RTCPSendInterval:      20 * time.Millisecond,
+				RTPInactivityTimeout:  Duration(time.Second),
+				RTCPInactivityTimeout: Duration(time.Second),
+				RTCPSendInterval:      Duration(20 * time.Millisecond),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
 						t.Fatal("OpenMedia OnPacket is nil")
@@ -5793,9 +5793,9 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 				rtcpCh: rtcpCh,
 			}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:  time.Second,
-				RTCPInactivityTimeout: 40 * time.Millisecond,
-				RTCPSendInterval:      20 * time.Millisecond,
+				RTPInactivityTimeout:  Duration(time.Second),
+				RTCPInactivityTimeout: Duration(40 * time.Millisecond),
+				RTCPSendInterval:      Duration(20 * time.Millisecond),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket
@@ -5881,9 +5881,9 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 				writeCh: rtpWrites,
 			}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:  time.Second,
-				RTCPInactivityTimeout: time.Second,
-				RTCPSendInterval:      20 * time.Millisecond,
+				RTPInactivityTimeout:  Duration(time.Second),
+				RTCPInactivityTimeout: Duration(time.Second),
+				RTCPSendInterval:      Duration(20 * time.Millisecond),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket
@@ -5938,11 +5938,11 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 	}
 }
 
-func TestDialEndsAfterRTCPInactivityByDefault(t *testing.T) {
+func TestDialEndsAfterRTCPInactivityWhenPolicyIncludesRTCP(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "default inactivity end reasons include connected rtcp timeout"},
+		{name: "connected rtcp timeout ends call"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5965,8 +5965,11 @@ func TestDialEndsAfterRTCPInactivityByDefault(t *testing.T) {
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:  time.Second,
-				RTCPInactivityTimeout: rtcpTimeout,
+				RTPInactivityTimeout:  Duration(time.Second),
+				RTCPInactivityTimeout: Duration(rtcpTimeout),
+				AudioInactivityCallEndReasons: []AudioInactivityCallEndReason{
+					AudioInactivityRTCPOnConnected,
+				},
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
 						t.Fatal("OpenMedia OnPacket is nil")
@@ -6052,8 +6055,8 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			svc, err := New(Config{Logger: testLogger(),
-				RTPInactivityTimeout:          rtpTimeout,
-				RTCPInactivityTimeout:         rtcpTimeout,
+				RTPInactivityTimeout:          Duration(rtpTimeout),
+				RTCPInactivityTimeout:         Duration(rtcpTimeout),
 				AudioInactivityCallEndReasons: []AudioInactivityCallEndReason{AudioInactivityRTPOnConnected},
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
@@ -6110,6 +6113,108 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 			time.Sleep(2 * rtcpTimeout)
 			if call.State() == CallStateEnded {
 				t.Fatalf("call state = %s, want active call before RTP timeout", call.State())
+			}
+			if got := transport.countMethod("BYE"); got != 0 {
+				t.Fatalf("BYE count before hangup = %d, want 0", got)
+			}
+			if err := call.Hangup(context.Background()); err != nil {
+				t.Fatalf("Hangup() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDialUsesEmergencyAudioInactivityPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		reasons    []AudioInactivityCallEndReason
+		wantEnded  bool
+		wantReason string
+	}{
+		{
+			name:       "emergency rtcp reason ends emergency call",
+			reasons:    []AudioInactivityCallEndReason{AudioInactivityE911RTCP},
+			wantEnded:  true,
+			wantReason: "rtcp inactivity timeout",
+		},
+		{
+			name:    "normal connected rtcp reason does not end emergency call",
+			reasons: []AudioInactivityCallEndReason{AudioInactivityRTCPOnConnected},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+
+			rtcpTimeout := 40 * time.Millisecond
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			svc, err := New(Config{Logger: testLogger(),
+				RTPInactivityTimeout:          Duration(time.Second),
+				RTCPInactivityTimeout:         Duration(rtcpTimeout),
+				AudioInactivityCallEndReasons: tt.reasons,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					if cfg.OnPacket == nil {
+						t.Fatal("OpenMedia OnPacket is nil")
+					}
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+				OnCallEvent: func(event CallEvent) { events <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "BYE":
+					transport.queue(callStatus(msg, 200, "OK"))
+				}
+			}
+			call, err := svc.Dial(context.Background(), DialRequest{To: "911", Emergency: true})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+
+			ended := waitForCallEvent(events, CallStateEnded, tt.wantReason, 3*rtcpTimeout)
+			if ended != tt.wantEnded {
+				t.Fatalf("ended after RTCP inactivity = %t, want %t", ended, tt.wantEnded)
+			}
+			if tt.wantEnded {
+				return
 			}
 			if got := transport.countMethod("BYE"); got != 0 {
 				t.Fatalf("BYE count before hangup = %d, want 0", got)

@@ -435,17 +435,17 @@ func (cfg Config) withWFCVoiceProfile(profile *wfcVoiceProfile) Config {
 	if cfg.IMS.Voice.AudioASBandwidthKbps == 0 {
 		cfg.IMS.Voice.AudioASBandwidthKbps = profile.AudioASBandwidthKbps
 	}
-	if cfg.IMS.Voice.RTPInactivityTimeout == 0 && profile.RTPInactivityTimeout != nil {
-		cfg.IMS.Voice.RTPInactivityTimeout = profile.RTPInactivityTimeout.Duration
+	if cfg.IMS.Voice.RTPInactivityTimeout == nil && profile.RTPInactivityTimeout != nil {
+		cfg.IMS.Voice.RTPInactivityTimeout = imsvoice.Duration(profile.RTPInactivityTimeout.Duration)
 	}
-	if cfg.IMS.Voice.RTCPInactivityTimeout == 0 && profile.RTCPInactivityTimeout != nil {
-		cfg.IMS.Voice.RTCPInactivityTimeout = profile.RTCPInactivityTimeout.Duration
+	if cfg.IMS.Voice.RTCPInactivityTimeout == nil && profile.RTCPInactivityTimeout != nil {
+		cfg.IMS.Voice.RTCPInactivityTimeout = imsvoice.Duration(profile.RTCPInactivityTimeout.Duration)
 	}
 	if cfg.IMS.Voice.AudioInactivityCallEndReasons == nil && profile.AudioInactivityCallEndReasons != nil {
 		cfg.IMS.Voice.AudioInactivityCallEndReasons = append([]imsvoice.AudioInactivityCallEndReason(nil), profile.AudioInactivityCallEndReasons...)
 	}
-	if cfg.IMS.Voice.RTCPSendInterval == 0 && profile.RTCPSendInterval != nil {
-		cfg.IMS.Voice.RTCPSendInterval = profile.RTCPSendInterval.Duration
+	if cfg.IMS.Voice.RTCPSendInterval == nil && profile.RTCPSendInterval != nil {
+		cfg.IMS.Voice.RTCPSendInterval = imsvoice.Duration(profile.RTCPSendInterval.Duration)
 	}
 	if cfg.IMS.Voice.LocalRTPPortMin == 0 {
 		cfg.IMS.Voice.LocalRTPPortMin = profile.LocalRTPPortMin

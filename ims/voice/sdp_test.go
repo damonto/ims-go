@@ -778,9 +778,8 @@ func TestConfigNormalizedAudioInactivityCallEndReasons(t *testing.T) {
 			name: "default matches android carrier config default",
 			want: []AudioInactivityCallEndReason{
 				AudioInactivityRTCPOnHold,
-				AudioInactivityRTCPOnConnected,
 				AudioInactivityRTPOnConnected,
-				AudioInactivityE911RTCP,
+				AudioInactivityE911RTP,
 			},
 		},
 		{
@@ -808,6 +807,50 @@ func TestConfigNormalizedAudioInactivityCallEndReasons(t *testing.T) {
 			}
 			if !slices.Equal(got.AudioInactivityCallEndReasons, tt.want) {
 				t.Fatalf("AudioInactivityCallEndReasons = %v, want %v", got.AudioInactivityCallEndReasons, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigNormalizedMediaInactivityTimers(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantRTP  time.Duration
+		wantRTCP time.Duration
+		wantSend time.Duration
+	}{
+		{
+			name:     "zero values use android defaults",
+			wantRTP:  10 * time.Second,
+			wantRTCP: 30 * time.Second,
+			wantSend: defaultRTCPSend,
+		},
+		{
+			name:     "explicit zero disables timers",
+			cfg:      Config{RTPInactivityTimeout: Duration(0), RTCPInactivityTimeout: Duration(0), RTCPSendInterval: Duration(0)},
+			wantRTP:  0,
+			wantRTCP: 0,
+			wantSend: 0,
+		},
+		{
+			name:     "explicit non-zero timers",
+			cfg:      Config{RTPInactivityTimeout: Duration(10 * time.Second), RTCPInactivityTimeout: Duration(11 * time.Second), RTCPSendInterval: Duration(3 * time.Second)},
+			wantRTP:  10 * time.Second,
+			wantRTCP: 11 * time.Second,
+			wantSend: 3 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if *got.RTPInactivityTimeout != tt.wantRTP || *got.RTCPInactivityTimeout != tt.wantRTCP || *got.RTCPSendInterval != tt.wantSend {
+				t.Fatalf("media timers = %v/%v/%v, want %v/%v/%v",
+					*got.RTPInactivityTimeout, *got.RTCPInactivityTimeout, *got.RTCPSendInterval,
+					tt.wantRTP, tt.wantRTCP, tt.wantSend)
 			}
 		})
 	}

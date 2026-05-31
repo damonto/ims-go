@@ -258,8 +258,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.AudioASBandwidthKbps != 49 {
 					t.Fatalf("IMS voice AudioASBandwidthKbps = %d, want 49", got.IMS.Voice.AudioASBandwidthKbps)
 				}
-				if got.IMS.Voice.RTPInactivityTimeout != 20*time.Second || got.IMS.Voice.RTCPInactivityTimeout != 21*time.Second || got.IMS.Voice.RTCPSendInterval != 5*time.Second {
-					t.Fatalf("IMS voice media timers = %v/%v/%v, want profile values", got.IMS.Voice.RTPInactivityTimeout, got.IMS.Voice.RTCPInactivityTimeout, got.IMS.Voice.RTCPSendInterval)
+				if *got.IMS.Voice.RTPInactivityTimeout != 20*time.Second || *got.IMS.Voice.RTCPInactivityTimeout != 21*time.Second || *got.IMS.Voice.RTCPSendInterval != 5*time.Second {
+					t.Fatalf("IMS voice media timers = %v/%v/%v, want profile values", *got.IMS.Voice.RTPInactivityTimeout, *got.IMS.Voice.RTCPInactivityTimeout, *got.IMS.Voice.RTCPSendInterval)
 				}
 				wantReasons := []imsvoice.AudioInactivityCallEndReason{
 					imsvoice.AudioInactivityRTCPOnHold,
@@ -995,6 +995,33 @@ func TestEmbeddedWFCConfigUsesAudioInactivityCallEndReasons(t *testing.T) {
 			}
 			if !slices.Equal(got.IMS.Voice.AudioInactivityCallEndReasons, tt.want) {
 				t.Fatalf("AudioInactivityCallEndReasons = %v, want %v", got.IMS.Voice.AudioInactivityCallEndReasons, tt.want)
+			}
+		})
+	}
+}
+
+func TestEmbeddedWFCConfigPreservesDisabledRTCPInactivityTimer(t *testing.T) {
+	tests := []struct {
+		name string
+		card plmnWFCCard
+	}{
+		{
+			name: "free france",
+			card: plmnWFCCard{mcc: "208", mnc: "09", mncLength: 2},
+		},
+		{
+			name: "vodafone ireland",
+			card: plmnWFCCard{mcc: "272", mnc: "01", mncLength: 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+			if *got.IMS.Voice.RTCPInactivityTimeout != 0 {
+				t.Fatalf("RTCPInactivityTimeout = %v, want disabled", *got.IMS.Voice.RTCPInactivityTimeout)
 			}
 		})
 	}

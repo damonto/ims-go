@@ -41,10 +41,10 @@ type Config struct {
 	RingbackTimeout               time.Duration
 	RingingTimeout                time.Duration
 	AudioASBandwidthKbps          int
-	RTPInactivityTimeout          time.Duration
-	RTCPInactivityTimeout         time.Duration
+	RTPInactivityTimeout          *time.Duration
+	RTCPInactivityTimeout         *time.Duration
 	AudioInactivityCallEndReasons []AudioInactivityCallEndReason
-	RTCPSendInterval              time.Duration
+	RTCPSendInterval              *time.Duration
 	LocalRTPPortMin               int
 	LocalRTPPortMax               int
 	PrepareMedia                  func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
@@ -112,8 +112,8 @@ const (
 	defaultMaxPTime          = 240 * time.Millisecond
 	defaultSessionExpires    = 1800 * time.Second
 	defaultMinSessionExpires = 90 * time.Second
-	defaultRTPInactivity     = 20 * time.Second
-	defaultRTCPInactivity    = 20 * time.Second
+	defaultRTPInactivity     = 10 * time.Second
+	defaultRTCPInactivity    = 30 * time.Second
 	defaultRTCPSend          = 5 * time.Second
 	defaultLocalRTPPortMin   = 40000
 	defaultLocalRTPPortMax   = 40100
@@ -121,9 +121,8 @@ const (
 
 var defaultAudioInactivityCallEndReasons = []AudioInactivityCallEndReason{
 	AudioInactivityRTCPOnHold,
-	AudioInactivityRTCPOnConnected,
 	AudioInactivityRTPOnConnected,
-	AudioInactivityE911RTCP,
+	AudioInactivityE911RTP,
 }
 
 const (
@@ -204,17 +203,12 @@ func (cfg Config) Normalized() (Config, error) {
 	if cfg.RingingTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: ringing timeout must be >= 0")
 	}
-	if cfg.RTPInactivityTimeout < 0 {
-		return Config{}, errors.New("normalizing voice config: rtp inactivity timeout must be >= 0")
+	var err error
+	if cfg.RTPInactivityTimeout, err = normalizeDurationSetting(cfg.RTPInactivityTimeout, defaultRTPInactivity, "rtp inactivity timeout"); err != nil {
+		return Config{}, err
 	}
-	if cfg.RTPInactivityTimeout == 0 {
-		cfg.RTPInactivityTimeout = defaultRTPInactivity
-	}
-	if cfg.RTCPInactivityTimeout < 0 {
-		return Config{}, errors.New("normalizing voice config: rtcp inactivity timeout must be >= 0")
-	}
-	if cfg.RTCPInactivityTimeout == 0 {
-		cfg.RTCPInactivityTimeout = defaultRTCPInactivity
+	if cfg.RTCPInactivityTimeout, err = normalizeDurationSetting(cfg.RTCPInactivityTimeout, defaultRTCPInactivity, "rtcp inactivity timeout"); err != nil {
+		return Config{}, err
 	}
 	if cfg.AudioInactivityCallEndReasons == nil {
 		cfg.AudioInactivityCallEndReasons = append([]AudioInactivityCallEndReason(nil), defaultAudioInactivityCallEndReasons...)
@@ -226,11 +220,8 @@ func (cfg Config) Normalized() (Config, error) {
 			return Config{}, fmt.Errorf("normalizing voice config: unsupported audio inactivity call end reason %d", reason)
 		}
 	}
-	if cfg.RTCPSendInterval < 0 {
-		return Config{}, errors.New("normalizing voice config: rtcp send interval must be >= 0")
-	}
-	if cfg.RTCPSendInterval == 0 {
-		cfg.RTCPSendInterval = defaultRTCPSend
+	if cfg.RTCPSendInterval, err = normalizeDurationSetting(cfg.RTCPSendInterval, defaultRTCPSend, "rtcp send interval"); err != nil {
+		return Config{}, err
 	}
 	if cfg.LocalRTPPortMin == 0 {
 		cfg.LocalRTPPortMin = defaultLocalRTPPortMin
@@ -250,6 +241,21 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	cfg.Codecs = codecs
 	return cfg, nil
+}
+
+// Duration returns a configured duration value. Passing zero explicitly disables timers that use nil for defaults.
+func Duration(value time.Duration) *time.Duration {
+	return &value
+}
+
+func normalizeDurationSetting(value *time.Duration, fallback time.Duration, label string) (*time.Duration, error) {
+	if value == nil {
+		value = Duration(fallback)
+	}
+	if *value < 0 {
+		return nil, fmt.Errorf("normalizing voice config: %s must be >= 0", label)
+	}
+	return Duration(*value), nil
 }
 
 func (cfg Config) endsCallOnAudioInactivity(reason AudioInactivityCallEndReason) bool {

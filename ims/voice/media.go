@@ -169,11 +169,15 @@ func (c *Call) writeRTCPReport() {
 }
 
 func (c *Call) startMediaInactivityWatch() {
-	rtpTimeout := c.service.cfg.RTPInactivityTimeout
-	rtcpTimeout := c.service.cfg.RTCPInactivityTimeout
-	rtcpSendInterval := c.service.cfg.RTCPSendInterval
+	rtpTimeout := *c.service.cfg.RTPInactivityTimeout
+	rtcpTimeout := *c.service.cfg.RTCPInactivityTimeout
+	rtcpSendInterval := *c.service.cfg.RTCPSendInterval
 	endOnRTPInactivity := c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTPOnConnected)
 	endOnRTCPInactivity := c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTCPOnConnected)
+	if c.emergency {
+		endOnRTPInactivity = c.service.cfg.endsCallOnAudioInactivity(AudioInactivityE911RTP)
+		endOnRTCPInactivity = c.service.cfg.endsCallOnAudioInactivity(AudioInactivityE911RTCP)
+	}
 	c.mu.Lock()
 	if c.mediaWatchStop != nil || c.closed {
 		c.mu.Unlock()
