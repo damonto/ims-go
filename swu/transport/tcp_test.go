@@ -112,10 +112,10 @@ func TestTCPConnReadPacketReturnsTerminalErrorAfterHandleError(t *testing.T) {
 }
 
 func TestTCPConnWritePacketClosesOnAckTimeout(t *testing.T) {
-	oldTimeout := tcpDataACKTimeout
-	tcpDataACKTimeout = 10 * time.Millisecond
+	oldTimeouts := tcpDataACKTimeouts
+	tcpDataACKTimeouts = []time.Duration{10 * time.Millisecond}
 	t.Cleanup(func() {
-		tcpDataACKTimeout = oldTimeout
+		tcpDataACKTimeouts = oldTimeouts
 	})
 
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")

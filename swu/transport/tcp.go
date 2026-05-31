@@ -25,7 +25,13 @@ const (
 	tcpDefaultWindow      = 65535
 )
 
-var tcpDataACKTimeout = 2 * time.Second
+var tcpDataACKTimeouts = []time.Duration{
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+}
 
 var _ imssession.Transport = (*TCPConn)(nil)
 
@@ -280,14 +286,14 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 		t.mu.Unlock()
 		wantAck := seq + uint32(len(chunk))
 		acked := false
-		for attempt := range 3 {
+		for attempt, timeout := range tcpDataACKTimeouts {
 			if err := t.sendSegmentWithSeq(ctx, seq, t.currentAck(), flags, chunk); err != nil {
 				return err
 			}
 			if attempt == 0 {
 				t.noteSent(wantAck)
 			}
-			waitCtx, cancel := context.WithTimeout(ctx, tcpDataACKTimeout)
+			waitCtx, cancel := context.WithTimeout(ctx, timeout)
 			err := t.waitForAck(waitCtx, wantAck)
 			cancel()
 			if err == nil {
