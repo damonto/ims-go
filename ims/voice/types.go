@@ -45,7 +45,6 @@ const (
 	sipStatusBadInfoPackage              = 469
 	sipStatusCallTransactionDoesNotExist = 481
 	sipStatusBusyHere                    = 486
-	sipStatusRequestTerminated           = 487
 	sipStatusNotAcceptableHere           = 488
 	sipStatusRequestPending              = 491
 	sipStatusServerInternalError         = 500
@@ -63,6 +62,15 @@ const (
 	CallStateEnding     CallState = "ending"
 	CallStateEnded      CallState = "ended"
 	CallStateFailed     CallState = "failed"
+)
+
+type CallHoldState string
+
+const (
+	CallHoldNone        CallHoldState = "none"
+	CallHoldLocal       CallHoldState = "local"
+	CallHoldRemote      CallHoldState = "remote"
+	CallHoldLocalRemote CallHoldState = "local_remote"
 )
 
 type DialRequest struct {
@@ -85,6 +93,7 @@ type CallEvent struct {
 	Call   *Call
 	CallID string
 	State  CallState
+	Hold   CallHoldState
 	Cause  string
 	At     time.Time
 }
@@ -157,6 +166,7 @@ type Call struct {
 	sessionTimerStop    chan struct{}
 	dialogAttachment    session.Attachment
 	media               NegotiatedMedia
+	hold                CallHoldState
 	transport           MediaTransport
 	rtcpSSRC            uint32
 	emergency           bool

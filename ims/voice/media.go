@@ -174,7 +174,15 @@ func (c *Call) startMediaInactivityWatch() {
 	rtcpSendInterval := *c.service.cfg.RTCPSendInterval
 	endOnRTPInactivity := c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTPOnConnected)
 	endOnRTCPInactivity := c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTCPOnConnected)
-	if c.emergency {
+	c.mu.Lock()
+	held := callIsHeld(c.hold)
+	emergency := c.emergency
+	c.mu.Unlock()
+	if held {
+		rtpTimeout = 0
+		endOnRTPInactivity = false
+		endOnRTCPInactivity = c.service.cfg.endsCallOnAudioInactivity(AudioInactivityRTCPOnHold)
+	} else if emergency {
 		endOnRTPInactivity = c.service.cfg.endsCallOnAudioInactivity(AudioInactivityE911RTP)
 		endOnRTCPInactivity = c.service.cfg.endsCallOnAudioInactivity(AudioInactivityE911RTCP)
 	}
@@ -264,6 +272,21 @@ func (c *Call) startMediaInactivityWatch() {
 			}
 		}
 	}()
+}
+
+func (c *Call) restartMediaInactivityWatch() {
+	c.mu.Lock()
+	stop := c.mediaWatchStop
+	c.mediaWatchStop = nil
+	c.mediaActivity = nil
+	closed := c.closed
+	c.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+	if !closed {
+		c.startMediaInactivityWatch()
+	}
 }
 
 func (c *Call) noteMediaInactivity(reason mediaReleaseReason, timeout time.Duration) {

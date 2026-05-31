@@ -214,10 +214,21 @@ func (c *Call) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 }
 
 func (c *Call) WritePacket(ctx context.Context, data []byte) error {
-	transport, err := c.mediaTransport("writing call media")
-	if err != nil {
-		return err
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("writing call media: call is closed")
 	}
+	if c.transport == nil {
+		c.mu.Unlock()
+		return errors.New("writing call media: media transport is not configured")
+	}
+	if holdHasLocal(c.hold) || localMediaSendBlocked(c.media.Direction) {
+		c.mu.Unlock()
+		return errors.New("writing call media: call is on hold")
+	}
+	transport := c.transport
+	c.mu.Unlock()
 	return transport.WritePacket(ctx, data)
 }
 

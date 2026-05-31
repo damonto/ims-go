@@ -28,6 +28,7 @@ type NegotiatedMedia struct {
 	DTMFPayloadType int
 	DTMFClockRate   int
 	PTime           time.Duration
+	Direction       mediaDirection
 	RemoteIP        net.IP
 	RemotePort      int
 	RemoteRTCPIP    net.IP
@@ -35,6 +36,15 @@ type NegotiatedMedia struct {
 	RTCPMux         bool
 	RTCPDisabled    bool
 }
+
+type mediaDirection string
+
+const (
+	mediaDirectionSendRecv mediaDirection = "sendrecv"
+	mediaDirectionSendOnly mediaDirection = "sendonly"
+	mediaDirectionRecvOnly mediaDirection = "recvonly"
+	mediaDirectionInactive mediaDirection = "inactive"
+)
 
 type sdpOffer struct {
 	RemoteIP              net.IP
@@ -51,6 +61,7 @@ type sdpOffer struct {
 	PTime                 time.Duration
 	RTCPSenderBandwidth   *int
 	RTCPReceiverBandwidth *int
+	Direction             mediaDirection
 	UnsupportedMedia      []sdpMediaLine
 }
 
@@ -85,6 +96,13 @@ const (
 )
 
 func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) ([]byte, NegotiatedMedia, error) {
+	return buildSDPOfferWithDirection(cfg, localIP, localPort, offer, mediaDirectionSendRecv)
+}
+
+func buildSDPOfferWithDirection(cfg Config, localIP net.IP, localPort int, offer MediaOffer, direction mediaDirection) ([]byte, NegotiatedMedia, error) {
+	if !direction.valid() {
+		return nil, NegotiatedMedia{}, fmt.Errorf("building voice SDP offer: invalid media direction %q", direction)
+	}
 	codecs := selectOfferCodecs(cfg.Codecs, offer.Codecs)
 	if len(codecs) == 0 {
 		return nil, NegotiatedMedia{}, errors.New("building voice SDP offer: no matching codecs")
@@ -124,9 +142,9 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 	if cfg.MaxPTime > 0 {
 		fmt.Fprintf(&b, "a=maxptime:%d\r\n", durationMillis(cfg.MaxPTime))
 	}
-	fmt.Fprintf(&b, "a=sendrecv\r\n")
+	fmt.Fprintf(&b, "a=%s\r\n", direction)
 	if cfg.Preconditions {
-		appendQoSPreconditions(&b, qosStatusNone, false)
+		appendQoSPreconditions(&b, qosStatusNone, qosStatusNone, false)
 	}
 	media := NegotiatedMedia{
 		Codec:       firstSpeechCodec(codecs).Name,
@@ -135,11 +153,23 @@ func buildSDPOffer(cfg Config, localIP net.IP, localPort int, offer MediaOffer) 
 		Channels:    firstSpeechCodec(codecs).Channels,
 		OctetAlign:  firstSpeechCodec(codecs).OctetAlign,
 		PTime:       ptime,
+		Direction:   direction,
 	}
 	return []byte(b.String()), media, nil
 }
 
 func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, offer MediaOffer) ([]byte, NegotiatedMedia, error) {
+	return buildSDPAnswerWithDirection(cfg, localIP, localPort, remote, offer, answerDirection(remote.Direction, false))
+}
+
+func buildSDPAnswerWithLocalHold(cfg Config, localIP net.IP, localPort int, remote sdpOffer, offer MediaOffer, localHold bool) ([]byte, NegotiatedMedia, error) {
+	return buildSDPAnswerWithDirection(cfg, localIP, localPort, remote, offer, answerDirection(remote.Direction, localHold))
+}
+
+func buildSDPAnswerWithDirection(cfg Config, localIP net.IP, localPort int, remote sdpOffer, offer MediaOffer, direction mediaDirection) ([]byte, NegotiatedMedia, error) {
+	if !direction.valid() {
+		return nil, NegotiatedMedia{}, fmt.Errorf("building voice SDP answer: invalid media direction %q", direction)
+	}
 	if len(remote.Payloads) == 0 {
 		return nil, NegotiatedMedia{}, errors.New("building voice SDP answer: remote offer has no audio payloads")
 	}
@@ -194,12 +224,13 @@ func buildSDPAnswer(cfg Config, localIP net.IP, localPort int, remote sdpOffer, 
 	if remote.RTCPMux {
 		fmt.Fprintf(&b, "a=rtcp-mux\r\n")
 	}
-	fmt.Fprintf(&b, "a=sendrecv\r\n")
+	fmt.Fprintf(&b, "a=%s\r\n", direction)
 	if cfg.Preconditions && remote.Preconditions {
-		appendQoSPreconditions(&b, qosStatusNone, remote.LocalQoSStatus != qosStatusSendRecv)
+		appendQoSPreconditions(&b, qosStatusNone, qosStatusNone, remote.LocalQoSStatus != qosStatusSendRecv)
 	}
 	appendRejectedMedia(&b, remote.UnsupportedMedia)
 	media := negotiatedMedia(remote, selected, ptime, dtmf, hasDTMF)
+	media.Direction = direction
 	media.RTCPDisabled = rtcpBandwidthDisabled(rs, rr)
 	return []byte(b.String()), media, nil
 }
@@ -244,8 +275,41 @@ func buildSDPPreconditionUpdate(cfg Config, localIP net.IP, localPort int, answe
 		fmt.Fprintf(&b, "a=maxptime:%d\r\n", durationMillis(cfg.MaxPTime))
 	}
 	fmt.Fprintf(&b, "a=sendrecv\r\n")
-	appendQoSPreconditions(&b, qosStatusSendRecv, false)
+	appendQoSPreconditions(&b, qosStatusSendRecv, qosStatusNone, false)
 	return []byte(b.String()), nil
+}
+
+func answerDirection(remote mediaDirection, localHold bool) mediaDirection {
+	if remote == "" {
+		remote = mediaDirectionSendRecv
+	}
+	if localHold {
+		switch remote {
+		case mediaDirectionRecvOnly, mediaDirectionInactive:
+			return mediaDirectionInactive
+		default:
+			return mediaDirectionRecvOnly
+		}
+	}
+	switch remote {
+	case mediaDirectionSendOnly:
+		return mediaDirectionRecvOnly
+	case mediaDirectionRecvOnly:
+		return mediaDirectionSendOnly
+	case mediaDirectionInactive:
+		return mediaDirectionInactive
+	default:
+		return mediaDirectionSendRecv
+	}
+}
+
+func (d mediaDirection) valid() bool {
+	switch d {
+	case mediaDirectionSendRecv, mediaDirectionSendOnly, mediaDirectionRecvOnly, mediaDirectionInactive:
+		return true
+	default:
+		return false
+	}
 }
 
 const (
@@ -253,9 +317,9 @@ const (
 	qosStatusSendRecv = "sendrecv"
 )
 
-func appendQoSPreconditions(b *strings.Builder, localStatus string, requestRemoteConfirmation bool) {
+func appendQoSPreconditions(b *strings.Builder, localStatus string, remoteStatus string, requestRemoteConfirmation bool) {
 	fmt.Fprintf(b, "a=curr:qos local %s\r\n", localStatus)
-	fmt.Fprintf(b, "a=curr:qos remote none\r\n")
+	fmt.Fprintf(b, "a=curr:qos remote %s\r\n", remoteStatus)
 	fmt.Fprintf(b, "a=des:qos mandatory local sendrecv\r\n")
 	fmt.Fprintf(b, "a=des:qos optional remote sendrecv\r\n")
 	if requestRemoteConfirmation {
@@ -298,6 +362,7 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Dura
 		Channels:       selected.Channels,
 		OctetAlign:     selected.OctetAlign,
 		PTime:          ptime,
+		Direction:      answerDirection(remote.Direction, false),
 		RemoteIP:       append(net.IP(nil), remote.RemoteIP...),
 		RemotePort:     remote.RemotePort,
 		RemoteRTCPIP:   remoteRTCPIP,
@@ -321,7 +386,7 @@ func parseSDP(text []byte) (sdpOffer, error) {
 }
 
 func (offer *sdpOffer) UnmarshalText(text []byte) error {
-	*offer = sdpOffer{Codecs: make(map[int]AudioCodecConfig)}
+	*offer = sdpOffer{Codecs: make(map[int]AudioCodecConfig), Direction: mediaDirectionSendRecv}
 	var mediaPayloads map[int]struct{}
 	inAudio := false
 	lines := strings.FieldsFunc(string(text), func(r rune) bool { return r == '\n' || r == '\r' })
@@ -407,6 +472,10 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			if inAudio {
 				offer.RTCPMux = true
 			}
+		case isSDPDirectionLine(line):
+			if inAudio {
+				offer.Direction = mediaDirection(strings.TrimPrefix(strings.ToLower(line), "a="))
+			}
 		case strings.HasPrefix(line, "a=curr:qos") || strings.HasPrefix(line, "a=des:qos") || strings.HasPrefix(line, "a=conf:qos"):
 			if inAudio {
 				offer.Preconditions = true
@@ -444,6 +513,15 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 	}
 	applyStaticRTPPayloads(offer)
 	return nil
+}
+
+func isSDPDirectionLine(line string) bool {
+	switch strings.ToLower(line) {
+	case "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseCurrentQoSLocal(line string) (string, bool) {

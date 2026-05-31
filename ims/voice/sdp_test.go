@@ -882,3 +882,147 @@ func TestBuildSDPAnswerRejectsUnsupportedMediaLines(t *testing.T) {
 		t.Fatalf("SDP answer = %q, want rejected video m-line", string(answer))
 	}
 }
+
+func TestParseSDPMediaDirection(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want mediaDirection
+	}{
+		{name: "missing direction defaults sendrecv", want: mediaDirectionSendRecv},
+		{name: "sendrecv", line: "a=sendrecv\r\n", want: mediaDirectionSendRecv},
+		{name: "sendonly", line: "a=sendonly\r\n", want: mediaDirectionSendOnly},
+		{name: "recvonly", line: "a=recvonly\r\n", want: mediaDirectionRecvOnly},
+		{name: "inactive", line: "a=inactive\r\n", want: mediaDirectionInactive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte("v=0\r\n" +
+				"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 50000 RTP/AVP 104\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				tt.line)
+			offer, err := parseSDP(body)
+			if err != nil {
+				t.Fatalf("parseSDP() error = %v", err)
+			}
+			if offer.Direction != tt.want {
+				t.Fatalf("direction = %s, want %s", offer.Direction, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildSDPOfferWithDirection(t *testing.T) {
+	cfg, err := (Config{}).Normalized()
+	if err != nil {
+		t.Fatalf("Normalized() error = %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		direction mediaDirection
+		want      string
+	}{
+		{name: "local hold", direction: mediaDirectionRecvOnly, want: "a=recvonly\r\n"},
+		{name: "resume", direction: mediaDirectionSendRecv, want: "a=sendrecv\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, _, err := buildSDPOfferWithDirection(cfg, net.IPv4(10, 0, 0, 2), 40000, MediaOffer{}, tt.direction)
+			if err != nil {
+				t.Fatalf("buildSDPOfferWithDirection() error = %v", err)
+			}
+			if !strings.Contains(string(body), tt.want) {
+				t.Fatalf("SDP offer missing %q:\n%s", tt.want, string(body))
+			}
+		})
+	}
+}
+
+func TestSDPWithDirectionMarksSessionModificationQoSMet(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		direction mediaDirection
+		want      []string
+	}{
+		{
+			name:      "hold keeps preconditions met",
+			direction: mediaDirectionRecvOnly,
+			body: "v=0\r\n" +
+				"o=- 1 1 IN IP4 10.0.0.1\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 10.0.0.1\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 40000 RTP/AVP 104\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				"a=sendrecv\r\n" +
+				"a=curr:qos local none\r\n" +
+				"a=curr:qos remote none\r\n" +
+				"a=des:qos mandatory local sendrecv\r\n" +
+				"a=des:qos optional remote sendrecv\r\n",
+			want: []string{
+				"a=recvonly\r\n",
+				"a=curr:qos local sendrecv\r\n",
+				"a=curr:qos remote sendrecv\r\n",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(sdpWithDirection([]byte(tt.body), tt.direction, true))
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("SDP missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildSDPAnswerWithHoldDirections(t *testing.T) {
+	cfg, err := (Config{}).Normalized()
+	if err != nil {
+		t.Fatalf("Normalized() error = %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		remote    mediaDirection
+		localHold bool
+		want      string
+	}{
+		{name: "remote sendonly answer", remote: mediaDirectionSendOnly, want: "a=recvonly\r\n"},
+		{name: "remote hold answer", remote: mediaDirectionRecvOnly, want: "a=sendonly\r\n"},
+		{name: "both sides held answer", remote: mediaDirectionRecvOnly, localHold: true, want: "a=inactive\r\n"},
+		{name: "remote inactive answer", remote: mediaDirectionInactive, want: "a=inactive\r\n"},
+		{name: "local hold answer", remote: mediaDirectionSendRecv, localHold: true, want: "a=recvonly\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote, err := parseSDP([]byte("v=0\r\n" +
+				"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 50000 RTP/AVP 104 101\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				"a=rtpmap:101 telephone-event/8000\r\n" +
+				"a=" + string(tt.remote) + "\r\n"))
+			if err != nil {
+				t.Fatalf("parseSDP() error = %v", err)
+			}
+			answer, _, err := buildSDPAnswerWithLocalHold(cfg, net.IPv4(10, 0, 0, 2), 40000, remote, MediaOffer{}, tt.localHold)
+			if err != nil {
+				t.Fatalf("buildSDPAnswerWithLocalHold() error = %v", err)
+			}
+			if !strings.Contains(string(answer), tt.want) {
+				t.Fatalf("SDP answer missing %q:\n%s", tt.want, string(answer))
+			}
+		})
+	}
+}

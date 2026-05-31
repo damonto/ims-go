@@ -40,6 +40,7 @@ type Config struct {
 	MOCallRequestTimeout          time.Duration
 	RingbackTimeout               time.Duration
 	RingingTimeout                time.Duration
+	AllowHoldDuringEmergency      bool
 	AudioASBandwidthKbps          int
 	RTPInactivityTimeout          *time.Duration
 	RTCPInactivityTimeout         *time.Duration

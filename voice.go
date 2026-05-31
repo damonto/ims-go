@@ -21,6 +21,7 @@ type CallEvent struct {
 	Call   *imsvoice.Call
 	CallID string
 	State  imsvoice.CallState
+	Hold   imsvoice.CallHoldState
 	Cause  string
 	At     time.Time
 }
@@ -66,6 +67,7 @@ func (c *Client) handleVoiceEvent(event imsvoice.CallEvent) {
 		Call:   event.Call,
 		CallID: event.CallID,
 		State:  event.State,
+		Hold:   event.Hold,
 		Cause:  event.Cause,
 		At:     event.At,
 	})

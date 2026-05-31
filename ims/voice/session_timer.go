@@ -24,7 +24,7 @@ func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) er
 	if minSE, tooSmall := incomingSessionTimerTooSmall(req.Message, c.service.cfg); tooSmall {
 		return c.service.writeSessionIntervalTooSmall(ctx, req, minSE)
 	}
-	answer, media, ok, err := c.sessionRefreshAnswer(req.Message)
+	answer, media, hold, ok, err := c.sessionRefreshAnswer(req.Message)
 	if err != nil {
 		return c.service.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 	}
@@ -35,7 +35,8 @@ func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) er
 		if err := c.openMedia(ctx); err != nil {
 			return c.service.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
-		c.startMediaInactivityWatch()
+		c.restartMediaInactivityWatch()
+		c.setHoldState(hold, "remote session modification")
 	}
 	resp := c.buildSessionRefreshOK(req.Message)
 	if len(answer) != 0 {
@@ -76,7 +77,7 @@ func (c *Call) handleReINVITE(ctx context.Context, req session.Request) error {
 	if minSE, tooSmall := incomingSessionTimerTooSmall(req.Message, c.service.cfg); tooSmall {
 		return c.service.writeSessionIntervalTooSmall(ctx, req, minSE)
 	}
-	answer, media, ok, err := c.sessionRefreshAnswer(req.Message)
+	answer, media, hold, ok, err := c.sessionRefreshAnswer(req.Message)
 	if err != nil {
 		return c.service.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 	}
@@ -87,7 +88,8 @@ func (c *Call) handleReINVITE(ctx context.Context, req session.Request) error {
 		if err := c.openMedia(ctx); err != nil {
 			return c.service.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
-		c.startMediaInactivityWatch()
+		c.restartMediaInactivityWatch()
+		c.setHoldState(hold, "remote session modification")
 	}
 	resp := c.buildSessionRefreshOK(req.Message)
 	if len(answer) != 0 {
@@ -114,26 +116,27 @@ func (c *Call) handleReINVITE(ctx context.Context, req session.Request) error {
 	return nil
 }
 
-func (c *Call) sessionRefreshAnswer(msg sip.Message) ([]byte, NegotiatedMedia, bool, error) {
+func (c *Call) sessionRefreshAnswer(msg sip.Message) ([]byte, NegotiatedMedia, CallHoldState, bool, error) {
 	if len(msg.Body) == 0 {
-		return nil, NegotiatedMedia{}, false, nil
+		return nil, NegotiatedMedia{}, "", false, nil
 	}
 	body, ok := sdpBody(msg)
 	if !ok {
-		return nil, NegotiatedMedia{}, false, errors.New("handling re-INVITE: missing SDP offer")
+		return nil, NegotiatedMedia{}, "", false, errors.New("handling re-INVITE: missing SDP offer")
 	}
 	offer, err := parseSDP(body)
 	if err != nil {
-		return nil, NegotiatedMedia{}, false, err
+		return nil, NegotiatedMedia{}, "", false, err
 	}
 	c.mu.Lock()
 	localPort := c.localPort
+	currentHold := c.hold
 	c.mu.Unlock()
-	answer, media, err := buildSDPAnswer(c.service.cfg, c.service.localIP(), localPort, offer, MediaOffer{})
+	answer, media, err := buildSDPAnswerWithLocalHold(c.service.cfg, c.service.localIP(), localPort, offer, MediaOffer{}, holdHasLocal(currentHold))
 	if err != nil {
-		return nil, NegotiatedMedia{}, false, err
+		return nil, NegotiatedMedia{}, "", false, err
 	}
-	return answer, media, true, nil
+	return answer, media, setRemoteHold(currentHold, remoteHoldFromDirection(offer.Direction)), true, nil
 }
 
 func (c *Call) buildSessionRefreshOK(req sip.Message) sip.Message {
@@ -347,9 +350,9 @@ func (c *Call) refreshSession() {
 	clearLocalINVITEPending := c.markLocalINVITEPending(req.Method())
 	defer clearLocalINVITEPending()
 
-	resp, err := c.exchangeSessionRefresh(req)
+	resp, err := c.exchangeSessionRefresh(context.Background(), req)
 	if err == nil && resp.StatusCode() == sipStatusSessionIntervalTooSmall {
-		resp, err = c.retrySessionRefreshWithMinSE(req, resp)
+		resp, err = c.retrySessionRefreshWithMinSE(context.Background(), req, resp)
 	}
 	if err != nil {
 		c.service.emitError(fmt.Errorf("refreshing session timer: %w", err))
@@ -359,7 +362,7 @@ func (c *Call) refreshSession() {
 	switch {
 	case resp.StatusCode() >= sipStatusOK && resp.StatusCode() < sipStatusMultipleChoices:
 		if req.Method() == "INVITE" {
-			if err := c.acknowledgeSessionRefreshINVITE(resp); err != nil {
+			if err := c.acknowledgeSessionRefreshINVITE(context.Background(), resp); err != nil {
 				c.service.emitError(err)
 				c.terminateAfterSessionRefreshFailure()
 				return
@@ -385,8 +388,8 @@ func (c *Call) refreshSession() {
 	}
 }
 
-func (c *Call) exchangeSessionRefresh(req sip.Message) (sip.Message, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.service.timers.TF+c.service.timers.T1)
+func (c *Call) exchangeSessionRefresh(ctx context.Context, req sip.Message) (sip.Message, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.service.timers.TF+c.service.timers.T1)
 	defer cancel()
 	resp, err := c.service.sess.Exchange(ctx, req)
 	if err != nil {
@@ -398,7 +401,7 @@ func (c *Call) exchangeSessionRefresh(req sip.Message) (sip.Message, error) {
 	return resp, nil
 }
 
-func (c *Call) retrySessionRefreshWithMinSE(req sip.Message, resp sip.Message) (sip.Message, error) {
+func (c *Call) retrySessionRefreshWithMinSE(ctx context.Context, req sip.Message, resp sip.Message) (sip.Message, error) {
 	minSE, ok := parseMinSessionSeconds(resp.Header("Min-SE"))
 	if !ok {
 		return sip.Message{}, fmt.Errorf("session timer retry: invalid Min-SE %q", resp.Header("Min-SE"))
@@ -420,15 +423,15 @@ func (c *Call) retrySessionRefreshWithMinSE(req sip.Message, resp sip.Message) (
 		c.sessionTimer.minSE = minSE
 	}
 	c.mu.Unlock()
-	return c.exchangeSessionRefresh(retry)
+	return c.exchangeSessionRefresh(ctx, retry)
 }
 
-func (c *Call) acknowledgeSessionRefreshINVITE(resp sip.Message) error {
+func (c *Call) acknowledgeSessionRefreshINVITE(ctx context.Context, resp sip.Message) error {
 	c.mu.Lock()
 	snap := c.dialogSnapshot()
 	c.mu.Unlock()
 	ack := snap.buildACKForSessionRefreshINVITE(resp)
-	ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
+	ctx, cancel := context.WithTimeout(ctx, callReleaseTimeout)
 	defer cancel()
 	if err := c.service.sess.Send(ctx, ack); err != nil {
 		return fmt.Errorf("acknowledging session refresh re-INVITE: %w", err)
@@ -460,7 +463,7 @@ func (c *Call) applySessionRefreshINVITEAnswer(resp sip.Message) error {
 	if err := c.openMedia(ctx); err != nil {
 		return fmt.Errorf("refreshing session timer: %w", err)
 	}
-	c.startMediaInactivityWatch()
+	c.restartMediaInactivityWatch()
 	return nil
 }
 

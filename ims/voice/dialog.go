@@ -367,6 +367,7 @@ type dialogSnapshot struct {
 	inviteRequest     sip.Message
 	localSDP          []byte
 	sessionTimer      bool
+	preconditions     bool
 	flow              registration.Flow
 	userAgent         string
 	accessNetworkInfo string
@@ -396,6 +397,7 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 		inviteRequest:     invite,
 		localSDP:          append([]byte(nil), c.localSDP...),
 		sessionTimer:      c.service.cfg.SessionTimer,
+		preconditions:     c.service.cfg.Preconditions,
 		flow:              state.Flow,
 		userAgent:         state.UserAgent,
 		accessNetworkInfo: state.AccessNetworkInfo,
@@ -558,6 +560,7 @@ func (s dialogSnapshot) buildSessionRefreshRequest(cseq int64, timer sessionTime
 	if len(s.localSDP) != 0 {
 		msg.Headers.Set("Content-Type", "application/sdp")
 		msg.Body = append([]byte(nil), s.localSDP...)
+		s.addPreconditionSupport(&msg, s.localSDP)
 	}
 	if timer.active {
 		seconds := durationSeconds(timer.interval)
@@ -573,6 +576,34 @@ func (s dialogSnapshot) buildSessionRefreshRequest(cseq int64, timer sessionTime
 		msg.Headers.Set("Min-SE", strconv.Itoa(timer.minSE))
 	}
 	return msg
+}
+
+func (s dialogSnapshot) buildMediaReINVITE(cseq int64, timer sessionTimerState, body []byte) sip.Message {
+	msg := s.buildDialogRequest("INVITE", cseq)
+	msg.Headers.Set("Content-Type", "application/sdp")
+	msg.Body = append([]byte(nil), body...)
+	addTokenHeader(&msg, "Supported", sessionTimerOption)
+	s.addPreconditionSupport(&msg, body)
+	if timer.active {
+		seconds := durationSeconds(timer.interval)
+		if timer.minSE > seconds {
+			seconds = timer.minSE
+		}
+		msg.Headers.Set("Session-Expires", sessionExpiresHeader{
+			seconds:   seconds,
+			refresher: sessionRefresherUAC,
+		}.String())
+	}
+	if timer.minSE > durationSeconds(defaultMinSessionExpires) {
+		msg.Headers.Set("Min-SE", strconv.Itoa(timer.minSE))
+	}
+	return msg
+}
+
+func (s dialogSnapshot) addPreconditionSupport(msg *sip.Message, body []byte) {
+	if s.preconditions && sdpUsesPreconditions(body) {
+		addTokenHeader(msg, "Supported", preconditionOption)
+	}
 }
 
 func (s dialogSnapshot) buildBYEForResponse(resp sip.Message, cseq int64, reason string) sip.Message {
@@ -687,8 +718,9 @@ func (c *Call) setState(state CallState, cause string) {
 	}
 	c.state = state
 	id := c.id
+	hold := normalizeHoldState(c.hold)
 	c.mu.Unlock()
-	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
+	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause, At: time.Now()})
 }
 
 func (c *Call) finish(state CallState, cause string) {
@@ -701,6 +733,7 @@ func (c *Call) finish(state CallState, cause string) {
 	id := c.id
 	emit := c.state != state || cause != ""
 	c.state = state
+	hold := normalizeHoldState(c.hold)
 	attachment := c.dialogAttachment
 	stop := c.inviteOKStop
 	ringbackStop := c.ringbackStop
@@ -748,6 +781,6 @@ func (c *Call) finish(state CallState, cause string) {
 	_ = c.closeMedia()
 	c.service.removeCall(id)
 	if emit {
-		c.service.emit(CallEvent{Call: c, CallID: id, State: state, Cause: cause, At: time.Now()})
+		c.service.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause, At: time.Now()})
 	}
 }
