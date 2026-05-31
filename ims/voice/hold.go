@@ -28,7 +28,7 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 	direction := mediaDirectionSendRecv
 	action := "resuming call"
 	if hold {
-		direction = mediaDirectionRecvOnly
+		direction = mediaDirectionInactive
 		action = "holding call"
 	}
 

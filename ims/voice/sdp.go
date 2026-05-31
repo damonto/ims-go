@@ -284,12 +284,7 @@ func answerDirection(remote mediaDirection, localHold bool) mediaDirection {
 		remote = mediaDirectionSendRecv
 	}
 	if localHold {
-		switch remote {
-		case mediaDirectionRecvOnly, mediaDirectionInactive:
-			return mediaDirectionInactive
-		default:
-			return mediaDirectionRecvOnly
-		}
+		return mediaDirectionInactive
 	}
 	switch remote {
 	case mediaDirectionSendOnly:
