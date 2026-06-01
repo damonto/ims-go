@@ -95,7 +95,7 @@ func encodeEnvelopeAddress(value string) ([]byte, error) {
 	}
 	value = strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(value)
 	if value == "" {
-		return nil, errors.New("building SMS-PP download envelope: service centre address is empty")
+		return nil, errors.New("building SMS-PP download envelope: service center address is empty")
 	}
 	if len(value)%2 == 1 {
 		value += "F"
@@ -103,7 +103,7 @@ func encodeEnvelopeAddress(value string) ([]byte, error) {
 
 	raw, err := hex.DecodeString(value)
 	if err != nil {
-		return nil, fmt.Errorf("building SMS-PP download envelope: service centre address %q is not decimal", value)
+		return nil, fmt.Errorf("building SMS-PP download envelope: service center address %q is not decimal", value)
 	}
 
 	out := make([]byte, 0, 1+len(raw))

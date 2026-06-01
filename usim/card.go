@@ -38,7 +38,7 @@ type Card struct {
 	mnc             string
 	mncLength       int
 	gid1            string
-	serviceCentre   ServiceCentre
+	serviceCenter   ServiceCenter
 	privateIdentity string
 	publicIdentity  string
 	homeDomain      string
@@ -54,8 +54,8 @@ func (u *Card) MCC() string                                { return u.mcc }
 func (u *Card) MNC() string                                { return u.mnc }
 func (u *Card) MNCLength() int                             { return u.mncLength }
 func (u *Card) GID1() string                               { return u.gid1 }
-func (u *Card) SMSC() string                               { return u.serviceCentre.Address }
-func (u *Card) ServiceCentre() ServiceCentre               { return u.serviceCentre }
+func (u *Card) SMSC() string                               { return u.serviceCenter.Address }
+func (u *Card) ServiceCenter() ServiceCenter               { return u.serviceCenter }
 func (u *Card) PrivateIdentity() string                    { return u.privateIdentity }
 func (u *Card) PublicIdentity() string                     { return u.publicIdentity }
 func (u *Card) HomeDomain() string                         { return u.homeDomain }
@@ -194,10 +194,10 @@ func (u *Card) load(ctx context.Context) error {
 
 	smsc, err := usimApp.ReadSMSC(ctx, fileEFSMSP)
 	if err == nil {
-		u.serviceCentre.Address = smsc
+		u.serviceCenter.Address = smsc
 	}
 	if psi, err := usimApp.ReadLinearFixedTextPathFirst(ctx, pathEFPSISMSC, "reading EFPSISMSC"); err == nil {
-		u.serviceCentre.PSI = psi
+		u.serviceCenter.PSI = psi
 	} else {
 		u.logger.Debug("reading EFPSISMSC from USIM failed", "err", err)
 	}
@@ -211,8 +211,8 @@ func (u *Card) load(ctx context.Context) error {
 		"imsi", u.imsi,
 		"mcc", u.mcc,
 		"mnc", u.mnc,
-		"smsc", u.serviceCentre.Address,
-		"smsc_psi", u.serviceCentre.PSI,
+		"smsc", u.serviceCenter.Address,
+		"smsc_psi", u.serviceCenter.PSI,
 		"private_identity", u.privateIdentity,
 		"public_identity", u.publicIdentity,
 		"home_domain", u.homeDomain,
@@ -250,9 +250,9 @@ func (u *Card) loadISIM(ctx context.Context) error {
 		return fmt.Errorf("reading EF_IMPU: %w", err)
 	}
 	publicIdentity := impu
-	serviceCentre := u.serviceCentre
+	serviceCenter := u.serviceCenter
 	if psi, err := isimApp.ReadLinearFixedTextPathFirst(ctx, pathEFPSISMSC, "reading EFPSISMSC"); err == nil {
-		serviceCentre.PSI = psi
+		serviceCenter.PSI = psi
 	} else {
 		u.logger.Debug("reading EFPSISMSC from ISIM failed", "err", err)
 	}
@@ -264,7 +264,7 @@ func (u *Card) loadISIM(ctx context.Context) error {
 	u.privateIdentity = privateIdentity
 	u.publicIdentity = publicIdentity
 	u.homeDomain = homeDomain
-	u.serviceCentre = serviceCentre
+	u.serviceCenter = serviceCenter
 	return nil
 }
 

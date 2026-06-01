@@ -12,7 +12,7 @@ func TestSMSPPDownloadEnvelope(t *testing.T) {
 		want []byte
 	}{
 		{
-			name: "service centre and tpdu",
+			name: "service center and tpdu",
 			cmd: SMSPPDownload{
 				ServiceCenterAddress: "+1234",
 				TPDU:                 []byte{0x00, 0x7F, 0xF6, 0x00, 0x00, 0x00},
@@ -25,7 +25,7 @@ func TestSMSPPDownloadEnvelope(t *testing.T) {
 			},
 		},
 		{
-			name: "without service centre",
+			name: "without service center",
 			cmd:  SMSPPDownload{TPDU: []byte{0x00, 0x7F, 0x16}},
 			want: []byte{
 				0xD1, 0x09,

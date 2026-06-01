@@ -349,7 +349,7 @@ func TestLoadSkipsUnavailableISIM(t *testing.T) {
 	}
 }
 
-func TestLoadServiceCentrePSIPreference(t *testing.T) {
+func TestLoadServiceCenterPSIPreference(t *testing.T) {
 	tx := New(&scriptTransmitter{steps: []scriptStep{
 		{wantAPDU: "00A40004023F00", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00}},
 		{wantAPDU: "00A40004022F00", resp: []byte{0x62, 0x0B, 0x82, 0x05, 0x42, 0x21, 0x00, 0x14, 0x01, 0x80, 0x02, 0x00, 0x14, 0x90, 0x00}},
@@ -396,8 +396,8 @@ func TestLoadServiceCentrePSIPreference(t *testing.T) {
 	if got := card.SMSC(); got != "+55510000000" {
 		t.Fatalf("SMSC() = %q, want %q", got, "+55510000000")
 	}
-	if got := card.ServiceCentre().PSI; got != "sip:isim-smsc@example.com" {
-		t.Fatalf("ServiceCentre().PSI = %q, want %q", got, "sip:isim-smsc@example.com")
+	if got := card.ServiceCenter().PSI; got != "sip:isim-smsc@example.com" {
+		t.Fatalf("ServiceCenter().PSI = %q, want %q", got, "sip:isim-smsc@example.com")
 	}
 }
 

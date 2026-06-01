@@ -65,7 +65,7 @@ func TestReportStatusClassification(t *testing.T) {
 			wantEffective: ReportStatusNoRetryServiceRejected,
 		},
 		{
-			name:                  "service centre specific completed",
+			name:                  "service center specific completed",
 			status:                ReportStatus(0x10),
 			wantClass:             ReportStatusClassCompleted,
 			wantFinal:             true,

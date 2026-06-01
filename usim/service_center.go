@@ -2,12 +2,12 @@ package usim
 
 import "strings"
 
-type ServiceCentre struct {
+type ServiceCenter struct {
 	Address string
 	PSI     string
 }
 
-func (s ServiceCentre) Target() string {
+func (s ServiceCenter) Target() string {
 	if psi := strings.TrimSpace(s.PSI); psi != "" {
 		return psi
 	}

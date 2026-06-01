@@ -2,14 +2,15 @@ package sms
 
 import (
 	"context"
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
-	"github.com/damonto/vowifi-go/usim"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/vowifi-go/usim"
 )
 
 type Config struct {
@@ -109,7 +110,7 @@ type concatState struct {
 	updatedAt   time.Time
 }
 
-type serviceCentre struct {
+type serviceCenter struct {
 	target  string
 	address string
 }
@@ -129,8 +130,8 @@ const (
 	mtTransferActive
 )
 
-type serviceCentreProvider interface {
-	ServiceCentre() usim.ServiceCentre
+type serviceCenterProvider interface {
+	ServiceCenter() usim.ServiceCenter
 }
 
 type ppDownloader interface {

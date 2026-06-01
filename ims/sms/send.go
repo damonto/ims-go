@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegment, error) {
@@ -16,7 +17,7 @@ func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegmen
 	}
 	defer s.finishMOSend()
 
-	sc, err := s.resolveServiceCentre()
+	sc, err := s.resolveServiceCenter()
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +177,7 @@ func (s *Service) endMTTransfer() {
 	s.mu.Unlock()
 }
 
-func (s *Service) newOutboundSegment(to string, sc serviceCentre, part userDataPart, index, count int) (outboundSegment, error) {
+func (s *Service) newOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int) (outboundSegment, error) {
 	rpRef, err := s.reserveReference()
 	if err != nil {
 		return outboundSegment{}, err
@@ -184,7 +185,7 @@ func (s *Service) newOutboundSegment(to string, sc serviceCentre, part userDataP
 	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, rpRef)
 }
 
-func (s *Service) buildOutboundSegment(to string, sc serviceCentre, part userDataPart, index, count int, rpRef, tpRef byte) (outboundSegment, error) {
+func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, rpRef, tpRef byte) (outboundSegment, error) {
 	tpDestination := to
 	if isSIPURI(to) {
 		tpDestination = dummyMSISDN

@@ -787,7 +787,7 @@ func (s *Service) deliverSingle(msg sip.Message, incoming Incoming) {
 func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip.Message {
 	state := s.reg.State()
 	if target == "" {
-		target = s.mustResolveServiceCentreTarget()
+		target = s.mustResolveServiceCenterTarget()
 	}
 	callID, _, tag, branch := sip.NewTransaction()
 	senderIdentity := preferredIdentity(state)
@@ -868,8 +868,8 @@ func preferredIdentity(state registration.State) string {
 	return state.PublicIdentity
 }
 
-func (s *Service) mustResolveServiceCentreTarget() string {
-	sc, _ := s.resolveServiceCentre()
+func (s *Service) mustResolveServiceCenterTarget() string {
+	sc, _ := s.resolveServiceCenter()
 	return sc.target
 }
 

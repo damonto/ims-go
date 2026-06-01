@@ -120,8 +120,8 @@ func TestLoadWithFakeQMITransport(t *testing.T) {
 				if got := card.HomeDomain(); got != "ims.example.com" {
 					t.Fatalf("HomeDomain() = %q", got)
 				}
-				if got := card.ServiceCentre().PSI; got != "sip:isim-smsc@example.com" {
-					t.Fatalf("ServiceCentre().PSI = %q", got)
+				if got := card.ServiceCenter().PSI; got != "sip:isim-smsc@example.com" {
+					t.Fatalf("ServiceCenter().PSI = %q", got)
 				}
 			},
 		},

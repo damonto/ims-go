@@ -33,9 +33,9 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-type serviceCentreStubCard struct {
+type serviceCenterStubCard struct {
 	serviceStubCard
-	centre usim.ServiceCentre
+	center usim.ServiceCenter
 }
 type smsppDownloadStubCard struct {
 	serviceStubCard
@@ -127,12 +127,12 @@ func (serviceStubCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 	}, nil
 }
 
-func (c serviceCentreStubCard) SMSC() string {
-	return c.centre.Address
+func (c serviceCenterStubCard) SMSC() string {
+	return c.center.Address
 }
 
-func (c serviceCentreStubCard) ServiceCentre() usim.ServiceCentre {
-	return c.centre
+func (c serviceCenterStubCard) ServiceCenter() usim.ServiceCenter {
+	return c.center
 }
 
 func (c *smsppDownloadStubCard) SMSPPDownload(ctx context.Context, req usim.SMSPPDownloadRequest) (usim.SMSPPDownloadResponse, error) {
@@ -201,10 +201,10 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 	}
 }
 
-func TestSendUsesServiceCentrePSIForSIPTargetAndAddressForRP(t *testing.T) {
+func TestSendUsesServiceCenterPSIForSIPTargetAndAddressForRP(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	card := serviceCentreStubCard{centre: usim.ServiceCentre{
+	card := serviceCenterStubCard{center: usim.ServiceCenter{
 		Address: "+15550000000",
 		PSI:     "sip:smsc@example.com",
 	}}
