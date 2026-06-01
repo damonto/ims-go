@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/vowifi-go"
+	"github.com/damonto/vowifi-go/wfcsetup"
 )
 
 func TestTCPAPDUFrameRoundTrip(t *testing.T) {
@@ -127,12 +127,12 @@ func TestWFCUserActionFromError(t *testing.T) {
 	}{
 		{
 			name: "nsds websheet",
-			err: &vowifi.WFCEntitlementError{
-				Err: vowifi.ErrWFCEntitlementUserActionRequired,
-				Result: vowifi.WFCEntitlementResult{
-					Scheme:  vowifi.WFCEntitlementSchemeNSDS,
+			err: &wfcsetup.Error{
+				Err: wfcsetup.ErrUserActionRequired,
+				Result: wfcsetup.Result{
+					Scheme:  wfcsetup.SchemeNSDS,
 					Carrier: "AT&T",
-					Websheet: &vowifi.WFCWebsheet{
+					Websheet: &wfcsetup.Websheet{
 						URL:        "https://example.test/e911",
 						Data:       "token=abc",
 						Title:      "Wi-Fi Calling",
@@ -152,12 +152,12 @@ func TestWFCUserActionFromError(t *testing.T) {
 		},
 		{
 			name: "ts43 web flow",
-			err: &vowifi.WFCEntitlementError{
-				Err: vowifi.ErrWFCEntitlementUserActionRequired,
-				Result: vowifi.WFCEntitlementResult{
-					Scheme:  vowifi.WFCEntitlementSchemeTS43,
+			err: &wfcsetup.Error{
+				Err: wfcsetup.ErrUserActionRequired,
+				Result: wfcsetup.Result{
+					Scheme:  wfcsetup.SchemeTS43,
 					Carrier: "Carrier",
-					Websheet: &vowifi.WFCWebsheet{
+					Websheet: &wfcsetup.Websheet{
 						URL:   "https://example.test/flow",
 						Data:  "session=1",
 						Title: "Wi-Fi Calling",
@@ -203,11 +203,11 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 		{
 			name: "polls after user action",
 			errors: []error{
-				&vowifi.WFCEntitlementError{
-					Err: vowifi.ErrWFCEntitlementUserActionRequired,
-					Result: vowifi.WFCEntitlementResult{
-						Scheme:   vowifi.WFCEntitlementSchemeNSDS,
-						Websheet: &vowifi.WFCWebsheet{URL: "https://example.test/e911"},
+				&wfcsetup.Error{
+					Err: wfcsetup.ErrUserActionRequired,
+					Result: wfcsetup.Result{
+						Scheme:   wfcsetup.SchemeNSDS,
+						Websheet: &wfcsetup.Websheet{URL: "https://example.test/e911"},
 					},
 				},
 				nil,
@@ -217,9 +217,9 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 		{
 			name: "polls after pending retry",
 			errors: []error{
-				&vowifi.WFCEntitlementError{
-					Err: vowifi.ErrWFCEntitlementPending,
-					Result: vowifi.WFCEntitlementResult{
+				&wfcsetup.Error{
+					Err: wfcsetup.ErrPending,
+					Result: wfcsetup.Result{
 						Pending:    true,
 						RetryAfter: time.Nanosecond,
 					},

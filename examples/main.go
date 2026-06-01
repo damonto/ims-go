@@ -30,6 +30,7 @@ import (
 	"github.com/damonto/vowifi-go/swu/tunnel"
 	"github.com/damonto/vowifi-go/usim"
 	usimreader "github.com/damonto/vowifi-go/usim/reader"
+	"github.com/damonto/vowifi-go/wfcsetup"
 )
 
 const (
@@ -306,7 +307,7 @@ func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context
 			return nil
 		}
 
-		if errors.Is(err, vowifi.ErrWFCEntitlementPending) {
+		if errors.Is(err, wfcsetup.ErrPending) {
 			retryAfter := wfcRetryAfter(err, interval)
 			slog.Info("wfc entitlement pending", "retry_after", retryAfter)
 			if err := waitForWFCRetry(ctx, retryAfter); err != nil {
@@ -321,7 +322,7 @@ func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context
 		}
 		if completedFlow {
 			if rechecks >= wfcFlowRecheckMax {
-				return fmt.Errorf("waiting for wfc entitlement update: %w", vowifi.ErrWFCEntitlementPending)
+				return fmt.Errorf("waiting for wfc entitlement update: %w", wfcsetup.ErrPending)
 			}
 			rechecks++
 			if err := waitForWFCRetry(ctx, wfcFlowRecheckDelay); err != nil {
@@ -351,9 +352,9 @@ func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context
 }
 
 func wfcRetryAfter(err error, fallback time.Duration) time.Duration {
-	var entitlementErr *vowifi.WFCEntitlementError
-	if errors.As(err, &entitlementErr) && entitlementErr.Result.RetryAfter > 0 {
-		return entitlementErr.Result.RetryAfter
+	var setupErr *wfcsetup.Error
+	if errors.As(err, &setupErr) && setupErr.Result.RetryAfter > 0 {
+		return setupErr.Result.RetryAfter
 	}
 	return fallback
 }
@@ -471,19 +472,19 @@ func logWFCUserAction(action wfcUserAction) {
 }
 
 func wfcUserActionFromError(err error) (wfcUserAction, bool) {
-	if !errors.Is(err, vowifi.ErrWFCEntitlementUserActionRequired) {
+	if !errors.Is(err, wfcsetup.ErrUserActionRequired) {
 		return wfcUserAction{}, false
 	}
 
-	var entitlementErr *vowifi.WFCEntitlementError
-	if errors.As(err, &entitlementErr) {
-		websheet := entitlementErr.Result.Websheet
+	var setupErr *wfcsetup.Error
+	if errors.As(err, &setupErr) {
+		websheet := setupErr.Result.Websheet
 		if websheet == nil {
-			return wfcUserAction{Source: string(entitlementErr.Result.Scheme), Carrier: entitlementErr.Result.Carrier}, true
+			return wfcUserAction{Source: string(setupErr.Result.Scheme), Carrier: setupErr.Result.Carrier}, true
 		}
 		return wfcUserAction{
-			Source:     string(entitlementErr.Result.Scheme),
-			Carrier:    entitlementErr.Result.Carrier,
+			Source:     string(setupErr.Result.Scheme),
+			Carrier:    setupErr.Result.Carrier,
 			URL:        websheet.URL,
 			Data:       websheet.Data,
 			Title:      websheet.Title,

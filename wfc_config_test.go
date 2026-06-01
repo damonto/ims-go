@@ -1199,7 +1199,25 @@ func TestEmbeddedWFCConfigPreservesDisabledRTCPInactivityTimer(t *testing.T) {
 }
 
 func TestEmbeddedWFCConfigMatchesNSDSProfiles(t *testing.T) {
-	for _, profile := range nsdsWFCProfiles {
+	nsdsProfiles := []struct {
+		Carrier   string
+		MCC       string
+		MNC       string
+		ServerURL string
+	}{
+		{Carrier: "AT&T", MCC: "310", MNC: "030", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "Cricket/AT&T", MCC: "310", MNC: "150", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "310", MNC: "170", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "310", MNC: "280", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "310", MNC: "380", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "310", MNC: "410", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "310", MNC: "560", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "310", MNC: "950", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "AT&T", MCC: "311", MNC: "180", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "FirstNet/AT&T", MCC: "313", MNC: "100", ServerURL: "https://sentitlement2.mobile.att.net/WFC"},
+		{Carrier: "GCI", MCC: "311", MNC: "370", ServerURL: "https://ses.epdg.gci.net/generic_devices"},
+	}
+	for _, profile := range nsdsProfiles {
 		t.Run(profile.Carrier+" "+profile.MCC+profile.MNC, func(t *testing.T) {
 			card := plmnWFCCard{
 				mcc:       profile.MCC,
