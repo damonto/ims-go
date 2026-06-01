@@ -24,11 +24,15 @@ func TestNextSIPMessage(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "complete", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantMsg: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantOK: true},
+		{name: "leading crlf ignored", stream: "\r\n\r\nMESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantMsg: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantOK: true},
 		{name: "incomplete body", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhel", wantOK: false},
 		{name: "missing length", stream: "MESSAGE sip:test SIP/2.0\r\nVia: SIP/2.0/TCP 127.0.0.1:5060\r\n\r\n", wantErr: true},
 		{name: "invalid length", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: nope\r\n\r\n", wantErr: true},
 		{name: "negative length", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: -1\r\n\r\n", wantErr: true},
 		{name: "compact length", stream: "MESSAGE sip:test SIP/2.0\r\nl: 5\r\n\r\nhello", wantMsg: "MESSAGE sip:test SIP/2.0\r\nl: 5\r\n\r\nhello", wantOK: true},
+		{name: "header too large", stream: "MESSAGE sip:test SIP/2.0\r\n" + strings.Repeat("X-Test: x\r\n", tcpMaxSIPHeaderBytes/10+1), wantErr: true},
+		{name: "message too large", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 1048577\r\n\r\n", wantErr: true},
+		{name: "message length overflows total", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 9223372036854775807\r\n\r\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -52,13 +56,42 @@ func TestNextSIPMessage(t *testing.T) {
 	}
 }
 
+func TestTCPConnReserveSendSeqAcceptsFastACK(t *testing.T) {
+	conn := &TCPConn{
+		sendSeq:      1001,
+		ackedSeq:     1000,
+		ackCh:        make(chan struct{}, 1),
+		associations: NewSecurityAssociations(),
+	}
+
+	seq, wantAck, err := conn.reserveSendSeq(48)
+	if err != nil {
+		t.Fatalf("reserveSendSeq() error = %v", err)
+	}
+	if seq != 1001 {
+		t.Fatalf("seq = %d, want 1001", seq)
+	}
+	if wantAck != 1049 {
+		t.Fatalf("wantAck = %d, want 1049", wantAck)
+	}
+
+	conn.mu.Lock()
+	conn.noteAckLocked(wantAck)
+	got := conn.ackedSeq
+	conn.mu.Unlock()
+	if got != wantAck {
+		t.Fatalf("ackedSeq = %d, want %d", got, wantAck)
+	}
+}
+
 func TestTCPConnWritePacketUnblocksOnHandleError(t *testing.T) {
 	conn := &TCPConn{
-		errCh:   make(chan error, 1),
-		msgCh:   make(chan []byte, 1),
-		readyCh: make(chan struct{}),
-		ackCh:   make(chan struct{}, 1),
-		done:    make(chan struct{}),
+		errCh:        make(chan error, 1),
+		msgCh:        make(chan []byte, 1),
+		readyCh:      make(chan struct{}),
+		ackCh:        make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		associations: NewSecurityAssociations(),
 	}
 	result := make(chan error, 1)
 	go func() {
@@ -89,11 +122,12 @@ func TestTCPConnWritePacketUnblocksOnHandleError(t *testing.T) {
 
 func TestTCPConnReadPacketReturnsTerminalErrorAfterHandleError(t *testing.T) {
 	conn := &TCPConn{
-		errCh:   make(chan error, 1),
-		msgCh:   make(chan []byte, 1),
-		readyCh: make(chan struct{}),
-		ackCh:   make(chan struct{}, 1),
-		done:    make(chan struct{}),
+		errCh:        make(chan error, 1),
+		msgCh:        make(chan []byte, 1),
+		readyCh:      make(chan struct{}),
+		ackCh:        make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		associations: NewSecurityAssociations(),
 	}
 	cause := errors.New("session failed")
 	conn.HandleError(cause)
@@ -137,18 +171,19 @@ func TestTCPConnWritePacketClosesOnAckTimeout(t *testing.T) {
 		_ = session.Close()
 	})
 	conn := &TCPConn{
-		session:     session,
-		local:       &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
-		remote:      &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
-		established: true,
-		sendSeq:     1001,
-		recvSeq:     2001,
-		ackedSeq:    1000,
-		errCh:       make(chan error, 1),
-		msgCh:       make(chan []byte, 1),
-		readyCh:     make(chan struct{}),
-		ackCh:       make(chan struct{}, 1),
-		done:        make(chan struct{}),
+		session:      session,
+		local:        &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+		remote:       &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
+		established:  true,
+		sendSeq:      1001,
+		recvSeq:      2001,
+		ackedSeq:     1000,
+		errCh:        make(chan error, 1),
+		msgCh:        make(chan []byte, 1),
+		readyCh:      make(chan struct{}),
+		ackCh:        make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		associations: NewSecurityAssociations(),
 	}
 	err = conn.WritePacket(context.Background(), []byte("INVITE sip:test SIP/2.0\r\nContent-Length: 0\r\n\r\n"))
 	if err == nil {
@@ -176,6 +211,27 @@ func TestTCPConnWritePacketClosesOnAckTimeout(t *testing.T) {
 	}
 }
 
+func TestTCPConnWritePacketClosesOnSendError(t *testing.T) {
+	conn := newEstablishedTCPConnForTest(t)
+	_ = conn.session.Close()
+
+	err := conn.WritePacket(context.Background(), []byte("INVITE sip:test SIP/2.0\r\nContent-Length: 0\r\n\r\n"))
+	if err == nil {
+		t.Fatal("WritePacket() error = nil, want send error")
+	}
+	if !strings.Contains(err.Error(), "session is closed") {
+		t.Fatalf("WritePacket() error = %v, want session closed", err)
+	}
+	if !conn.closed {
+		t.Fatal("closed = false, want true")
+	}
+	select {
+	case <-conn.done:
+	case <-time.After(time.Second):
+		t.Fatal("done was not closed after send error")
+	}
+}
+
 func TestTCPConnACKWindow(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -193,9 +249,10 @@ func TestTCPConnACKWindow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &TCPConn{
-				sendSeq:  tt.sendSeq,
-				ackedSeq: tt.ackedSeq,
-				ackCh:    make(chan struct{}, 1),
+				sendSeq:      tt.sendSeq,
+				ackedSeq:     tt.ackedSeq,
+				ackCh:        make(chan struct{}, 1),
+				associations: NewSecurityAssociations(),
 			}
 			conn.mu.Lock()
 			conn.noteAckLocked(tt.ack)
@@ -205,6 +262,286 @@ func TestTCPConnACKWindow(t *testing.T) {
 				t.Fatalf("ackedSeq = %d, want %d", got, tt.wantAcked)
 			}
 		})
+	}
+}
+
+func TestTCPConnIgnoresAckNumberWithoutACKFlag(t *testing.T) {
+	conn := newEstablishedTCPConnForTest(t)
+	conn.sendSeq = 5
+	conn.ackedSeq = ^uint32(0) - 4
+
+	conn.mu.Lock()
+	_, err := conn.handleSegmentLocked(packet.TCPSegment{Seq: 2001, Ack: 3})
+	got := conn.ackedSeq
+	conn.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("handleSegmentLocked() error = %v", err)
+	}
+	if got != ^uint32(0)-4 {
+		t.Fatalf("ackedSeq = %d, want %d", got, ^uint32(0)-4)
+	}
+}
+
+func TestTCPConnActiveHandshakeRequiresValidSYNACK(t *testing.T) {
+	tests := []struct {
+		name            string
+		ack             uint32
+		wantEstablished bool
+		wantAcked       uint32
+		wantResponse    tcpSegmentResponse
+	}{
+		{
+			name:      "invalid stale ack is ignored",
+			ack:       1000,
+			wantAcked: 1000,
+		},
+		{
+			name:      "invalid future ack is ignored",
+			ack:       1002,
+			wantAcked: 1000,
+		},
+		{
+			name:            "valid ack establishes",
+			ack:             1001,
+			wantEstablished: true,
+			wantAcked:       1001,
+			wantResponse:    tcpSegmentResponse{seq: 1001, ack: 2001, flags: packet.TCPFlagACK},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.established = false
+			conn.passive = false
+			conn.sendSeq = 1001
+			conn.ackedSeq = 1000
+			conn.recvSeq = 0
+
+			conn.mu.Lock()
+			response, err := conn.handleSegmentLocked(packet.TCPSegment{
+				Seq:   2000,
+				Ack:   tt.ack,
+				Flags: packet.TCPFlagSYN | packet.TCPFlagACK,
+			})
+			established := conn.established
+			acked := conn.ackedSeq
+			recvSeq := conn.recvSeq
+			conn.mu.Unlock()
+
+			if err != nil {
+				t.Fatalf("handleSegmentLocked() error = %v", err)
+			}
+			if established != tt.wantEstablished {
+				t.Fatalf("established = %t, want %t", established, tt.wantEstablished)
+			}
+			if acked != tt.wantAcked {
+				t.Fatalf("ackedSeq = %d, want %d", acked, tt.wantAcked)
+			}
+			if response != tt.wantResponse {
+				t.Fatalf("response = %+v, want %+v", response, tt.wantResponse)
+			}
+			if !tt.wantEstablished && recvSeq != 0 {
+				t.Fatalf("recvSeq = %d, want unchanged 0", recvSeq)
+			}
+		})
+	}
+}
+
+func TestTCPConnPassiveHandshakeProcessesACKPayload(t *testing.T) {
+	conn := newEstablishedTCPConnForTest(t)
+	conn.established = false
+	conn.passive = true
+	conn.sendSeq = 1001
+	conn.ackedSeq = 1000
+	conn.recvSeq = 2001
+	payload := "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"
+
+	conn.mu.Lock()
+	response, err := conn.handleSegmentLocked(packet.TCPSegment{
+		Seq:     2001,
+		Ack:     1001,
+		Flags:   packet.TCPFlagACK | packet.TCPFlagPSH,
+		Payload: []byte(payload),
+	})
+	established := conn.established
+	acked := conn.ackedSeq
+	recvSeq := conn.recvSeq
+	conn.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("handleSegmentLocked() error = %v", err)
+	}
+	if !established {
+		t.Fatal("established = false, want true")
+	}
+	if acked != 1001 {
+		t.Fatalf("ackedSeq = %d, want 1001", acked)
+	}
+	wantAck := uint32(2001 + len(payload))
+	if recvSeq != wantAck {
+		t.Fatalf("recvSeq = %d, want %d", recvSeq, wantAck)
+	}
+	if response != (tcpSegmentResponse{seq: 1001, ack: wantAck, flags: packet.TCPFlagACK}) {
+		t.Fatalf("response = %+v, want ACK %d", response, wantAck)
+	}
+	select {
+	case got := <-conn.msgCh:
+		if string(got) != payload {
+			t.Fatalf("message = %q, want %q", string(got), payload)
+		}
+	default:
+		t.Fatal("message queue was empty")
+	}
+}
+
+func TestTCPConnDialReady(t *testing.T) {
+	tests := []struct {
+		name        string
+		established bool
+		closed      bool
+		wantReady   bool
+		wantErr     bool
+	}{
+		{name: "not signaled"},
+		{name: "established", established: true, wantReady: true},
+		{name: "closed before established", closed: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.established = tt.established
+			conn.closed = tt.closed
+			if tt.established || tt.closed {
+				conn.signalReady()
+			}
+
+			ready, err := conn.dialReady("dialing tcp transport")
+			if ready != tt.wantReady {
+				t.Fatalf("dialReady() ready = %t, want %t", ready, tt.wantReady)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("dialReady() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestTCPConnIgnoresOutOfOrderFIN(t *testing.T) {
+	conn := newEstablishedTCPConnForTest(t)
+
+	conn.mu.Lock()
+	response, err := conn.handleSegmentLocked(packet.TCPSegment{
+		Seq:   2002,
+		Ack:   1001,
+		Flags: packet.TCPFlagFIN | packet.TCPFlagACK,
+	})
+	closed := conn.closed
+	recvSeq := conn.recvSeq
+	conn.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("handleSegmentLocked() error = %v", err)
+	}
+	if closed {
+		t.Fatal("closed = true, want false")
+	}
+	if recvSeq != 2001 {
+		t.Fatalf("recvSeq = %d, want 2001", recvSeq)
+	}
+	want := tcpSegmentResponse{seq: 1001, ack: 2001, flags: packet.TCPFlagACK}
+	if response != want {
+		t.Fatalf("response = %+v, want %+v", response, want)
+	}
+}
+
+func TestTCPConnConsumesFINSequence(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		wantMessage bool
+	}{
+		{
+			name:        "fin with complete sip message",
+			payload:     "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello",
+			wantMessage: true,
+		},
+		{
+			name: "fin without payload",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+
+			conn.mu.Lock()
+			response, err := conn.handleSegmentLocked(packet.TCPSegment{
+				Seq:     2001,
+				Ack:     1001,
+				Flags:   packet.TCPFlagPSH | packet.TCPFlagACK | packet.TCPFlagFIN,
+				Payload: []byte(tt.payload),
+			})
+			recvSeq := conn.recvSeq
+			conn.mu.Unlock()
+
+			wantAck := uint32(2001 + len(tt.payload) + 1)
+			if response != (tcpSegmentResponse{seq: 1001, ack: wantAck, flags: packet.TCPFlagACK}) {
+				t.Fatalf("response = %+v, want seq 1001 ack %d ACK", response, wantAck)
+			}
+			if recvSeq != wantAck {
+				t.Fatalf("recvSeq = %d, want %d", recvSeq, wantAck)
+			}
+			if err == nil || !strings.Contains(err.Error(), "peer closed connection") {
+				t.Fatalf("handleSegmentLocked() error = %v, want peer closed connection", err)
+			}
+			if tt.wantMessage {
+				select {
+				case got := <-conn.msgCh:
+					if string(got) != tt.payload {
+						t.Fatalf("message = %q, want %q", string(got), tt.payload)
+					}
+				default:
+					t.Fatal("message queue was empty")
+				}
+				return
+			}
+			select {
+			case got := <-conn.msgCh:
+				t.Fatalf("message = %q, want none", string(got))
+			default:
+			}
+		})
+	}
+}
+
+func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
+	conn := newEstablishedTCPConnForTest(t)
+	payload := "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"
+
+	conn.mu.Lock()
+	_, err := conn.handleSegmentLocked(packet.TCPSegment{
+		Seq:     2001,
+		Ack:     1001,
+		Flags:   packet.TCPFlagPSH | packet.TCPFlagACK | packet.TCPFlagFIN,
+		Payload: []byte(payload),
+	})
+	conn.mu.Unlock()
+	if err == nil {
+		t.Fatal("handleSegmentLocked() error = nil, want peer close")
+	}
+	conn.closeWithError(err)
+
+	got, _, err := conn.ReadPacket(context.Background())
+	if err != nil {
+		t.Fatalf("ReadPacket() first error = %v, want queued message", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("ReadPacket() first message = %q, want %q", string(got), payload)
+	}
+
+	_, _, err = conn.ReadPacket(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "peer closed connection") {
+		t.Fatalf("ReadPacket() second error = %v, want peer closed connection", err)
 	}
 }
 
@@ -293,18 +630,19 @@ func newEstablishedTCPConnForTest(t *testing.T) *TCPConn {
 		_ = session.Close()
 	})
 	return &TCPConn{
-		session:     session,
-		local:       &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
-		remote:      &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
-		established: true,
-		sendSeq:     1001,
-		recvSeq:     2001,
-		ackedSeq:    1000,
-		errCh:       make(chan error, 1),
-		msgCh:       make(chan []byte, 1),
-		readyCh:     make(chan struct{}),
-		ackCh:       make(chan struct{}, 1),
-		done:        make(chan struct{}),
+		session:      session,
+		local:        &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+		remote:       &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
+		established:  true,
+		sendSeq:      1001,
+		recvSeq:      2001,
+		ackedSeq:     1000,
+		errCh:        make(chan error, 1),
+		msgCh:        make(chan []byte, 1),
+		readyCh:      make(chan struct{}),
+		ackCh:        make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		associations: NewSecurityAssociations(),
 	}
 }
 

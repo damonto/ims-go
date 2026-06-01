@@ -193,7 +193,7 @@ func (c *Call) applyMediaReINVITEAnswer(ctx context.Context, resp sip.Message) e
 	if !ok {
 		return errors.New("no compatible re-INVITE answer codec")
 	}
-	dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.service.cfg.Codecs, negotiated.ClockRate)
 	c.mu.Lock()
 	current := c.media
 	c.media = negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), dtmf, hasDTMF)

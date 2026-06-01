@@ -25,8 +25,10 @@ type NegotiatedMedia struct {
 	ClockRate       int
 	Channels        int
 	OctetAlign      bool
+	HasDTMF         bool
 	DTMFPayloadType int
 	DTMFClockRate   int
+	DTMFEventMask   uint16
 	PTime           time.Duration
 	Direction       mediaDirection
 	RemoteIP        net.IP
@@ -89,6 +91,7 @@ const (
 
 	amrModeChangeCapability = 2
 	amrMaxRedMillis         = 220
+	dtmfAllEventsMask       = 0xffff
 
 	sdpNetworkIN      = "IN"
 	sdpAddressTypeIP4 = "IP4"
@@ -146,14 +149,22 @@ func buildSDPOfferWithDirection(cfg Config, localIP net.IP, localPort int, offer
 	if cfg.Preconditions {
 		appendQoSPreconditions(&b, qosStatusNone, qosStatusNone, false)
 	}
+	speech := firstSpeechCodec(codecs)
+	dtmf, hasDTMF := chooseLocalTelephoneEventForClock(codecs, speech.ClockRate)
 	media := NegotiatedMedia{
-		Codec:       firstSpeechCodec(codecs).Name,
-		PayloadType: firstSpeechCodec(codecs).PayloadTypes[0],
-		ClockRate:   firstSpeechCodec(codecs).ClockRate,
-		Channels:    firstSpeechCodec(codecs).Channels,
-		OctetAlign:  firstSpeechCodec(codecs).OctetAlign,
+		Codec:       speech.Name,
+		PayloadType: speech.PayloadTypes[0],
+		ClockRate:   speech.ClockRate,
+		Channels:    speech.Channels,
+		OctetAlign:  speech.OctetAlign,
 		PTime:       ptime,
 		Direction:   direction,
+	}
+	if hasDTMF {
+		media.HasDTMF = true
+		media.DTMFPayloadType = dtmf.PayloadTypes[0]
+		media.DTMFClockRate = dtmf.ClockRate
+		media.DTMFEventMask = dtmf.DTMFEventMask
 	}
 	return []byte(b.String()), media, nil
 }
@@ -177,7 +188,7 @@ func buildSDPAnswerWithDirection(cfg Config, localIP net.IP, localPort int, remo
 	if !ok {
 		return nil, NegotiatedMedia{}, errors.New("building voice SDP answer: no compatible codec")
 	}
-	dtmf, hasDTMF := chooseTelephoneEvent(remote, cfg.Codecs)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(remote, cfg.Codecs, selected.ClockRate)
 	if localIP == nil || localIP.IsUnspecified() {
 		localIP = net.IPv4(0, 0, 0, 0)
 	}
@@ -240,7 +251,7 @@ func buildSDPPreconditionUpdate(cfg Config, localIP net.IP, localPort int, answe
 	if !ok {
 		return nil, errors.New("building voice precondition SDP update: no compatible codec")
 	}
-	dtmf, hasDTMF := chooseTelephoneEvent(answer, cfg.Codecs)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, cfg.Codecs, selected.ClockRate)
 	if localIP == nil || localIP.IsUnspecified() {
 		localIP = net.IPv4(0, 0, 0, 0)
 	}
@@ -366,8 +377,10 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Dura
 		RTCPDisabled:   rtcpDisabled(remote),
 	}
 	if hasDTMF {
+		media.HasDTMF = true
 		media.DTMFPayloadType = dtmf.PayloadTypes[0]
 		media.DTMFClockRate = dtmf.ClockRate
+		media.DTMFEventMask = dtmf.DTMFEventMask
 	}
 	return media
 }
@@ -443,6 +456,9 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			codec.ModeSet = fmtpParam(fmtp, "mode-set")
 			codec.Bitrate = fmtpParam(fmtp, "br")
 			codec.Bandwidth = fmtpParam(fmtp, "bw")
+			if codec.Name == CodecTelephoneEvent {
+				codec.DTMFEventMask = parseTelephoneEventMask(fmtp)
+			}
 			if value, ok := fmtpSignedParam(fmtp, "ch-aw-recv"); ok {
 				codec.ChAwRecv = &value
 			}
@@ -552,7 +568,7 @@ func applyStaticRTPPayloads(offer *sdpOffer) {
 
 func selectOfferCodecs(configured []AudioCodecConfig, requested []AudioCodec) []AudioCodecConfig {
 	if len(requested) == 0 {
-		return cloneCodecConfigs(configured)
+		return filterTelephoneEventsForSpeech(cloneCodecConfigs(configured))
 	}
 	wanted := make(map[AudioCodec]struct{}, len(requested))
 	for _, name := range requested {
@@ -577,16 +593,44 @@ func selectOfferCodecs(configured []AudioCodecConfig, requested []AudioCodec) []
 	}
 	for _, codec := range codecs {
 		if codec.Name == CodecTelephoneEvent {
-			return codecs
+			return filterTelephoneEventsForSpeech(codecs)
 		}
+	}
+	clockRates := make(map[int]struct{})
+	for _, codec := range codecs {
+		if codec.Name == CodecTelephoneEvent {
+			continue
+		}
+		clockRates[codec.ClockRate] = struct{}{}
 	}
 	for _, codec := range configured {
 		if codec.Name == CodecTelephoneEvent {
+			if _, ok := clockRates[codec.ClockRate]; !ok {
+				continue
+			}
 			codecs = append(codecs, cloneCodecConfig(codec))
-			break
 		}
 	}
-	return codecs
+	return filterTelephoneEventsForSpeech(codecs)
+}
+
+func filterTelephoneEventsForSpeech(codecs []AudioCodecConfig) []AudioCodecConfig {
+	clockRates := make(map[int]struct{})
+	for _, codec := range codecs {
+		if codec.Name != CodecTelephoneEvent {
+			clockRates[codec.ClockRate] = struct{}{}
+		}
+	}
+	out := codecs[:0]
+	for _, codec := range codecs {
+		if codec.Name == CodecTelephoneEvent {
+			if _, ok := clockRates[codec.ClockRate]; !ok {
+				continue
+			}
+		}
+		out = append(out, codec)
+	}
+	return out
 }
 
 func chooseCodec(remote sdpOffer, local []AudioCodecConfig) (AudioCodecConfig, bool) {
@@ -640,20 +684,17 @@ func chooseCodec(remote sdpOffer, local []AudioCodecConfig) (AudioCodecConfig, b
 	return AudioCodecConfig{}, false
 }
 
-func chooseTelephoneEvent(remote sdpOffer, local []AudioCodecConfig) (AudioCodecConfig, bool) {
-	var localCodec AudioCodecConfig
-	for _, codec := range local {
-		if codec.Name == CodecTelephoneEvent {
-			localCodec = codec
-			break
-		}
-	}
-	if localCodec.Name == "" {
+func chooseTelephoneEventForClock(remote sdpOffer, local []AudioCodecConfig, clockRate int) (AudioCodecConfig, bool) {
+	localCodec, ok := chooseLocalTelephoneEventForClock(local, clockRate)
+	if !ok {
 		return AudioCodecConfig{}, false
 	}
 	for _, payload := range remote.Payloads {
 		remoteCodec, ok := remote.Codecs[payload]
 		if !ok || remoteCodec.Name != CodecTelephoneEvent {
+			continue
+		}
+		if remoteCodec.ClockRate != 0 && remoteCodec.ClockRate != clockRate {
 			continue
 		}
 		selected := localCodec
@@ -664,7 +705,22 @@ func chooseTelephoneEvent(remote sdpOffer, local []AudioCodecConfig) (AudioCodec
 		if remoteCodec.Channels != 0 {
 			selected.Channels = remoteCodec.Channels
 		}
+		selected.DTMFEventMask = dtmfEventMaskOrDefault(localCodec.DTMFEventMask) & remoteCodec.DTMFEventMask
+		if selected.DTMFEventMask == 0 {
+			continue
+		}
 		return selected, true
+	}
+	return AudioCodecConfig{}, false
+}
+
+func chooseLocalTelephoneEventForClock(codecs []AudioCodecConfig, clockRate int) (AudioCodecConfig, bool) {
+	for _, codec := range codecs {
+		if codec.Name != CodecTelephoneEvent || codec.ClockRate != clockRate || len(codec.PayloadTypes) == 0 {
+			continue
+		}
+		codec.DTMFEventMask = dtmfEventMaskOrDefault(codec.DTMFEventMask)
+		return codec, true
 	}
 	return AudioCodecConfig{}, false
 }
@@ -752,6 +808,8 @@ func answerCodecFMTP(codec AudioCodecConfig) string {
 		if codec.ModeSet != "" {
 			params = append(params, "mode-set="+codec.ModeSet)
 		}
+	case CodecTelephoneEvent:
+		params = append(params, formatTelephoneEventMask(dtmfEventMaskOrDefault(codec.DTMFEventMask)))
 	}
 	return strings.Join(params, ";")
 }
@@ -1049,7 +1107,11 @@ func parseRTPMap(line string) (int, AudioCodecConfig, error) {
 	default:
 		return payloadType, AudioCodecConfig{}, nil
 	}
-	return payloadType, AudioCodecConfig{Name: codec, PayloadTypes: []int{payloadType}, ClockRate: clock, Channels: channels}, nil
+	config := AudioCodecConfig{Name: codec, PayloadTypes: []int{payloadType}, ClockRate: clock, Channels: channels}
+	if codec == CodecTelephoneEvent {
+		config.DTMFEventMask = dtmfAllEventsMask
+	}
+	return payloadType, config, nil
 }
 
 func parseFMTP(line string) (int, string) {
@@ -1096,6 +1158,59 @@ func fmtpFlag(fmtp, want string) bool {
 		return strings.TrimSpace(value) == "1"
 	}
 	return false
+}
+
+func parseTelephoneEventMask(fmtp string) uint16 {
+	var mask uint16
+	for _, part := range strings.Split(fmtp, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		startText, endText, hasRange := strings.Cut(part, "-")
+		start, ok := parseBoundedDecimal(startText, 0, 15)
+		if !ok {
+			continue
+		}
+		end := start
+		if hasRange {
+			end, ok = parseBoundedDecimal(endText, start, 15)
+			if !ok {
+				continue
+			}
+		}
+		for event := start; event <= end; event++ {
+			mask |= 1 << event
+		}
+	}
+	return mask
+}
+
+func dtmfEventMaskOrDefault(mask uint16) uint16 {
+	if mask == 0 {
+		return dtmfAllEventsMask
+	}
+	return mask
+}
+
+func formatTelephoneEventMask(mask uint16) string {
+	mask = dtmfEventMaskOrDefault(mask)
+	parts := make([]string, 0, 4)
+	for event := 0; event <= 15; event++ {
+		if mask&(1<<event) == 0 {
+			continue
+		}
+		start := event
+		for event+1 <= 15 && mask&(1<<(event+1)) != 0 {
+			event++
+		}
+		if start == event {
+			parts = append(parts, strconv.Itoa(start))
+			continue
+		}
+		parts = append(parts, strconv.Itoa(start)+"-"+strconv.Itoa(event))
+	}
+	return strings.Join(parts, ",")
 }
 
 func parseSDPDuration(value string) time.Duration {

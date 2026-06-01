@@ -283,6 +283,7 @@ func run(opt options) error {
 	}
 
 	<-ctx.Done()
+	stop()
 	return nil
 }
 

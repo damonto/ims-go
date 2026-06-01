@@ -354,6 +354,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 
 	pcscfIPs := pcscfCandidateIPs(tunnelInfo)
 	selectedPCSCF := firstPCSCFIP(pcscfIPs)
+	associations := swutransport.NewSecurityAssociations()
 	var transport imssession.Transport = tunnelDatagramTransport{session: setup.session}
 	if setup.imsCfg.Transport != "tcp" {
 		setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
@@ -369,6 +370,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 				EncryptionKey: cfg.EncryptionKey,
 				Integrity:     cfg.Integrity,
 				IntegrityKey:  cfg.IntegrityKey,
+				Associations:  associations,
 			})
 		}
 		setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
@@ -385,6 +387,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 				EncryptionKey: cfg.EncryptionKey,
 				Integrity:     cfg.Integrity,
 				IntegrityKey:  cfg.IntegrityKey,
+				Associations:  associations,
 			})
 		}
 		return transport, nil
@@ -409,6 +412,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Associations:  associations,
 		})
 	}
 	setup.imsCfg.listenSecureTCP = func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
@@ -425,6 +429,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Associations:  associations,
 		})
 	}
 	setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
@@ -441,6 +446,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Associations:  associations,
 		})
 	}
 	return transport, nil
@@ -1017,8 +1023,15 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		if active != nil && active.cancel != nil {
 			active.cancel()
 		}
-		c.closeWG.Wait()
-		err = errors.Join(err, c.closeActive(ctx, active))
+		if c.waitCloseTasks(ctx) {
+			err = errors.Join(err, c.closeActive(ctx, active))
+		} else {
+			err = errors.Join(err, ctx.Err())
+			err = errors.Join(err, c.closeActiveRuntime(ctx, active))
+			if active != nil && active.session != nil {
+				err = errors.Join(err, wrapCloseError("closing session", normalizeCloseError(active.session.CloseContext(ctx))))
+			}
+		}
 		if reader != nil {
 			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
 		}
@@ -1029,6 +1042,21 @@ func (c *Client) CloseContext(ctx context.Context) error {
 		c.events.close()
 	})
 	return err
+}
+
+func (c *Client) waitCloseTasks(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		c.closeWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func normalizeCloseError(err error) error {

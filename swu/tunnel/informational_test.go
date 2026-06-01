@@ -643,7 +643,7 @@ func TestBuildDeviceIdentityResponsePayload(t *testing.T) {
 		wantOK   bool
 	}{
 		{
-			name:     "android informational request uses one byte identity type",
+			name:     "informational request uses one byte identity type",
 			request:  []byte{0x01},
 			identity: "123456789123456",
 			wantData: []byte{0x00, 0x09, 0x01, 0x21, 0x43, 0x65, 0x87, 0x19, 0x32, 0x54, 0xf6},

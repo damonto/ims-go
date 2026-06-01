@@ -108,7 +108,7 @@ func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 		c.finish(CallStateFailed, "no compatible delayed-offer answer codec")
 		return nil
 	}
-	dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.service.cfg.Codecs, negotiated.ClockRate)
 	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), dtmf, hasDTMF)
 	c.mu.Lock()
 	c.media = answerMedia

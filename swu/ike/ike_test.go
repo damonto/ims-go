@@ -567,7 +567,7 @@ func TestTrafficSelectorContains(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "protocol must match android behavior",
+			name: "protocol must match reference behavior",
 			base: selector(ipProtocolAny, 0, 65535, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 10)),
 			sub:  selector(ipProtocolUDP, 0, 65535, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 10)),
 		},
@@ -1370,13 +1370,13 @@ func TestDeviceIdentityMarshalBinary(t *testing.T) {
 		wantMarshalErr string
 	}{
 		{
-			name:          "imei matches android vector",
+			name:          "imei matches reference vector",
 			identity:      "123456789123456",
 			requestedType: deviceIdentityAuto,
 			want:          []byte{0x00, 0x09, 0x01, 0x21, 0x43, 0x65, 0x87, 0x19, 0x32, 0x54, 0xf6},
 		},
 		{
-			name:          "imeisv matches android vector",
+			name:          "imeisv matches reference vector",
 			identity:      "1234567891234567",
 			requestedType: deviceIdentityAuto,
 			want:          []byte{0x00, 0x09, 0x02, 0x21, 0x43, 0x65, 0x87, 0x19, 0x32, 0x54, 0x76},
@@ -1453,7 +1453,7 @@ func TestDeviceIdentityUnmarshalBinary(t *testing.T) {
 		wantErr   string
 	}{
 		{
-			name:     "android informational request carries only requested type",
+			name:     "informational request carries only requested type",
 			wire:     []byte{deviceIdentityIMEI},
 			wantType: deviceIdentityIMEI,
 		},

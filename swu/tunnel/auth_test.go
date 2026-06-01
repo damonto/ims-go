@@ -39,9 +39,21 @@ type twoDigitMNCCard struct {
 	sessionTestCard
 }
 
+type akaStateTestCard struct {
+	sessionTestCard
+	state usim.AKAIdentityState
+}
+
 func (twoDigitMNCCard) IMSI() string { return "204020123456789" }
 func (twoDigitMNCCard) MCC() string  { return "204" }
 func (twoDigitMNCCard) MNC() string  { return "02" }
+
+func (c *akaStateTestCard) AKAIdentityState() usim.AKAIdentityState {
+	return cloneAKAIdentityState(c.state)
+}
+func (c *akaStateTestCard) SetAKAIdentityState(state usim.AKAIdentityState) {
+	c.state = cloneAKAIdentityState(state)
+}
 
 func (c akaChallengeTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return c.result, nil
@@ -601,6 +613,96 @@ func TestAKAAuthFlowBuildIdentityResponse(t *testing.T) {
 	}
 }
 
+func TestAKAAuthFlowDiscardsStoredReauthStateWhenUsed(t *testing.T) {
+	realm := "nai.epc.mnc001.mcc001.3gppnetwork.org"
+	reauthIdentity := "reauth123@" + realm
+	mk := bytes.Repeat([]byte{0x77}, 20)
+	kAut := bytes.Repeat([]byte{0x11}, 16)
+	kEncr := bytes.Repeat([]byte{0x22}, 16)
+	state := usim.AKAIdentityState{
+		Pseudonym:      "pseudonym123",
+		ReauthIdentity: reauthIdentity,
+		Counter:        4,
+		MK:             mk,
+		KAut:           kAut,
+		KEncr:          kEncr,
+	}
+	tests := []struct {
+		name string
+		run  func(t *testing.T, flow *akaAuthFlow)
+	}{
+		{
+			name: "identity response",
+			run: func(t *testing.T, flow *akaAuthFlow) {
+				response := buildIdentityResponseForTest(t, flow, eapaka.AKAMessage{
+					Identifier: 7,
+					Attributes: []eapaka.AKAAttribute{
+						{Type: akaAttrAnyIDReq, Value: []byte{0x00, 0x00}},
+					},
+				})
+				if response.afterSend != nil {
+					t.Fatalf("buildIdentityResponse() afterSend = %v, want nil", response.afterSend)
+				}
+			},
+		},
+		{
+			name: "reauthentication response",
+			run: func(t *testing.T, flow *akaAuthFlow) {
+				nonceS := bytes.Repeat([]byte{0x33}, 16)
+				wire := buildSignedAKAReauthRequest(t, 9, 5, nonceS, kAut, kEncr)
+				var message eapaka.AKAMessage
+				if err := message.UnmarshalBinary(wire); err != nil {
+					t.Fatalf("UnmarshalBinary() error = %v", err)
+				}
+				response, err := flow.buildReauthenticationResponse(message, wire)
+				if err != nil {
+					t.Fatalf("buildReauthenticationResponse() error = %v", err)
+				}
+				if response.afterSend != nil {
+					t.Fatalf("buildReauthenticationResponse() afterSend = %v, want nil", response.afterSend)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card := &akaStateTestCard{state: state}
+			flow := akaAuthFlow{
+				card:             card,
+				realm:            realm,
+				reauthIdentity:   reauthIdentity,
+				currentState:     cloneAKAIdentityState(state),
+				pendingState:     cloneAKAIdentityState(state),
+				currentAuthKey:   append([]byte(nil), kAut...),
+				currentEncrKey:   append([]byte(nil), kEncr...),
+				currentEAPType:   eapTypeAKA,
+				currentCounter:   state.Counter,
+				fastReauth:       true,
+				akaAuthenticated: true,
+				crypto:           &ikeCrypto{},
+			}
+
+			tt.run(t, &flow)
+
+			if card.state.Pseudonym != state.Pseudonym {
+				t.Fatalf("stored pseudonym = %q, want %q", card.state.Pseudonym, state.Pseudonym)
+			}
+			if card.state.HasReauth() {
+				t.Fatalf("stored reauth state still available: %+v", card.state)
+			}
+			if card.state.Counter != 0 {
+				t.Fatalf("stored counter = %d, want 0", card.state.Counter)
+			}
+			if len(card.state.MK) != 0 || len(card.state.KAut) != 0 || len(card.state.KEncr) != 0 {
+				t.Fatalf("stored keys were not cleared")
+			}
+			if !validAKAReauthState(flow.currentState) {
+				t.Fatalf("flow current reauth state was cleared during active exchange")
+			}
+		})
+	}
+}
+
 func TestAKAAuthFlowRepeatedAnyIdentityRequestReturnsClientError(t *testing.T) {
 	flow := akaAuthFlow{card: sessionTestCard{}, realm: "nai.epc.mnc001.mcc001.3gppnetwork.org"}
 	message := eapaka.AKAMessage{
@@ -964,7 +1066,7 @@ func TestAKAPrimeNetworkNamesMatch(t *testing.T) {
 		{name: "exact", peer: "WLAN", server: "WLAN", want: true},
 		{name: "peer prefix", peer: "WLAN", server: "WLAN:foo", want: true},
 		{name: "server prefix", peer: "WLAN:foo", server: "WLAN", want: true},
-		{name: "empty peer follows android behavior", peer: "", server: "WLAN", want: true},
+		{name: "empty peer follows reference behavior", peer: "", server: "WLAN", want: true},
 		{name: "mismatch", peer: "WLAN", server: "HRPD", want: false},
 		{name: "later field mismatch", peer: "WLAN:foo", server: "WLAN:bar", want: false},
 	}
@@ -1117,6 +1219,214 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsInvalidAKAPrimeKDFAttributes(t 
 				t.Fatalf("response = % X, want authentication reject % X", response.data, want)
 			}
 		})
+	}
+}
+
+func TestAKAAuthFlowBuildChallengeResponseNegotiatesAKAPrimeKDF(t *testing.T) {
+	randValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)
+	autnValue := []byte{
+		0x00, 0x00,
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+		0xcd, 0xef,
+		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+	}
+	kdfInputAttr := akaAttributeFromBinaryForTest(t, eapaka.KDFInput{NetworkName: []byte("WLAN")})
+	kdfAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault})
+	unsupportedKDFAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault + 1})
+	tests := []struct {
+		name  string
+		attrs []eapaka.AKAAttribute
+	}{
+		{
+			name: "selects supported alternative",
+			attrs: []eapaka.AKAAttribute{
+				{Type: akaAttrRAND, Value: randValue},
+				{Type: akaAttrAUTN, Value: autnValue},
+				kdfInputAttr,
+				unsupportedKDFAttr,
+				kdfAttr,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := akaAuthFlow{
+				session:             &Session{logger: slog.Default()},
+				card:                akaFailTestCard{err: errors.New("AKA should not be called")},
+				crypto:              &ikeCrypto{},
+				akaPrimeNetworkName: "WLAN",
+			}
+			wire := buildAKAPrimeChallengeWithAttrs(t, 8, tt.attrs)
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if response.afterSend != nil {
+				t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
+			}
+			var got eapaka.AKAMessage
+			if err := got.UnmarshalBinary(response.data); err != nil {
+				t.Fatalf("response UnmarshalBinary() error = %v", err)
+			}
+			if got.EAPType != eapTypeAKAPrime || got.Subtype != akaSubtypeChallenge {
+				t.Fatalf("response = %+v, want AKA' Challenge response", got)
+			}
+			if len(got.Attributes) != 1 || got.Attributes[0].Type != akaAttrKDF {
+				t.Fatalf("response attrs = %+v, want only AT_KDF", got.Attributes)
+			}
+			selected, err := eapaka.KDFFromAttribute(&got.Attributes[0])
+			if err != nil {
+				t.Fatalf("KDFFromAttribute() error = %v", err)
+			}
+			if selected.Version != akaPrimeKDFDefault {
+				t.Fatalf("selected KDF = %d, want %d", selected.Version, akaPrimeKDFDefault)
+			}
+			if len(flow.akaPrimeKDFOffer) != 2 || flow.akaPrimeKDFOffer[0] != akaPrimeKDFDefault+1 || flow.akaPrimeKDFOffer[1] != akaPrimeKDFDefault {
+				t.Fatalf("akaPrimeKDFOffer = %v, want [%d %d]", flow.akaPrimeKDFOffer, akaPrimeKDFDefault+1, akaPrimeKDFDefault)
+			}
+		})
+	}
+}
+
+func TestAKAAuthFlowBuildChallengeResponseAcceptsNegotiatedAKAPrimeKDF(t *testing.T) {
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := []byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+		0xcd, 0xef,
+		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+	}
+	networkName := []byte("WLAN")
+	identity := "6123456789012345@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	akaResult := usim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44, 0x55},
+		IK:  []byte{0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00},
+		CK:  []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+	}
+	unsupportedKDFAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault + 1})
+	kdfAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault})
+	tests := []struct {
+		name      string
+		offer     []uint16
+		extraKDFs []eapaka.AKAAttribute
+		wantErr   bool
+	}{
+		{
+			name:      "accepts requested change",
+			offer:     []uint16{akaPrimeKDFDefault + 1, akaPrimeKDFDefault},
+			extraKDFs: []eapaka.AKAAttribute{unsupportedKDFAttr, kdfAttr},
+		},
+		{
+			name:      "rejects changed offer",
+			offer:     []uint16{akaPrimeKDFDefault + 2, akaPrimeKDFDefault},
+			extraKDFs: []eapaka.AKAAttribute{unsupportedKDFAttr, kdfAttr},
+			wantErr:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := akaAuthFlow{
+				session:             &Session{logger: slog.Default()},
+				card:                akaChallengeTestCard{result: akaResult},
+				identity:            identity,
+				eapIdentity:         identity,
+				realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:              &ikeCrypto{},
+				akaPrimeNetworkName: "WLAN",
+				akaPrimeKDFOffer:    append([]uint16(nil), tt.offer...),
+			}
+			wire := buildSignedAKAPrimeChallenge(t, 8, identity, rand, autn, networkName, akaResult, tt.extraKDFs...)
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if tt.wantErr {
+				want, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
+				if err != nil {
+					t.Fatalf("BuildAKAPrimeAuthenticationReject() error = %v", err)
+				}
+				if !bytes.Equal(response.data, want) {
+					t.Fatalf("response = % X, want authentication reject % X", response.data, want)
+				}
+				return
+			}
+			if response.afterSend != nil {
+				t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
+			}
+			var got eapaka.AKAMessage
+			if err := got.UnmarshalBinary(response.data); err != nil {
+				t.Fatalf("response UnmarshalBinary() error = %v", err)
+			}
+			if got.EAPType != eapTypeAKAPrime || got.Subtype != akaSubtypeChallenge {
+				t.Fatalf("response = %+v, want AKA' Challenge response", got)
+			}
+		})
+	}
+}
+
+func TestAKAAuthFlowBuildChallengeResponseCopiesNegotiatedKDFsOnAKAPrimeSyncFailure(t *testing.T) {
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := []byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+		0xcd, 0xef,
+		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+	}
+	networkName := []byte("WLAN")
+	identity := "6123456789012345@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	akaResult := usim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44, 0x55},
+		IK:  []byte{0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00},
+		CK:  []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+	}
+	auts := bytes.Repeat([]byte{0x44}, 14)
+	unsupportedKDFAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault + 1})
+	kdfAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault})
+	flow := akaAuthFlow{
+		session:             &Session{logger: slog.Default()},
+		card:                akaChallengeTestCard{result: usim.AKAResult{AUTS: auts}},
+		identity:            identity,
+		eapIdentity:         identity,
+		realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
+		crypto:              &ikeCrypto{},
+		akaPrimeNetworkName: "WLAN",
+		akaPrimeKDFOffer:    []uint16{akaPrimeKDFDefault + 1, akaPrimeKDFDefault},
+	}
+	wire := buildSignedAKAPrimeChallenge(t, 8, identity, rand, autn, networkName, akaResult, unsupportedKDFAttr, kdfAttr)
+	var message eapaka.AKAMessage
+	if err := message.UnmarshalBinary(wire); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+
+	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	if err != nil {
+		t.Fatalf("buildChallengeResponse() error = %v", err)
+	}
+	var got eapaka.AKAMessage
+	if err := got.UnmarshalBinary(response.data); err != nil {
+		t.Fatalf("response UnmarshalBinary() error = %v", err)
+	}
+	if got.EAPType != eapTypeAKAPrime || got.Subtype != akaSubtypeSynchronizationFailure {
+		t.Fatalf("response = %+v, want AKA' Synchronization-Failure", got)
+	}
+	if attr := eapaka.FindAttribute(got.Attributes, akaAttrAUTS); attr == nil || !bytes.Equal(attr.Value, auts) {
+		t.Fatalf("AT_AUTS = %+v, want % X", attr, auts)
+	}
+	kdfs, err := akaPrimeKDFValues(got.Attributes)
+	if err != nil {
+		t.Fatalf("akaPrimeKDFValues() error = %v", err)
+	}
+	wantKDFs := []uint16{akaPrimeKDFDefault, akaPrimeKDFDefault + 1, akaPrimeKDFDefault}
+	if !uint16sEqual(kdfs, wantKDFs) {
+		t.Fatalf("response KDFs = %v, want %v", kdfs, wantKDFs)
 	}
 }
 
@@ -2559,7 +2869,7 @@ func TestBackoffTimerNotifyDataBinary(t *testing.T) {
 		wantDelay time.Duration
 	}{
 		{
-			name:      "android vector",
+			name:      "reference vector",
 			wire:      []byte{0x01, 0xaf},
 			value:     0xaf,
 			wantWire:  []byte{0x01, 0xaf},

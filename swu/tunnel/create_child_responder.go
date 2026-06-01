@@ -196,9 +196,9 @@ func buildCreateChildSAResponsePayloads(state createChildSARequestState, payload
 		err := ike.InvalidSyntaxError{Err: err}
 		return createChildSAErrorNotify(notifyTypeInvalidSyntax, nil), createChildSAAction{fatalIKE: true, fatalErr: err}, nil
 	}
-	// Match Android's subtype selection: the first SA proposal decides IKE-vs-Child
-	// rekey, so an accidental REKEY_SA notify does not turn an IKE rekey into a
-	// Child rekey.
+	// Match platform reference subtype selection: the first SA proposal decides
+	// IKE-vs-Child rekey, so an accidental REKEY_SA notify does not turn an IKE
+	// rekey into a Child rekey.
 	if sa.Proposals[0].ProtocolID == proposalProtocolIKE {
 		return buildIKESARekeyResponsePayloads(state, payloads)
 	}

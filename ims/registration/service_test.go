@@ -473,7 +473,7 @@ func TestApplyRegisterChallengeSelectsHighestQSecurityServer(t *testing.T) {
 	req := svc.buildRegister(nil, nil)
 	resp := newResponse(req, 401, "Unauthorized",
 		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
-		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222;q=0.1`},
+		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222;q=0.1`},
 		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`},
 	)
 
@@ -494,7 +494,7 @@ func TestApplyRegisterChallengeSelectsHighestQSecurityServer(t *testing.T) {
 	if got := state.MessagePort; got != state.SecurityClient.PortS {
 		t.Fatalf("MessagePort = %d, want %d", got, state.SecurityClient.PortS)
 	}
-	wantVerify := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222;q=0.1,ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`
+	wantVerify := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222;q=0.1,ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`
 	if got := svc.SecurityVerifyValue(); got != wantVerify {
 		t.Fatalf("SecurityVerifyValue() = %q, want %q", got, wantVerify)
 	}
@@ -2347,6 +2347,82 @@ func TestRegisterHandlesRechallenge401(t *testing.T) {
 	}
 }
 
+func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) {
+	initial := newUDPTransport(5062, 5060)
+	firstOutbound := newUDPTransport(45000, 4060)
+	firstInbound := newUDPTransport(5063, 45000)
+	nextOutbound := newUDPTransport(45001, 4600)
+	nextInbound := newUDPTransport(5063, 45001)
+
+	dialed := 0
+	listened := 0
+	var secondDialCfg session.SecureUDPConfig
+	var secondListenCfg session.SecureUDPConfig
+	svc := newTestService(t, Config{
+		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			dialed++
+			if dialed == 2 {
+				secondDialCfg = cfg
+				return nextOutbound, nil
+			}
+			return firstOutbound, nil
+		},
+		ListenSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			listened++
+			if listened == 2 {
+				secondListenCfg = cfg
+				return nextInbound, nil
+			}
+			return firstInbound, nil
+		},
+	}, initial, stubCard{})
+
+	firstNonce := "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
+	secondNonce := "AgICAgICAgICAgICAgICAQMDAwMDAwMDAwMDAwMDAwM="
+	initial.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		initial.queue(newUnauthorizedRegisterResponse(req, firstNonce, 4060))
+	}
+	firstOutbound.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "REGISTER" {
+			t.Fatalf("first secure method = %q, want REGISTER", req.Method())
+		}
+		firstInbound.queue(newUnauthorizedRegisterResponse(req, secondNonce, 4600))
+	}
+	nextOutbound.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if got := req.Header("Authorization"); !strings.Contains(got, `nonce="`+secondNonce+`"`) {
+			t.Fatalf("Authorization = %q, want second nonce", got)
+		}
+		if got := req.Header("Security-Verify"); !strings.Contains(got, "port-c=4600") {
+			t.Fatalf("Security-Verify = %q, want refreshed Security-Server", got)
+		}
+		nextInbound.queue(newResponse(req, 200, "OK"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := svc.Register(ctx); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if dialed != 2 || listened != 2 {
+		t.Fatalf("secure transports dialed/listened = %d/%d, want 2/2", dialed, listened)
+	}
+	if secondDialCfg.RemotePort != 4060 {
+		t.Fatalf("second dial remote port = %d, want P-CSCF protected server port 4060", secondDialCfg.RemotePort)
+	}
+	if secondListenCfg.RemotePort != 4600 {
+		t.Fatalf("second listen remote port = %d, want refreshed P-CSCF protected client port 4600", secondListenCfg.RemotePort)
+	}
+	if got := countWrites(firstOutbound); got != 1 {
+		t.Fatalf("first outbound writes = %d, want 1", got)
+	}
+	if got := countWrites(nextOutbound); got != 1 {
+		t.Fatalf("next outbound writes = %d, want 1", got)
+	}
+}
+
 func TestRefreshUsesAuthenticationInfoNextNonce(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
@@ -2455,6 +2531,43 @@ func TestRefreshReauthenticationRequiresSecureInboundTransport(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "secure inbound transport is not configured") {
 		t.Fatalf("Refresh() error = %v, want missing secure inbound transport", err)
+	}
+}
+
+func TestSecureTransportConfigExpandsHMACSHA1IntegrityKey(t *testing.T) {
+	ik := []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
+	ck := []byte{0x20, 0x21, 0x22, 0x23}
+	tests := []struct {
+		name string
+		alg  string
+		want []byte
+	}{
+		{
+			name: "spec spelling",
+			alg:  "hmac-sha-1-96",
+			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0, 0, 0, 0},
+		},
+		{
+			name: "codec spelling",
+			alg:  "hmac-sha1-96",
+			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0, 0, 0, 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := secureTransportConfigWithKeys(&security.Param{Alg: tt.alg, EAlg: "null"}, 40000, 5060, 1111, 2222, ck, ik)
+			if !bytes.Equal(cfg.IntegrityKey, tt.want) {
+				t.Fatalf("IntegrityKey = %X, want %X", cfg.IntegrityKey, tt.want)
+			}
+			if !bytes.Equal(cfg.EncryptionKey, ck) {
+				t.Fatalf("EncryptionKey = %X, want %X", cfg.EncryptionKey, ck)
+			}
+			cfg.IntegrityKey[0] = 0
+			if ik[0] == 0 {
+				t.Fatal("input IK was mutated")
+			}
+		})
 	}
 }
 
@@ -3383,6 +3496,49 @@ func TestEstablishKeepsPlainTransportWhenSecureInboundSetupFails(t *testing.T) {
 	}
 }
 
+func TestRegisterFailureDeletesIncompleteSecurityAssociations(t *testing.T) {
+	initial := newTCPTransport(5062, 5060)
+	outbound := newTCPTransport(45000, 4060)
+	inbound := newTCPTransport(5063, 45000)
+	svc := newTestService(t, Config{
+		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			return outbound, nil
+		},
+		ListenSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			return inbound, nil
+		},
+	}, initial, stubCard{})
+
+	initial.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 4060))
+	}
+	outbound.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		outbound.queue(newResponse(req, 403, "Forbidden"))
+	}
+
+	err := svc.Register(context.Background())
+	if err == nil {
+		t.Fatal("Register() error = nil, want registration failure")
+	}
+	if !errors.Is(err, errInitialRegistrationNeeded) {
+		t.Fatalf("Register() error = %v, want %v", err, errInitialRegistrationNeeded)
+	}
+	if got := closeCount(outbound); got != 1 {
+		t.Fatalf("outbound closeCount = %d, want incomplete SA closed", got)
+	}
+	if got := closeCount(inbound); got != 1 {
+		t.Fatalf("inbound closeCount = %d, want incomplete SA closed", got)
+	}
+	if got := closeCount(initial); got != 0 {
+		t.Fatalf("initial closeCount = %d, want plain transport retained", got)
+	}
+	if svc.sess.LocalAddr() != initial.LocalAddr() {
+		t.Fatalf("LocalAddr() = %v, want initial transport %v", svc.sess.LocalAddr(), initial.LocalAddr())
+	}
+}
+
 func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 	initial := newUDPTransport(5062, 5060)
 	secure := newUDPTransport(45000, 5060)
@@ -3411,10 +3567,12 @@ func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 		if req.Method() != "REGISTER" {
 			t.Fatalf("unexpected method %q", req.Method())
 		}
-		secure.queue(newResponse(req, 200, "OK"))
+		serverUDP.queue(newResponse(req, 200, "OK"))
 	}
 
-	if err := svc.Establish(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := svc.Establish(ctx); err != nil {
 		t.Fatalf("Establish() error = %v", err)
 	}
 	if dialCfg.LocalPort == 0 || listenUDPCfg.LocalPort == 0 {
@@ -3755,9 +3913,9 @@ func mustParseMessage(t *testing.T, data []byte) sip.Message {
 }
 
 func newUnauthorizedRegisterResponse(req sip.Message, nonce string, portC int) sip.Message {
-	securityServer := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`
+	securityServer := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`
 	if portC != 0 {
-		securityServer = `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=` + strconv.Itoa(portC) + `;port-s=4060;prot=esp;spi-c=111;spi-s=222`
+		securityServer = `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=` + strconv.Itoa(portC) + `;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`
 	}
 	return newResponse(req, 401, "Unauthorized",
 		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + nonce + `",algorithm=AKAv1-MD5,qop="auth"`},

@@ -30,6 +30,8 @@ const (
 	akaRANDLength            = 16
 	akaAUTNLength            = 16
 	akaNonceMinLength        = akaRANDLength + akaAUTNLength
+	maxIPPort                = 65535
+	minUnreservedESPSPI      = 256
 )
 
 type Param struct {
@@ -119,15 +121,26 @@ func NormalizeParam(p Param) (Param, bool) {
 	if p.Prot == "" {
 		p.Prot = "esp"
 	}
+	if p.EAlg == "" {
+		p.EAlg = "null"
+	}
 	if !supportedEncryptionAlg(p.EAlg) || !strings.EqualFold(p.Mod, "trans") || !strings.EqualFold(p.Prot, "esp") {
 		return Param{}, false
 	}
 	alg, ok := normalizeIntegrityAlg(p.Alg)
-	if !ok || p.PortC == 0 || p.PortS == 0 || p.SPIC == 0 || p.SPIS == 0 {
+	if !ok || !validIPPort(p.PortC) || !validIPPort(p.PortS) || !ValidESPSPI(p.SPIC) || !ValidESPSPI(p.SPIS) {
 		return Param{}, false
 	}
 	p.Alg = alg
 	return p, true
+}
+
+func ValidESPSPI(spi uint32) bool {
+	return spi >= minUnreservedESPSPI
+}
+
+func validIPPort(port int) bool {
+	return port > 0 && port <= maxIPPort
 }
 
 func (c Challenge) SelectedQOP() (string, error) {
@@ -497,8 +510,6 @@ func normalizeIntegrityAlg(alg string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
 	case "hmac-sha-1-96", "hmac-sha1-96":
 		return "hmac-sha1-96", true
-	case "hmac-sha-256-128", "hmac-sha256-128":
-		return "hmac-sha256-128", true
 	default:
 		return "", false
 	}

@@ -195,6 +195,13 @@ type attachmentDrain struct {
 	attachments []session.Attachment
 }
 
+type registerSecurity struct {
+	outbound           session.Transport
+	outboundAttachment session.Attachment
+	inboundTransports  []session.Transport
+	inboundAttachments []session.Attachment
+}
+
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 	cfg, err := normalizeConfig(cfg)
 	if err != nil {
@@ -291,9 +298,6 @@ func (s *Service) Register(ctx context.Context) error {
 			return fmt.Errorf("registering IMS: %w", err)
 		}
 		resynchronized = true
-	}
-	if err := s.upgradeSecureTransport(ctx); err != nil {
-		return fmt.Errorf("registering IMS: %w", err)
 	}
 	if err := s.completeRegistration(ctx, challenge, initialAuth); err != nil {
 		return err
@@ -752,6 +756,14 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 	rechallenged := false
 	resynchronized := false
 	auth := initialAuth
+	var pendingSecurity *registerSecurity
+	secureTransportStale := false
+	committedSecurity := false
+	defer func() {
+		if !committedSecurity {
+			pendingSecurity.close()
+		}
+	}()
 	for {
 		if auth == nil {
 			var err error
@@ -775,7 +787,16 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 				continue
 			}
 		}
-		resp, err := s.sess.Exchange(ctx, s.buildRegister(auth, s.currentSecurityVerify()))
+		if pendingSecurity == nil || secureTransportStale {
+			pendingSecurity.close()
+			nextSecurity, err := s.openRegisterSecurity(ctx)
+			if err != nil {
+				return fmt.Errorf("registering IMS: %w", err)
+			}
+			pendingSecurity = nextSecurity
+			secureTransportStale = false
+		}
+		resp, err := s.exchangeProtectedRegister(ctx, pendingSecurity, auth)
 		if err != nil {
 			return fmt.Errorf("registering IMS: %w", err)
 		}
@@ -797,6 +818,7 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			}
 			challenge = nextChallenge
 			rechallenged = true
+			secureTransportStale = s.currentSecurityVerify() != nil
 			auth = nil
 			continue
 		}
@@ -809,8 +831,26 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
 			return fmt.Errorf("registering IMS: %w", err)
 		}
+		if err := s.commitRegisterSecurity(pendingSecurity); err != nil {
+			return fmt.Errorf("registering IMS: %w", err)
+		}
 		s.applyRegisterSuccess(resp)
+		committedSecurity = true
 		return nil
+	}
+}
+
+func (s *Service) protectedRegisterExchangeOptions() session.ExchangeOptions {
+	if !strings.EqualFold(sip.TransportToken(s.sess.LocalAddr()), "UDP") {
+		return session.ExchangeOptions{}
+	}
+	transports := s.currentSecureServerTransports()
+	if len(transports) == 0 {
+		return session.ExchangeOptions{}
+	}
+	return session.ExchangeOptions{
+		AcceptResponseTransport: acceptResponseFrom(transports),
+		ResponseTransports:      transports,
 	}
 }
 
@@ -1774,12 +1814,46 @@ func closeAttachments(attachments []session.Attachment) {
 	}
 }
 
+func (r *registerSecurity) close() {
+	if r == nil {
+		return
+	}
+	closeAttachments(r.inboundAttachments)
+	r.inboundAttachments = nil
+	r.inboundTransports = nil
+	if r.outboundAttachment != nil {
+		_ = r.outboundAttachment.Close()
+		r.outboundAttachment = nil
+	}
+	r.outbound = nil
+}
+
+func (r *registerSecurity) exchangeOptions() session.ExchangeOptions {
+	if r == nil || r.outbound == nil || !strings.EqualFold(sip.TransportToken(r.outbound.LocalAddr()), "UDP") {
+		return session.ExchangeOptions{}
+	}
+	if len(r.inboundTransports) == 0 {
+		return session.ExchangeOptions{}
+	}
+	return session.ExchangeOptions{
+		AcceptResponseTransport: acceptResponseFrom(r.inboundTransports),
+		ResponseTransports:      r.inboundTransports,
+	}
+}
+
 func (s *Service) replaceSecureServerAttachments(next []session.Attachment) []session.Attachment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.secureServerAttachments
 	s.secureServerAttachments = append([]session.Attachment(nil), next...)
 	return old
+}
+
+func (s *Service) currentSecureServerTransports() []session.Transport {
+	s.mu.Lock()
+	attachments := append([]session.Attachment(nil), s.secureServerAttachments...)
+	s.mu.Unlock()
+	return attachmentTransports(attachments)
 }
 
 func (s *Service) closeAttachmentsAfter(attachments []session.Attachment, delay time.Duration) {
@@ -1980,29 +2054,73 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 	}
 }
 
-func (s *Service) upgradeSecureTransport(ctx context.Context) error {
+func (s *Service) openRegisterSecurity(ctx context.Context) (*registerSecurity, error) {
 	verify := s.currentSecurityVerify()
 	if verify == nil {
-		return nil
+		return nil, nil
 	}
 	flow := s.CurrentFlow()
-	secureTransport, err := s.dialSecureTransport(ctx, verify, flow, s.authCK, s.authIK)
+	outbound, err := s.dialSecureTransport(ctx, verify, flow, s.authCK, s.authIK)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, serverAttachments, err := s.startSecureServerTransports(ctx, verify)
+	registration := &registerSecurity{outbound: outbound}
+	if !sameSessionEndpoint(outbound, s.sess.LocalAddr(), s.sess.RemoteAddr()) {
+		attachment, err := s.sess.AddTransport(outbound)
+		if err != nil {
+			outbound.Close()
+			return nil, fmt.Errorf("adding secure IMS transport: %w", err)
+		}
+		registration.outboundAttachment = attachment
+	}
+	inboundTransports, inboundAttachments, err := s.startSecureServerTransports(ctx, verify)
 	if err != nil {
-		secureTransport.Close()
-		return err
+		registration.close()
+		return nil, err
 	}
-	if err := s.sess.ReplacePrimary(secureTransport); err != nil {
-		secureTransport.Close()
-		closeAttachments(serverAttachments)
-		return fmt.Errorf("replacing secure IMS transport: %w", err)
+	registration.inboundTransports = inboundTransports
+	registration.inboundAttachments = inboundAttachments
+	return registration, nil
+}
+
+func (s *Service) exchangeProtectedRegister(ctx context.Context, registration *registerSecurity, auth *security.Authorization) (sip.Message, error) {
+	req := s.buildRegister(auth, s.currentSecurityVerify())
+	if registration == nil || registration.outbound == nil {
+		return s.sess.ExchangeWithOptions(ctx, req, s.protectedRegisterExchangeOptions())
 	}
-	oldServerAttachments := s.replaceSecureServerAttachments(serverAttachments)
-	closeAttachments(oldServerAttachments)
+	return s.sess.ExchangeWithTransport(ctx, registration.outbound, req, registration.exchangeOptions())
+}
+
+func (s *Service) commitRegisterSecurity(registration *registerSecurity) error {
+	if registration == nil || registration.outbound == nil {
+		return nil
+	}
+	oldPrimary, err := s.sess.PromotePrimary(registration.outbound)
+	if err != nil {
+		return fmt.Errorf("promoting secure IMS transport: %w", err)
+	}
+	oldServers := s.replaceSecureServerAttachments(registration.inboundAttachments)
+	registration.outboundAttachment = nil
+	registration.inboundAttachments = nil
+	closeAttachments(oldServers)
+	if oldPrimary != nil {
+		_ = oldPrimary.Close()
+	}
 	return nil
+}
+
+func sameSessionEndpoint(transport session.Transport, local, remote net.Addr) bool {
+	if transport == nil {
+		return false
+	}
+	return sameAddr(transport.LocalAddr(), local) && sameAddr(transport.RemoteAddr(), remote)
+}
+
+func sameAddr(left, right net.Addr) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Network() == right.Network() && left.String() == right.String()
 }
 
 func secureTransportConfigWithKeys(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32, ck, ik []byte) session.SecureTCPConfig {
@@ -2014,8 +2132,19 @@ func secureTransportConfigWithKeys(verify *security.Param, localPort, remotePort
 		Encryption:    verify.EAlg,
 		EncryptionKey: append([]byte(nil), ck...),
 		Integrity:     verify.Alg,
-		IntegrityKey:  append([]byte(nil), ik...),
+		IntegrityKey:  espIntegrityKey(verify.Alg, ik),
 	}
+}
+
+func espIntegrityKey(alg string, ik []byte) []byte {
+	key := append([]byte(nil), ik...)
+	switch strings.ToLower(strings.TrimSpace(alg)) {
+	case "hmac-sha-1-96", "hmac-sha1-96":
+		if len(key) == 16 {
+			key = append(key, 0, 0, 0, 0)
+		}
+	}
+	return key
 }
 
 func (s *Service) dialSecureTransport(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) (session.Transport, error) {
@@ -2717,7 +2846,7 @@ func reauthSecurityClient(current security.Param, registerPort int) security.Par
 
 func randomNonZeroUint32Except(except uint32) uint32 {
 	value := sip.RandomUint32()
-	for value == 0 || value == except {
+	for !security.ValidESPSPI(value) || value == except {
 		value = sip.RandomUint32()
 	}
 	return value

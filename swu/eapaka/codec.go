@@ -609,6 +609,18 @@ func BuildAKAPrimeAuthenticationReject(id byte) ([]byte, error) {
 	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKAPrime, akaSubtypeAuthenticationReject, nil, nil, nil)
 }
 
+func BuildAKAPrimeKDFSelection(id byte, kdf uint16) ([]byte, error) {
+	attr, err := (KDF{Version: kdf}).MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	var kdfAttr AKAAttribute
+	if err := kdfAttr.UnmarshalBinary(attr); err != nil {
+		return nil, err
+	}
+	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKAPrime, akaSubtypeChallenge, []AKAAttribute{kdfAttr}, nil, nil)
+}
+
 func BuildAKASynchronizationFailure(id byte, auts []byte) ([]byte, error) {
 	if len(auts) != akaAUTSLen {
 		return nil, fmt.Errorf("building aka synchronization failure: auts length %d, want %d", len(auts), akaAUTSLen)
@@ -616,13 +628,17 @@ func BuildAKASynchronizationFailure(id byte, auts []byte) ([]byte, error) {
 	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKA, akaSubtypeSynchronizationFailure, []AKAAttribute{{Type: akaAttrAUTS, Value: append([]byte(nil), auts...)}}, nil, nil)
 }
 
-func BuildAKAPrimeSynchronizationFailure(id byte, auts []byte, kdf uint16) ([]byte, error) {
+func BuildAKAPrimeSynchronizationFailure(id byte, auts []byte, kdfs []uint16) ([]byte, error) {
 	if len(auts) != akaAUTSLen {
 		return nil, fmt.Errorf("building aka synchronization failure: auts length %d, want %d", len(auts), akaAUTSLen)
 	}
-	attrs := []AKAAttribute{
-		{Type: akaAttrAUTS, Value: append([]byte(nil), auts...)},
-		buildAKAUint16Attribute(akaAttrKDF, kdf),
+	if len(kdfs) == 0 {
+		return nil, errors.New("building aka synchronization failure: kdf list is empty")
+	}
+	attrs := make([]AKAAttribute, 0, len(kdfs)+1)
+	attrs = append(attrs, AKAAttribute{Type: akaAttrAUTS, Value: append([]byte(nil), auts...)})
+	for _, kdf := range kdfs {
+		attrs = append(attrs, buildAKAUint16Attribute(akaAttrKDF, kdf))
 	}
 	return buildAKAMessageWithType(eapCodeResponse, id, eapTypeAKAPrime, akaSubtypeSynchronizationFailure, attrs, nil, nil)
 }

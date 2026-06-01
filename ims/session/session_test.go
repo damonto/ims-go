@@ -1802,7 +1802,7 @@ func TestTransactionTimersNormalizeDefaults(t *testing.T) {
 		want  TransactionTimers
 	}{
 		{
-			name:  "empty uses Android IMS defaults",
+			name:  "empty uses IMS defaults",
 			input: TransactionTimers{},
 			want:  TransactionTimers{T1: 500 * time.Millisecond, T2: 4 * time.Second, T4: 5 * time.Second, TB: 32 * time.Second, TD: 32 * time.Second, TF: 32 * time.Second, TH: 32 * time.Second, TJ: 32 * time.Second},
 		},

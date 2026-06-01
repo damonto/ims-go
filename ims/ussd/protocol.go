@@ -229,7 +229,7 @@ func validateLanguage(language string) error {
 	if language == "" {
 		return nil
 	}
-	if strings.EqualFold(language, androidUndefinedLang) {
+	if strings.EqualFold(language, undefinedLang) {
 		return nil
 	}
 	if strings.Contains(language, "-") {

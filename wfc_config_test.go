@@ -364,31 +364,61 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 	}
 }
 
-func TestConfigNormalizedWFCProfileMapsAndroidRetransmitTimers(t *testing.T) {
-	data := []byte(`[
+func TestConfigNormalizedWFCProfileMapsIWLANRetransmitTimers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []time.Duration
+	}{
+		{
+			name: "valid IWLAN profile",
+			body: `"iwlan.retransmit_timer_sec_int_array": [1000, 2000, 4000, 8000]`,
+			want: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second},
+		},
+		{
+			name: "too many entries uses WFC default",
+			body: `"iwlan.retransmit_timer_sec_int_array": [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 512000]`,
+			want: wfcDefaultIKERetransmitDelays,
+		},
+		{
+			name: "out of range entry uses WFC default",
+			body: `"iwlan.retransmit_timer_sec_int_array": [250]`,
+			want: wfcDefaultIKERetransmitDelays,
+		},
+		{
+			name: "non exponential entries use WFC default",
+			body: `"iwlan.retransmit_timer_sec_int_array": [500, 750]`,
+			want: wfcDefaultIKERetransmitDelays,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(`[
   {
     "mcc": "530",
     "mnc": "24",
     "epdg": "epdg.ims.2degrees.net.nz",
-    "iwlan.retransmit_timer_sec_int_array": [1000, 2000, 4000, 8000]
+    ` + tt.body + `
   }
 ]`)
-	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
-	if err != nil {
-		t.Fatalf("parseWFCProfile() error = %v", err)
-	}
-	if !ok {
-		t.Fatal("parseWFCProfile() ok = false, want true")
-	}
+			profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+			if err != nil {
+				t.Fatalf("parseWFCProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseWFCProfile() ok = false, want true")
+			}
 
-	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
-	tunnelCfg, err := got.normalizedTunnel()
-	if err != nil {
-		t.Fatalf("normalizedTunnel() error = %v", err)
-	}
-	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
-	if !slices.Equal(tunnelCfg.IKERetransmitDelays, want) {
-		t.Fatalf("IKERetransmitDelays = %v, want %v", tunnelCfg.IKERetransmitDelays, want)
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+			tunnelCfg, err := got.normalizedTunnel()
+			if err != nil {
+				t.Fatalf("normalizedTunnel() error = %v", err)
+			}
+			if !slices.Equal(tunnelCfg.IKERetransmitDelays, tt.want) {
+				t.Fatalf("IKERetransmitDelays = %v, want %v", tunnelCfg.IKERetransmitDelays, tt.want)
+			}
+		})
 	}
 }
 
@@ -429,7 +459,7 @@ func TestConfigNormalizedWFCProfileMapsIMSRegistrationRetryTimers(t *testing.T) 
 		wantMax  time.Duration
 	}{
 		{
-			name: "android carrier config millis",
+			name: "carrier profile millis",
 			body: `
     "ims.registration_retry_base_timer_millis_int": 120000,
     "ims.registration_retry_max_timer_millis_int": 300000`,
@@ -529,7 +559,7 @@ func TestConfigNormalizedWFCProfileMapsSMSDeliveryReports(t *testing.T) {
 	}
 }
 
-func TestConfigNormalizedWFCProfileMapsAndroidTunnelTimers(t *testing.T) {
+func TestConfigNormalizedWFCProfileMapsIWLANTunnelTimers(t *testing.T) {
 	data := []byte(`[
   {
     "mcc": "530",
@@ -563,14 +593,82 @@ func TestConfigNormalizedWFCProfileMapsAndroidTunnelTimers(t *testing.T) {
 	if tunnelCfg.NATKeepaliveInterval != 30*time.Second {
 		t.Fatalf("NATKeepaliveInterval = %v, want 30s", tunnelCfg.NATKeepaliveInterval)
 	}
-	if tunnelCfg.IKESALifetime != 86500*time.Second || tunnelCfg.IKESARekeyMargin != 100*time.Second {
-		t.Fatalf("IKE SA lifetime = %v/%v, want 86500s/100s", tunnelCfg.IKESALifetime, tunnelCfg.IKESARekeyMargin)
+	if tunnelCfg.IKESALifetime != 86400*time.Second || tunnelCfg.IKESARekeyMargin != 60*time.Second {
+		t.Fatalf("IKE SA lifetime = %v/%v, want clamped WFC 86400s/60s", tunnelCfg.IKESALifetime, tunnelCfg.IKESARekeyMargin)
 	}
 	if tunnelCfg.ChildSALifetime != 3600*time.Second || tunnelCfg.ChildSARekeyMargin != 600*time.Second {
 		t.Fatalf("Child SA lifetime = %v/%v, want 3600s/600s", tunnelCfg.ChildSALifetime, tunnelCfg.ChildSARekeyMargin)
 	}
 	if !tunnelCfg.AddKEToChildSARekey {
 		t.Fatal("AddKEToChildSARekey = false, want true")
+	}
+}
+
+func TestConfigNormalizedWFCProfileRejectsInvalidIWLANTunnelTimers(t *testing.T) {
+	data := []byte(`[
+  {
+    "mcc": "530",
+    "mnc": "24",
+    "epdg": "epdg.ims.2degrees.net.nz",
+    "iwlan.dpd_timer_sec_int": 5,
+    "iwlan.natt_keep_alive_timer_sec_int": 5,
+    "iwlan.ike_rekey_soft_timer_sec_int": 60,
+    "iwlan.ike_rekey_hard_timer_in_sec": 100,
+    "iwlan.child_sa_rekey_soft_timer_sec_int": 60,
+    "iwlan.child_sa_rekey_hard_timer_sec_int": 100
+  }
+]`)
+	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	if err != nil {
+		t.Fatalf("parseWFCProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("parseWFCProfile() ok = false, want true")
+	}
+
+	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+	tunnelCfg, err := got.normalizedTunnel()
+	if err != nil {
+		t.Fatalf("normalizedTunnel() error = %v", err)
+	}
+	if tunnelCfg.LivenessTimeout != 120*time.Second {
+		t.Fatalf("LivenessTimeout = %v, want WFC default 120s", tunnelCfg.LivenessTimeout)
+	}
+	if tunnelCfg.NATKeepaliveInterval != 20*time.Second {
+		t.Fatalf("NATKeepaliveInterval = %v, want WFC default 20s", tunnelCfg.NATKeepaliveInterval)
+	}
+	if tunnelCfg.IKESALifetime != 14400*time.Second || tunnelCfg.IKESARekeyMargin != 7200*time.Second {
+		t.Fatalf("IKE SA lifetime = %v/%v, want WFC defaults 14400s/7200s", tunnelCfg.IKESALifetime, tunnelCfg.IKESARekeyMargin)
+	}
+	if tunnelCfg.ChildSALifetime != 7200*time.Second || tunnelCfg.ChildSARekeyMargin != 3600*time.Second {
+		t.Fatalf("Child SA lifetime = %v/%v, want WFC defaults 7200s/3600s", tunnelCfg.ChildSALifetime, tunnelCfg.ChildSARekeyMargin)
+	}
+}
+
+func TestConfigNormalizedWFCProfileAcceptsAndroidNATKeepaliveRange(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int
+		want    time.Duration
+	}{
+		{name: "android cts five minutes", seconds: 300, want: 5 * time.Minute},
+		{name: "android maximum", seconds: 3600, want: time.Hour},
+		{name: "above android maximum", seconds: 3601, want: wfcDefaultNATKeepalive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seconds := tt.seconds
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(wfcProfile{
+				IWLANNATKeepaliveSeconds: &seconds,
+			}, wfcTestCard{})
+			tunnelCfg, err := got.normalizedTunnel()
+			if err != nil {
+				t.Fatalf("normalizedTunnel() error = %v", err)
+			}
+			if tunnelCfg.NATKeepaliveInterval != tt.want {
+				t.Fatalf("NATKeepaliveInterval = %v, want %v", tunnelCfg.NATKeepaliveInterval, tt.want)
+			}
+		})
 	}
 }
 
@@ -930,26 +1028,99 @@ func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
 		t.Fatalf("ring timers = %v/%v, want Pixel values", got.IMS.Voice.RingbackTimeout, got.IMS.Voice.RingingTimeout)
 	}
 	want := []struct {
-		name    imsvoice.AudioCodec
-		payload int
+		name      imsvoice.AudioCodec
+		payload   int
+		clockRate int
 	}{
-		{imsvoice.CodecAMRWB, 104},
-		{imsvoice.CodecAMR, 110},
-		{imsvoice.CodecEVS, 127},
-		{imsvoice.CodecTelephoneEvent, 97},
+		{imsvoice.CodecAMRWB, 104, 16000},
+		{imsvoice.CodecAMR, 110, 8000},
+		{imsvoice.CodecEVS, 127, 16000},
+		{imsvoice.CodecTelephoneEvent, 97, 8000},
+		{imsvoice.CodecTelephoneEvent, 96, 16000},
 	}
 	if len(got.IMS.Voice.Codecs) != len(want) {
 		t.Fatalf("Voice codecs = %+v, want Pixel codec list", got.IMS.Voice.Codecs)
 	}
 	for i, wantCodec := range want {
 		gotCodec := got.IMS.Voice.Codecs[i]
-		if gotCodec.Name != wantCodec.name || len(gotCodec.PayloadTypes) != 1 || gotCodec.PayloadTypes[0] != wantCodec.payload {
-			t.Fatalf("Voice codec[%d] = %+v, want %s/%d", i, gotCodec, wantCodec.name, wantCodec.payload)
+		if gotCodec.Name != wantCodec.name || len(gotCodec.PayloadTypes) != 1 || gotCodec.PayloadTypes[0] != wantCodec.payload || gotCodec.ClockRate != wantCodec.clockRate {
+			t.Fatalf("Voice codec[%d] = %+v, want %s/%d/%d", i, gotCodec, wantCodec.name, wantCodec.payload, wantCodec.clockRate)
 		}
 	}
 	evs := got.IMS.Voice.Codecs[2]
 	if evs.Bitrate != "5.9-13.2" || evs.Bandwidth != "nb-swb" || evs.ChAwRecv == nil || *evs.ChAwRecv != 2 {
 		t.Fatalf("EVS codec = %+v, want Pixel payload description", evs)
+	}
+}
+
+func TestEmbeddedWFCConfigUsesWFCWidebandDTMFPayloads(t *testing.T) {
+	tests := []struct {
+		name string
+		card plmnWFCCard
+		nb   int
+		wb   int
+	}{
+		{
+			name: "Pixel default",
+			card: plmnWFCCard{mcc: "000", mnc: "000", mncLength: 3},
+			nb:   97,
+			wb:   96,
+		},
+		{
+			name: "Vodafone Netherlands generic",
+			card: plmnWFCCard{mcc: "204", mnc: "04", mncLength: 2},
+			nb:   97,
+			wb:   96,
+		},
+		{
+			name: "Verizon Netherlands GID1",
+			card: plmnWFCCard{mcc: "204", mnc: "04", mncLength: 2, gid1: "BAE0000000000000"},
+			nb:   100,
+			wb:   105,
+		},
+		{
+			name: "T-Mobile Austria",
+			card: plmnWFCCard{mcc: "232", mnc: "03", mncLength: 2},
+			nb:   99,
+			wb:   98,
+		},
+		{
+			name: "Verizon",
+			card: plmnWFCCard{mcc: "311", mnc: "480", mncLength: 3},
+			nb:   100,
+			wb:   105,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+			wantByClock := map[int]int{
+				8000:  tt.nb,
+				16000: tt.wb,
+			}
+			seen := make(map[int]bool, len(wantByClock))
+			for _, codec := range got.IMS.Voice.Codecs {
+				if codec.Name != imsvoice.CodecTelephoneEvent {
+					continue
+				}
+				want, ok := wantByClock[codec.ClockRate]
+				if !ok {
+					continue
+				}
+				seen[codec.ClockRate] = true
+				if len(codec.PayloadTypes) != 1 || codec.PayloadTypes[0] != want {
+					t.Fatalf("DTMF %d payloadTypes = %v, want [%d]", codec.ClockRate, codec.PayloadTypes, want)
+				}
+			}
+			for clock := range wantByClock {
+				if !seen[clock] {
+					t.Fatalf("DTMF %d codec is missing", clock)
+				}
+			}
+		})
 	}
 }
 

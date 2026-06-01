@@ -451,7 +451,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				if transport.countMethod("REGISTER") == 1 {
 					resp := callStatus(msg, 401, "Unauthorized")
 					resp.Headers.Add("WWW-Authenticate", `Digest realm="one.att.net",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`)
-					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`)
+					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`)
 					transport.queue(resp)
 					return
 				}
@@ -1057,8 +1057,8 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			media := call.Media()
-			if media.DTMFPayloadType != 101 || media.DTMFClockRate != 8000 {
-				t.Fatalf("Media() DTMF = %d/%d, want 101/8000", media.DTMFPayloadType, media.DTMFClockRate)
+			if media.DTMFPayloadType != 110 || media.DTMFClockRate != 16000 {
+				t.Fatalf("Media() DTMF = %d/%d, want 110/16000", media.DTMFPayloadType, media.DTMFClockRate)
 			}
 			if !waitForCallTest(func() bool { return transport.countMethod("ACK") == 1 }) {
 				t.Fatalf("ACK count = %d, want 1", transport.countMethod("ACK"))
@@ -2766,7 +2766,7 @@ func TestDialSessionTimerRefreshFallsBackToReINVITEWithoutRemoteUPDATE(t *testin
 					resp.Headers.Add("Allow", "ACK,BYE,CANCEL,INVITE,PRACK")
 				} else {
 					resp.Headers.Set("Contact", "<sip:remote-refresh@192.0.2.11:5060>")
-					resp.Body = bytes.Replace(resp.Body, []byte("m=audio 50000 RTP/AVP 104 101\r\n"), []byte("m=audio 51000 RTP/AVP 104 101\r\n"), 1)
+					resp.Body = bytes.Replace(resp.Body, []byte("m=audio 50000 RTP/AVP 104 110\r\n"), []byte("m=audio 51000 RTP/AVP 104 110\r\n"), 1)
 				}
 				transport.queue(resp)
 			}
@@ -4372,7 +4372,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				if transport.countMethod("REGISTER") == 1 {
 					resp := callStatus(msg, 401, "Unauthorized")
 					resp.Headers.Add("WWW-Authenticate", `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`)
-					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`)
+					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`)
 					transport.queue(resp)
 					return
 				}
@@ -4817,7 +4817,7 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 					}
 					body := string(msg.Body)
 					for _, want := range []string{
-						"m=audio 40000 RTP/AVP 104 101",
+						"m=audio 40000 RTP/AVP 104 110",
 						"a=curr:qos local sendrecv",
 						"a=des:qos mandatory local sendrecv",
 						"a=des:qos optional remote sendrecv",
@@ -5718,9 +5718,9 @@ func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
 				"s=-\r\n" +
 				"c=IN IP4 192.0.2.10\r\n" +
 				"t=0 0\r\n" +
-				"m=audio 51002 RTP/AVP 104 101\r\n" +
+				"m=audio 51002 RTP/AVP 104 110\r\n" +
 				"a=rtpmap:104 AMR-WB/16000\r\n" +
-				"a=rtpmap:101 telephone-event/8000\r\n" +
+				"a=rtpmap:110 telephone-event/16000\r\n" +
 				"a=ptime:20\r\n")
 			transport.queue(prack)
 
@@ -6358,7 +6358,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 				switch msg.Method() {
 				case "INVITE":
 					resp := callOK(msg)
-					resp.Body = bytes.Replace(resp.Body, []byte("m=audio 50000 RTP/AVP 104 101\r\n"), []byte("m=audio 50000 RTP/AVP 104 101\r\nb=RS:0\r\nb=RR:0\r\n"), 1)
+					resp.Body = bytes.Replace(resp.Body, []byte("m=audio 50000 RTP/AVP 104 110\r\n"), []byte("m=audio 50000 RTP/AVP 104 110\r\nb=RS:0\r\nb=RR:0\r\n"), 1)
 					transport.queue(resp)
 				case "BYE":
 					transport.queue(callStatus(msg, 200, "OK"))
@@ -7064,7 +7064,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "200 OK carries SDP only under Android invite/register PIDF config"},
+		{name: "200 OK carries SDP only under invite/register PIDF config"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -7282,9 +7282,9 @@ func callOK(req sip.Message) sip.Message {
 		"s=-\r\n" +
 		"c=IN IP4 192.0.2.10\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 50000 RTP/AVP 104 101\r\n" +
+		"m=audio 50000 RTP/AVP 104 110\r\n" +
 		"a=rtpmap:104 AMR-WB/16000\r\n" +
-		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n" +
 		"a=ptime:20\r\n")
 	return resp
 }
@@ -7329,9 +7329,9 @@ func reliableCallProgress(req sip.Message) sip.Message {
 		"s=-\r\n" +
 		"c=IN IP4 192.0.2.10\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 50000 RTP/AVP 104 101\r\n" +
+		"m=audio 50000 RTP/AVP 104 110\r\n" +
 		"a=rtpmap:104 AMR-WB/16000\r\n" +
-		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n" +
 		"a=ptime:20\r\n")
 	return resp
 }
@@ -7386,9 +7386,9 @@ func inviteWithSDP() sip.Message {
 		"s=-\r\n" +
 		"c=IN IP4 192.0.2.10\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 50000 RTP/AVP 104 101\r\n" +
+		"m=audio 50000 RTP/AVP 104 110\r\n" +
 		"a=rtpmap:104 AMR-WB/16000\r\n" +
-		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n" +
 		"a=ptime:20\r\n")
 	return msg
 }
@@ -7407,9 +7407,9 @@ func prackForReliableProvisional(invite, provisional sip.Message) sip.Message {
 		"s=-\r\n" +
 		"c=IN IP4 192.0.2.10\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 50000 RTP/AVP 104 101\r\n" +
+		"m=audio 50000 RTP/AVP 104 110\r\n" +
 		"a=rtpmap:104 AMR-WB/16000\r\n" +
-		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n" +
 		"a=ptime:20\r\n")
 	return msg
 }
@@ -7454,9 +7454,9 @@ func delayedOfferACK(invite, ok sip.Message) sip.Message {
 		"s=-\r\n" +
 		"c=IN IP4 192.0.2.10\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 50000 RTP/AVP 104 101\r\n" +
+		"m=audio 50000 RTP/AVP 104 110\r\n" +
 		"a=rtpmap:104 AMR-WB/16000\r\n" +
-		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n" +
 		"a=ptime:20\r\n")
 	return msg
 }

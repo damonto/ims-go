@@ -2,9 +2,11 @@ package transport
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/packet"
 )
 
 func TestRemoteAddrOverridesIP(t *testing.T) {
@@ -53,9 +55,109 @@ func TestSecureEncryption(t *testing.T) {
 	}
 }
 
-func TestValidateSecureESPConfigRejectsNullEncryptionWithoutIntegrity(t *testing.T) {
-	err := validateSecureESPConfig("testing secure transport", esp.EncryptionNull, esp.IntegrityNone, nil, nil)
-	if err == nil {
-		t.Fatal("validateSecureESPConfig() error = nil, want error")
+func TestValidateSecureESPConfigRequiresIntegrity(t *testing.T) {
+	tests := []struct {
+		name       string
+		encryption string
+		key        []byte
+	}{
+		{name: "null encryption"},
+		{name: "aes cbc encryption", encryption: esp.EncryptionAESCBC, key: []byte("0123456789abcdef")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSecureESPConfig("testing secure transport", tt.encryption, esp.IntegrityNone, tt.key, nil)
+			if err == nil {
+				t.Fatal("validateSecureESPConfig() error = nil, want integrity error")
+			}
+			if !strings.Contains(err.Error(), "integrity must be enabled") {
+				t.Fatalf("validateSecureESPConfig() error = %v, want integrity error", err)
+			}
+		})
+	}
+}
+
+func TestUDPFlowMatches(t *testing.T) {
+	local := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000}
+	remote := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060}
+
+	tests := []struct {
+		name    string
+		segment *packet.UDPSegment
+		want    bool
+	}{
+		{
+			name: "matching four tuple",
+			segment: &packet.UDPSegment{
+				Src: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				Dst: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+			},
+			want: true,
+		},
+		{
+			name: "different local IP",
+			segment: &packet.UDPSegment{
+				Src: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				Dst: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 3), Port: 40000},
+			},
+		},
+		{
+			name: "different remote port",
+			segment: &packet.UDPSegment{
+				Src: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 6000},
+				Dst: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := udpFlowMatches(tt.segment, local, remote); got != tt.want {
+				t.Fatalf("udpFlowMatches() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTCPFlowMatches(t *testing.T) {
+	local := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000}
+	remote := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060}
+
+	tests := []struct {
+		name    string
+		segment *packet.TCPSegment
+		want    bool
+	}{
+		{
+			name: "matching four tuple",
+			segment: &packet.TCPSegment{
+				Src: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				Dst: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+			},
+			want: true,
+		},
+		{
+			name: "different local IP",
+			segment: &packet.TCPSegment{
+				Src: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				Dst: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 3), Port: 40000},
+			},
+		},
+		{
+			name: "different remote port",
+			segment: &packet.TCPSegment{
+				Src: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 6000},
+				Dst: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tcpFlowMatches(tt.segment, local, remote); got != tt.want {
+				t.Fatalf("tcpFlowMatches() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }

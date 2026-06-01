@@ -13,7 +13,7 @@ func (c *Call) openEarlyMedia(ctx context.Context, answer sdpOffer) error {
 	if !ok {
 		return errors.New("handling provisional call answer: no compatible codec")
 	}
-	dtmf, hasDTMF := chooseTelephoneEvent(answer, c.service.cfg.Codecs)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.service.cfg.Codecs, negotiated.ClockRate)
 	c.mu.Lock()
 	current := c.media
 	c.mu.Unlock()

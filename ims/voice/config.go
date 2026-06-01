@@ -57,15 +57,16 @@ type Config struct {
 }
 
 type AudioCodecConfig struct {
-	Name         AudioCodec
-	PayloadTypes []int
-	ClockRate    int
-	Channels     int
-	OctetAlign   bool
-	ModeSet      string
-	Bitrate      string
-	Bandwidth    string
-	ChAwRecv     *int
+	Name          AudioCodec
+	PayloadTypes  []int
+	ClockRate     int
+	Channels      int
+	DTMFEventMask uint16
+	OctetAlign    bool
+	ModeSet       string
+	Bitrate       string
+	Bandwidth     string
+	ChAwRecv      *int
 }
 
 type AudioInactivityCallEndReason int
@@ -285,6 +286,7 @@ func normalizeCodecs(codecs []AudioCodecConfig) ([]AudioCodecConfig, error) {
 			{Name: CodecAMR, PayloadTypes: []int{102}, ClockRate: 8000, ModeSet: "0,2,4,7"},
 			{Name: CodecPCMU, PayloadTypes: []int{0}, ClockRate: 8000},
 			{Name: CodecTelephoneEvent, PayloadTypes: []int{101}, ClockRate: 8000},
+			{Name: CodecTelephoneEvent, PayloadTypes: []int{110}, ClockRate: 16000},
 		}
 	}
 	normalized := make([]AudioCodecConfig, 0, len(codecs))
@@ -316,6 +318,9 @@ func normalizeCodecs(codecs []AudioCodecConfig) ([]AudioCodecConfig, error) {
 			codec.Name = CodecTelephoneEvent
 			if codec.ClockRate == 0 {
 				codec.ClockRate = 8000
+			}
+			if codec.DTMFEventMask == 0 {
+				codec.DTMFEventMask = dtmfAllEventsMask
 			}
 		default:
 			return nil, fmt.Errorf("normalizing voice config: unsupported codec %q", codec.Name)

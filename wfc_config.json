@@ -48,6 +48,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -479,6 +486,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -576,6 +590,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -757,6 +778,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -856,6 +884,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -991,6 +1026,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1091,6 +1133,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1191,6 +1240,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1291,6 +1347,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1391,6 +1454,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1491,6 +1561,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1606,6 +1683,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -1714,6 +1798,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2004,6 +2095,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2253,6 +2351,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2360,6 +2465,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2468,6 +2580,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2537,6 +2656,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2630,6 +2756,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -2785,6 +2918,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -3110,6 +3250,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -3285,6 +3432,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -3336,6 +3490,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -3437,6 +3598,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -3544,6 +3712,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -3652,6 +3827,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -3745,6 +3927,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -3936,6 +4125,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -4030,6 +4226,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -4166,6 +4369,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -4309,6 +4519,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -4370,6 +4587,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -4456,6 +4680,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -4573,6 +4804,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -4947,6 +5185,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -5005,6 +5250,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -5092,6 +5344,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -5198,6 +5457,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -5295,6 +5561,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -5595,6 +5868,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -5810,6 +6090,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -5911,6 +6198,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -6194,6 +6488,13 @@
             99
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            98
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -6250,6 +6551,13 @@
             99
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            98
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -6404,6 +6712,13 @@
             99
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            98
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -6558,6 +6873,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -6943,6 +7265,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7151,6 +7480,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7249,6 +7585,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7347,6 +7690,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7445,6 +7795,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7533,6 +7890,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -7619,6 +7983,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -7705,6 +8076,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -7791,6 +8169,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7883,6 +8268,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -7975,6 +8367,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8067,6 +8466,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8159,6 +8565,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8283,6 +8696,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8446,6 +8866,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8568,6 +8995,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8632,6 +9066,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -8717,6 +9158,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8767,6 +9215,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -8814,6 +9269,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8874,6 +9336,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -8927,6 +9396,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -8975,6 +9451,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -9061,6 +9544,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9152,6 +9642,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9239,6 +9736,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9334,6 +9838,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9422,6 +9933,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9489,6 +10007,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9659,6 +10184,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9748,6 +10280,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9832,6 +10371,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -9886,6 +10432,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -9988,6 +10541,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -10609,6 +11169,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -10680,6 +11247,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -10724,6 +11298,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -10816,6 +11397,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -10904,6 +11492,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -10962,6 +11557,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -11114,6 +11716,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -11368,6 +11977,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -11836,6 +12452,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -12393,6 +13016,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -12499,6 +13129,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -12605,6 +13242,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -12711,6 +13355,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -12817,6 +13468,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -12923,6 +13581,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13029,6 +13694,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13135,6 +13807,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13241,6 +13920,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13347,6 +14033,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13449,6 +14142,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13724,6 +14424,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13838,6 +14545,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -13916,6 +14630,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14005,6 +14726,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14123,6 +14851,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14237,6 +14972,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14325,6 +15067,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14390,6 +15139,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14473,6 +15229,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14561,6 +15324,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -14698,6 +15468,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -15041,6 +15818,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -15127,6 +15911,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -15440,6 +16231,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -15859,6 +16657,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -15986,6 +16791,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -16110,6 +16922,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -16350,6 +17169,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -16464,6 +17290,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "moCallRequestTimeout": "0s"
@@ -16505,6 +17338,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -16550,6 +17390,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -16600,6 +17447,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -16678,6 +17532,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -16718,6 +17579,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -16769,6 +17637,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "moCallRequestTimeout": "0s"
@@ -17467,6 +18342,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -17517,6 +18399,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -17635,6 +18524,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -17754,6 +18650,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -17842,6 +18745,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "moCallRequestTimeout": "10s",
@@ -17921,6 +18831,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "moCallRequestTimeout": "10s",
@@ -18161,6 +19078,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -18264,6 +19188,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -18366,6 +19297,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -18468,6 +19406,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -18532,6 +19477,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -18661,6 +19613,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -18772,6 +19731,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -18891,6 +19857,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19010,6 +19983,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19129,6 +20109,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19192,6 +20179,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19266,6 +20260,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19338,6 +20339,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -19393,6 +20401,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -19447,6 +20462,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -19497,6 +20519,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "ringbackTimer": "180s",
@@ -19580,6 +20609,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "ringbackTimer": "180s",
@@ -19650,6 +20686,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19851,6 +20894,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -19914,6 +20964,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -19959,6 +21016,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -20015,6 +21079,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -20091,6 +21162,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -20363,6 +21441,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29223,6 +30308,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29334,6 +30426,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29445,6 +30544,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29556,6 +30662,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29667,6 +30780,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29778,6 +30898,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -29889,6 +31016,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30000,6 +31134,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30111,6 +31252,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30222,6 +31370,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30333,6 +31488,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30444,6 +31606,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30555,6 +31724,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30666,6 +31842,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30777,6 +31960,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30888,6 +32078,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -30999,6 +32196,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31110,6 +32314,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31221,6 +32432,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31332,6 +32550,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31443,6 +32668,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31554,6 +32786,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31665,6 +32904,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -31977,6 +33223,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -32090,6 +33343,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32201,6 +33461,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32311,6 +33578,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32422,6 +33696,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32533,6 +33814,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32644,6 +33932,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32755,6 +34050,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32866,6 +34168,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -32977,6 +34286,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33088,6 +34404,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33199,6 +34522,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33310,6 +34640,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33421,6 +34758,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33532,6 +34876,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33643,6 +34994,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33754,6 +35112,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33865,6 +35230,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -33976,6 +35348,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34087,6 +35466,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34198,6 +35584,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34309,6 +35702,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34420,6 +35820,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34531,6 +35938,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34642,6 +36056,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34753,6 +36174,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34864,6 +36292,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -34975,6 +36410,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35086,6 +36528,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35197,6 +36646,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35308,6 +36764,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35419,6 +36882,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35530,6 +37000,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35641,6 +37118,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35752,6 +37236,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35863,6 +37354,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -35925,6 +37423,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -36309,6 +37814,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -36414,6 +37926,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -36510,6 +38029,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -36606,6 +38132,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -36702,6 +38235,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -36827,6 +38367,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -36923,6 +38470,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37019,6 +38573,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37144,6 +38705,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37269,6 +38837,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37394,6 +38969,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37519,6 +39101,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37644,6 +39233,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37769,6 +39365,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37894,6 +39497,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -37989,6 +39599,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -38085,6 +39702,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -38181,6 +39805,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -38277,6 +39908,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -38363,6 +40001,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -38916,6 +40561,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39027,6 +40679,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39138,6 +40797,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39249,6 +40915,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39360,6 +41033,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39471,6 +41151,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39582,6 +41269,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39693,6 +41387,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39804,6 +41505,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -39915,6 +41623,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40026,6 +41741,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40137,6 +41859,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40248,6 +41977,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40359,6 +42095,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40470,6 +42213,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40581,6 +42331,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40692,6 +42449,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40803,6 +42567,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -40914,6 +42685,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41025,6 +42803,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41136,6 +42921,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41247,6 +43039,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41309,6 +43108,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -41398,6 +43204,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41509,6 +43322,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41620,6 +43440,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41731,6 +43558,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41842,6 +43676,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -41953,6 +43794,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42064,6 +43912,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42175,6 +44030,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42286,6 +44148,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42397,6 +44266,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42508,6 +44384,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42619,6 +44502,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42730,6 +44620,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42841,6 +44738,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -42952,6 +44856,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43063,6 +44974,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43174,6 +45092,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43285,6 +45210,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43396,6 +45328,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43507,6 +45446,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43618,6 +45564,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43729,6 +45682,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43840,6 +45800,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -43951,6 +45918,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44062,6 +46036,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44173,6 +46154,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44284,6 +46272,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44395,6 +46390,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44506,6 +46508,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44617,6 +46626,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44728,6 +46744,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44839,6 +46862,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44913,6 +46943,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -44984,6 +47021,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45055,6 +47099,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45126,6 +47177,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45197,6 +47255,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45268,6 +47333,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45339,6 +47411,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45410,6 +47489,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45481,6 +47567,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45552,6 +47645,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45621,6 +47721,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45705,6 +47812,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45800,6 +47914,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -45868,6 +47989,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -45936,6 +48064,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46031,6 +48166,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46127,6 +48269,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46223,6 +48372,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46319,6 +48475,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46415,6 +48578,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46511,6 +48681,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46607,6 +48784,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46703,6 +48887,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46799,6 +48990,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -46887,6 +49085,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "audioASBandwidthKbps": 38,
@@ -46971,6 +49176,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47096,6 +49308,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47192,6 +49411,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47317,6 +49543,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47413,6 +49646,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47538,6 +49778,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47634,6 +49881,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47759,6 +50013,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47855,6 +50116,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -47980,6 +50248,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48076,6 +50351,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48201,6 +50483,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48297,6 +50586,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48422,6 +50718,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48518,6 +50821,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48643,6 +50953,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48739,6 +51056,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48864,6 +51188,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -48960,6 +51291,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49149,6 +51487,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49220,6 +51565,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49291,6 +51643,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49362,6 +51721,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49433,6 +51799,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49504,6 +51877,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49575,6 +51955,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49646,6 +52033,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49717,6 +52111,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -49788,6 +52189,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -50001,6 +52409,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -50074,6 +52489,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -50154,6 +52576,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -50223,6 +52652,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -50609,6 +53045,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true,
@@ -50651,6 +53094,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -50695,6 +53145,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -50737,6 +53194,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -50791,6 +53255,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -50866,6 +53337,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -50939,6 +53417,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51013,6 +53498,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51087,6 +53579,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51160,6 +53659,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51348,6 +53854,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51416,6 +53929,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "includeCallerIDServiceCodesInSIPInvite": true
@@ -51470,6 +53990,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51532,6 +54059,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -51572,6 +54106,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -51639,6 +54180,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -51742,6 +54290,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "rtpInactivityTimeout": "30s",
@@ -51851,6 +54406,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conference@factory.ims.movistar.mx"
@@ -51892,6 +54454,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conference@factory.ims.movistar.mx"
@@ -52014,6 +54583,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52166,6 +54742,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52247,6 +54830,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52328,6 +54918,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52409,6 +55006,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52490,6 +55094,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52571,6 +55182,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52652,6 +55270,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52795,6 +55420,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52852,6 +55484,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -52926,6 +55565,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -53074,6 +55720,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -53130,6 +55783,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -53481,6 +56141,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -53572,6 +56239,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -53811,6 +56485,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -54154,6 +56835,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -54545,6 +57233,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -54589,6 +57284,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -54629,6 +57331,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -54669,6 +57378,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -54756,6 +57472,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -54947,6 +57670,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -55090,6 +57820,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -55134,6 +57871,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55174,6 +57918,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55214,6 +57965,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55254,6 +58012,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55342,6 +58107,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55382,6 +58154,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55422,6 +58201,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55514,6 +58300,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55554,6 +58347,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55594,6 +58394,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55634,6 +58441,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55721,6 +58535,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -55765,6 +58586,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55805,6 +58633,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55845,6 +58680,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55885,6 +58727,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55925,6 +58774,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -55965,6 +58821,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -56005,6 +58868,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -56093,6 +58963,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -56133,6 +59010,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -56173,6 +59057,13 @@
             100
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -56560,6 +59451,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -56651,6 +59549,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -56742,6 +59647,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -56833,6 +59745,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -56924,6 +59843,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57015,6 +59941,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57106,6 +60039,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57197,6 +60137,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57288,6 +60235,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57379,6 +60333,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57470,6 +60431,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57561,6 +60529,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57652,6 +60627,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -57743,6 +60725,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "35s",
@@ -60252,6 +63241,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60294,6 +63290,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "qosPreconditionsSupported": false
@@ -60365,6 +63368,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60438,6 +63448,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "confuri@fmc.stc.com.sa"
@@ -60500,6 +63517,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60581,6 +63605,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conf.mnc004.mcc420.3gppnetwork.org"
@@ -60710,6 +63741,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60750,6 +63788,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60790,6 +63835,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60927,6 +63979,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -60990,6 +64049,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61060,6 +64126,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringbackTimer": "60s",
@@ -61135,6 +64208,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61207,6 +64287,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61270,6 +64357,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61399,6 +64493,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61467,6 +64568,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61578,6 +64686,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61643,6 +64758,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -61957,6 +65079,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -62016,6 +65145,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -62090,6 +65226,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -62192,6 +65335,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -62259,6 +65409,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -62365,6 +65522,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "audioInactivityCallEndReasons": [
@@ -62568,6 +65732,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -62937,6 +66108,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conference@ims.mnc006.mcc454.3gppnetwork.org"
@@ -63061,6 +66239,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -63139,6 +66324,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -63276,6 +66468,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conference@ims.mnc006.mcc454.3gppnetwork.org"
@@ -63411,6 +66610,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conference@ims.mnc006.mcc454.3gppnetwork.org"
@@ -63956,6 +67162,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -64012,6 +67225,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -64068,6 +67288,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceSubscribeType": 0,
@@ -64146,6 +67373,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "sessionRefreshMethod": 0,
@@ -64190,6 +67424,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringbackTimer": "35s",
@@ -64350,6 +67591,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "sessionRefreshMethod": 0,
@@ -64470,6 +67718,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -64635,6 +67890,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "conferenceFactoryURI": "conference-factory@yes.my"
@@ -64702,6 +67964,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -65512,6 +68781,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -65584,6 +68860,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -65626,6 +68909,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -65726,6 +69016,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -65808,6 +69105,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -65889,6 +69193,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -66194,6 +69505,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -66277,6 +69595,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "ringingTimer": "45s",
@@ -66361,6 +69686,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -66401,6 +69733,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "audioInactivityCallEndReasons": [
@@ -66446,6 +69785,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "audioInactivityCallEndReasons": [
@@ -66533,6 +69879,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ],
       "sessionExpires": "600s",
@@ -66580,6 +69933,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -67011,6 +70371,13 @@
             106
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            105
+          ],
+          "clockRate": 16000
         }
       ],
       "evsPayloadDescriptions": {
@@ -67074,6 +70441,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -68446,6 +71820,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }
@@ -69343,6 +72724,13 @@
             97
           ],
           "clockRate": 8000
+        },
+        {
+          "name": "telephone-event",
+          "payloadTypes": [
+            96
+          ],
+          "clockRate": 16000
         }
       ]
     }

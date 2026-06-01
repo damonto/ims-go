@@ -26,6 +26,14 @@ const (
 	TCPFlagRST byte = 0x04
 	TCPFlagPSH byte = 0x08
 	TCPFlagACK byte = 0x10
+
+	tcpDefaultMSS uint16 = 1360
+
+	maxTransportPort   = 65535
+	maxIPPacketBytes   = 65535
+	maxIPPayloadBytes  = 65535
+	maxUDPSegmentBytes = 65535
+	maxTCPSegmentBytes = 65535
 )
 
 var (
@@ -126,6 +134,9 @@ func (p IPPacket) MarshalBinary() ([]byte, error) {
 	payload := append([]byte(nil), p.Payload...)
 	switch version {
 	case IPVersion4:
+		if len(payload) > maxIPPacketBytes-20 {
+			return nil, fmt.Errorf("marshalling ipv4 packet: payload length %d exceeds %d", len(payload), maxIPPacketBytes-20)
+		}
 		packet := make([]byte, 20+len(payload))
 		packet[0] = 0x45
 		packet[1] = 0x00
@@ -138,6 +149,9 @@ func (p IPPacket) MarshalBinary() ([]byte, error) {
 		copy(packet[20:], payload)
 		return packet, nil
 	case IPVersion6:
+		if len(payload) > maxIPPayloadBytes {
+			return nil, fmt.Errorf("marshalling ipv6 packet: payload length %d exceeds %d", len(payload), maxIPPayloadBytes)
+		}
 		packet := make([]byte, 40+len(payload))
 		packet[0] = 0x60
 		binary.BigEndian.PutUint16(packet[4:6], uint16(len(payload)))
@@ -171,9 +185,18 @@ func (s UDPSegment) MarshalBinary() ([]byte, error) {
 	if s.Src == nil || s.Dst == nil {
 		return nil, errors.New("marshalling udp segment: endpoint is nil")
 	}
+	if err := validateTransportPort("marshalling udp segment", "source", s.Src.Port); err != nil {
+		return nil, err
+	}
+	if err := validateTransportPort("marshalling udp segment", "destination", s.Dst.Port); err != nil {
+		return nil, err
+	}
 	_, src, dst, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
 	if err != nil {
 		return nil, err
+	}
+	if len(s.Payload) > maxUDPSegmentBytes-8 {
+		return nil, fmt.Errorf("marshalling udp segment: payload length %d exceeds %d", len(s.Payload), maxUDPSegmentBytes-8)
 	}
 	udp := make([]byte, 8+len(s.Payload))
 	binary.BigEndian.PutUint16(udp[0:2], uint16(s.Src.Port))
@@ -181,10 +204,10 @@ func (s UDPSegment) MarshalBinary() ([]byte, error) {
 	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
 	copy(udp[8:], s.Payload)
 	if src.To4() != nil {
-		binary.BigEndian.PutUint16(udp[6:8], udpChecksumIPv4(src.To4(), dst.To4(), udp))
+		binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv4(src.To4(), dst.To4(), udp)))
 		return udp, nil
 	}
-	binary.BigEndian.PutUint16(udp[6:8], udpChecksumIPv6(src.To16(), dst.To16(), udp))
+	binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv6(src.To16(), dst.To16(), udp)))
 	return udp, nil
 }
 
@@ -205,6 +228,12 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	if s.Src == nil || s.Dst == nil {
 		return nil, errors.New("marshalling tcp segment: endpoint is nil")
 	}
+	if err := validateTransportPort("marshalling tcp segment", "source", s.Src.Port); err != nil {
+		return nil, err
+	}
+	if err := validateTransportPort("marshalling tcp segment", "destination", s.Dst.Port); err != nil {
+		return nil, err
+	}
 	_, src, dst, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
 	if err != nil {
 		return nil, err
@@ -212,6 +241,9 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	options := tcpOptionsForFlags(s.Flags)
 	options = padTCPOptions(options)
 	headerLen := 20 + len(options)
+	if len(s.Payload) > maxTCPSegmentBytes-headerLen {
+		return nil, fmt.Errorf("marshalling tcp segment: payload length %d exceeds %d", len(s.Payload), maxTCPSegmentBytes-headerLen)
+	}
 	tcp := make([]byte, headerLen+len(s.Payload))
 	binary.BigEndian.PutUint16(tcp[0:2], uint16(s.Src.Port))
 	binary.BigEndian.PutUint16(tcp[2:4], uint16(s.Dst.Port))
@@ -228,6 +260,13 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	}
 	binary.BigEndian.PutUint16(tcp[16:18], tcpChecksumIPv6(src.To16(), dst.To16(), tcp))
 	return tcp, nil
+}
+
+func validateTransportPort(action, name string, port int) error {
+	if port <= 0 || port > maxTransportPort {
+		return fmt.Errorf("%s: %s port %d is out of range", action, name, port)
+	}
+	return nil
 }
 
 func (s *TCPSegment) UnmarshalBinary(data []byte) error {
@@ -446,14 +485,11 @@ func decodeOpaqueESPPacket(data []byte) (esp.ESPPacket, error) {
 }
 
 func tcpOptionsForFlags(flags byte) []byte {
-	if flags&TCPFlagSYN == 0 || flags&TCPFlagACK != 0 {
+	if flags&TCPFlagSYN == 0 {
 		return nil
 	}
 	return []byte{
-		0x02, 0x04, 0x05, 0x50,
-		0x04, 0x02,
-		0x01,
-		0x03, 0x03, 0x07,
+		0x02, 0x04, byte(tcpDefaultMSS >> 8), byte(tcpDefaultMSS & 0xff),
 	}
 }
 
@@ -490,6 +526,13 @@ func udpChecksumIPv6(src, dst net.IP, udp []byte) uint16 {
 	pseudo[39] = ProtocolUDP
 	copy(pseudo[40:], udp)
 	return checksum(pseudo)
+}
+
+func udpWireChecksum(sum uint16) uint16 {
+	if sum == 0 {
+		return 0xffff
+	}
+	return sum
 }
 
 func tcpChecksumIPv4(src, dst net.IP, tcp []byte) uint16 {

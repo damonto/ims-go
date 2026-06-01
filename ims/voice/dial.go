@@ -162,7 +162,7 @@ func (s *Service) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
-	dtmf, hasDTMF := chooseTelephoneEvent(answer, s.cfg.Codecs)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, s.cfg.Codecs, negotiated.ClockRate)
 	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), dtmf, hasDTMF)
 
 	call.mu.Lock()

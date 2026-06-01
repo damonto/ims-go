@@ -17,11 +17,13 @@ var _ imssession.Transport = (*UDPConn)(nil)
 
 type SecureUDPConfig struct {
 	TCPConfig
-	OutboundSPI   uint32
-	InboundSPI    uint32
-	Encryption    string
+	OutboundSPI  uint32
+	InboundSPI   uint32
+	Encryption   string
+	Integrity    string
+	Associations *SecurityAssociations
+
 	EncryptionKey []byte
-	Integrity     string
 	IntegrityKey  []byte
 }
 
@@ -31,16 +33,15 @@ type UDPConn struct {
 	local      *net.UDPAddr
 	remote     *net.UDPAddr
 
-	mu            sync.Mutex
-	closed        bool
-	terminalErr   error
-	espSeq        uint32
-	outboundESP   esp.Codec
-	inboundESP    esp.Codec
-	inboundReplay esp.ReplayWindow
-	readCh        chan inboundPacket
-	done          chan struct{}
-	closeOnce     sync.Once
+	mu           sync.Mutex
+	closed       bool
+	terminalErr  error
+	outboundESP  esp.Codec
+	inboundESP   esp.Codec
+	associations *SecurityAssociations
+	readCh       chan inboundPacket
+	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 type inboundPacket struct {
@@ -81,13 +82,14 @@ func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action string) (*U
 		return nil, err
 	}
 	conn := &UDPConn{
-		session:     s,
-		local:       &net.UDPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
-		remote:      udpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
-		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		readCh:      make(chan inboundPacket, 16),
-		done:        make(chan struct{}),
+		session:      s,
+		local:        &net.UDPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
+		remote:       udpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
+		outboundESP:  esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		inboundESP:   esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		associations: secureAssociations(cfg.Associations),
+		readCh:       make(chan inboundPacket, 16),
+		done:         make(chan struct{}),
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
@@ -126,13 +128,9 @@ func (t *UDPConn) writePacket(ctx context.Context, data []byte, remote *net.UDPA
 		t.mu.Unlock()
 		return errors.New("writing secure udp packet: transport is closed")
 	}
-	espSeq, ok := esp.NextSequence(&t.espSeq)
 	codec := t.outboundESP
+	associations := t.associations
 	t.mu.Unlock()
-	if !ok {
-		_ = t.Close()
-		return errors.New("writing secure udp packet: esp sequence number overflow")
-	}
 	segment := packet.UDPSegment{
 		Src:     cloneUDPAddr(t.local),
 		Dst:     cloneUDPAddr(remote),
@@ -142,7 +140,7 @@ func (t *UDPConn) writePacket(ctx context.Context, data []byte, remote *net.UDPA
 	if err != nil {
 		return fmt.Errorf("writing secure udp packet: %w", err)
 	}
-	sealed, err := codec.Encode(esp.ESPPacket{SPI: codec.SPI, Sequence: espSeq, NextHeader: packet.ProtocolUDP, Payload: wire})
+	sealed, err := associations.sealESP(codec, packet.ProtocolUDP, wire)
 	if err != nil {
 		return fmt.Errorf("writing secure udp packet: %w", err)
 	}
@@ -157,25 +155,36 @@ func (t *UDPConn) writePacket(ctx context.Context, data []byte, remote *net.UDPA
 }
 
 func protectedUDPWriteRemote(configuredRemote, requested *net.UDPAddr) *net.UDPAddr {
-	if requested == nil {
+	if configuredRemote != nil {
+		// SIP Via can point at an advertised response target, but this transport
+		// represents one ESP-protected SA flow. Keep writes on the negotiated
+		// P-CSCF protected peer tuple.
 		return cloneUDPAddr(configuredRemote)
 	}
-	remote := cloneUDPAddr(requested)
-	if configuredRemote != nil && remote.IP.Equal(configuredRemote.IP) {
-		// The protected UDP flow is bound to the peer's IPsec port-c/port-s
-		// tuple. SIP Via may advertise 5060/6000, but sending outside the
-		// established protected flow makes networks retransmit the request.
-		remote.Port = configuredRemote.Port
+	if requested == nil {
+		return nil
 	}
-	return remote
+	return cloneUDPAddr(requested)
 }
 
 func (t *UDPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	for {
+		if inbound, ok := t.nextPacket(); ok {
+			if inbound.err != nil {
+				return nil, nil, inbound.err
+			}
+			return inbound.data, inbound.addr, nil
+		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
 		case <-t.done:
+			if inbound, ok := t.nextPacket(); ok {
+				if inbound.err != nil {
+					return nil, nil, inbound.err
+				}
+				return inbound.data, inbound.addr, nil
+			}
 			return nil, nil, t.closedErr("reading secure udp packet: transport is closed")
 		case inbound := <-t.readCh:
 			if inbound.err != nil {
@@ -183,6 +192,15 @@ func (t *UDPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 			}
 			return inbound.data, inbound.addr, nil
 		}
+	}
+}
+
+func (t *UDPConn) nextPacket() (inboundPacket, bool) {
+	select {
+	case inbound := <-t.readCh:
+		return inbound, true
+	default:
+		return inboundPacket{}, false
 	}
 }
 
@@ -196,12 +214,11 @@ func (t *UDPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		return false
 	}
 	spi := packetSPI(pkt.IP.Payload)
-	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
-	if err != nil || espPacket.SPI != t.inboundESP.SPI {
+	if spi != t.inboundESP.SPI {
 		return false
 	}
-	if !t.acceptInboundESP(espPacket.Sequence) {
-		t.session.Logger().Debug("dropping replayed secure UDP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
+	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
+	if err != nil {
 		return false
 	}
 	if espPacket.NextHeader != packet.ProtocolUDP {
@@ -213,8 +230,12 @@ func (t *UDPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		t.session.Logger().Debug("parsing secure UDP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
 		return false
 	}
-	if !inner.UDP.Src.IP.Equal(t.remote.IP) || inner.UDP.Src.Port != t.remote.Port || inner.UDP.Dst.Port != t.local.Port {
+	if !udpFlowMatches(inner.UDP, t.local, t.remote) {
 		t.session.Logger().Debug("secure UDP flow mismatch", "spi", spi, "peer_addr", inner.UDP.Src, "expected_remote_addr", t.remote, "expected_local_addr", t.local)
+		return false
+	}
+	if !t.acceptInboundESP(espPacket.Sequence) {
+		t.session.Logger().Debug("dropping replayed secure UDP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
 		return false
 	}
 	t.session.Logger().Debug("received secure UDP packet", "peer_addr", inner.UDP.Src, "local_addr", t.local, "payload_len", len(inner.UDP.Payload))
@@ -252,19 +273,22 @@ func (t *UDPConn) deliver(payload []byte, peer net.Addr) {
 	case <-t.done:
 	case t.readCh <- inboundPacket{data: append([]byte(nil), payload...), addr: peer}:
 	default:
+		if t.session != nil {
+			t.session.Logger().Debug("dropping secure UDP packet: read queue is full", "peer_addr", peer, "payload_len", len(payload))
+		}
 	}
 }
 
 func (t *UDPConn) acceptInboundESP(sequence uint32) bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.closed {
+		t.mu.Unlock()
 		return false
 	}
-	if !espIntegrityEnabled(t.inboundESP.Integrity) {
-		return true
-	}
-	return t.inboundReplay.Accept(sequence)
+	codec := t.inboundESP
+	associations := t.associations
+	t.mu.Unlock()
+	return associations.acceptInboundESP(codec, sequence)
 }
 
 func (t *UDPConn) closedErr(fallback string) error {

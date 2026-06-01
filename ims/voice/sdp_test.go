@@ -21,7 +21,7 @@ func TestBuildSDPOffer(t *testing.T) {
 
 	text := string(body)
 	for _, want := range []string{
-		"m=audio 40000 RTP/AVP 104 102 0 101",
+		"m=audio 40000 RTP/AVP 104 102 0 101 110",
 		"b=AS:14",
 		"b=RS:0",
 		"b=RR:2500",
@@ -31,6 +31,9 @@ func TestBuildSDPOffer(t *testing.T) {
 		"a=fmtp:102 mode-change-capability=2;max-red=220",
 		"a=rtpmap:0 PCMU/8000",
 		"a=rtpmap:101 telephone-event/8000",
+		"a=fmtp:101 0-15",
+		"a=rtpmap:110 telephone-event/16000",
+		"a=fmtp:110 0-15",
 		"a=ptime:20",
 		"a=maxptime:240",
 	} {
@@ -49,6 +52,9 @@ func TestBuildSDPOffer(t *testing.T) {
 	}
 	if media.OctetAlign {
 		t.Fatalf("NegotiatedMedia.OctetAlign = true, want false")
+	}
+	if !media.HasDTMF || media.DTMFPayloadType != 110 || media.DTMFClockRate != 16000 {
+		t.Fatalf("NegotiatedMedia DTMF = %t %d/%d, want telephone-event 110/16000", media.HasDTMF, media.DTMFPayloadType, media.DTMFClockRate)
 	}
 }
 
@@ -78,7 +84,7 @@ func TestBuildSDPOfferUsesConfiguredEVSProfile(t *testing.T) {
 		AudioASBandwidthKbps: 49,
 		Codecs: []AudioCodecConfig{
 			{Name: CodecEVS, PayloadTypes: []int{127}, ClockRate: 16000, Bitrate: "5.9-13.2", Bandwidth: "nb-swb", ModeSet: "0,1,2", ChAwRecv: &chAwRecv},
-			{Name: CodecTelephoneEvent, PayloadTypes: []int{97}, ClockRate: 8000},
+			{Name: CodecTelephoneEvent, PayloadTypes: []int{96}, ClockRate: 16000},
 		},
 	}).Normalized()
 	if err != nil {
@@ -92,10 +98,12 @@ func TestBuildSDPOfferUsesConfiguredEVSProfile(t *testing.T) {
 
 	text := string(body)
 	for _, want := range []string{
-		"m=audio 40000 RTP/AVP 127 97",
+		"m=audio 40000 RTP/AVP 127 96",
 		"b=AS:49",
 		"a=rtpmap:127 EVS/16000",
 		"a=fmtp:127 br=5.9-13.2;bw=nb-swb;ch-aw-recv=2",
+		"a=rtpmap:96 telephone-event/16000",
+		"a=fmtp:96 0-15",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("SDP offer missing %q:\n%s", want, text)
@@ -410,13 +418,13 @@ func TestBuildSDPAnswerEchoesEVSChannelAwareReceive(t *testing.T) {
 		AudioASBandwidthKbps: 49,
 		Codecs: []AudioCodecConfig{
 			{Name: CodecEVS, PayloadTypes: []int{127}, ClockRate: 16000, Bitrate: "5.9-13.2", Bandwidth: "nb-swb"},
-			{Name: CodecTelephoneEvent, PayloadTypes: []int{97}, ClockRate: 8000},
+			{Name: CodecTelephoneEvent, PayloadTypes: []int{96}, ClockRate: 16000},
 		},
 	}).Normalized()
 	if err != nil {
 		t.Fatalf("Normalized() error = %v", err)
 	}
-	remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 127 97\r\na=rtpmap:127 EVS/16000\r\na=fmtp:127 br=5.9-13.2;bw=nb-swb;ch-aw-recv=2\r\na=rtpmap:97 telephone-event/8000\r\n"))
+	remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 127 96\r\na=rtpmap:127 EVS/16000\r\na=fmtp:127 br=5.9-13.2;bw=nb-swb;ch-aw-recv=2\r\na=rtpmap:96 telephone-event/16000\r\n"))
 	if err != nil {
 		t.Fatalf("parseSDP() error = %v", err)
 	}
@@ -427,16 +435,17 @@ func TestBuildSDPAnswerEchoesEVSChannelAwareReceive(t *testing.T) {
 	}
 	text := string(body)
 	for _, want := range []string{
-		"m=audio 40000 RTP/AVP 127 97",
+		"m=audio 40000 RTP/AVP 127 96",
 		"b=AS:49",
 		"a=fmtp:127 br=5.9-13.2;bw=nb-swb;ch-aw-recv=2",
+		"a=fmtp:96 0-15",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("SDP answer missing %q:\n%s", want, text)
 		}
 	}
-	if media.Codec != CodecEVS || media.PayloadType != 127 || media.DTMFPayloadType != 97 {
-		t.Fatalf("NegotiatedMedia = %+v, want EVS payload 127 DTMF 97", media)
+	if media.Codec != CodecEVS || media.PayloadType != 127 || !media.HasDTMF || media.DTMFPayloadType != 96 || media.DTMFClockRate != 16000 {
+		t.Fatalf("NegotiatedMedia = %+v, want EVS payload 127 DTMF 96/16000", media)
 	}
 }
 
@@ -445,7 +454,7 @@ func TestBuildSDPAnswerSelectsCompatibleCodec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Normalized() error = %v", err)
 	}
-	remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104 102 101\r\na=rtpmap:104 AMR-WB/16000\r\na=fmtp:104 octet-align=1\r\na=rtpmap:102 AMR/8000\r\na=rtpmap:101 telephone-event/8000\r\na=ptime:20\r\n"))
+	remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104 102 101 110\r\na=rtpmap:104 AMR-WB/16000\r\na=fmtp:104 octet-align=1\r\na=rtpmap:102 AMR/8000\r\na=rtpmap:101 telephone-event/8000\r\na=rtpmap:110 telephone-event/16000\r\na=ptime:20\r\n"))
 	if err != nil {
 		t.Fatalf("parseSDP() error = %v", err)
 	}
@@ -456,22 +465,107 @@ func TestBuildSDPAnswerSelectsCompatibleCodec(t *testing.T) {
 	}
 	text := string(body)
 	for _, want := range []string{
-		"m=audio 40000 RTP/AVP 104 101",
+		"m=audio 40000 RTP/AVP 104 110",
 		"b=AS:14",
 		"b=RS:0",
 		"b=RR:2500",
 		"a=fmtp:104 octet-align=1;mode-change-capability=2;max-red=220",
-		"a=rtpmap:101 telephone-event/8000",
+		"a=rtpmap:110 telephone-event/16000",
+		"a=fmtp:110 0-15",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("SDP answer missing %q:\n%s", want, text)
 		}
 	}
-	if media.Codec != CodecAMRWB || media.PayloadType != 104 || media.RemotePort != 50000 || media.DTMFPayloadType != 101 {
-		t.Fatalf("NegotiatedMedia = %+v, want AMR-WB payload 104 remote port 50000 DTMF 101", media)
+	if media.Codec != CodecAMRWB || media.PayloadType != 104 || media.RemotePort != 50000 || !media.HasDTMF || media.DTMFPayloadType != 110 || media.DTMFClockRate != 16000 {
+		t.Fatalf("NegotiatedMedia = %+v, want AMR-WB payload 104 remote port 50000 DTMF 110/16000", media)
 	}
 	if !media.OctetAlign {
 		t.Fatalf("NegotiatedMedia.OctetAlign = false, want true")
+	}
+}
+
+func TestBuildSDPAnswerPreservesTelephoneEventMask(t *testing.T) {
+	cfg, err := (Config{}).Normalized()
+	if err != nil {
+		t.Fatalf("Normalized() error = %v", err)
+	}
+	remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104 110\r\na=rtpmap:104 AMR-WB/16000\r\na=rtpmap:110 telephone-event/16000\r\na=fmtp:110 0-9\r\n"))
+	if err != nil {
+		t.Fatalf("parseSDP() error = %v", err)
+	}
+	body, media, err := buildSDPAnswer(cfg, net.IPv4(192, 0, 2, 20), 40000, remote, MediaOffer{})
+	if err != nil {
+		t.Fatalf("buildSDPAnswer() error = %v", err)
+	}
+	want := uint16(0x03ff)
+	if media.DTMFEventMask != want {
+		t.Fatalf("DTMFEventMask = %#04x, want %#04x", media.DTMFEventMask, want)
+	}
+	text := string(body)
+	if !strings.Contains(text, "a=fmtp:110 0-9\r\n") {
+		t.Fatalf("SDP answer missing negotiated telephone-event mask:\n%s", text)
+	}
+	if strings.Contains(text, "a=fmtp:110 0-15\r\n") {
+		t.Fatalf("SDP answer advertised unnegotiated telephone-event mask:\n%s", text)
+	}
+}
+
+func TestBuildSDPAnswerRejectsTelephoneEventWithoutDTMFDigits(t *testing.T) {
+	cfg, err := (Config{}).Normalized()
+	if err != nil {
+		t.Fatalf("Normalized() error = %v", err)
+	}
+	remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104 110\r\na=rtpmap:104 AMR-WB/16000\r\na=rtpmap:110 telephone-event/16000\r\na=fmtp:110 16-31\r\n"))
+	if err != nil {
+		t.Fatalf("parseSDP() error = %v", err)
+	}
+	body, media, err := buildSDPAnswer(cfg, net.IPv4(192, 0, 2, 20), 40000, remote, MediaOffer{})
+	if err != nil {
+		t.Fatalf("buildSDPAnswer() error = %v", err)
+	}
+	if media.HasDTMF || strings.Contains(string(body), "telephone-event") {
+		t.Fatalf("DTMF negotiated for unsupported event range: media=%+v\n%s", media, body)
+	}
+}
+
+func TestParseTelephoneEventMask(t *testing.T) {
+	tests := []struct {
+		name string
+		fmtp string
+		want uint16
+	}{
+		{name: "full range", fmtp: "0-15", want: 0xffff},
+		{name: "list and range", fmtp: "0-2,10,12-15", want: 0xf407},
+		{name: "out of DTMF range", fmtp: "16-31", want: 0},
+		{name: "partial invalid", fmtp: "0-1,broken,15", want: 0x8003},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseTelephoneEventMask(tt.fmtp); got != tt.want {
+				t.Fatalf("parseTelephoneEventMask() = %#04x, want %#04x", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatTelephoneEventMask(t *testing.T) {
+	tests := []struct {
+		name string
+		mask uint16
+		want string
+	}{
+		{name: "default full range", mask: 0, want: "0-15"},
+		{name: "full range", mask: 0xffff, want: "0-15"},
+		{name: "single event", mask: 1 << 10, want: "10"},
+		{name: "ranges", mask: 0xf407, want: "0-2,10,12-15"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatTelephoneEventMask(tt.mask); got != tt.want {
+				t.Fatalf("formatTelephoneEventMask() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -530,7 +624,7 @@ func TestBuildSDPAnswerSelectsPCMU(t *testing.T) {
 	if strings.Contains(text, "a=fmtp:0") {
 		t.Fatalf("SDP answer contains PCMU fmtp:\n%s", text)
 	}
-	if media.Codec != CodecPCMU || media.PayloadType != 0 || media.RemotePort != 50000 || media.DTMFPayloadType != 101 {
+	if media.Codec != CodecPCMU || media.PayloadType != 0 || media.RemotePort != 50000 || !media.HasDTMF || media.DTMFPayloadType != 101 {
 		t.Fatalf("NegotiatedMedia = %+v, want PCMU payload 0 remote port 50000 DTMF 101", media)
 	}
 }
@@ -651,9 +745,9 @@ func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T)
 				"s=-\r\n" +
 				"c=IN IP4 192.0.2.10\r\n" +
 				"t=0 0\r\n" +
-				"m=audio 50000 RTP/AVP 104 101\r\n" +
+				"m=audio 50000 RTP/AVP 104 110\r\n" +
 				"a=rtpmap:104 AMR-WB/16000\r\n" +
-				"a=rtpmap:101 telephone-event/8000\r\n" +
+				"a=rtpmap:110 telephone-event/16000\r\n" +
 				"a=ptime:20\r\n" +
 				"a=curr:qos local none\r\n" +
 				"a=curr:qos remote none\r\n" +
@@ -669,9 +763,10 @@ func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T)
 			}
 			text := string(body)
 			for _, want := range []string{
-				"m=audio 40000 RTP/AVP 104 101",
+				"m=audio 40000 RTP/AVP 104 110",
 				"a=rtpmap:104 AMR-WB/16000",
-				"a=rtpmap:101 telephone-event/8000",
+				"a=rtpmap:110 telephone-event/16000",
+				"a=fmtp:110 0-15",
 				"a=curr:qos local sendrecv",
 				"a=curr:qos remote none",
 				"a=des:qos mandatory local sendrecv",
@@ -708,9 +803,9 @@ func TestBuildSDPAnswerPreconditionConfirmation(t *testing.T) {
 				"s=-\r\n" +
 				"c=IN IP4 192.0.2.10\r\n" +
 				"t=0 0\r\n" +
-				"m=audio 50000 RTP/AVP 104 101\r\n" +
+				"m=audio 50000 RTP/AVP 104 110\r\n" +
 				"a=rtpmap:104 AMR-WB/16000\r\n" +
-				"a=rtpmap:101 telephone-event/8000\r\n" +
+				"a=rtpmap:110 telephone-event/16000\r\n" +
 				"a=curr:qos local " + tt.qosLocal + "\r\n" +
 				"a=curr:qos remote none\r\n" +
 				"a=des:qos mandatory local sendrecv\r\n" +
@@ -775,7 +870,7 @@ func TestConfigNormalizedAudioInactivityCallEndReasons(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "default matches android carrier config default",
+			name: "default matches carrier config default",
 			want: []AudioInactivityCallEndReason{
 				AudioInactivityRTCPOnHold,
 				AudioInactivityRTPOnConnected,
@@ -821,7 +916,7 @@ func TestConfigNormalizedMediaInactivityTimers(t *testing.T) {
 		wantSend time.Duration
 	}{
 		{
-			name:     "zero values use android defaults",
+			name:     "zero values use carrier defaults",
 			wantRTP:  10 * time.Second,
 			wantRTCP: 30 * time.Second,
 			wantSend: defaultRTCPSend,
@@ -866,9 +961,9 @@ func TestBuildSDPAnswerRejectsUnsupportedMediaLines(t *testing.T) {
 		"s=-\r\n" +
 		"c=IN IP4 192.0.2.10\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 50000 RTP/AVP 104 101\r\n" +
+		"m=audio 50000 RTP/AVP 104 110\r\n" +
 		"a=rtpmap:104 AMR-WB/16000\r\n" +
-		"a=rtpmap:101 telephone-event/8000\r\n" +
+		"a=rtpmap:110 telephone-event/16000\r\n" +
 		"m=video 50002 RTP/AVP 96\r\n" +
 		"a=rtpmap:96 H264/90000\r\n"))
 	if err != nil {
@@ -1009,9 +1104,9 @@ func TestBuildSDPAnswerWithHoldDirections(t *testing.T) {
 				"s=-\r\n" +
 				"c=IN IP4 192.0.2.10\r\n" +
 				"t=0 0\r\n" +
-				"m=audio 50000 RTP/AVP 104 101\r\n" +
+				"m=audio 50000 RTP/AVP 104 110\r\n" +
 				"a=rtpmap:104 AMR-WB/16000\r\n" +
-				"a=rtpmap:101 telephone-event/8000\r\n" +
+				"a=rtpmap:110 telephone-event/16000\r\n" +
 				"a=" + string(tt.remote) + "\r\n"))
 			if err != nil {
 				t.Fatalf("parseSDP() error = %v", err)

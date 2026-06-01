@@ -249,7 +249,7 @@ func (t *gatedCancelTransport) writeCount() int {
 
 const (
 	testIMEI              = "356789012345678"
-	fakeIMSSecurityServer = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=10;spi-s=20"
+	fakeIMSSecurityServer = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=310;spi-s=320"
 )
 
 func newStandaloneClient(t *testing.T) *Client {
@@ -756,6 +756,32 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for Connect to exit")
+	}
+	if reader.closeCalls != 1 {
+		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
+	}
+}
+
+func TestCloseContextReturnsWhenCloseTaskDoesNotExit(t *testing.T) {
+	client := newStandaloneClient(t)
+	reader := &readerStub{}
+	client.reader = reader
+
+	done, ok := client.reserveCloseTask()
+	if !ok {
+		t.Fatal("reserveCloseTask() = false, want true")
+	}
+	defer done()
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := client.CloseContext(closeCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("CloseContext() took %s, want bounded by context", elapsed)
 	}
 	if reader.closeCalls != 1 {
 		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)

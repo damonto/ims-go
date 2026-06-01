@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ type stubTransport struct {
 	local   net.Addr
 	remote  net.Addr
 	readCh  chan []byte
+	mu      sync.Mutex
 	writes  [][]byte
 	onWrite func([]byte)
 }
@@ -35,9 +37,12 @@ func testLogger() *slog.Logger {
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
 func (t *stubTransport) WritePacket(ctx context.Context, data []byte) error {
+	t.mu.Lock()
 	t.writes = append(t.writes, append([]byte(nil), data...))
-	if t.onWrite != nil {
-		t.onWrite(data)
+	onWrite := t.onWrite
+	t.mu.Unlock()
+	if onWrite != nil {
+		onWrite(data)
 	}
 	return nil
 }
@@ -51,6 +56,31 @@ func (t *stubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error
 }
 func (t *stubTransport) Close() error          { return nil }
 func (t *stubTransport) queue(msg sip.Message) { t.readCh <- msg.Bytes() }
+
+func (t *stubTransport) writeCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.writes)
+}
+
+func (t *stubTransport) lastWrite() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.writes) == 0 {
+		return nil
+	}
+	return append([]byte(nil), t.writes[len(t.writes)-1]...)
+}
+
+func (t *stubTransport) writesSnapshot() [][]byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	writes := make([][]byte, len(t.writes))
+	for i, write := range t.writes {
+		writes[i] = append([]byte(nil), write...)
+	}
+	return writes
+}
 
 func (stubCard) IMSI() string { return "001010123456789" }
 func (stubCard) MCC() string  { return "001" }
@@ -115,7 +145,7 @@ func TestUSSDXMLValidation(t *testing.T) {
 			want: Message{Language: "en", Text: "*100#"},
 		},
 		{
-			name: "android undefined language accepted",
+			name: "undefined language accepted",
 			body: xml.Header + `<ussd-data><language>undefined</language><ussd-string>*100#</ussd-string></ussd-data>`,
 			want: Message{Language: "undefined", Text: "*100#"},
 		},
@@ -210,7 +240,7 @@ func TestMarshalUSSDXMLRejectsInvalidLanguage(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "valid", msg: Message{Text: "*100#", Language: "en"}},
-		{name: "android undefined", msg: Message{Text: "*100#", Language: "undefined"}},
+		{name: "undefined", msg: Message{Text: "*100#", Language: "undefined"}},
 		{name: "region subtag", msg: Message{Text: "*100#", Language: "en-US"}, wantErr: true},
 		{name: "numeric", msg: Message{Text: "*100#", Language: "123"}, wantErr: true},
 	}
@@ -583,7 +613,7 @@ func TestHandleInfoMapsPackageAndMediaErrors(t *testing.T) {
 			if err := us.handleInfo(context.Background(), session.Request{Message: info, Transport: transport}); err != nil {
 				t.Fatalf("handleInfo() error = %v", err)
 			}
-			resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+			resp := mustParseUSSDMessage(t, transport.lastWrite())
 			if got := resp.StatusCode(); got != tt.wantStatus {
 				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
 			}
@@ -644,7 +674,7 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 			if err := us.handleBye(context.Background(), session.Request{Message: bye, Transport: transport}); err != nil {
 				t.Fatalf("handleBye() error = %v", err)
 			}
-			resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+			resp := mustParseUSSDMessage(t, transport.lastWrite())
 			if got := resp.StatusCode(); got != tt.wantStatus {
 				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
 			}
@@ -722,7 +752,7 @@ func TestContactValueFormatsIPHosts(t *testing.T) {
 }
 
 func TestStartUSSDSessionFlow(t *testing.T) {
-	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222"
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222"
 
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
@@ -774,7 +804,7 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	if err := session.Reply(context.Background(), "1"); err != nil {
 		t.Fatalf("Reply() error = %v", err)
 	}
-	last := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+	last := mustParseUSSDMessage(t, transport.lastWrite())
 	if last.Method() != "INFO" {
 		t.Fatalf("last.Method() = %q, want INFO", last.Method())
 	}
@@ -816,10 +846,10 @@ func TestAbortClosesUSSDLocallyWithoutBYE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	writesAfterStart := len(transport.writes)
+	writesAfterStart := transport.writeCount()
 	svc.Abort()
 
-	if got := len(transport.writes); got != writesAfterStart {
+	if got := transport.writeCount(); got != writesAfterStart {
 		t.Fatalf("write count after Abort() = %d, want %d", got, writesAfterStart)
 	}
 	if !ussdSession.isClosed() {
@@ -843,12 +873,12 @@ func TestUSSDRejectsParallelTransactions(t *testing.T) {
 		{
 			name: "local start while active",
 			run: func(t *testing.T, svc *Service, transport *stubTransport) {
-				writesBefore := len(transport.writes)
+				writesBefore := transport.writeCount()
 				_, err := svc.Start(context.Background(), "*101#")
 				if !errors.Is(err, errSessionActive) {
 					t.Fatalf("Start() error = %v, want errSessionActive", err)
 				}
-				if got := len(transport.writes); got != writesBefore {
+				if got := transport.writeCount(); got != writesBefore {
 					t.Fatalf("write count = %d, want %d", got, writesBefore)
 				}
 			},
@@ -865,7 +895,7 @@ func TestUSSDRejectsParallelTransactions(t *testing.T) {
 				if !handled {
 					t.Fatal("HandleRequest() handled = false, want true")
 				}
-				resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+				resp := mustParseUSSDMessage(t, transport.lastWrite())
 				if got := resp.StatusCode(); got != sipStatusBusyHere {
 					t.Fatalf("parallel INVITE status = %d, want %d", got, sipStatusBusyHere)
 				}
@@ -951,7 +981,7 @@ func TestHandleIncomingInviteMapsUnsupportedMediaTo415(t *testing.T) {
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
-			resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+			resp := mustParseUSSDMessage(t, transport.lastWrite())
 			if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
 				t.Fatalf("StatusCode() = %d, want %d", got, sipStatusUnsupportedMediaType)
 			}
@@ -977,7 +1007,7 @@ func TestHandleIncomingInviteDisabledReturns404(t *testing.T) {
 	if !handled {
 		t.Fatal("HandleRequest() handled = false, want true")
 	}
-	resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+	resp := mustParseUSSDMessage(t, transport.lastWrite())
 	if got := resp.StatusCode(); got != sipStatusNotFound {
 		t.Fatalf("StatusCode() = %d, want %d", got, sipStatusNotFound)
 	}
@@ -1068,7 +1098,7 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 }
 
 func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
-	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222"
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222"
 
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
@@ -1732,7 +1762,7 @@ func TestUnknownDialogGets481(t *testing.T) {
 	if !handled {
 		t.Fatal("HandleRequest() handled = false, want true")
 	}
-	resp := mustParseUSSDMessage(t, transport.writes[len(transport.writes)-1])
+	resp := mustParseUSSDMessage(t, transport.lastWrite())
 	if got := resp.StatusCode(); got != 481 {
 		t.Fatalf("StatusCode() = %d, want 481", got)
 	}
@@ -1748,7 +1778,7 @@ func newTransport() *stubTransport {
 
 func countUSSDResponses(transport *stubTransport, status int, cseqMethod string) int {
 	count := 0
-	for _, data := range transport.writes {
+	for _, data := range transport.writesSnapshot() {
 		msg, err := sip.ParseMessage(data)
 		if err != nil {
 			continue
@@ -1774,10 +1804,10 @@ func registeredService(t *testing.T, transport *stubTransport) (*session.Session
 		req := mustParseUSSDMessage(t, data)
 		switch req.Method() {
 		case "REGISTER":
-			if len(transport.writes) == 1 {
+			if transport.writeCount() == 1 {
 				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
 				))
 				return
 			}
@@ -1804,10 +1834,10 @@ func registeredServiceWithSessionConfig(t *testing.T, transport *stubTransport, 
 		req := mustParseUSSDMessage(t, data)
 		switch req.Method() {
 		case "REGISTER":
-			if len(transport.writes) == 1 {
+			if transport.writeCount() == 1 {
 				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
 				))
 				return
 			}
@@ -1834,10 +1864,10 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 		req := mustParseUSSDMessage(t, data)
 		switch req.Method() {
 		case "REGISTER":
-			if len(transport.writes) == 1 {
+			if transport.writeCount() == 1 {
 				transport.queue(newUSSDResponse(req, 401, "Unauthorized", nil,
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
 				))
 				return
 			}

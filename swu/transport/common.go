@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/vowifi-go/swu/packet"
 	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
@@ -36,8 +37,8 @@ func espIntegrityEnabled(value string) bool {
 }
 
 func validateSecureESPConfig(action, encryption, integrity string, encryptionKey, integrityKey []byte) error {
-	if encryption == esp.EncryptionNull && strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityNone) {
-		return fmt.Errorf("%s: encryption and integrity must not both be null", action)
+	if strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityNone) {
+		return fmt.Errorf("%s: integrity must be enabled", action)
 	}
 	if encryption == esp.EncryptionAESCBC && len(encryptionKey) == 0 {
 		return fmt.Errorf("%s: encryption key is empty", action)
@@ -46,6 +47,13 @@ func validateSecureESPConfig(action, encryption, integrity string, encryptionKey
 		return fmt.Errorf("%s: integrity key is empty", action)
 	}
 	return nil
+}
+
+func secureAssociations(associations *SecurityAssociations) *SecurityAssociations {
+	if associations != nil {
+		return associations
+	}
+	return NewSecurityAssociations()
 }
 
 func connectedUDPAddrs(s *tunnel.Session) (*net.UDPAddr, *net.UDPAddr, error) {
@@ -95,6 +103,26 @@ func cloneTCPAddr(addr *net.TCPAddr) *net.TCPAddr {
 		return nil
 	}
 	return &net.TCPAddr{IP: append(net.IP(nil), addr.IP...), Port: addr.Port, Zone: addr.Zone}
+}
+
+func udpFlowMatches(segment *packet.UDPSegment, local, remote *net.UDPAddr) bool {
+	if segment == nil || segment.Src == nil || segment.Dst == nil || local == nil || remote == nil {
+		return false
+	}
+	return segment.Src.IP.Equal(remote.IP) &&
+		segment.Src.Port == remote.Port &&
+		segment.Dst.IP.Equal(local.IP) &&
+		segment.Dst.Port == local.Port
+}
+
+func tcpFlowMatches(segment *packet.TCPSegment, local, remote *net.TCPAddr) bool {
+	if segment == nil || segment.Src == nil || segment.Dst == nil || local == nil || remote == nil {
+		return false
+	}
+	return segment.Src.IP.Equal(remote.IP) &&
+		segment.Src.Port == remote.Port &&
+		segment.Dst.IP.Equal(local.IP) &&
+		segment.Dst.Port == local.Port
 }
 
 func packetSPI(packet []byte) uint32 {

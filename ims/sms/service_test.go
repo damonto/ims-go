@@ -52,7 +52,7 @@ func TestNormalizeConfigSubmitReportTimeout(t *testing.T) {
 		wantErr            bool
 	}{
 		{
-			name:               "android rp timer defaults",
+			name:               "ims rp timer defaults",
 			wantSubmitReport:   40 * time.Second,
 			wantDeliveryReport: 15 * time.Second,
 		},
@@ -148,7 +148,7 @@ func (c *smsppDownloadStubCard) SMSPPDownload(ctx context.Context, req usim.SMSP
 }
 
 func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
-	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222"
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222"
 
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
@@ -1987,7 +1987,7 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 			if len(transport.writes) == 1 {
 				transport.queue(newResponse(req, 401, "Unauthorized",
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
 				))
 				return
 			}
@@ -2020,7 +2020,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 			if len(transport.writes) == 1 {
 				transport.queue(newResponse(req, 401, "Unauthorized",
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=111;spi-s=222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
 				))
 				return
 			}

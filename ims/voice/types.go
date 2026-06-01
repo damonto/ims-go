@@ -118,6 +118,7 @@ type Call struct {
 	service *Service
 
 	mu                  sync.Mutex
+	mediaSendMu         sync.Mutex
 	id                  string
 	sessionID           string
 	direction           CallDirection
@@ -166,12 +167,20 @@ type Call struct {
 	sessionTimerStop    chan struct{}
 	dialogAttachment    session.Attachment
 	media               NegotiatedMedia
+	rtpSend             rtpSendState
 	hold                CallHoldState
 	transport           MediaTransport
 	rtcpSSRC            uint32
 	emergency           bool
 	currentLocation     bool
 	closed              bool
+}
+
+type rtpSendState struct {
+	initialized   bool
+	ssrc          uint32
+	nextSequence  uint16
+	nextTimestamp uint32
 }
 
 type earlyDialog struct {

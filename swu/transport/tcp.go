@@ -23,6 +23,8 @@ const (
 	tcpEphemeralPortBase  = 40000
 	tcpEphemeralPortRange = 20000
 	tcpDefaultWindow      = 65535
+	tcpMaxSIPHeaderBytes  = 32 * 1024
+	tcpMaxSIPMessageBytes = 1024 * 1024
 )
 
 var tcpDataACKTimeouts = []time.Duration{
@@ -43,11 +45,13 @@ type TCPConfig struct {
 
 type SecureTCPConfig struct {
 	TCPConfig
-	OutboundSPI   uint32
-	InboundSPI    uint32
-	Encryption    string
+	OutboundSPI  uint32
+	InboundSPI   uint32
+	Encryption   string
+	Integrity    string
+	Associations *SecurityAssociations
+
 	EncryptionKey []byte
-	Integrity     string
 	IntegrityKey  []byte
 }
 
@@ -59,11 +63,10 @@ type TCPConn struct {
 	secure     bool
 	passive    bool
 	initialSeq uint32
-	espSeq     uint32
 
-	outboundESP   esp.Codec
-	inboundESP    esp.Codec
-	inboundReplay esp.ReplayWindow
+	outboundESP  esp.Codec
+	inboundESP   esp.Codec
+	associations *SecurityAssociations
 
 	mu          sync.Mutex
 	writeMu     sync.Mutex
@@ -81,6 +84,12 @@ type TCPConn struct {
 	done        chan struct{}
 	closeOnce   sync.Once
 	readyOnce   sync.Once
+}
+
+type tcpSegmentResponse struct {
+	seq   uint32
+	ack   uint32
+	flags byte
 }
 
 func DialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig) (*TCPConn, error) {
@@ -114,21 +123,22 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
 	conn := &TCPConn{
-		session:     s,
-		local:       &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
-		remote:      tcpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
-		secure:      true,
-		passive:     true,
-		initialSeq:  seq,
-		sendSeq:     seq + 1,
-		ackedSeq:    seq,
-		msgCh:       make(chan []byte, 16),
-		errCh:       make(chan error, 1),
-		readyCh:     make(chan struct{}),
-		ackCh:       make(chan struct{}, 1),
-		done:        make(chan struct{}),
-		outboundESP: esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		inboundESP:  esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		session:      s,
+		local:        &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
+		remote:       tcpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
+		secure:       true,
+		passive:      true,
+		initialSeq:   seq,
+		sendSeq:      seq + 1,
+		ackedSeq:     seq,
+		msgCh:        make(chan []byte, 16),
+		errCh:        make(chan error, 1),
+		readyCh:      make(chan struct{}),
+		ackCh:        make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		associations: secureAssociations(cfg.Associations),
+		outboundESP:  esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		inboundESP:   esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
@@ -184,6 +194,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 			return nil, err
 		}
 		conn.secure = true
+		conn.associations = secureAssociations(secure.Associations)
 		conn.outboundESP = esp.Codec{
 			SPI:           secure.OutboundSPI,
 			Encryption:    encryption,
@@ -206,6 +217,13 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	conn.attachment = attachment
 
 	for attempt := range 3 {
+		if ready, err := conn.dialReady("dialing tcp transport"); ready || err != nil {
+			if err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return conn, nil
+		}
 		if err := conn.sendSegmentWithSeq(ctx, seq, 0, packet.TCPFlagSYN, nil); err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -224,6 +242,13 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 			}
 			return conn, nil
 		case <-wait.C:
+			if ready, err := conn.dialReady("dialing tcp transport"); ready || err != nil {
+				if err != nil {
+					_ = conn.Close()
+					return nil, err
+				}
+				return conn, nil
+			}
 			s.Logger().Debug("TCP SYN timed out", "attempt", attempt+1)
 		}
 	}
@@ -281,17 +306,15 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			flags |= packet.TCPFlagPSH
 		}
 
-		t.mu.Lock()
-		seq := t.sendSeq
-		t.mu.Unlock()
-		wantAck := seq + uint32(len(chunk))
+		seq, wantAck, err := t.reserveSendSeq(len(chunk))
+		if err != nil {
+			return err
+		}
 		acked := false
 		for attempt, timeout := range tcpDataACKTimeouts {
 			if err := t.sendSegmentWithSeq(ctx, seq, t.currentAck(), flags, chunk); err != nil {
+				t.closeWithError(err)
 				return err
-			}
-			if attempt == 0 {
-				t.noteSent(wantAck)
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, timeout)
 			err := t.waitForAck(waitCtx, wantAck)
@@ -320,9 +343,23 @@ func (t *TCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
+		default:
+		}
+		if msg, ok := t.nextMessage(); ok {
+			return msg, t.RemoteAddr(), nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
 		case <-t.done:
+			if msg, ok := t.nextMessage(); ok {
+				return msg, t.RemoteAddr(), nil
+			}
 			return nil, nil, t.closedErr("reading tcp packet: transport is closed")
 		case err := <-t.errCh:
+			if msg, ok := t.nextMessage(); ok {
+				return msg, t.RemoteAddr(), nil
+			}
 			return nil, nil, err
 		case msg, ok := <-t.msgCh:
 			if !ok {
@@ -330,6 +367,18 @@ func (t *TCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 			}
 			return msg, t.RemoteAddr(), nil
 		}
+	}
+}
+
+func (t *TCPConn) nextMessage() ([]byte, bool) {
+	select {
+	case msg, ok := <-t.msgCh:
+		if !ok {
+			return nil, false
+		}
+		return msg, true
+	default:
+		return nil, false
 	}
 }
 
@@ -343,7 +392,7 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		if pkt.TCP == nil {
 			return false
 		}
-		if pkt.TCP.Dst.Port != t.local.Port || !pkt.TCP.Src.IP.Equal(t.remote.IP) || pkt.TCP.Src.Port != t.remote.Port {
+		if !tcpFlowMatches(pkt.TCP, t.local, t.remote) {
 			t.session.Logger().Debug("dropping TCP segment for unexpected flow", "src_addr", pkt.TCP.Src, "dst_addr", pkt.TCP.Dst)
 			return false
 		}
@@ -354,12 +403,11 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		return false
 	}
 	spi := packetSPI(pkt.IP.Payload)
-	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
-	if err != nil || espPacket.SPI != t.inboundESP.SPI {
+	if spi != t.inboundESP.SPI {
 		return false
 	}
-	if !t.acceptInboundESP(espPacket.Sequence) {
-		t.session.Logger().Debug("dropping replayed secure TCP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
+	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
+	if err != nil {
 		return false
 	}
 	if espPacket.NextHeader != packet.ProtocolTCP {
@@ -370,8 +418,12 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		t.session.Logger().Debug("parsing secure TCP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
 		return false
 	}
-	if inner.TCP.Dst.Port != t.local.Port || !inner.TCP.Src.IP.Equal(t.remote.IP) || inner.TCP.Src.Port != t.remote.Port {
+	if !tcpFlowMatches(inner.TCP, t.local, t.remote) {
 		t.session.Logger().Debug("secure TCP flow mismatch", "spi", spi, "src_addr", inner.TCP.Src, "dst_addr", inner.TCP.Dst, "expected_remote_addr", t.remote, "expected_local_addr", t.local)
+		return false
+	}
+	if !t.acceptInboundESP(espPacket.Sequence) {
+		t.session.Logger().Debug("dropping replayed secure TCP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
 		return false
 	}
 	t.handleSegment(*inner.TCP)
@@ -408,14 +460,14 @@ func (t *TCPConn) closeWithError(err error) {
 
 func (t *TCPConn) acceptInboundESP(sequence uint32) bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.closed {
+		t.mu.Unlock()
 		return false
 	}
-	if !espIntegrityEnabled(t.inboundESP.Integrity) {
-		return true
-	}
-	return t.inboundReplay.Accept(sequence)
+	codec := t.inboundESP
+	associations := t.associations
+	t.mu.Unlock()
+	return associations.acceptInboundESP(codec, sequence)
 }
 
 func (t *TCPConn) currentAck() uint32 {
@@ -459,12 +511,16 @@ func (t *TCPConn) noteAckLocked(ack uint32) {
 	}
 }
 
-func (t *TCPConn) noteSent(nextSeq uint32) {
+func (t *TCPConn) reserveSendSeq(payloadLen int) (uint32, uint32, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if tcpSeqAfter(nextSeq, t.sendSeq) {
-		t.sendSeq = nextSeq
+	if t.closed {
+		return 0, 0, t.closedErrLocked("writing tcp packet: transport is closed")
 	}
+	seq := t.sendSeq
+	nextSeq := seq + uint32(payloadLen)
+	t.sendSeq = nextSeq
+	return seq, nextSeq, nil
 }
 
 func tcpSeqAfter(a, b uint32) bool {
@@ -477,15 +533,30 @@ func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.Ca
 
 func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	response, terminalErr := t.handleSegmentLocked(segment)
+	t.mu.Unlock()
+
+	if response.flags != 0 {
+		ctx, cancel := t.ackContext(5 * time.Second)
+		err := t.sendSegmentWithSeq(ctx, response.seq, response.ack, response.flags, nil)
+		cancel()
+		if err != nil {
+			t.session.Logger().Debug("sending TCP response failed", "tcp_flags", response.flags, "seq", response.seq, "ack", response.ack, "err", err)
+		}
+	}
+	if terminalErr != nil {
+		t.closeWithError(terminalErr)
+	}
+}
+
+func (t *TCPConn) handleSegmentLocked(segment packet.TCPSegment) (tcpSegmentResponse, error) {
 	if t.closed {
-		return
+		return tcpSegmentResponse{}, nil
 	}
 	t.session.Logger().Debug("received TCP segment", "src_addr", segment.Src, "dst_addr", segment.Dst, "tcp_flags", segment.Flags, "seq", segment.Seq, "ack", segment.Ack, "payload_len", len(segment.Payload))
 
 	if segment.Flags&packet.TCPFlagRST != 0 {
-		t.closeAfterSegmentError(errors.New("reading tcp packet: peer reset connection"))
-		return
+		return tcpSegmentResponse{}, errors.New("reading tcp packet: peer reset connection")
 	}
 
 	if !t.established {
@@ -494,89 +565,79 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 				t.recvSeq = segment.Seq + 1
 				ack := t.recvSeq
 				synSeq := t.initialSeq
-				go func() {
-					ctx, cancel := t.ackContext(5 * time.Second)
-					defer cancel()
-					_ = t.sendSegmentWithSeq(ctx, synSeq, ack, packet.TCPFlagSYN|packet.TCPFlagACK, nil)
-				}()
-				return
+				return tcpSegmentResponse{seq: synSeq, ack: ack, flags: packet.TCPFlagSYN | packet.TCPFlagACK}, nil
 			}
 			if segment.Flags&packet.TCPFlagACK != 0 && segment.Ack == t.sendSeq {
 				t.noteAckLocked(segment.Ack)
 				t.established = true
 				t.signalReady()
-				return
+				if len(segment.Payload) == 0 && segment.Flags&packet.TCPFlagFIN == 0 {
+					return tcpSegmentResponse{}, nil
+				}
+				return t.handleEstablishedSegmentLocked(segment)
 			}
 		} else if segment.Flags&(packet.TCPFlagSYN|packet.TCPFlagACK) == packet.TCPFlagSYN|packet.TCPFlagACK {
+			if segment.Ack != t.sendSeq {
+				return tcpSegmentResponse{}, nil
+			}
 			t.recvSeq = segment.Seq + 1
 			t.noteAckLocked(segment.Ack)
 			t.established = true
 			t.signalReady()
 			ack := t.recvSeq
-			go func(seq uint32) {
-				ctx, cancel := t.ackContext(5 * time.Second)
-				defer cancel()
-				_ = t.sendSegmentWithSeq(ctx, seq, ack, packet.TCPFlagACK, nil)
-			}(t.sendSeq)
+			return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
 		}
-		return
+		return tcpSegmentResponse{}, nil
 	}
 
-	t.noteAckLocked(segment.Ack)
-	if len(segment.Payload) == 0 {
-		if segment.Flags&packet.TCPFlagFIN != 0 {
-			t.recvSeq = segment.Seq + 1
-			ack := t.recvSeq
-			go func(seq uint32) {
-				ctx, cancel := t.ackContext(5 * time.Second)
-				defer cancel()
-				_ = t.sendSegmentWithSeq(ctx, seq, ack, packet.TCPFlagACK, nil)
-			}(t.sendSeq)
-			t.closeAfterSegmentError(errors.New("reading tcp packet: peer closed connection"))
-		}
-		return
+	return t.handleEstablishedSegmentLocked(segment)
+}
+
+func (t *TCPConn) handleEstablishedSegmentLocked(segment packet.TCPSegment) (tcpSegmentResponse, error) {
+	if segment.Flags&packet.TCPFlagACK != 0 {
+		t.noteAckLocked(segment.Ack)
+	}
+	fin := segment.Flags&packet.TCPFlagFIN != 0
+	if len(segment.Payload) == 0 && !fin {
+		return tcpSegmentResponse{}, nil
 	}
 
 	if segment.Seq != t.recvSeq {
 		ack := t.recvSeq
-		go func(seq uint32) {
-			ctx, cancel := t.ackContext(5 * time.Second)
-			defer cancel()
-			_ = t.sendSegmentWithSeq(ctx, seq, ack, packet.TCPFlagACK, nil)
-		}(t.sendSeq)
-		return
+		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
 	}
 
-	t.recvSeq += uint32(len(segment.Payload))
+	nextRecv := segment.Seq + uint32(len(segment.Payload))
+	if fin {
+		nextRecv++
+	}
+	t.recvSeq = nextRecv
 	ack := t.recvSeq
-	go func(seq uint32) {
-		ctx, cancel := t.ackContext(5 * time.Second)
-		defer cancel()
-		_ = t.sendSegmentWithSeq(ctx, seq, ack, packet.TCPFlagACK, nil)
-	}(t.sendSeq)
+	response := tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}
+	if len(segment.Payload) == 0 {
+		return response, errors.New("reading tcp packet: peer closed connection")
+	}
 
 	t.stream = append(t.stream, segment.Payload...)
 	for {
 		msg, rest, ok, err := nextSIPMessage(t.stream)
 		if err != nil {
-			t.closeAfterSegmentError(err)
-			return
+			return response, err
 		}
 		if !ok {
-			break
+			t.stream = rest
+			if fin {
+				return response, errors.New("reading tcp packet: peer closed connection")
+			}
+			return response, nil
 		}
 		t.stream = rest
 		select {
 		case t.msgCh <- msg:
 		default:
-			t.closeAfterSegmentError(errors.New("reading tcp packet: message queue is full"))
-			return
+			return response, errors.New("reading tcp packet: message queue is full")
 		}
 	}
-}
-
-func (t *TCPConn) closeAfterSegmentError(err error) {
-	go t.closeWithError(err)
 }
 
 func (t *TCPConn) signalReady() {
@@ -610,6 +671,18 @@ func (t *TCPConn) readyResult(action string) error {
 	return fmt.Errorf("%s: transport is not established", action)
 }
 
+func (t *TCPConn) dialReady(action string) (bool, error) {
+	select {
+	case <-t.readyCh:
+		if err := t.readyResult(action); err != nil {
+			return false, err
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags byte, payload []byte) error {
 	t.session.Logger().Debug("sending TCP segment", "src_addr", t.local, "dst_addr", t.remote, "tcp_flags", flags, "seq", seq, "ack", ack, "payload_len", len(payload), "secure", t.secure)
 	segment := packet.TCPSegment{
@@ -629,14 +702,10 @@ func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags
 		return fmt.Errorf("writing secure tcp packet: %w", err)
 	}
 	t.mu.Lock()
-	espSeq, ok := esp.NextSequence(&t.espSeq)
 	codec := t.outboundESP
+	associations := t.associations
 	t.mu.Unlock()
-	if !ok {
-		_ = t.Close()
-		return errors.New("writing secure tcp packet: esp sequence number overflow")
-	}
-	sealed, err := codec.Encode(esp.ESPPacket{SPI: codec.SPI, Sequence: espSeq, NextHeader: packet.ProtocolTCP, Payload: wire})
+	sealed, err := associations.sealESP(codec, packet.ProtocolTCP, wire)
 	if err != nil {
 		return fmt.Errorf("writing secure tcp packet: %w", err)
 	}
@@ -651,9 +720,16 @@ func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags
 }
 
 func nextSIPMessage(stream []byte) ([]byte, []byte, bool, error) {
+	stream = trimLeadingSIPCRLF(stream)
 	headersEnd := bytes.Index(stream, []byte("\r\n\r\n"))
 	if headersEnd < 0 {
+		if len(stream) > tcpMaxSIPHeaderBytes {
+			return nil, stream, false, errors.New("reading tcp packet: SIP header too large")
+		}
 		return nil, stream, false, nil
+	}
+	if headersEnd > tcpMaxSIPHeaderBytes {
+		return nil, stream, false, errors.New("reading tcp packet: SIP header too large")
 	}
 	headersBlob := string(stream[:headersEnd])
 	contentLength := 0
@@ -681,9 +757,20 @@ func nextSIPMessage(stream []byte) ([]byte, []byte, bool, error) {
 	if !foundContentLength {
 		return nil, stream, false, errors.New("reading tcp packet: missing Content-Length")
 	}
-	total := headersEnd + 4 + contentLength
+	headersSize := headersEnd + 4
+	if contentLength > tcpMaxSIPMessageBytes-headersSize {
+		return nil, stream, false, errors.New("reading tcp packet: SIP message too large")
+	}
+	total := headersSize + contentLength
 	if len(stream) < total {
 		return nil, stream, false, nil
 	}
 	return append([]byte(nil), stream[:total]...), append([]byte(nil), stream[total:]...), true, nil
+}
+
+func trimLeadingSIPCRLF(stream []byte) []byte {
+	for len(stream) >= 2 && stream[0] == '\r' && stream[1] == '\n' {
+		stream = stream[2:]
+	}
+	return stream
 }

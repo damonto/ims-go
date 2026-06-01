@@ -88,7 +88,7 @@ func TestDeriveAKAPrimeCKIK(t *testing.T) {
 		wantIK      []byte
 	}{
 		{
-			name:        "android challenge state vector",
+			name:        "reference challenge state vector",
 			ck:          mustHex(t, "00112233445566778899AABBCCDDEEFF"),
 			ik:          mustHex(t, "FFEEDDCCBBAA99887766554433221100"),
 			networkName: []byte("foo:bar"),
@@ -134,8 +134,8 @@ func TestDeriveAKAPrimeKeys(t *testing.T) {
 		want        AKAPrimeKeys
 	}{
 		{
-			name:        "android challenge state vector",
-			identity:    []byte("test@android.net"),
+			name:        "reference challenge state vector",
+			identity:    []byte("test@example.net"),
 			ck:          mustHex(t, "00112233445566778899AABBCCDDEEFF"),
 			ik:          mustHex(t, "FFEEDDCCBBAA99887766554433221100"),
 			networkName: []byte("foo:bar"),
@@ -143,13 +143,13 @@ func TestDeriveAKAPrimeKeys(t *testing.T) {
 			want: AKAPrimeKeys{
 				CKPrime: mustHex(t, "3F7B2687E2000F35F4AD0796E579CC90"),
 				IKPrime: mustHex(t, "CCE648C28E26FAD3FC2749B790249F1E"),
-				ENCR:    mustHex(t, "9CD8BDFF999E547B73D127172ADB7881"),
-				AUT:     mustHex(t, "CC3CD1AD2B63D01931D1E48567966ECBA60092C4554C6A60EBD180D0957282BE"),
-				RE:      mustHex(t, "333A148B074FC01B2D0F17ABB741B2EA1968899A152CC9F2B6CBE728A9A31BC1"),
-				MSK: mustHex(t, "A29268E164BB89E741FBEC0301006E34D277758145AD8404EAF2C5414F866E2A"+
-					"D635B0752C3B3D3F14A4BA9A388D338BF5F72161199E5D136CA1E4F7FE95E7FB"),
-				EMSK: mustHex(t, "81B2C0EFB382B7E7749E9FAB6A678605D65F18E440FD997854CCB3FB9FF7CDB1"+
-					"D05D73736650F1A5470FA87F39B3BF584DBB3C27422E536C9C2CB1F985CEBB0B"),
+				ENCR:    mustHex(t, "DE28640565A622858710686E8F025621"),
+				AUT:     mustHex(t, "53F9D86DCCC9C98335217001F9A54A8626891249A2F709B4AD278D22948E8B29"),
+				RE:      mustHex(t, "0CADD87FB7401CE386808DD8D53254C5E7C4C231A0D7E274C1997CAD953E4280"),
+				MSK: mustHex(t, "339843B76C5F5255F18BDCF17143A308756BAD1D17AFF7E19C3AA4BFBE7ECE44"+
+					"EFC2D4295BD7E403A0B1B515FE5F2C248FD02D69CB57BA4388BBFEC0D99966CB"),
+				EMSK: mustHex(t, "238AED9A36A1A0059119A31083C2BC33618994BA467E84CDB27983D7E8A2B2B"+
+					"F912456886858CF1E3A7EE55FD0990A0A1A18035D82A8C9D38AB35758B5103F97"),
 			},
 		},
 		{
@@ -472,6 +472,41 @@ func TestBuildAKAIdentityResponse(t *testing.T) {
 			}
 			if got.Code != eapCodeResponse || got.Subtype != akaSubtypeIdentity {
 				t.Fatalf("AKAMessage = %+v", got)
+			}
+		})
+	}
+}
+
+func TestBuildAKAPrimeKDFSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		id   byte
+		kdf  uint16
+	}{
+		{name: "default kdf", id: 7, kdf: akaPrimeKDFDefault},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := BuildAKAPrimeKDFSelection(tt.id, tt.kdf)
+			if err != nil {
+				t.Fatalf("BuildAKAPrimeKDFSelection() error = %v", err)
+			}
+			var got AKAMessage
+			if err := got.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.Code != eapCodeResponse || got.Identifier != tt.id || got.EAPType != eapTypeAKAPrime || got.Subtype != akaSubtypeChallenge {
+				t.Fatalf("AKAMessage = %+v", got)
+			}
+			if len(got.Attributes) != 1 || got.Attributes[0].Type != akaAttrKDF {
+				t.Fatalf("Attributes = %+v, want only AT_KDF", got.Attributes)
+			}
+			kdf, err := KDFFromAttribute(&got.Attributes[0])
+			if err != nil {
+				t.Fatalf("KDFFromAttribute() error = %v", err)
+			}
+			if kdf.Version != tt.kdf {
+				t.Fatalf("KDF = %d, want %d", kdf.Version, tt.kdf)
 			}
 		})
 	}
@@ -865,7 +900,7 @@ func TestAKAChallengeUnmarshalBinaryAKAPrimeKDFValidation(t *testing.T) {
 	randValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)
 	autnValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x22}, 16)...)
 	macValue := append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x55}, 16)...)
-	networkName := []byte("android.net")
+	networkName := []byte("example.net")
 	kdfInputValue := buildAKAStringAttribute(akaAttrKDFInput, string(networkName)).Value
 	emptyKDFInputValue := buildAKAStringAttribute(akaAttrKDFInput, "").Value
 	kdfValue := []byte{0x00, byte(akaPrimeKDFDefault)}
@@ -1212,9 +1247,9 @@ func TestKDFInputMarshalBinary(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "android network name vector",
-			in:   KDFInput{NetworkName: []byte("android.net")},
-			want: mustHex(t, "1704000B616E64726F69642E6E657400"),
+			name: "reference network name vector",
+			in:   KDFInput{NetworkName: []byte("example.net")},
+			want: mustHex(t, "1704000B6578616D706C652E6E657400"),
 		},
 		{
 			name: "empty network name vector",
@@ -1253,10 +1288,10 @@ func TestKDFInputUnmarshalBinary(t *testing.T) {
 		want    []byte
 		wantErr bool
 	}{
-		{name: "android network name vector", wire: mustHex(t, "1704000B616E64726F69642E6E657400"), want: []byte("android.net")},
+		{name: "reference network name vector", wire: mustHex(t, "1704000B6578616D706C652E6E657400"), want: []byte("example.net")},
 		{name: "empty network name vector", wire: mustHex(t, "17010000")},
 		{name: "wrong attribute", wire: mustHex(t, "18010001"), wantErr: true},
-		{name: "truncated actual length", wire: mustHex(t, "1704000D616E64726F69642E6E657400"), wantErr: true},
+		{name: "truncated actual length", wire: mustHex(t, "1704000D6578616D706C652E6E657400"), wantErr: true},
 		{name: "network name exceeds 24.302 limit", wire: mustKDFInputWire(t, bytes.Repeat([]byte("a"), akaNetworkNameMaxLen+1)), wantErr: true},
 	}
 	for _, tt := range tests {

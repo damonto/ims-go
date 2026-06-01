@@ -2,10 +2,12 @@ package voice
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/sip"
 	"net"
+
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 func (c *Call) ID() string {
@@ -214,6 +216,9 @@ func (c *Call) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 }
 
 func (c *Call) WritePacket(ctx context.Context, data []byte) error {
+	c.mediaSendMu.Lock()
+	defer c.mediaSendMu.Unlock()
+
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -228,8 +233,19 @@ func (c *Call) WritePacket(ctx context.Context, data []byte) error {
 		return errors.New("writing call media: call is on hold")
 	}
 	transport := c.transport
+	media := c.media
 	c.mu.Unlock()
-	return transport.WritePacket(ctx, data)
+	wire, sent, ok, err := c.prepareOutgoingRTPPacket(data)
+	if err != nil {
+		return err
+	}
+	if err := transport.WritePacket(ctx, wire); err != nil {
+		return err
+	}
+	if ok {
+		c.saveRTPSendState(sent, media)
+	}
+	return nil
 }
 
 func (c *Call) ReadRTP(ctx context.Context) ([]byte, net.Addr, error) {
@@ -238,6 +254,45 @@ func (c *Call) ReadRTP(ctx context.Context) ([]byte, net.Addr, error) {
 
 func (c *Call) WriteRTP(ctx context.Context, data []byte) error {
 	return c.WritePacket(ctx, data)
+}
+
+func (c *Call) prepareOutgoingRTPPacket(data []byte) ([]byte, RTPPacket, bool, error) {
+	packet, err := ParseRTPPacket(data)
+	if err != nil {
+		return data, RTPPacket{}, false, nil
+	}
+	c.mu.Lock()
+	rtp := c.rtpSend
+	if rtp.initialized {
+		packet.SSRC = rtp.ssrc
+		packet.SequenceNumber = rtp.nextSequence
+		packet.Timestamp = rtp.nextTimestamp
+	}
+	c.mu.Unlock()
+	if !rtp.initialized {
+		return data, packet, true, nil
+	}
+	wire := rewriteRTPHeader(data, packet)
+	return wire, packet, true, nil
+}
+
+func rewriteRTPHeader(data []byte, packet RTPPacket) []byte {
+	wire := append([]byte(nil), data...)
+	binary.BigEndian.PutUint16(wire[2:4], packet.SequenceNumber)
+	binary.BigEndian.PutUint32(wire[4:8], packet.Timestamp)
+	binary.BigEndian.PutUint32(wire[8:12], packet.SSRC)
+	return wire
+}
+
+func (c *Call) saveRTPSendState(packet RTPPacket, media NegotiatedMedia) {
+	c.mu.Lock()
+	c.rtpSend = rtpSendState{
+		initialized:   true,
+		ssrc:          packet.SSRC,
+		nextSequence:  packet.SequenceNumber + 1,
+		nextTimestamp: packet.Timestamp + mediaFrameTicks(media),
+	}
+	c.mu.Unlock()
 }
 
 func (c *Call) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {

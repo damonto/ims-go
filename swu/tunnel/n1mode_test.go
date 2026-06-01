@@ -12,7 +12,7 @@ func TestN1ModeCapabilityNotifyDataBinary(t *testing.T) {
 		value   byte
 		wantErr string
 	}{
-		{name: "android vector", wire: []byte{0x01, 0x01}, value: 0x01},
+		{name: "reference vector", wire: []byte{0x01, 0x01}, value: 0x01},
 		{name: "wrong data length", wire: []byte{0x01, 0x01, 0x02}, wantErr: "data length"},
 		{name: "wrong value length", wire: []byte{0x02, 0x01}, wantErr: "value length"},
 		{name: "unset pdu session id", wire: []byte{0x01, 0x00}, wantErr: "unset"},
@@ -52,7 +52,7 @@ func TestN1ModeInformationNotifyDataBinary(t *testing.T) {
 		snssai  []byte
 		wantErr string
 	}{
-		{name: "android vector", wire: []byte{0x04, 0x11, 0x22, 0x33, 0x44}, snssai: []byte{0x11, 0x22, 0x33, 0x44}},
+		{name: "reference vector", wire: []byte{0x04, 0x11, 0x22, 0x33, 0x44}, snssai: []byte{0x11, 0x22, 0x33, 0x44}},
 		{name: "zero length", wire: []byte{0x00}},
 		{name: "wrong snssai length", wire: []byte{0x05, 0x11, 0x22, 0x33, 0x44}, wantErr: "does not match"},
 		{name: "missing length field", wire: []byte{}, wantErr: "length field"},

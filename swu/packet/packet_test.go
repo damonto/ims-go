@@ -1,7 +1,9 @@
 package packet
 
 import (
+	"encoding/binary"
 	"net"
+	"slices"
 	"testing"
 
 	"github.com/damonto/vowifi-go/swu/esp"
@@ -190,6 +192,183 @@ func TestDecodePayloadRejectsShortESP(t *testing.T) {
 			_, err := DecodePayload(ProtocolESP, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), tt.payload)
 			if err == nil {
 				t.Fatal("DecodePayload() error = nil, want short ESP error")
+			}
+		})
+	}
+}
+
+func TestUDPSegmentMarshalNormalizesZeroChecksum(t *testing.T) {
+	tests := []struct {
+		name string
+		src  net.IP
+		dst  net.IP
+	}{
+		{name: "ipv4", src: net.IPv4(10, 0, 0, 1), dst: net.IPv4(10, 0, 0, 2)},
+		{name: "ipv6", src: net.ParseIP("2001:db8::1"), dst: net.ParseIP("2001:db8::2")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := udpPayloadForChecksum(t, tt.src, tt.dst, 5062, 5060, 0)
+			wire, err := (UDPSegment{
+				Src:     &net.UDPAddr{IP: tt.src, Port: 5062},
+				Dst:     &net.UDPAddr{IP: tt.dst, Port: 5060},
+				Payload: payload,
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if got := binary.BigEndian.Uint16(wire[6:8]); got != 0xffff {
+				t.Fatalf("UDP checksum = %#04x, want 0xffff", got)
+			}
+		})
+	}
+}
+
+func TestTCPOptionsOnlyAdvertiseImplementedCapabilities(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags byte
+		want  []byte
+	}{
+		{name: "syn", flags: TCPFlagSYN, want: []byte{0x02, 0x04, 0x05, 0x50}},
+		{name: "syn ack", flags: TCPFlagSYN | TCPFlagACK, want: []byte{0x02, 0x04, 0x05, 0x50}},
+		{name: "ack", flags: TCPFlagACK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tcpOptionsForFlags(tt.flags)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("tcpOptionsForFlags() = %x, want %x", got, tt.want)
+			}
+		})
+	}
+}
+
+func udpPayloadForChecksum(t *testing.T, src, dst net.IP, srcPort, dstPort int, want uint16) []byte {
+	t.Helper()
+	payload := make([]byte, 2)
+	udp := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint16(udp[0:2], uint16(srcPort))
+	binary.BigEndian.PutUint16(udp[2:4], uint16(dstPort))
+	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
+	var sum uint16
+	if src.To4() != nil {
+		sum = udpChecksumIPv4(src.To4(), dst.To4(), udp)
+	} else {
+		sum = udpChecksumIPv6(src.To16(), dst.To16(), udp)
+	}
+	binary.BigEndian.PutUint16(payload, sum-want)
+	return payload
+}
+
+func TestTransportSegmentsRejectInvalidPorts(t *testing.T) {
+	tests := []struct {
+		name    string
+		marshal func() ([]byte, error)
+	}{
+		{
+			name: "udp source port wraps uint16",
+			marshal: func() ([]byte, error) {
+				return (UDPSegment{
+					Src: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 65536},
+					Dst: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				}).MarshalBinary()
+			},
+		},
+		{
+			name: "udp destination port is zero",
+			marshal: func() ([]byte, error) {
+				return (UDPSegment{
+					Src: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
+					Dst: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2)},
+				}).MarshalBinary()
+			},
+		},
+		{
+			name: "tcp source port is negative",
+			marshal: func() ([]byte, error) {
+				return (TCPSegment{
+					Src: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: -1},
+					Dst: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				}).MarshalBinary()
+			},
+		},
+		{
+			name: "tcp destination port wraps uint16",
+			marshal: func() ([]byte, error) {
+				return (TCPSegment{
+					Src: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
+					Dst: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 70000},
+				}).MarshalBinary()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.marshal(); err == nil {
+				t.Fatal("MarshalBinary() error = nil, want invalid port error")
+			}
+		})
+	}
+}
+
+func TestPacketsRejectLengthOverflow(t *testing.T) {
+	tests := []struct {
+		name    string
+		marshal func() ([]byte, error)
+	}{
+		{
+			name: "ipv4 total length",
+			marshal: func() ([]byte, error) {
+				return (IPPacket{
+					Version:  IPVersion4,
+					Protocol: ProtocolUDP,
+					SrcIP:    net.IPv4(10, 0, 0, 1),
+					DstIP:    net.IPv4(10, 0, 0, 2),
+					Payload:  make([]byte, maxIPPacketBytes-20+1),
+				}).MarshalBinary()
+			},
+		},
+		{
+			name: "ipv6 payload length",
+			marshal: func() ([]byte, error) {
+				return (IPPacket{
+					Version:  IPVersion6,
+					Protocol: ProtocolTCP,
+					SrcIP:    net.ParseIP("2001:db8::1"),
+					DstIP:    net.ParseIP("2001:db8::2"),
+					Payload:  make([]byte, maxIPPayloadBytes+1),
+				}).MarshalBinary()
+			},
+		},
+		{
+			name: "udp length",
+			marshal: func() ([]byte, error) {
+				return (UDPSegment{
+					Src:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
+					Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+					Payload: make([]byte, maxUDPSegmentBytes-8+1),
+				}).MarshalBinary()
+			},
+		},
+		{
+			name: "tcp length",
+			marshal: func() ([]byte, error) {
+				return (TCPSegment{
+					Src:     &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
+					Dst:     &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+					Flags:   TCPFlagACK,
+					Payload: make([]byte, maxTCPSegmentBytes-20+1),
+				}).MarshalBinary()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.marshal(); err == nil {
+				t.Fatal("MarshalBinary() error = nil, want length overflow error")
 			}
 		})
 	}

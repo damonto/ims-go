@@ -30,7 +30,7 @@ const (
 	smsIPFeatureTag             = "+g.3gpp.smsip"
 	srvccAlertingFeatureTag     = "+g.3gpp.srvcc-alerting"
 	defaultLang                 = "en"
-	androidUndefinedLang        = "undefined"
+	undefinedLang               = "undefined"
 	defaultQueuedRequestTimeout = 30 * time.Second
 	inviteOKWriteTimeout        = 5 * time.Second
 	inviteOKTimeoutMultiplier   = 64

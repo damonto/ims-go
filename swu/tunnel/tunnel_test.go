@@ -58,10 +58,10 @@ func TestConfigNormalized(t *testing.T) {
 				t.Fatalf("LivenessTimeout = %s, want %s", got.LivenessTimeout, defaultLivenessTimeout)
 			}
 			if got.IKESALifetime != defaultIKESARekeyHardTimer || got.IKESARekeyMargin != defaultIKESARekeyHardTimer-defaultIKESARekeySoftTimer {
-				t.Fatalf("IKE SA lifetime = %s/%s, want Android default hard/soft timers", got.IKESALifetime, got.IKESARekeyMargin)
+				t.Fatalf("IKE SA lifetime = %s/%s, want WFC default hard/soft timers", got.IKESALifetime, got.IKESARekeyMargin)
 			}
 			if got.ChildSALifetime != defaultChildSARekeyHardTimer || got.ChildSARekeyMargin != defaultChildSARekeyHardTimer-defaultChildSARekeySoftTimer {
-				t.Fatalf("Child SA lifetime = %s/%s, want Android default hard/soft timers", got.ChildSALifetime, got.ChildSARekeyMargin)
+				t.Fatalf("Child SA lifetime = %s/%s, want WFC default hard/soft timers", got.ChildSALifetime, got.ChildSARekeyMargin)
 			}
 			if len(got.IKERetransmitDelays) != len(defaultIKERetransmitDelays) {
 				t.Fatalf("IKERetransmitDelays = %v, want %v", got.IKERetransmitDelays, defaultIKERetransmitDelays)
