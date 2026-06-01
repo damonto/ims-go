@@ -460,8 +460,8 @@ func TestHandleMalformedInboundSMSReturns200(t *testing.T) {
 func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan Incoming, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	gotCh := make(chan IncomingSMS, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -492,13 +492,13 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	select {
 	case got := <-gotCh:
 		if got.Text != "hello" || got.From != "+15551234567" || got.ServiceCenter != "+15550000000" {
-			t.Fatalf("Incoming = %+v", got)
+			t.Fatalf("IncomingSMS = %+v", got)
 		}
 		if !bytes.Equal(got.RawTPDU, tpdu) {
-			t.Fatalf("Incoming.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
+			t.Fatalf("IncomingSMS.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
 		}
 		if got.ReservedMTI {
-			t.Fatal("Incoming.ReservedMTI = true, want false")
+			t.Fatal("IncomingSMS.ReservedMTI = true, want false")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
@@ -508,8 +508,8 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan Incoming, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	gotCh := make(chan IncomingSMS, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -540,13 +540,13 @@ func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
 	select {
 	case got := <-gotCh:
 		if got.Text != "hello" || got.From != "+15551234567" {
-			t.Fatalf("Incoming = %+v, want decoded reserved-MTI deliver", got)
+			t.Fatalf("IncomingSMS = %+v, want decoded reserved-MTI deliver", got)
 		}
 		if !got.ReservedMTI {
-			t.Fatal("Incoming.ReservedMTI = false, want true")
+			t.Fatal("IncomingSMS.ReservedMTI = false, want true")
 		}
 		if !bytes.Equal(got.RawTPDU, tpdu) {
-			t.Fatalf("Incoming.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
+			t.Fatalf("IncomingSMS.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
@@ -555,25 +555,33 @@ func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
 
 func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) {
 	tests := []struct {
-		name    string
-		xmlFrom string
-		tpFrom  string
-		want    string
+		name        string
+		xmlFrom     string
+		tpFrom      string
+		wantFrom    string
+		wantFromURI string
 	}{
 		{
-			name:    "xml from overrides dummy originator",
-			xmlFrom: "sip:sender@example.net",
-			tpFrom:  dummyMSISDN,
-			want:    "sip:sender@example.net",
+			name:        "sip phone uri is split from display number",
+			xmlFrom:     "sip:+64210647889@ims.mnc001.mcc530.3gppnetwork.org",
+			tpFrom:      dummyMSISDN,
+			wantFrom:    "+64210647889",
+			wantFromURI: "sip:+64210647889@ims.mnc001.mcc530.3gppnetwork.org",
+		},
+		{
+			name:        "non dialable sip uri stays in FromURI",
+			xmlFrom:     "sip:sender@example.net",
+			tpFrom:      dummyMSISDN,
+			wantFromURI: "sip:sender@example.net",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newServiceTransport()
 			sess, reg := registeredService(t, transport)
-			gotCh := make(chan Incoming, 1)
+			gotCh := make(chan IncomingSMS, 1)
 			reportCh := make(chan sip.Message, 1)
-			svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+			svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -616,8 +624,8 @@ func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) 
 			}
 			select {
 			case got := <-gotCh:
-				if got.From != tt.want || got.Text != "hello" {
-					t.Fatalf("Incoming = %+v, want From %q text hello", got, tt.want)
+				if got.From != tt.wantFrom || got.FromURI != tt.wantFromURI || got.Text != "hello" {
+					t.Fatalf("IncomingSMS = %+v, want From %q FromURI %q text hello", got, tt.wantFrom, tt.wantFromURI)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("waiting for incoming sms callback")
@@ -649,9 +657,9 @@ func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) 
 func TestHandleInboundMSISDNLessSMSRequiresFeatureCaps(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan Incoming, 1)
+	gotCh := make(chan IncomingSMS, 1)
 	reportCh := make(chan sip.Message, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -702,9 +710,9 @@ func TestHandleInboundMSISDNLessSMSRequiresFeatureCaps(t *testing.T) {
 func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan Incoming, 1)
+	gotCh := make(chan IncomingSMS, 1)
 	reportCh := make(chan sip.Message, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -745,8 +753,8 @@ func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
 	}
 	select {
 	case got := <-gotCh:
-		if got.From != "+15551234567" || got.Text != "hello" {
-			t.Fatalf("Incoming = %+v, want TP-OA +15551234567 text hello", got)
+		if got.From != "+15551234567" || got.FromURI != "" || got.Text != "hello" {
+			t.Fatalf("IncomingSMS = %+v, want TP-OA +15551234567, empty FromURI, text hello", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
@@ -912,7 +920,7 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 	callbackRelease := make(chan struct{})
 	reportCh := make(chan sip.Message, 1)
 	svc, err := New(Config{Logger: testLogger(),
-		OnIncoming: func(in Incoming) {
+		OnIncoming: func(in IncomingSMS) {
 			close(callbackStarted)
 			<-callbackRelease
 		},

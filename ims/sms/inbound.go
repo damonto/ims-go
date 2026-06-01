@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/damonto/vowifi-go/ims/identity"
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
@@ -625,8 +626,9 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), ackInfo)
 			return nil
 		}
-		if from := strings.TrimSpace(ackInfo.From); from != "" {
-			tpdu.Message.From = from
+		if fromURI := strings.TrimSpace(ackInfo.From); fromURI != "" {
+			tpdu.Message.FromURI = fromURI
+			tpdu.Message.From = identity.MSISDN(fromURI)
 		}
 		s.deliverIncoming(msg, rp, tpdu)
 		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), ackInfo); !ok {
@@ -773,7 +775,7 @@ func envelopeAddress(value string) string {
 	}
 }
 
-func (s *Service) deliverSingle(msg sip.Message, incoming Incoming) {
+func (s *Service) deliverSingle(msg sip.Message, incoming IncomingSMS) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
@@ -781,7 +783,7 @@ func (s *Service) deliverSingle(msg sip.Message, incoming Incoming) {
 		s.cfg.OnIncoming(incoming)
 		return
 	}
-	s.logger.Debug("suppressing duplicate sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "from", incoming.From, "text", incoming.Text)
+	s.logger.Debug("suppressing duplicate sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "from", incoming.From, "from_uri", incoming.FromURI, "text", incoming.Text)
 }
 
 func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip.Message {

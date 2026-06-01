@@ -18,7 +18,7 @@ type Config struct {
 	SubmitReportTimeout   time.Duration
 	DeliveryReportTimeout time.Duration
 	RequestStatusReport   bool
-	OnIncoming            func(Incoming)
+	OnIncoming            func(IncomingSMS)
 	OnStatusReport        func(StatusReport)
 	OnError               func(error)
 	Logger                *slog.Logger

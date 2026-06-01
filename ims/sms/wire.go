@@ -147,9 +147,10 @@ const (
 
 var tpduZeroTimestamp [tpduTimestampOctets]byte
 
-type Incoming struct {
+type IncomingSMS struct {
 	CallID        string
 	From          string
+	FromURI       string
 	To            string
 	ServiceCenter string
 	Text          string
@@ -157,8 +158,6 @@ type Incoming struct {
 	RawTPDUs      [][]byte
 	ReservedMTI   bool
 }
-
-type IncomingSMS = Incoming
 
 type StatusReport struct {
 	ServiceCenter         string
@@ -391,10 +390,10 @@ func (p userDataPart) marshalDeliver(from string) []byte {
 	return payload
 }
 
-func decodeDeliver(data []byte) (Incoming, error) {
+func decodeDeliver(data []byte) (IncomingSMS, error) {
 	var deliver deliverTPDU
 	if err := deliver.UnmarshalBinary(data); err != nil {
-		return Incoming{}, err
+		return IncomingSMS{}, err
 	}
 	return deliver.Message, nil
 }

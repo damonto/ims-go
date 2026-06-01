@@ -102,6 +102,7 @@ var (
 type SMS struct {
 	CallID        string
 	From          string
+	FromURI       string
 	To            string
 	ServiceCenter string
 	Text          string

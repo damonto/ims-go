@@ -56,10 +56,11 @@ func (c *Client) currentSMSService() (*imssms.Service, error) {
 	return active.sms, nil
 }
 
-func (c *Client) handleSMS(msg imssms.Incoming) {
+func (c *Client) handleSMS(msg imssms.IncomingSMS) {
 	c.emitSMS(SMS{
 		CallID:        msg.CallID,
 		From:          msg.From,
+		FromURI:       msg.FromURI,
 		To:            msg.To,
 		ServiceCenter: msg.ServiceCenter,
 		Text:          msg.Text,

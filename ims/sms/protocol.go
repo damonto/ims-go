@@ -67,7 +67,7 @@ func (tp submitTPDU) MarshalBinary() ([]byte, error) {
 type deliverTPDU struct {
 	From    string
 	Part    userDataPart
-	Message Incoming
+	Message IncomingSMS
 	Concat  *concatInfo
 }
 
@@ -262,7 +262,7 @@ func (tp *deliverTPDU) UnmarshalBinary(data []byte) error {
 	*tp = deliverTPDU{
 		From:    fields.from,
 		Part:    fields.part,
-		Message: Incoming{From: fields.from, Text: text, RawTPDU: append([]byte(nil), data...), ReservedMTI: data[0]&tpduMTIMask == tpduMTIReserved},
+		Message: IncomingSMS{From: fields.from, Text: text, RawTPDU: append([]byte(nil), data...), ReservedMTI: data[0]&tpduMTIMask == tpduMTIReserved},
 		Concat:  concat,
 	}
 	return nil

@@ -3,12 +3,13 @@ package voice
 import (
 	"context"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/damonto/vowifi-go/ims/identity"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 func (s *Service) handleIncomingInvite(ctx context.Context, req session.Request) error {
@@ -215,80 +216,13 @@ func incomingCallerNumber(msg sip.Message) string {
 	for _, header := range []string{"P-Asserted-Identity", "Remote-Party-ID", "From"} {
 		for _, value := range msg.HeadersByName(header) {
 			for _, part := range sip.SplitHeaderList(value) {
-				if number := callerNumber(part); number != "" {
+				if number := identity.MSISDN(part); number != "" {
 					return number
 				}
 			}
 		}
 	}
 	return ""
-}
-
-func callerNumber(value string) string {
-	uri := sip.AddressURI(value)
-	if uri == "" {
-		return ""
-	}
-	return callerNumberFromURI(uri)
-}
-
-func callerNumberFromURI(uri string) string {
-	uri = strings.TrimSpace(uri)
-	lower := strings.ToLower(uri)
-	switch {
-	case strings.HasPrefix(lower, "tel:"):
-		return cleanCallerUser(uri[len("tel:"):])
-	case strings.HasPrefix(lower, "sip:"):
-		return callerNumberFromSIPUser(uri[len("sip:"):])
-	case strings.HasPrefix(lower, "sips:"):
-		return callerNumberFromSIPUser(uri[len("sips:"):])
-	default:
-		return ""
-	}
-}
-
-func callerNumberFromSIPUser(value string) string {
-	if before, _, ok := strings.Cut(value, "@"); ok {
-		value = before
-	}
-	number := cleanCallerUser(value)
-	if !isDialableCaller(number) {
-		return ""
-	}
-	return number
-}
-
-func cleanCallerUser(value string) string {
-	if before, _, ok := strings.Cut(value, ";"); ok {
-		value = before
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if unescaped, err := url.PathUnescape(value); err == nil {
-		value = unescaped
-	}
-	return strings.TrimSpace(value)
-}
-
-func isDialableCaller(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return false
-	}
-	digits := 0
-	for i, r := range value {
-		switch {
-		case r >= '0' && r <= '9':
-			digits++
-		case r == '+' && i == 0:
-		case r == '*' || r == '#':
-		default:
-			return false
-		}
-	}
-	return digits > 0
 }
 
 func (s *Service) writeRinging(ctx context.Context, req session.Request, call *Call) error {

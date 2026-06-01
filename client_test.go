@@ -331,7 +331,7 @@ func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
 	})
 	defer stop()
 
-	client.handleSMS(imssms.Incoming{CallID: "sms-call-id", From: "+1", To: "+2", ServiceCenter: "+3", Text: "hello"})
+	client.handleSMS(imssms.IncomingSMS{CallID: "sms-call-id", From: "+1", FromURI: "sip:+1@example.net", To: "+2", ServiceCenter: "+3", Text: "hello"})
 
 	for i, events := range []*SMSEvents{smsEventsA, smsEventsB} {
 		select {
@@ -341,6 +341,9 @@ func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
 			}
 			if msg.CallID != "sms-call-id" {
 				t.Fatalf("subscriber %d msg.CallID = %q, want sms-call-id", i, msg.CallID)
+			}
+			if msg.From != "+1" || msg.FromURI != "sip:+1@example.net" {
+				t.Fatalf("subscriber %d sender = %q/%q, want +1/sip:+1@example.net", i, msg.From, msg.FromURI)
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("waiting for sms subscriber %d", i)

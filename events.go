@@ -252,9 +252,9 @@ func (c *Client) emitError(err error) {
 }
 
 func (c *Client) emitSMS(msg SMS) {
-	c.logger.Info("incoming SMS", "from", msg.From, "to", msg.To, "service_center", msg.ServiceCenter)
+	c.logger.Info("incoming SMS", "from", msg.From, "from_uri", msg.FromURI, "to", msg.To, "service_center", msg.ServiceCenter)
 	c.events.smsIncoming.publish(msg, func() {
-		c.logger.Debug("dropping sms event", "from", msg.From, "to", msg.To, "service_center", msg.ServiceCenter)
+		c.logger.Debug("dropping sms event", "from", msg.From, "from_uri", msg.FromURI, "to", msg.To, "service_center", msg.ServiceCenter)
 	})
 }
 
