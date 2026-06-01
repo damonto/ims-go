@@ -452,7 +452,7 @@ func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, req WFCEntitlement
 	}
 	client := nsdsWFCClient{
 		serverURL:  profile.ServerURL,
-		deviceID:   base64.StdEncoding.EncodeToString([]byte(cfg.Terminal.trimmed().ID)),
+		deviceID:   nsdsWFCDeviceID(cfg.Terminal.trimmed().ID),
 		deviceName: nsdsWFCDeviceName(*cfg),
 		imsiEAP:    imsiEAP,
 		userAgent:  nsdsWFCUserAgent(*cfg),
@@ -461,7 +461,7 @@ func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, req WFCEntitlement
 	checkCtx, cancel := context.WithTimeout(ctx, defaultWFCEntitlementTimeout)
 	defer cancel()
 
-	status, err := client.checkLocationAndTC(checkCtx, card)
+	status, err := client.checkLocationAndTC(checkCtx, card, req.Purpose)
 	if err != nil {
 		if nsdsWFCActivationCheckOptional(req.Purpose, err) {
 			c.logger.Warn("wfc nsds entitlement check did not complete; continuing activation", "carrier", profile.Carrier, "err", err)
@@ -491,6 +491,11 @@ func (c *Client) checkNSDSWFCEntitlement(ctx context.Context, req WFCEntitlement
 	if status.MSISDN != "" {
 		applyNSDSWFCMSISDN(cfg, status.MSISDN)
 		c.logger.Debug("wfc nsds msisdn received", "carrier", profile.Carrier, "msisdn", status.MSISDN, "public_identity", cfg.IMS.PublicIdentity)
+	}
+	if req.Purpose == WFCEntitlementActivation && !status.LocationChecked {
+		result.Entitled = true
+		result.Action = WFCEntitlementActionAllowActivation
+		return result, nil
 	}
 	if !status.LocationTCOK() {
 		if req.Purpose == WFCEntitlementEmergencyAddressRecheck {
@@ -538,6 +543,23 @@ func nsdsWFCUserAgent(cfg Config) string {
 		return ""
 	}
 	return "Dalvik/2.1.0 (Linux; U; Android " + terminal.SoftwareVersion + "; " + terminal.Model + ")"
+}
+
+func nsdsWFCDeviceID(imei string) string {
+	imei = strings.TrimSpace(imei)
+	if len(imei) >= 14 && allASCIIDigits(imei) {
+		imei = fmt.Sprintf("urn:gsma:imei:%s-%s-0", imei[:8], imei[8:14])
+	}
+	return base64.StdEncoding.EncodeToString([]byte(imei))
+}
+
+func allASCIIDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
 }
 
 func nsdsWFCIMSIEAP(card Card) (string, error) {
@@ -675,6 +697,13 @@ const (
 	nsdsDefinedHTTPTransactionError             = 2600
 )
 
+const (
+	nsdsMessageID3GPPAuthentication  = 1
+	nsdsMessageIDServiceEntitlement  = 2
+	nsdsMessageIDGetMSISDN           = 3
+	nsdsMessageIDManageLocationAndTC = 2
+)
+
 type nsdsRequest struct {
 	MessageID          int      `json:"message-id"`
 	Method             string   `json:"method"`
@@ -718,13 +747,14 @@ type nsdsWFCStatus struct {
 	LocationTC      nsdsResponse
 	ServiceEntitled bool
 	Pending         bool
+	LocationChecked bool
 }
 
 func (status nsdsWFCStatus) LocationTCOK() bool {
 	return status.LocationTC.LocationTCOK()
 }
 
-func (c nsdsWFCClient) checkLocationAndTC(ctx context.Context, card Card) (nsdsWFCStatus, error) {
+func (c nsdsWFCClient) checkLocationAndTC(ctx context.Context, card Card, purpose WFCEntitlementPurpose) (nsdsWFCStatus, error) {
 	authChallenge, err := c.requestChallenge(ctx)
 	if err != nil {
 		return nsdsWFCStatus{}, err
@@ -733,75 +763,70 @@ func (c nsdsWFCClient) checkLocationAndTC(ctx context.Context, card Card) (nsdsW
 	if err != nil {
 		return nsdsWFCStatus{}, err
 	}
+	token := ""
+	requests := []nsdsRequest{
+		c.authenticationRequest(nsdsMessageID3GPPAuthentication, challengeResponse, token),
+		c.serviceEntitlementRequest(nsdsMessageIDServiceEntitlement),
+	}
+	if purpose != WFCEntitlementActivation {
+		requests = append(requests, c.getMSISDNRequest(nsdsMessageIDGetMSISDN))
+	}
 
-	authenticated, err := c.respondToChallenge(ctx, challengeResponse)
+	responses, err := c.post(ctx, requests)
 	if err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	token := firstNonEmpty(authenticated.AKAToken, authChallenge.AKAToken)
-
-	responses, err := c.post(ctx, []nsdsRequest{
-		c.authenticationRequest(1, challengeResponse, token),
-		c.serviceEntitlementRequest(2),
-		c.getMSISDNRequest(3),
-	})
-	if err != nil {
+	if err := nsdsRequireResponseCode(responses.response(nsdsMessageID3GPPAuthentication), nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	if err := nsdsRequireResponseCode(responses.response(1), nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
-		return nsdsWFCStatus{}, err
-	}
-	entitlement := responses.response(2)
+	entitlement := responses.response(nsdsMessageIDServiceEntitlement)
 	if err := nsdsRequireResponseCode(entitlement, nsdsResponseSuccessful, nsdsMethodServiceEntitlement); err != nil {
 		return nsdsWFCStatus{}, err
 	}
 	if !nsdsVowifiEntitled(entitlement) {
 		return nsdsWFCStatus{}, nil
 	}
-	msisdn := responses.response(3)
+	if purpose == WFCEntitlementActivation {
+		return nsdsWFCStatus{ServiceEntitled: true}, nil
+	}
+
+	msisdn := responses.response(nsdsMessageIDGetMSISDN)
 	if err := nsdsRequireResponseCode(msisdn, nsdsResponseSuccessful, nsdsMethodGetMSISDN); err != nil {
 		return nsdsWFCStatus{}, err
 	}
 	if msisdn.ServiceFingerprint == "" {
-		return nsdsWFCStatus{ServiceEntitled: true, Pending: true}, nil
+		return nsdsWFCStatus{}, errors.New("nsds service fingerprint is missing")
 	}
 
-	token = firstNonEmpty(responses.response(1).AKAToken, token)
+	token = firstNonEmpty(responses.response(nsdsMessageID3GPPAuthentication).AKAToken, token)
 	responses, err = c.post(ctx, []nsdsRequest{
-		c.authenticationRequest(1, challengeResponse, token),
-		c.manageLocationAndTCRequest(2, msisdn.ServiceFingerprint),
+		c.authenticationRequest(nsdsMessageID3GPPAuthentication, "", token),
+		c.manageLocationAndTCRequest(nsdsMessageIDManageLocationAndTC, msisdn.ServiceFingerprint),
 	})
 	if err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	if err := nsdsRequireResponseCode(responses.response(1), nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
+	if err := nsdsRequireResponseCode(responses.response(nsdsMessageID3GPPAuthentication), nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	locationTC := responses.response(2)
+	locationTC := responses.response(nsdsMessageIDManageLocationAndTC)
 	if err := nsdsRequireResponseCode(locationTC, nsdsResponseSuccessful, nsdsMethodManageLocationAndTC); err != nil {
 		return nsdsWFCStatus{}, err
 	}
-	return nsdsWFCStatus{MSISDN: msisdn.MSISDN, LocationTC: locationTC, ServiceEntitled: true}, nil
-}
-
-func (c nsdsWFCClient) respondToChallenge(ctx context.Context, challengeResponse string) (nsdsResponse, error) {
-	responses, err := c.post(ctx, []nsdsRequest{c.authenticationRequest(1, challengeResponse, "")})
-	if err != nil {
-		return nsdsResponse{}, err
-	}
-	response := responses.response(1)
-	if err := nsdsRequireResponseCode(response, nsdsResponseSuccessful, nsdsMethod3GPPAuthentication); err != nil {
-		return nsdsResponse{}, err
-	}
-	return response, nil
+	return nsdsWFCStatus{
+		MSISDN:          msisdn.MSISDN,
+		LocationTC:      locationTC,
+		ServiceEntitled: true,
+		LocationChecked: true,
+	}, nil
 }
 
 func (c nsdsWFCClient) requestChallenge(ctx context.Context) (nsdsResponse, error) {
-	responses, err := c.post(ctx, []nsdsRequest{c.authenticationRequest(1, "", "")})
+	responses, err := c.post(ctx, []nsdsRequest{c.authenticationRequest(nsdsMessageID3GPPAuthentication, "", "")})
 	if err != nil {
 		return nsdsResponse{}, err
 	}
-	response := responses.response(1)
+	response := responses.response(nsdsMessageID3GPPAuthentication)
 	if err := nsdsRequireResponseCode(response, nsdsResponseAKAChallenge, nsdsMethod3GPPAuthentication); err != nil {
 		return nsdsResponse{}, err
 	}

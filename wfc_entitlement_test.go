@@ -465,11 +465,11 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 		check      func(*testing.T, WFCEntitlementResult, error)
 	}{
 		{
-			name:       "location and tc accepted",
+			name:       "entitlement accepted for activation",
 			purpose:    WFCEntitlementActivation,
 			wantAction: WFCEntitlementActionAllowActivation,
 			status: nsdsResponse{
-				MessageID:      2,
+				MessageID:      nsdsMessageIDManageLocationAndTC,
 				ResponseCode:   1000,
 				LocationStatus: boolPtr(true),
 				TCStatus:       boolPtr(true),
@@ -483,17 +483,8 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 				if err != nil {
 					t.Fatalf("checkNSDSWFCEntitlement() error = %v", err)
 				}
-				if result.E911 == nil {
-					t.Fatal("E911 is nil")
-				}
-				if result.E911.AddressID != "aid-1" {
-					t.Fatalf("E911.AddressID = %q, want aid-1", result.E911.AddressID)
-				}
-				if result.E911.ServerURL != "https://example.test/e911" {
-					t.Fatalf("E911.ServerURL = %q, want https://example.test/e911", result.E911.ServerURL)
-				}
-				if result.E911.AIDExpiration.IsZero() {
-					t.Fatal("E911.AIDExpiration is zero")
+				if result.E911 != nil {
+					t.Fatalf("E911 = %+v, want nil", result.E911)
 				}
 			},
 		},
@@ -502,7 +493,7 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 			purpose:    WFCEntitlementEmergencyAddressUpdate,
 			wantAction: WFCEntitlementActionOpenWebsheet,
 			status: nsdsResponse{
-				MessageID:      2,
+				MessageID:      nsdsMessageIDManageLocationAndTC,
 				ResponseCode:   1000,
 				LocationStatus: boolPtr(true),
 				TCStatus:       boolPtr(true),
@@ -527,7 +518,7 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 			purpose:    WFCEntitlementEmergencyAddressRecheck,
 			wantAction: WFCEntitlementActionNone,
 			status: nsdsResponse{
-				MessageID:      2,
+				MessageID:      nsdsMessageIDManageLocationAndTC,
 				ResponseCode:   1000,
 				LocationStatus: boolPtr(true),
 				TCStatus:       boolPtr(true),
@@ -540,7 +531,7 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 			purpose:    WFCEntitlementEmergencyAddressRecheck,
 			wantAction: WFCEntitlementActionDisableWFC,
 			status: nsdsResponse{
-				MessageID:      2,
+				MessageID:      nsdsMessageIDManageLocationAndTC,
 				ResponseCode:   1000,
 				LocationStatus: boolPtr(false),
 				TCStatus:       boolPtr(false),
@@ -550,22 +541,20 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 		},
 		{
 			name:       "needs e911 websheet",
-			purpose:    WFCEntitlementActivation,
+			purpose:    WFCEntitlementEmergencyAddressUpdate,
 			wantAction: WFCEntitlementActionOpenWebsheet,
 			status: nsdsResponse{
-				MessageID:      2,
+				MessageID:      nsdsMessageIDManageLocationAndTC,
 				ResponseCode:   1000,
 				LocationStatus: boolPtr(false),
 				TCStatus:       boolPtr(false),
 				ServerURL:      "https://example.test/e911",
 				ServerData:     "token=abc",
 			},
-			wantErr: ErrWFCEntitlementUserActionRequired,
 			check: func(t *testing.T, result WFCEntitlementResult, err error) {
 				t.Helper()
-				var entitlementErr *WFCEntitlementError
-				if !errors.As(err, &entitlementErr) {
-					t.Fatalf("error = %T, want *WFCEntitlementError", err)
+				if err != nil {
+					t.Fatalf("checkNSDSWFCEntitlement() error = %v", err)
 				}
 				if result.Websheet == nil {
 					t.Fatal("Websheet is nil")
@@ -578,9 +567,6 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 				}
 				if result.Websheet.ClientName != "WiFiCallingWebViewController" {
 					t.Fatalf("Websheet.ClientName = %q", result.Websheet.ClientName)
-				}
-				if entitlementErr.Result.Websheet == nil || entitlementErr.Result.Websheet.URL != result.Websheet.URL {
-					t.Fatalf("error result Websheet = %+v, want %+v", entitlementErr.Result.Websheet, result.Websheet)
 				}
 			},
 		},
@@ -620,8 +606,8 @@ func TestCheckNSDSWFCEntitlement(t *testing.T) {
 			if result.Action != tt.wantAction {
 				t.Fatalf("Action = %v, want %v", result.Action, tt.wantAction)
 			}
-			if cfg.IMS.PublicIdentity != "sip:+15551234567@ims.mnc030.mcc310.3gppnetwork.org" {
-				t.Fatalf("PublicIdentity = %q, want sip:+15551234567@ims.mnc030.mcc310.3gppnetwork.org", cfg.IMS.PublicIdentity)
+			if cfg.IMS.PublicIdentity != "" {
+				t.Fatalf("PublicIdentity = %q, want empty", cfg.IMS.PublicIdentity)
 			}
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
@@ -706,15 +692,26 @@ func TestCheckNSDSWFCEntitlementAuthErrorFallback(t *testing.T) {
 				case 1:
 					checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication})
 					writeNSDSResponses(t, w, []nsdsResponse{{
-						MessageID:    1,
+						MessageID:    nsdsMessageID3GPPAuthentication,
 						Method:       nsdsMethod3GPPAuthentication,
 						ResponseCode: nsdsResponseAKAChallenge,
 						AKAChallenge: challengeText,
+						AKAToken:     "aka-token",
 					}})
 				case 2:
-					checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication})
+					wantMethods := []string{nsdsMethod3GPPAuthentication, nsdsMethodServiceEntitlement}
+					if tt.purpose != WFCEntitlementActivation {
+						wantMethods = append(wantMethods, nsdsMethodGetMSISDN)
+					}
+					checkNSDSMethods(t, requests, wantMethods)
+					if requests[0].AKAChallengeRsp == "" {
+						t.Fatal("aka-challenge-rsp is empty")
+					}
+					if requests[0].AKAToken != "" {
+						t.Fatalf("aka-token = %q, want empty", requests[0].AKAToken)
+					}
 					writeNSDSResponses(t, w, []nsdsResponse{{
-						MessageID:    1,
+						MessageID:    nsdsMessageID3GPPAuthentication,
 						Method:       nsdsMethod3GPPAuthentication,
 						ResponseCode: tt.responseCode,
 					}})
@@ -767,6 +764,128 @@ func TestCheckNSDSWFCEntitlementAuthErrorFallback(t *testing.T) {
 	}
 }
 
+func TestCheckNSDSWFCE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "server rejects standalone challenge response"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			challengeText := nsdsAKAChallengeText(t)
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				requests := readNSDSRequests(t, req)
+				calls++
+				switch calls {
+				case 1:
+					checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication})
+					writeNSDSResponses(t, w, []nsdsResponse{{
+						MessageID:    nsdsMessageID3GPPAuthentication,
+						Method:       nsdsMethod3GPPAuthentication,
+						ResponseCode: nsdsResponseAKAChallenge,
+						AKAChallenge: challengeText,
+						AKAToken:     "aka-token",
+					}})
+				case 2:
+					if len(requests) == 1 && requests[0].Method == nsdsMethod3GPPAuthentication {
+						writeNSDSResponses(t, w, []nsdsResponse{{
+							MessageID:    nsdsMessageID3GPPAuthentication,
+							Method:       nsdsMethod3GPPAuthentication,
+							ResponseCode: nsdsResponseInvalidRequest,
+						}})
+						return
+					}
+					checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication, nsdsMethodServiceEntitlement, nsdsMethodGetMSISDN})
+					if requests[0].AKAChallengeRsp == "" {
+						t.Fatal("aka-challenge-rsp is empty")
+					}
+					if requests[0].AKAToken != "" {
+						t.Fatalf("aka-token = %q, want empty", requests[0].AKAToken)
+					}
+					writeNSDSResponses(t, w, []nsdsResponse{
+						{MessageID: nsdsMessageID3GPPAuthentication, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful, AKAToken: "aka-token"},
+						{
+							MessageID:    nsdsMessageIDServiceEntitlement,
+							Method:       nsdsMethodServiceEntitlement,
+							ResponseCode: nsdsResponseSuccessful,
+							ServiceEntitlementList: []serviceEntitlement{{
+								ServiceName:       nsdsServiceVowifi,
+								EntitlementStatus: nsdsResponseSuccessful,
+							}},
+						},
+						{
+							MessageID:          nsdsMessageIDGetMSISDN,
+							Method:             nsdsMethodGetMSISDN,
+							ResponseCode:       nsdsResponseSuccessful,
+							ServiceFingerprint: "fingerprint-1",
+						},
+					})
+				case 3:
+					checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication, nsdsMethodManageLocationAndTC})
+					if requests[0].AKAChallengeRsp != "" {
+						t.Fatalf("aka-challenge-rsp = %q, want empty", requests[0].AKAChallengeRsp)
+					}
+					if requests[0].AKAToken != "aka-token" {
+						t.Fatalf("aka-token = %q, want aka-token", requests[0].AKAToken)
+					}
+					if requests[1].ServiceFingerprint != "fingerprint-1" {
+						t.Fatalf("service-fingerprint = %q, want fingerprint-1", requests[1].ServiceFingerprint)
+					}
+					writeNSDSResponses(t, w, []nsdsResponse{
+						{MessageID: nsdsMessageID3GPPAuthentication, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful},
+						{
+							MessageID:      nsdsMessageIDManageLocationAndTC,
+							Method:         nsdsMethodManageLocationAndTC,
+							ResponseCode:   nsdsResponseSuccessful,
+							LocationStatus: boolPtr(true),
+							TCStatus:       boolPtr(true),
+							ServerURL:      "https://example.test/e911",
+							ServerData:     "token=accepted",
+						},
+					})
+				default:
+					t.Fatalf("unexpected request %d", calls)
+				}
+			}))
+			defer server.Close()
+
+			cfg := Config{
+				Logger: slog.Default(),
+				Terminal: TerminalInfo{
+					ID:              testIMEI,
+					Model:           "Pixel",
+					SoftwareVersion: "13",
+				},
+			}
+			client := newClient(cfg)
+			result, err := client.checkNSDSWFCEntitlement(context.Background(), WFCEntitlementRequest{
+				Config:  &cfg,
+				Card:    nsdsTestCard{},
+				Purpose: WFCEntitlementEmergencyAddressUpdate,
+			}, nsdsWFCProfile{
+				Carrier:    "AT&T",
+				ServerURL:  server.URL,
+				Title:      "Wi-Fi Calling",
+				ClientName: "WiFiCallingWebViewController",
+			})
+			if err != nil {
+				t.Fatalf("checkNSDSWFCEntitlement() error = %v", err)
+			}
+			if result.Action != WFCEntitlementActionOpenWebsheet {
+				t.Fatalf("Action = %v, want %v", result.Action, WFCEntitlementActionOpenWebsheet)
+			}
+			if result.Websheet == nil {
+				t.Fatal("Websheet is nil")
+			}
+			if calls != 3 {
+				t.Fatalf("server calls = %d, want 3", calls)
+			}
+		})
+	}
+}
+
 func TestNSDSWFCPublicMSISDN(t *testing.T) {
 	tests := []struct {
 		name string
@@ -813,6 +932,33 @@ func TestNSDSWFCIMSIEAPPadsTwoDigitMNC(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Fatalf("nsdsWFCIMSIEAP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNSDSWFCDeviceID(t *testing.T) {
+	tests := []struct {
+		name string
+		imei string
+		want string
+	}{
+		{
+			name: "imei urn",
+			imei: "869710031623444",
+			want: "dXJuOmdzbWE6aW1laTo4Njk3MTAwMy0xNjIzNDQtMA==",
+		},
+		{
+			name: "already formatted fallback",
+			imei: "urn:uuid:abc",
+			want: "dXJuOnV1aWQ6YWJj",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nsdsWFCDeviceID(tt.imei); got != tt.want {
+				t.Fatalf("nsdsWFCDeviceID() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -892,7 +1038,7 @@ func TestNSDSDefinedResponseCodeName(t *testing.T) {
 
 func TestNSDSRequireResponseCodeIncludesName(t *testing.T) {
 	err := nsdsRequireResponseCode(nsdsResponse{
-		MessageID:    1,
+		MessageID:    nsdsMessageID3GPPAuthentication,
 		ResponseCode: nsdsResponseInvalidRequest,
 	}, nsdsResponseSuccessful, nsdsMethod3GPPAuthentication)
 	if err == nil {
@@ -980,7 +1126,6 @@ func newNSDSWFCTestServer(t *testing.T, locationTC nsdsResponse) *httptest.Serve
 	t.Helper()
 	challengeText := nsdsAKAChallengeText(t)
 	var calls int
-	var challengeResponse string
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
@@ -999,32 +1144,28 @@ func newNSDSWFCTestServer(t *testing.T, locationTC nsdsResponse) *httptest.Serve
 		case 1:
 			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication})
 			writeNSDSResponses(t, w, []nsdsResponse{{
-				MessageID:    1,
+				MessageID:    nsdsMessageID3GPPAuthentication,
 				Method:       nsdsMethod3GPPAuthentication,
 				ResponseCode: nsdsResponseAKAChallenge,
 				AKAChallenge: challengeText,
+				AKAToken:     "aka-token",
 			}})
 		case 2:
-			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication})
+			wantMethods := []string{nsdsMethod3GPPAuthentication, nsdsMethodServiceEntitlement}
+			if len(requests) == 3 {
+				wantMethods = append(wantMethods, nsdsMethodGetMSISDN)
+			}
+			checkNSDSMethods(t, requests, wantMethods)
 			if requests[0].AKAChallengeRsp == "" {
 				t.Fatal("aka-challenge-rsp is empty")
 			}
-			challengeResponse = requests[0].AKAChallengeRsp
-			writeNSDSResponses(t, w, []nsdsResponse{
-				{MessageID: 1, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful, AKAToken: "aka-token"},
-			})
-		case 3:
-			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication, nsdsMethodServiceEntitlement, nsdsMethodGetMSISDN})
-			if requests[0].AKAChallengeRsp != challengeResponse {
-				t.Fatalf("aka-challenge-rsp = %q, want %q", requests[0].AKAChallengeRsp, challengeResponse)
+			if requests[0].AKAToken != "" {
+				t.Fatalf("aka-token = %q, want empty", requests[0].AKAToken)
 			}
-			if requests[0].AKAToken != "aka-token" {
-				t.Fatalf("aka-token = %q, want aka-token", requests[0].AKAToken)
-			}
-			writeNSDSResponses(t, w, []nsdsResponse{
-				{MessageID: 1, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful, AKAToken: "aka-token"},
+			responses := []nsdsResponse{
+				{MessageID: nsdsMessageID3GPPAuthentication, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful, AKAToken: "aka-token"},
 				{
-					MessageID:    2,
+					MessageID:    nsdsMessageIDServiceEntitlement,
 					Method:       nsdsMethodServiceEntitlement,
 					ResponseCode: nsdsResponseSuccessful,
 					ServiceEntitlementList: []serviceEntitlement{{
@@ -1032,21 +1173,29 @@ func newNSDSWFCTestServer(t *testing.T, locationTC nsdsResponse) *httptest.Serve
 						EntitlementStatus: nsdsResponseSuccessful,
 					}},
 				},
-				{MessageID: 3, Method: nsdsMethodGetMSISDN, ResponseCode: nsdsResponseSuccessful, MSISDN: "15551234567", ServiceFingerprint: "fingerprint"},
-			})
-		case 4:
+			}
+			if len(requests) == 3 {
+				responses = append(responses, nsdsResponse{
+					MessageID:          nsdsMessageIDGetMSISDN,
+					Method:             nsdsMethodGetMSISDN,
+					ResponseCode:       nsdsResponseSuccessful,
+					ServiceFingerprint: "fingerprint-1",
+				})
+			}
+			writeNSDSResponses(t, w, responses)
+		case 3:
 			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication, nsdsMethodManageLocationAndTC})
-			if requests[0].AKAChallengeRsp != challengeResponse {
-				t.Fatalf("aka-challenge-rsp = %q, want %q", requests[0].AKAChallengeRsp, challengeResponse)
+			if requests[0].AKAChallengeRsp != "" {
+				t.Fatalf("aka-challenge-rsp = %q, want empty", requests[0].AKAChallengeRsp)
 			}
 			if requests[0].AKAToken != "aka-token" {
 				t.Fatalf("aka-token = %q, want aka-token", requests[0].AKAToken)
 			}
-			if requests[1].ServiceFingerprint != "fingerprint" {
-				t.Fatalf("service-fingerprint = %q, want fingerprint", requests[1].ServiceFingerprint)
+			if requests[1].ServiceFingerprint != "fingerprint-1" {
+				t.Fatalf("service-fingerprint = %q, want fingerprint-1", requests[1].ServiceFingerprint)
 			}
 			writeNSDSResponses(t, w, []nsdsResponse{
-				{MessageID: 1, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful},
+				{MessageID: nsdsMessageID3GPPAuthentication, Method: nsdsMethod3GPPAuthentication, ResponseCode: nsdsResponseSuccessful},
 				locationTC,
 			})
 		default:
