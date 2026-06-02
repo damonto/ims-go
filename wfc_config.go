@@ -13,43 +13,6 @@ import (
 //go:embed wfc_config.json
 var embeddedWFCConfig []byte
 
-var wfcDefaultIKERetransmitDelays = []time.Duration{
-	500 * time.Millisecond,
-	time.Second,
-	2 * time.Second,
-	4 * time.Second,
-	8 * time.Second,
-}
-
-const (
-	wfcDefaultDPDTimeout        = 120 * time.Second
-	wfcDefaultNATKeepalive      = 20 * time.Second
-	wfcMinDPDTimeout            = 20 * time.Second
-	wfcMaxDPDTimeout            = 30 * time.Minute
-	wfcMinNATKeepalive          = 10 * time.Second
-	wfcMaxNATKeepalive          = time.Hour
-	wfcMinIKERetransmitDelay    = 500 * time.Millisecond
-	wfcMaxIKERetransmitDelay    = 30 * time.Minute
-	wfcMaxIKERetransmitEntries  = 10
-	wfcMinIKEHardLifetime       = 300 * time.Second
-	wfcMaxIKEHardLifetime       = 86400 * time.Second
-	wfcMinChildHardLifetime     = 300 * time.Second
-	wfcMaxChildHardLifetime     = 14400 * time.Second
-	wfcMinSASoftLifetime        = 120 * time.Second
-	wfcMinSARekeyMargin         = time.Minute
-	wfcDefaultIKESoftLifetime   = 7200 * time.Second
-	wfcDefaultIKEHardLifetime   = 14400 * time.Second
-	wfcDefaultChildSoftLifetime = 3600 * time.Second
-	wfcDefaultChildHardLifetime = 7200 * time.Second
-)
-
-type wfcSARekeyProfile struct {
-	minHard     time.Duration
-	maxHard     time.Duration
-	defaultSoft time.Duration
-	defaultHard time.Duration
-}
-
 type wfcProfile struct {
 	MCC                        string           `json:"mcc"`
 	MNC                        string           `json:"mnc"`
@@ -69,22 +32,15 @@ type wfcProfile struct {
 	PCSCFIPv4ConfigAttribute   uint16           `json:"pcscfIPv4ConfigAttribute"`
 	PCSCFIPv6ConfigAttribute   uint16           `json:"pcscfIPv6ConfigAttribute"`
 	NATKeepaliveInterval       *wfcDuration     `json:"natKeepaliveInterval"`
-	IWLANDPDSeconds            *int             `json:"iwlan.dpd_timer_sec_int"`
-	IWLANNATKeepaliveSeconds   *int             `json:"iwlan.natt_keep_alive_timer_sec_int"`
+	LivenessTimeout            *wfcDuration     `json:"livenessTimeout"`
 	IKERetransmitDelays        []wfcDuration    `json:"ikeRetransmitDelays"`
-	IWLANIKERetransmitMS       []int            `json:"iwlan.retransmit_timer_sec_int_array"`
 	IKESARekeySoftTime         *wfcDuration     `json:"ikeSARekeySoftTime"`
 	IKESARekeyHardTime         *wfcDuration     `json:"ikeSARekeyHardTime"`
 	IKESARekeyTime             *wfcDuration     `json:"ikeSARekeyTime"`
-	IWLANIKESARekeySoftSecs    *int             `json:"iwlan.ike_rekey_soft_timer_sec_int"`
-	IWLANIKESARekeyHardSecs    *int             `json:"iwlan.ike_rekey_hard_timer_in_sec"`
 	ChildSARekeySoftTime       *wfcDuration     `json:"childSARekeySoftTime"`
 	ChildSARekeyHardTime       *wfcDuration     `json:"childSARekeyHardTime"`
 	ChildSARekeyTime           *wfcDuration     `json:"childSARekeyTime"`
-	IWLANChildSARekeySoftSec   *int             `json:"iwlan.child_sa_rekey_soft_timer_sec_int"`
-	IWLANChildSARekeyHardSec   *int             `json:"iwlan.child_sa_rekey_hard_timer_sec_int"`
 	AddKEToChildSARekey        *bool            `json:"addKEToChildSARekey"`
-	IWLANAddKEToChildRekey     *bool            `json:"iwlan.add_ke_to_child_session_rekey_bool"`
 	IMSTransport               string           `json:"imsTransport"`
 	IMSHomeDomain              string           `json:"imsHomeDomain"`
 	IMSPrivateIdentity         string           `json:"imsPrivateIdentity"`
@@ -95,8 +51,6 @@ type wfcProfile struct {
 	IMSRegisterExpires         *wfcDuration     `json:"imsRegisterExpires"`
 	IMSRegistrationRetryBase   *wfcDuration     `json:"imsRegistrationRetryBase"`
 	IMSRegistrationRetryMax    *wfcDuration     `json:"imsRegistrationRetryMax"`
-	CarrierIMSRetryBaseMS      *int             `json:"ims.registration_retry_base_timer_millis_int"`
-	CarrierIMSRetryMaxMS       *int             `json:"ims.registration_retry_max_timer_millis_int"`
 	IMSGeolocationPIDFInvite   []int            `json:"imsGeolocationPIDFInSIPInviteSupport"`
 	IMSGeolocationPIDFRegister []int            `json:"imsGeolocationPIDFInSIPRegisterSupport"`
 	IMSUseTelURIForPIDFXML     *bool            `json:"imsUseTelURIForPIDFXML"`
@@ -316,13 +270,10 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 		cfg.Tunnel.PCSCFIPv6ConfigAttribute = profile.PCSCFIPv6ConfigAttribute
 	}
 	if cfg.Tunnel.NATKeepaliveInterval == 0 {
-		cfg.Tunnel.NATKeepaliveInterval = wfcProfileDuration(
-			profile.NATKeepaliveInterval,
-			wfcBoundedSecondsDuration(profile.IWLANNATKeepaliveSeconds, wfcMinNATKeepalive, wfcMaxNATKeepalive, wfcDefaultNATKeepalive),
-		)
+		cfg.Tunnel.NATKeepaliveInterval = wfcDurationValue(profile.NATKeepaliveInterval)
 	}
-	if cfg.Tunnel.LivenessTimeout == 0 {
-		cfg.Tunnel.LivenessTimeout = wfcBoundedSecondsDuration(profile.IWLANDPDSeconds, wfcMinDPDTimeout, wfcMaxDPDTimeout, wfcDefaultDPDTimeout)
+	if cfg.Tunnel.LivenessTimeout == 0 && profile.LivenessTimeout != nil {
+		cfg.Tunnel.LivenessTimeout = profile.LivenessTimeout.Duration
 	}
 	if len(cfg.Tunnel.IKERetransmitDelays) == 0 {
 		cfg.Tunnel.IKERetransmitDelays = wfcIKEReTransmitDelays(profile)
@@ -332,14 +283,6 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 			profile.IKESARekeySoftTime,
 			profile.IKESARekeyHardTime,
 			profile.IKESARekeyTime,
-			profile.IWLANIKESARekeySoftSecs,
-			profile.IWLANIKESARekeyHardSecs,
-			wfcSARekeyProfile{
-				minHard:     wfcMinIKEHardLifetime,
-				maxHard:     wfcMaxIKEHardLifetime,
-				defaultSoft: wfcDefaultIKESoftLifetime,
-				defaultHard: wfcDefaultIKEHardLifetime,
-			},
 		)
 	}
 	if cfg.Tunnel.ChildSALifetime == 0 {
@@ -347,14 +290,6 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 			profile.ChildSARekeySoftTime,
 			profile.ChildSARekeyHardTime,
 			profile.ChildSARekeyTime,
-			profile.IWLANChildSARekeySoftSec,
-			profile.IWLANChildSARekeyHardSec,
-			wfcSARekeyProfile{
-				minHard:     wfcMinChildHardLifetime,
-				maxHard:     wfcMaxChildHardLifetime,
-				defaultSoft: wfcDefaultChildSoftLifetime,
-				defaultHard: wfcDefaultChildHardLifetime,
-			},
 		)
 	}
 	if !cfg.Tunnel.AddKEToChildSARekey {
@@ -388,10 +323,10 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 		cfg.IMS.RegisterExpires = profile.IMSRegisterExpires.Duration
 	}
 	if cfg.IMS.RegistrationRetryBase == 0 {
-		cfg.IMS.RegistrationRetryBase = wfcProfileMillisDuration(profile.IMSRegistrationRetryBase, profile.CarrierIMSRetryBaseMS)
+		cfg.IMS.RegistrationRetryBase = wfcDurationValue(profile.IMSRegistrationRetryBase)
 	}
 	if cfg.IMS.RegistrationRetryMax == 0 {
-		cfg.IMS.RegistrationRetryMax = wfcProfileMillisDuration(profile.IMSRegistrationRetryMax, profile.CarrierIMSRetryMaxMS)
+		cfg.IMS.RegistrationRetryMax = wfcDurationValue(profile.IMSRegistrationRetryMax)
 	}
 	if len(cfg.IMS.Voice.GeolocationPIDFInvite) == 0 {
 		cfg.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)
@@ -635,34 +570,14 @@ func wfcIKEReTransmitDelays(profile wfcProfile) []time.Duration {
 	if len(profile.IKERetransmitDelays) != 0 {
 		return wfcDurations(profile.IKERetransmitDelays)
 	}
-	if len(profile.IWLANIKERetransmitMS) == 0 {
-		return nil
-	}
-	if len(profile.IWLANIKERetransmitMS) > wfcMaxIKERetransmitEntries {
-		return cloneDurations(wfcDefaultIKERetransmitDelays)
-	}
-	delays := make([]time.Duration, 0, len(profile.IWLANIKERetransmitMS))
-	for _, ms := range profile.IWLANIKERetransmitMS {
-		delay := time.Duration(ms) * time.Millisecond
-		if delay < wfcMinIKERetransmitDelay || delay > wfcMaxIKERetransmitDelay {
-			return cloneDurations(wfcDefaultIKERetransmitDelays)
-		}
-		if len(delays) > 0 && delay < delays[len(delays)-1]*2 {
-			return cloneDurations(wfcDefaultIKERetransmitDelays)
-		}
-		delays = append(delays, delay)
-	}
-	return delays
+	return nil
 }
 
-func saLifetimeFromWFCRekeyTimers(soft, hard, legacySoft *wfcDuration, profileSoft, profileHard *int, rekeyProfile wfcSARekeyProfile) (time.Duration, time.Duration) {
+func saLifetimeFromWFCRekeyTimers(soft, hard, legacySoft *wfcDuration) (time.Duration, time.Duration) {
 	softTime := firstPositiveDuration(
 		wfcDurationValue(soft),
 		wfcDurationValue(legacySoft),
 	)
-	if softTime <= 0 && (profileSoft != nil || profileHard != nil) {
-		return wfcSARekeyTimersFromProfile(profileSoft, profileHard, rekeyProfile)
-	}
 	if softTime <= 0 {
 		return 0, 0
 	}
@@ -673,74 +588,11 @@ func saLifetimeFromWFCRekeyTimers(soft, hard, legacySoft *wfcDuration, profileSo
 	return hardTime, hardTime - softTime
 }
 
-func wfcSARekeyTimersFromProfile(soft, hard *int, profile wfcSARekeyProfile) (time.Duration, time.Duration) {
-	softTime := wfcSecondsOrDefault(soft, profile.defaultSoft)
-	hardTime := wfcSecondsOrDefault(hard, profile.defaultHard)
-	if hardTime > profile.maxHard && softTime > wfcMinSASoftLifetime {
-		hardTime = profile.maxHard
-		softTime = hardTime - wfcMinSARekeyMargin
-	}
-	if hardTime < profile.minHard || hardTime > profile.maxHard || softTime < wfcMinSASoftLifetime || softTime > hardTime-wfcMinSARekeyMargin {
-		softTime = profile.defaultSoft
-		hardTime = profile.defaultHard
-	}
-	return hardTime, hardTime - softTime
-}
-
-func wfcProfileDuration(normalized *wfcDuration, profileDuration time.Duration) time.Duration {
-	return firstPositiveDuration(wfcDurationValue(normalized), profileDuration)
-}
-
-func wfcProfileMillisDuration(normalized *wfcDuration, profileMillis *int) time.Duration {
-	return firstPositiveDuration(wfcDurationValue(normalized), wfcMillisDuration(profileMillis))
-}
-
 func wfcDurationValue(value *wfcDuration) time.Duration {
 	if value == nil {
 		return 0
 	}
 	return value.Duration
-}
-
-func wfcSecondsDuration(seconds *int) time.Duration {
-	if seconds == nil || *seconds <= 0 {
-		return 0
-	}
-	return time.Duration(*seconds) * time.Second
-}
-
-func wfcSecondsOrDefault(seconds *int, fallback time.Duration) time.Duration {
-	if seconds == nil || *seconds <= 0 {
-		return fallback
-	}
-	return time.Duration(*seconds) * time.Second
-}
-
-func wfcBoundedSecondsDuration(seconds *int, minValue, maxValue, fallback time.Duration) time.Duration {
-	if seconds == nil {
-		return 0
-	}
-	duration := wfcSecondsDuration(seconds)
-	if duration < minValue || duration > maxValue {
-		return fallback
-	}
-	return duration
-}
-
-func cloneDurations(values []time.Duration) []time.Duration {
-	if len(values) == 0 {
-		return nil
-	}
-	cloned := make([]time.Duration, len(values))
-	copy(cloned, values)
-	return cloned
-}
-
-func wfcMillisDuration(millis *int) time.Duration {
-	if millis == nil || *millis <= 0 {
-		return 0
-	}
-	return time.Duration(*millis) * time.Millisecond
 }
 
 func firstPositiveDuration(values ...time.Duration) time.Duration {
@@ -755,9 +607,6 @@ func firstPositiveDuration(values ...time.Duration) time.Duration {
 func wfcAddKEToChildSARekey(profile wfcProfile) (bool, bool) {
 	if profile.AddKEToChildSARekey != nil {
 		return *profile.AddKEToChildSARekey, true
-	}
-	if profile.IWLANAddKEToChildRekey != nil {
-		return *profile.IWLANAddKEToChildRekey, true
 	}
 	return false, false
 }
