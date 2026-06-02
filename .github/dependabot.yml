@@ -13,11 +13,6 @@ registries:
     password: ${{secrets.VOWIFI_PRIVATE_MODULE_TOKEN}}
 
 updates:
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-
   - package-ecosystem: "gomod" # See documentation for possible values
     directory: "/" # Location of package manifests
     registries:
