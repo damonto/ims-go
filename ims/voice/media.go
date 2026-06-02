@@ -304,18 +304,26 @@ func (c *Call) endAfterMediaEvent(reason mediaReleaseReason) {
 		return
 	}
 	state := c.state
+	stop := c.mediaWatchStop
+	c.mediaWatchStop = nil
+	c.mediaActivity = nil
 	c.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
 
 	_ = c.closeMedia()
 	cause := reason.cause()
-	if state == CallStateActive || state == CallStateConfirmed {
-		c.setState(CallStateEnding, cause)
-		ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
-		resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reason.sipReason()))
-		cancel()
-		if !byeReleaseCompleted(resp, err) {
-			c.service.emitError(byeReleaseError("ending call after media event", resp, err))
-		}
+	if state != CallStateActive && state != CallStateConfirmed {
+		c.service.logger.Debug("call media release before confirmed dialog", "call_id", c.id, "state", state, "reason", cause)
+		return
+	}
+	c.setState(CallStateEnding, cause)
+	ctx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
+	resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reason.sipReason()))
+	cancel()
+	if !byeReleaseCompleted(resp, err) {
+		c.service.emitError(byeReleaseError("ending call after media event", resp, err))
 	}
 	c.finish(CallStateEnded, cause)
 }

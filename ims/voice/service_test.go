@@ -5345,6 +5345,282 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 	}
 }
 
+func TestDialSendsACKBeforeOpeningFinalMedia(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "final 2xx is acknowledged before local media open"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			ackSeen := make(chan struct{}, 1)
+			svc, err := New(Config{Logger: testLogger(),
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					select {
+					case <-ackSeen:
+					default:
+						t.Fatal("OpenMedia was called before final INVITE ACK")
+					}
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}}, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "ACK":
+					select {
+					case ackSeen <- struct{}{}:
+					default:
+					}
+				}
+			}
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if got := call.State(); got != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", got, CallStateConfirmed)
+			}
+			if got := transport.countMethod("ACK"); got != 1 {
+				t.Fatalf("ACK count = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestDialRoutesInDialogRequestImmediatelyAfterACK(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "remote bye after ack matches refreshed dialog"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			matchedRemoteBYE := make(chan struct{}, 1)
+			var ok200 sip.Message
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					ok200 = callOK(msg)
+					transport.queue(ok200)
+				case "ACK":
+					if _, ok := sess.LookupDialogKey(byeForConfirmedDialog(ok200)); !ok {
+						t.Error("remote BYE after ACK did not match refreshed dialog")
+						return
+					}
+					matchedRemoteBYE <- struct{}{}
+				}
+			}
+
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			select {
+			case <-matchedRemoteBYE:
+			default:
+				t.Fatal("remote BYE after ACK did not match dialog")
+			}
+			if got := call.State(); got != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", got, CallStateConfirmed)
+			}
+		})
+	}
+}
+
+func TestDialKeepsEarlyMediaCallAfterRTCPBye(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "early media rtcp bye does not prevent final 2xx ack"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			events := make(chan CallEvent, 16)
+			opened := make(chan *voiceMediaTransport, 2)
+			svc, err := New(Config{Logger: testLogger(),
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}, onPacket: cfg.OnPacket}
+					opened <- media
+					return media, nil
+				},
+				OnCallEvent: func(event CallEvent) { events <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			var invite sip.Message
+			ackSeen := make(chan struct{}, 1)
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					invite = msg
+					progress := reliableCallProgress(msg)
+					progress.Headers.Add("P-Early-Media", "sendrecv")
+					transport.queue(progress)
+				case "PRACK":
+					transport.queue(callStatus(msg, 200, "OK"))
+				case "ACK":
+					select {
+					case ackSeen <- struct{}{}:
+					default:
+					}
+				}
+			}
+
+			errCh := make(chan error, 1)
+			callCh := make(chan *Call, 1)
+			go func() {
+				call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+				if err != nil {
+					errCh <- err
+					return
+				}
+				callCh <- call
+			}()
+
+			earlyMedia := nextCallEvent(t, events, CallStateEarlyMedia, "", time.Second).Call
+			var firstMedia *voiceMediaTransport
+			select {
+			case firstMedia = <-opened:
+			case <-time.After(time.Second):
+				t.Fatal("early media transport was not opened")
+			}
+			firstMedia.notify(MediaPacket{RTCP: true, RTCPBye: true})
+			if !waitForCallTest(firstMedia.isClosed) {
+				t.Fatal("early media transport was not closed after RTCP BYE")
+			}
+			if got := earlyMedia.State(); got != CallStateEarlyMedia {
+				t.Fatalf("call.State() after early RTCP BYE = %q, want %q", got, CallStateEarlyMedia)
+			}
+
+			transport.queue(callOKWithoutSDP(invite, "early-tag"))
+			var call *Call
+			select {
+			case err := <-errCh:
+				t.Fatalf("Dial() error = %v", err)
+			case call = <-callCh:
+			case <-time.After(time.Second):
+				t.Fatal("Dial() did not complete after final response")
+			}
+			select {
+			case <-ackSeen:
+			default:
+				t.Fatal("final INVITE ACK was not sent")
+			}
+			if got := call.State(); got != CallStateConfirmed {
+				t.Fatalf("call.State() = %q, want %q", got, CallStateConfirmed)
+			}
+			select {
+			case <-opened:
+			case <-time.After(time.Second):
+				t.Fatal("final media transport was not reopened")
+			}
+		})
+	}
+}
+
 func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 	tests := []struct {
 		name string
@@ -6429,11 +6705,11 @@ func TestCallHoldBlocksRTPButAllowsRTCP(t *testing.T) {
 	}
 }
 
-func TestCallHoldInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
+func TestEarlyMediaHoldInactivityWatchDoesNotEndCall(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "hold disables rtp timeout and keeps rtcp timeout"},
+		{name: "early media hold ignores rtp and rtcp timeout release"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -6478,8 +6754,106 @@ func TestCallHoldInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
 			if waitForCallEvent(events, CallStateEnded, "rtp inactivity timeout", 2*rtpTimeout) {
 				t.Fatal("call ended on RTP inactivity while held")
 			}
+			if waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", 2*rtcpTimeout) {
+				t.Fatal("early media call ended on RTCP inactivity while held")
+			}
+			if got := call.State(); got != CallStateEarlyMedia {
+				t.Fatalf("call.State() = %q, want %q", got, CallStateEarlyMedia)
+			}
+		})
+	}
+}
+
+func TestHeldCallInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "active hold keeps rtcp timeout release policy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			rtpTimeout := 40 * time.Millisecond
+			rtcpTimeout := 160 * time.Millisecond
+			events := make(chan CallEvent, 16)
+			media := &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			svc, err := New(Config{Logger: testLogger(),
+				RTPInactivityTimeout:  Duration(rtpTimeout),
+				RTCPInactivityTimeout: Duration(rtcpTimeout),
+				RTCPSendInterval:      Duration(0),
+				AudioInactivityCallEndReasons: []AudioInactivityCallEndReason{
+					AudioInactivityRTPOnConnected,
+					AudioInactivityRTCPOnHold,
+				},
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+				OnCallEvent: func(event CallEvent) { events <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					transport.queue(callOK(msg))
+				case "BYE":
+					transport.queue(callStatus(msg, 200, "OK"))
+				}
+			}
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			call.mu.Lock()
+			call.hold = CallHoldLocal
+			call.mu.Unlock()
+			call.restartMediaInactivityWatch()
+
+			if waitForCallEvent(events, CallStateEnded, "rtp inactivity timeout", 2*rtpTimeout) {
+				t.Fatal("held call ended on RTP inactivity")
+			}
 			if !waitForCallEvent(events, CallStateEnded, "rtcp inactivity timeout", 2*rtcpTimeout) {
 				t.Fatalf("call state = %s, want RTCP-on-hold timeout", call.State())
+			}
+			byes := transport.messagesByMethod("BYE")
+			if len(byes) != 1 {
+				t.Fatalf("BYE count = %d, want 1", len(byes))
+			}
+			if got := byes[0].Header("Reason"); got != reasonMediaTimeout {
+				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaTimeout)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ts43http "github.com/damonto/ts43-go/http"
@@ -17,6 +18,13 @@ import (
 
 const ts43ActivationRecheckMaxAttempts = 6
 const ts43ActivationRecheckInterval = 5 * time.Second
+
+var ts43Tokens = struct {
+	mu     sync.Mutex
+	values map[string]ts43.AuthToken
+}{
+	values: make(map[string]ts43.AuthToken),
+}
 
 type ts43Flow struct {
 	req Request
@@ -78,7 +86,9 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	status, err := ts43.CheckWFCEntitlement(checkCtx, ts43.Config{
+	tokenKey := ts43TokenKey(identity, f.wfc)
+	cachedToken := ts43CachedToken(tokenKey)
+	check, err := ts43.CheckWFCEntitlementWithToken(checkCtx, ts43.Config{
 		Logger: req.Logger,
 		Source: ts43.Endpoint{Channel: ts43Channel{card: req.Card, identity: identity}},
 	}, identity, ts43.Device{
@@ -86,7 +96,7 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 		Vendor:          device.Vendor,
 		Model:           device.Model,
 		SoftwareVersion: device.SoftwareVersion,
-	}, f.wfc)
+	}, f.wfc, cachedToken)
 	result := Result{
 		Scheme:  SchemeTS43,
 		Carrier: f.wfc.CarrierName,
@@ -101,6 +111,8 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("checking wfc ts43 setup: %w", err)
 	}
+	status := check.Status
+	ts43StoreToken(tokenKey, check.AuthToken)
 	if status.Entitled() {
 		result.Entitled = true
 		switch req.Purpose {
@@ -110,7 +122,7 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 			result.Action = ActionNone
 		case PurposeEmergencyAddressUpdate:
 			result.Action = ActionOpenWebsheet
-			websheet, err := ts43Websheet(status, WebsheetKindEmergencyAddress)
+			websheet, err := ts43Websheet(status, WebsheetKindEmergencyAddress, f.wfc)
 			if err != nil {
 				return Result{}, err
 			}
@@ -135,7 +147,7 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 			return result, nil
 		}
 		result.Action = ActionOpenWebsheet
-		websheet, err := ts43Websheet(status, ts43WebsheetKind(status))
+		websheet, err := ts43Websheet(status, ts43WebsheetKind(status), f.wfc)
 		if err != nil {
 			return Result{}, err
 		}
@@ -166,15 +178,16 @@ func (f ts43Flow) E911UpdateSupport(context.Context) (E911UpdateSupport, error) 
 	}, nil
 }
 
-func ts43Websheet(status ts43.WFCStatus, kind WebsheetKind) (*Websheet, error) {
+func ts43Websheet(status ts43.WFCStatus, kind WebsheetKind, cfg ts43.WFCConfig) (*Websheet, error) {
 	if status.ServiceFlowURL == "" {
 		return nil, errors.New("wfc ts43 service flow URL is missing")
 	}
 	return &Websheet{
-		Kind:  kind,
-		URL:   status.ServiceFlowURL,
-		Data:  status.ServiceFlowUserData,
-		Title: "Wi-Fi Calling",
+		Kind:       kind,
+		URL:        status.ServiceFlowURL,
+		Data:       status.ServiceFlowUserData,
+		Title:      "Wi-Fi Calling",
+		ClientName: cfg.WebsheetClientName,
 	}, nil
 }
 
@@ -183,6 +196,33 @@ func ts43WebsheetKind(status ts43.WFCStatus) WebsheetKind {
 		return WebsheetKindTermsAndConditions
 	}
 	return WebsheetKindEmergencyAddress
+}
+
+func ts43TokenKey(identity sim.Identity, cfg ts43.WFCConfig) string {
+	return identity.IMSI + "\x00" + cfg.Server
+}
+
+func ts43CachedToken(key string) ts43.AuthToken {
+	ts43Tokens.mu.Lock()
+	defer ts43Tokens.mu.Unlock()
+	token := ts43Tokens.values[key]
+	if !token.ExpiresAt.IsZero() && !time.Now().Before(token.ExpiresAt) {
+		delete(ts43Tokens.values, key)
+		return ts43.AuthToken{}
+	}
+	token.Cookies = append([]string(nil), token.Cookies...)
+	return token
+}
+
+func ts43StoreToken(key string, token ts43.AuthToken) {
+	ts43Tokens.mu.Lock()
+	defer ts43Tokens.mu.Unlock()
+	if token.Value == "" {
+		delete(ts43Tokens.values, key)
+		return
+	}
+	token.Cookies = append([]string(nil), token.Cookies...)
+	ts43Tokens.values[key] = token
 }
 
 func ts43RetryAfter(err error) (time.Duration, bool) {

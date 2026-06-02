@@ -34,6 +34,7 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 		switch calls {
 		case 1:
 			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication})
+			checkNSDSMessageIDs(t, requests, []int{1})
 			writeNSDSResponses(t, w, []nsdsResponse{{
 				MessageID:    nsdsMessageID3GPPAuthentication,
 				Method:       nsdsMethod3GPPAuthentication,
@@ -42,6 +43,7 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 			}})
 		case 2:
 			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication, nsdsMethodServiceEntitlement, nsdsMethodGetMSISDN})
+			checkNSDSMessageIDs(t, requests, []int{1, 2, 3})
 			if requests[0].AKAChallengeRsp == "" {
 				t.Fatal("aka-challenge-rsp is empty")
 			}
@@ -66,6 +68,7 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 			})
 		case 3:
 			checkNSDSMethods(t, requests, []string{nsdsMethod3GPPAuthentication, nsdsMethodManageLocationAndTC})
+			checkNSDSMessageIDs(t, requests, []int{1, 4})
 			if requests[0].AKAToken != "aka-token" {
 				t.Fatalf("aka-token = %q, want aka-token", requests[0].AKAToken)
 			}
@@ -118,7 +121,7 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 func TestNSDSHelpers(t *testing.T) {
 	t.Run("device id", func(t *testing.T) {
 		got := nsdsDeviceID("123456789012345")
-		want := "dXJuOmdzbWE6aW1laToxMjM0NTY3OC05MDEyMzQtMA=="
+		want := "MTIzNDU2Nzg5MDEyMzQ1"
 		if got != want {
 			t.Fatalf("nsdsDeviceID() = %q, want %q", got, want)
 		}
@@ -174,6 +177,17 @@ func checkNSDSMethods(t *testing.T, requests []nsdsRequest, want []string) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("methods = %v, want %v", got, want)
+	}
+}
+
+func checkNSDSMessageIDs(t *testing.T, requests []nsdsRequest, want []int) {
+	t.Helper()
+	got := make([]int, len(requests))
+	for i, req := range requests {
+		got[i] = req.MessageID
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("message IDs = %v, want %v", got, want)
 	}
 }
 

@@ -1,7 +1,5 @@
 github.com/ElMostafaIdrassi/goscard v1.0.0 h1:RDG5QrqrQBUoi5MkzM4zILdYf8qDn62daYZszqvdgx0=
 github.com/ElMostafaIdrassi/goscard v1.0.0/go.mod h1:uGOakQe2fFlW2cVlr9cv6x07uelrf0j0aKPbR7jGgfg=
-github.com/damonto/ts43-go v0.0.0-20260601065336-bb5512b222fb h1:A50eXL3cWR+5rdlBB7aRCAWJPMBKVAMKWLjWDGRlXlM=
-github.com/damonto/ts43-go v0.0.0-20260601065336-bb5512b222fb/go.mod h1:3wNf90BwemrsknCrUJ3ujSlYKnfQhA63l5mVnB8p/Uc=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/ISU=

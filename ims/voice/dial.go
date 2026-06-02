@@ -179,29 +179,40 @@ func (s *Service) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	call.inviteACK = ack
 	call.mu.Unlock()
 	if err := call.refreshDialogRegistration(); err != nil {
-		_ = call.closeMedia()
-		s.removeCall(callID)
-		call.setState(CallStateFailed, err.Error())
-		return nil, err
+		if ackErr := s.sess.Send(ctx, ack); ackErr != nil {
+			call.finish(CallStateFailed, ackErr.Error())
+			return nil, fmt.Errorf("dialing call: %w", ackErr)
+		}
+		call.releaseAcknowledgedInviteFailure(err, reasonMediaBearerReleased)
+		return nil, fmt.Errorf("dialing call: %w", err)
 	}
-
-	if err := call.openMedia(ctx); err != nil {
-		_ = call.closeMedia()
-		s.removeCall(callID)
-		call.setState(CallStateFailed, err.Error())
-		return nil, err
-	}
-	call.startMediaInactivityWatch()
 	if err := s.sess.Send(ctx, ack); err != nil {
 		call.finish(CallStateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
+
+	if err := call.openMedia(ctx); err != nil {
+		call.releaseAcknowledgedInviteFailure(err, reasonMediaBearerReleased)
+		return nil, fmt.Errorf("dialing call: %w", err)
+	}
+	call.startMediaInactivityWatch()
 	if err := call.applySessionTimerUACResponse(resp, true); err != nil {
-		call.finish(CallStateFailed, err.Error())
+		call.releaseAcknowledgedInviteFailure(err, reasonMediaBearerReleased)
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
 	call.setState(CallStateConfirmed, "")
 	return call, nil
+}
+
+func (c *Call) releaseAcknowledgedInviteFailure(err error, reason string) {
+	_ = c.closeMedia()
+	releaseCtx, cancel := context.WithTimeout(context.Background(), callReleaseTimeout)
+	defer cancel()
+	resp, releaseErr := c.service.sess.Exchange(releaseCtx, c.buildBYE(reason))
+	if !byeReleaseCompleted(resp, releaseErr) {
+		c.service.emitError(byeReleaseError("releasing acknowledged failed call", resp, releaseErr))
+	}
+	c.finish(CallStateFailed, err.Error())
 }
 
 func (s *Service) initialInviteTarget(req DialRequest) (string, error) {

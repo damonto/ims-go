@@ -211,19 +211,7 @@ func nsdsUserAgent(device Device) string {
 
 func nsdsDeviceID(imei string) string {
 	imei = strings.TrimSpace(imei)
-	if len(imei) >= 14 && allASCIIDigits(imei) {
-		imei = fmt.Sprintf("urn:gsma:imei:%s-%s-0", imei[:8], imei[8:14])
-	}
 	return base64.StdEncoding.EncodeToString([]byte(imei))
-}
-
-func allASCIIDigits(value string) bool {
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return value != ""
 }
 
 func nsdsIMSIEAP(card Card) (string, error) {
@@ -337,7 +325,7 @@ const (
 	nsdsMessageID3GPPAuthentication  = 1
 	nsdsMessageIDServiceEntitlement  = 2
 	nsdsMessageIDGetMSISDN           = 3
-	nsdsMessageIDManageLocationAndTC = 2
+	nsdsMessageIDManageLocationAndTC = 4
 )
 
 type nsdsRequest struct {
