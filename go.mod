@@ -9,5 +9,3 @@ require (
 )
 
 require github.com/ebitengine/purego v0.10.0 // indirect
-
-replace github.com/damonto/ts43-go => ../ts43-go
