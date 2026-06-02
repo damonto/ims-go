@@ -84,6 +84,52 @@ func TestTCPConnReserveSendSeqAcceptsFastACK(t *testing.T) {
 	}
 }
 
+func TestNormalizedTCPDataACKTimeouts(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   []time.Duration
+		want    []time.Duration
+		wantErr bool
+	}{
+		{name: "default", want: tcpDataACKTimeouts},
+		{name: "custom", input: []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}, want: []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}},
+		{name: "zero", input: []time.Duration{0}, wantErr: true},
+		{name: "negative", input: []time.Duration{-time.Millisecond}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizedTCPDataACKTimeouts("testing tcp transport", tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("normalizedTCPDataACKTimeouts() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizedTCPDataACKTimeouts() error = %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("len(timeouts) = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("timeout[%d] = %s, want %s", i, got[i], tt.want[i])
+				}
+			}
+			if len(got) > 0 {
+				got[0] = time.Nanosecond
+				again, err := normalizedTCPDataACKTimeouts("testing tcp transport", tt.input)
+				if err != nil {
+					t.Fatalf("normalizedTCPDataACKTimeouts() second error = %v", err)
+				}
+				if again[0] != tt.want[0] {
+					t.Fatalf("timeout copy mutated default: got %s, want %s", again[0], tt.want[0])
+				}
+			}
+		})
+	}
+}
+
 func TestTCPConnWritePacketUnblocksOnHandleError(t *testing.T) {
 	conn := &TCPConn{
 		errCh:        make(chan error, 1),
@@ -146,12 +192,6 @@ func TestTCPConnReadPacketReturnsTerminalErrorAfterHandleError(t *testing.T) {
 }
 
 func TestTCPConnWritePacketClosesOnAckTimeout(t *testing.T) {
-	oldTimeouts := tcpDataACKTimeouts
-	tcpDataACKTimeouts = []time.Duration{10 * time.Millisecond}
-	t.Cleanup(func() {
-		tcpDataACKTimeouts = oldTimeouts
-	})
-
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("ListenPacket() error = %v", err)
@@ -171,19 +211,20 @@ func TestTCPConnWritePacketClosesOnAckTimeout(t *testing.T) {
 		_ = session.Close()
 	})
 	conn := &TCPConn{
-		session:      session,
-		local:        &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
-		remote:       &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
-		established:  true,
-		sendSeq:      1001,
-		recvSeq:      2001,
-		ackedSeq:     1000,
-		errCh:        make(chan error, 1),
-		msgCh:        make(chan []byte, 1),
-		readyCh:      make(chan struct{}),
-		ackCh:        make(chan struct{}, 1),
-		done:         make(chan struct{}),
-		associations: NewSecurityAssociations(),
+		session:         session,
+		local:           &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+		remote:          &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
+		established:     true,
+		sendSeq:         1001,
+		recvSeq:         2001,
+		ackedSeq:        1000,
+		errCh:           make(chan error, 1),
+		msgCh:           make(chan []byte, 1),
+		readyCh:         make(chan struct{}),
+		ackCh:           make(chan struct{}, 1),
+		done:            make(chan struct{}),
+		associations:    NewSecurityAssociations(),
+		dataACKTimeouts: []time.Duration{10 * time.Millisecond},
 	}
 	err = conn.WritePacket(context.Background(), []byte("INVITE sip:test SIP/2.0\r\nContent-Length: 0\r\n\r\n"))
 	if err == nil {

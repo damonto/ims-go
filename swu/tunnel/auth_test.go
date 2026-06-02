@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/eapaka"
+	"github.com/damonto/vowifi-go/eapaka"
 	"github.com/damonto/vowifi-go/swu/ike"
 	"github.com/damonto/vowifi-go/usim"
 )
@@ -2406,6 +2406,7 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 		payloads     []ike.Payload
 		wantErr      string
 		wantAccess   bool
+		wantNetwork  bool
 		wantSentinel error
 		wantBackoff  time.Duration
 	}{
@@ -2417,6 +2418,7 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 				&ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: []byte{0x01, 0xa2}},
 			},
 			wantErr:     "NETWORK_FAILURE (10500)",
+			wantNetwork: true,
 			wantBackoff: 2 * time.Minute,
 		},
 		{
@@ -2468,6 +2470,9 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 			}
 			if got := AccessRejected(err); got != tt.wantAccess {
 				t.Fatalf("AccessRejected() = %t, want %t", got, tt.wantAccess)
+			}
+			if got := NetworkFailure(err); got != tt.wantNetwork {
+				t.Fatalf("NetworkFailure() = %t, want %t", got, tt.wantNetwork)
 			}
 			if tt.wantSentinel != nil && !errors.Is(err, tt.wantSentinel) {
 				t.Fatalf("errors.Is(%v) = false", tt.wantSentinel)
@@ -2607,6 +2612,49 @@ func TestOpenIKEAuthResponseCarriesDeactivatedBackoffTimer(t *testing.T) {
 	}
 	if policy.Scope != BackoffScopeEPDG || !policy.Deactivated || policy.Delay != 0 {
 		t.Fatalf("BackoffPolicyFor() = %+v, want deactivated ePDG scope", policy)
+	}
+}
+
+func TestOpenIKEAuthResponseCarriesZeroBackoffTimer(t *testing.T) {
+	raw, err := (ike.IKEPacket{
+		Header: ike.IKEHeader{
+			InitiatorSPI: 1,
+			ResponderSPI: 2,
+			Version:      ikeVersion20,
+			ExchangeType: exchangeTypeIKEAuth,
+			Flags:        flagResponse,
+			MessageID:    3,
+		},
+		Payloads: []ike.Payload{
+			&ike.NotifyPayload{NotifyType: notifyTypeNetworkFailure},
+			&ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: []byte{0x01, 0xa0}},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	var packet ike.IKEPacket
+	if err := packet.UnmarshalBinary(raw); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+
+	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+	if err == nil {
+		t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
+	}
+	if delay, ok := BackoffDelay(err); ok || delay != 0 {
+		t.Fatalf("BackoffDelay() = %v, %v; want 0, false", delay, ok)
+	}
+	if BackoffDeactivated(err) {
+		t.Fatalf("BackoffDeactivated() = true for %v", err)
+	}
+	policy, ok := BackoffPolicyFor(err)
+	if !ok {
+		t.Fatal("BackoffPolicyFor() ok = false, want true")
+	}
+	if policy.Scope != BackoffScopeEPDG || policy.Deactivated || policy.Delay != 0 {
+		t.Fatalf("BackoffPolicyFor() = %+v, want zero ePDG scope", policy)
 	}
 }
 

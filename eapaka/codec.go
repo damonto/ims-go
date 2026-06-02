@@ -397,11 +397,19 @@ type AKAChallenge struct {
 	EncryptedData []byte
 }
 
+type AKAChallengeParseOptions struct {
+	AllowMissingMAC bool
+}
+
 func (c AKAChallenge) AMFSeparationBitSet() bool {
 	return len(c.AUTN) == akaVectorLen && c.AUTN[akaAUTNAMFOffset]&akaAMFSeparationBitMask != 0
 }
 
 func (c *AKAChallenge) UnmarshalBinary(data []byte) error {
+	return c.UnmarshalBinaryWithOptions(data, AKAChallengeParseOptions{})
+}
+
+func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallengeParseOptions) error {
 	var message AKAMessage
 	if err := message.UnmarshalBinary(data); err != nil {
 		return err
@@ -522,7 +530,7 @@ func (c *AKAChallenge) UnmarshalBinary(data []byte) error {
 	if !seenRAND || !seenAUTN {
 		return errors.New("parsing aka challenge: missing rand or autn")
 	}
-	if !seenMAC {
+	if !seenMAC && !opts.AllowMissingMAC {
 		return errors.New("parsing aka challenge: missing mac")
 	}
 	if message.EAPType == eapTypeAKAPrime {

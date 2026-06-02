@@ -583,26 +583,7 @@ func nsdsResponseBody(resp *http.Response) (io.ReadCloser, error) {
 }
 
 func nsdsChallengeResponse(ctx context.Context, card Card, imsiEAP, challengeText string) (string, error) {
-	var challenge eapAKAChallenge
-	if err := challenge.UnmarshalText([]byte(challengeText)); err != nil {
-		return "", fmt.Errorf("decoding nsds aka challenge: %w", err)
-	}
-	authenticate := card.AKA
-	if eapCard, ok := card.(eapAKACard); ok {
-		authenticate = eapCard.EAPAKA
-	}
-	aka, err := authenticate(ctx, challenge.Rand, challenge.Autn)
-	if err != nil {
-		return "", fmt.Errorf("authenticating nsds aka challenge: %w", err)
-	}
-	if aka.Reject {
-		return "", errors.New("USIM rejected NSDS AKA challenge")
-	}
-	text, err := respondToEAPAKAChallengeBase64(challenge, aka.RES, aka.CK, aka.IK, aka.AUTS, imsiEAP)
-	if err != nil {
-		return "", fmt.Errorf("building nsds aka challenge response: %w", err)
-	}
-	return text, nil
+	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP, challengeText, "nsds aka")
 }
 
 func nsdsRequireResponseCode(response nsdsResponse, want int, method string) error {

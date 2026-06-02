@@ -33,6 +33,11 @@ type readErrorTransport struct {
 	errCh chan error
 }
 
+type writeErrorTransport struct {
+	*stubTransport
+	err error
+}
+
 type blockingWriteTransport struct {
 	local      net.Addr
 	remote     net.Addr
@@ -73,6 +78,17 @@ func newReadErrorTransport(localPort, remotePort int) *readErrorTransport {
 		stubTransport: newStubTransport(localPort, remotePort),
 		errCh:         make(chan error, 1),
 	}
+}
+
+func newWriteErrorTransport(err error) *writeErrorTransport {
+	transport := newStubTransport(5062, 5060)
+	transport.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062}
+	transport.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+	return &writeErrorTransport{stubTransport: transport, err: err}
+}
+
+func newUnreliableWriteErrorTransport(err error) *writeErrorTransport {
+	return &writeErrorTransport{stubTransport: newStubTransport(5062, 5060), err: err}
 }
 
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
@@ -194,6 +210,10 @@ func (t *readErrorTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, 
 
 func (t *readErrorTransport) fail(err error) {
 	t.errCh <- err
+}
+
+func (t *writeErrorTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.err
 }
 
 func (h *requestHandler) HandleRequest(ctx context.Context, req Request) (bool, error) {
@@ -1912,6 +1932,44 @@ func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExchangeMapsReliableTransportSendErrorToServiceUnavailable(t *testing.T) {
+	cause := errors.New("writing tcp packet: waiting for ack 42")
+	transport := newWriteErrorTransport(cause)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	resp, err := sess.Exchange(context.Background(), newRequest("INVITE", "call-transport-failure", "1 INVITE"))
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	if resp.StatusCode() != sipStatusServiceUnavailable {
+		t.Fatalf("StatusCode() = %d, want %d", resp.StatusCode(), sipStatusServiceUnavailable)
+	}
+	responseErr := sip.NewResponseError(resp)
+	if !strings.Contains(responseErr.Error(), cause.Error()) {
+		t.Fatalf("ResponseError = %q, want warning %q", responseErr.Error(), cause.Error())
+	}
+}
+
+func TestExchangeReturnsUnreliableTransportSendError(t *testing.T) {
+	cause := errors.New("writing secure udp packet: tunnel is closed")
+	transport := newUnreliableWriteErrorTransport(cause)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	resp, err := sess.Exchange(context.Background(), newRequest("INVITE", "udp-transport-failure", "1 INVITE"))
+	if !errors.Is(err, cause) {
+		t.Fatalf("Exchange() error = %v, want %v", err, cause)
+	}
+	if resp.StartLine != "" {
+		t.Fatalf("Exchange() response = %v, want zero response", resp)
 	}
 }
 

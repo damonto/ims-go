@@ -123,6 +123,77 @@ func TestDeriveAKAPrimeCKIK(t *testing.T) {
 	}
 }
 
+func TestDeriveAKAKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity []byte
+		ik       []byte
+		ck       []byte
+		want     AKAKeys
+	}{
+		{
+			name:     "reference challenge state vector",
+			identity: []byte("0123456789012345@example.net"),
+			ik:       mustHex(t, "FFEEDDCCBBAA99887766554433221100"),
+			ck:       mustHex(t, "00112233445566778899AABBCCDDEEFF"),
+			want: AKAKeys{
+				MK:   mustHex(t, "C795BCD5EDDEAC8B9BD9195806B7BBC009BFA6C0"),
+				ENCR: mustHex(t, "71BAE1A432C1F0FFB7AAA26D4AEF0BEB"),
+				AUT:  mustHex(t, "CB56F10A6D3C504BA90F59429250804E"),
+				MSK: mustHex(t, "E4237E44C082407369B03162EA2B2F2A3EE168668A4F0FF6008D74CE42BD162C"+
+					"C73ED09007BA517D1D8EC0D1396BFA58197105B9AA09C160C9BE01A6E4954E38"),
+				EMSK: mustHex(t, "3CD8C2F54645ADA653877D740E11E20A8AB42DCEAC6A5A7061B855EF61723937"+
+					"C956892B9C8350948FFA54EFB1D379BC048165F71415008E301CEE90E14C17B0"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := DeriveAKAKeys(tt.identity, tt.ik, tt.ck)
+			if err != nil {
+				t.Fatalf("DeriveAKAKeys() error = %v", err)
+			}
+			assertAKAKeys(t, got, tt.want)
+		})
+	}
+}
+
+func TestDeriveAKAKeysValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity []byte
+		ik       []byte
+		ck       []byte
+	}{
+		{
+			name: "empty identity",
+			ik:   bytes.Repeat([]byte{0x11}, akaVectorLen),
+			ck:   bytes.Repeat([]byte{0x22}, akaVectorLen),
+		},
+		{
+			name:     "short ik",
+			identity: []byte("0123456789012345@example.net"),
+			ik:       bytes.Repeat([]byte{0x11}, akaVectorLen-1),
+			ck:       bytes.Repeat([]byte{0x22}, akaVectorLen),
+		},
+		{
+			name:     "short ck",
+			identity: []byte("0123456789012345@example.net"),
+			ik:       bytes.Repeat([]byte{0x11}, akaVectorLen),
+			ck:       bytes.Repeat([]byte{0x22}, akaVectorLen-1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DeriveAKAKeys(tt.identity, tt.ik, tt.ck); err == nil {
+				t.Fatal("DeriveAKAKeys() error = nil, want error")
+			}
+		})
+	}
+}
+
 func TestDeriveAKAPrimeKeys(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1458,6 +1529,25 @@ func mustKDFInputWire(t *testing.T, networkName []byte) []byte {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	return wire
+}
+
+func assertAKAKeys(t *testing.T, got, want AKAKeys) {
+	t.Helper()
+	if !bytes.Equal(got.MK, want.MK) {
+		t.Fatalf("MK = % X, want % X", got.MK, want.MK)
+	}
+	if !bytes.Equal(got.ENCR, want.ENCR) {
+		t.Fatalf("ENCR = % X, want % X", got.ENCR, want.ENCR)
+	}
+	if !bytes.Equal(got.AUT, want.AUT) {
+		t.Fatalf("AUT = % X, want % X", got.AUT, want.AUT)
+	}
+	if !bytes.Equal(got.MSK, want.MSK) {
+		t.Fatalf("MSK = % X, want % X", got.MSK, want.MSK)
+	}
+	if !bytes.Equal(got.EMSK, want.EMSK) {
+		t.Fatalf("EMSK = % X, want % X", got.EMSK, want.EMSK)
+	}
 }
 
 func assertAKAPrimeKeys(t *testing.T, got, want AKAPrimeKeys) {

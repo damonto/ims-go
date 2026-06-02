@@ -1621,6 +1621,93 @@ func TestSWUBackoffGateScopesPolicy(t *testing.T) {
 	}
 }
 
+func TestSWUBackoffGateRecordsImplementationSpecificPolicy(t *testing.T) {
+	now := time.Unix(100, 0)
+	tests := []struct {
+		name      string
+		err       error
+		cfg       Config
+		card      Card
+		wantDelay time.Duration
+	}{
+		{
+			name:      "network failure without timer blocks same epdg",
+			err:       fmt.Errorf("connecting swu: %w", swutunnel.ErrNetworkFailure),
+			cfg:       Config{EPDG: "epdg.example"},
+			card:      stubCard{},
+			wantDelay: 5 * time.Second,
+		},
+		{
+			name: "network failure without timer does not block different epdg",
+			err:  fmt.Errorf("connecting swu: %w", swutunnel.ErrNetworkFailure),
+			cfg:  Config{EPDG: "other.example"},
+			card: stubCard{},
+		},
+		{
+			name:      "no apn subscription without timer blocks same plmn apn",
+			err:       fmt.Errorf("connecting swu: %w", swutunnel.ErrNoAPNSubscription),
+			cfg:       Config{EPDG: "other.example"},
+			card:      stubCard{},
+			wantDelay: 5 * time.Second,
+		},
+		{
+			name: "no apn subscription without timer does not block different apn",
+			err:  fmt.Errorf("connecting swu: %w", swutunnel.ErrNoAPNSubscription),
+			cfg: Config{
+				EPDG:   "other.example",
+				Tunnel: swutunnel.Config{APN: "internet"},
+			},
+			card: stubCard{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newReadyClient(t, Config{
+				EPDG:           "epdg.example",
+				ReconnectDelay: 5 * time.Second,
+				Terminal:       TerminalInfo{ID: testIMEI},
+			})
+			defer client.Close()
+			client.recordSWUBackoff(tt.err, now)
+			client.cfg.EPDG = tt.cfg.EPDG
+			client.cfg.Tunnel.APN = tt.cfg.Tunnel.APN
+			client.card = tt.card
+
+			gotDelay, gotBlock, gotActive := client.swuBackoffDelay(now)
+			if gotActive != (tt.wantDelay > 0) {
+				t.Fatalf("swuBackoffDelay() active = %t, want %t", gotActive, tt.wantDelay > 0)
+			}
+			if gotBlock {
+				t.Fatal("swuBackoffDelay() deactivated = true, want false")
+			}
+			if gotDelay != tt.wantDelay {
+				t.Fatalf("swuBackoffDelay() delay = %v, want %v", gotDelay, tt.wantDelay)
+			}
+		})
+	}
+}
+
+func TestSWUBackoffGateClearsExplicitZeroPolicy(t *testing.T) {
+	client := newReadyClient(t, Config{
+		EPDG:           "epdg.example",
+		ReconnectDelay: 5 * time.Second,
+		Terminal:       TerminalInfo{ID: testIMEI},
+	})
+	defer client.Close()
+
+	now := time.Unix(100, 0)
+	client.recordSWUBackoff(testTunnelBackoffError{delay: time.Minute, scope: swutunnel.BackoffScopeEPDG}, now)
+	if delay, deactivated, active := client.swuBackoffDelay(now); !active || deactivated || delay != time.Minute {
+		t.Fatalf("swuBackoffDelay(before zero) = %v, %t, %t; want 1m, false, true", delay, deactivated, active)
+	}
+
+	client.recordSWUBackoff(testTunnelBackoffError{scope: swutunnel.BackoffScopeEPDG}, now)
+	if delay, deactivated, active := client.swuBackoffDelay(now); active || deactivated || delay != 0 {
+		t.Fatalf("swuBackoffDelay(after zero) = %v, %t, %t; want inactive", delay, deactivated, active)
+	}
+}
+
 func TestSWUBackoffGateExpiresAndClears(t *testing.T) {
 	client := newReadyClient(t, Config{
 		EPDG:     "epdg.example",
@@ -1653,7 +1740,7 @@ func TestTerminalReconnectError(t *testing.T) {
 	}{
 		{name: "access rejected", err: fmt.Errorf("connecting swu: %w", swutunnel.ErrAccessRejected), want: true},
 		{name: "backoff deactivated", err: fmt.Errorf("connecting swu: %w", testTunnelBackoffDeactivatedError{}), want: true},
-		{name: "scoped backoff deactivated", err: fmt.Errorf("preparing connect: %w", errSWUBackoffDeactivated), want: true},
+		{name: "swu backoff deactivated", err: fmt.Errorf("preparing connect: %w", errSWUBackoffDeactivated), want: true},
 		{name: "transport closed", err: errors.New("tcp transport closed")},
 	}
 

@@ -33,14 +33,16 @@ var tcpDataACKTimeouts = []time.Duration{
 	2 * time.Second,
 	4 * time.Second,
 	8 * time.Second,
+	16 * time.Second,
 }
 
 var _ imssession.Transport = (*TCPConn)(nil)
 
 type TCPConfig struct {
-	LocalPort  int
-	RemotePort int
-	RemoteIP   net.IP
+	LocalPort       int
+	RemotePort      int
+	RemoteIP        net.IP
+	DataACKTimeouts []time.Duration
 }
 
 type SecureTCPConfig struct {
@@ -84,6 +86,8 @@ type TCPConn struct {
 	done        chan struct{}
 	closeOnce   sync.Once
 	readyOnce   sync.Once
+
+	dataACKTimeouts []time.Duration
 }
 
 type tcpSegmentResponse struct {
@@ -118,27 +122,32 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	if err := validateSecureESPConfig("listening secure tcp transport", encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
 		return nil, err
 	}
+	dataACKTimeouts, err := normalizedTCPDataACKTimeouts("listening secure tcp transport", cfg.DataACKTimeouts)
+	if err != nil {
+		return nil, err
+	}
 	seq, err := randomUint32()
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
 	conn := &TCPConn{
-		session:      s,
-		local:        &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
-		remote:       tcpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
-		secure:       true,
-		passive:      true,
-		initialSeq:   seq,
-		sendSeq:      seq + 1,
-		ackedSeq:     seq,
-		msgCh:        make(chan []byte, 16),
-		errCh:        make(chan error, 1),
-		readyCh:      make(chan struct{}),
-		ackCh:        make(chan struct{}, 1),
-		done:         make(chan struct{}),
-		associations: secureAssociations(cfg.Associations),
-		outboundESP:  esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		inboundESP:   esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		session:         s,
+		local:           &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort, Zone: innerLocal.Zone},
+		remote:          tcpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP),
+		secure:          true,
+		passive:         true,
+		initialSeq:      seq,
+		sendSeq:         seq + 1,
+		ackedSeq:        seq,
+		msgCh:           make(chan []byte, 16),
+		errCh:           make(chan error, 1),
+		readyCh:         make(chan struct{}),
+		ackCh:           make(chan struct{}, 1),
+		done:            make(chan struct{}),
+		dataACKTimeouts: dataACKTimeouts,
+		associations:    secureAssociations(cfg.Associations),
+		outboundESP:     esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		inboundESP:      esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
@@ -169,18 +178,23 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	if err != nil {
 		return nil, fmt.Errorf("dialing tcp transport: %w", err)
 	}
+	dataACKTimeouts, err := normalizedTCPDataACKTimeouts("dialing tcp transport", cfg.DataACKTimeouts)
+	if err != nil {
+		return nil, err
+	}
 	conn := &TCPConn{
-		session:    s,
-		local:      &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: localPort, Zone: innerLocal.Zone},
-		remote:     tcpRemoteAddr(innerRemote, remotePort, cfg.RemoteIP),
-		initialSeq: seq,
-		sendSeq:    seq + 1,
-		ackedSeq:   seq,
-		msgCh:      make(chan []byte, 16),
-		errCh:      make(chan error, 1),
-		readyCh:    make(chan struct{}),
-		ackCh:      make(chan struct{}, 1),
-		done:       make(chan struct{}),
+		session:         s,
+		local:           &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: localPort, Zone: innerLocal.Zone},
+		remote:          tcpRemoteAddr(innerRemote, remotePort, cfg.RemoteIP),
+		initialSeq:      seq,
+		sendSeq:         seq + 1,
+		ackedSeq:        seq,
+		msgCh:           make(chan []byte, 16),
+		errCh:           make(chan error, 1),
+		readyCh:         make(chan struct{}),
+		ackCh:           make(chan struct{}, 1),
+		done:            make(chan struct{}),
+		dataACKTimeouts: dataACKTimeouts,
 	}
 	if secure != nil {
 		if secure.OutboundSPI == 0 || secure.InboundSPI == 0 {
@@ -296,6 +310,7 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 	}
 	t.mu.Unlock()
 
+	timeouts := t.tcpDataACKTimeouts()
 	remaining := data
 	for len(remaining) > 0 {
 		chunk := remaining
@@ -311,7 +326,7 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			return err
 		}
 		acked := false
-		for attempt, timeout := range tcpDataACKTimeouts {
+		for attempt, timeout := range timeouts {
 			if err := t.sendSegmentWithSeq(ctx, seq, t.currentAck(), flags, chunk); err != nil {
 				t.closeWithError(err)
 				return err
@@ -326,10 +341,12 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			t.session.Logger().Debug("TCP data ACK timed out", "seq", seq, "want_ack", wantAck, "attempt", attempt+1)
+			ackedSeq, sendSeq := t.sendState()
+			t.session.Logger().Debug("TCP data ACK timed out", "seq", seq, "want_ack", wantAck, "acked_seq", ackedSeq, "send_seq", sendSeq, "attempt", attempt+1)
 		}
 		if !acked {
-			err := fmt.Errorf("writing tcp packet: waiting for ack %d", wantAck)
+			ackedSeq, sendSeq := t.sendState()
+			err := fmt.Errorf("writing tcp packet: waiting for ack %d (acked %d, seq %d, send_seq %d, attempts %d)", wantAck, ackedSeq, seq, sendSeq, len(timeouts))
 			t.closeWithError(err)
 			return err
 		}
@@ -474,6 +491,21 @@ func (t *TCPConn) currentAck() uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.recvSeq
+}
+
+func (t *TCPConn) tcpDataACKTimeouts() []time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.dataACKTimeouts) == 0 {
+		return append([]time.Duration(nil), tcpDataACKTimeouts...)
+	}
+	return append([]time.Duration(nil), t.dataACKTimeouts...)
+}
+
+func (t *TCPConn) sendState() (uint32, uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ackedSeq, t.sendSeq
 }
 
 func (t *TCPConn) waitForAck(ctx context.Context, want uint32) error {
@@ -773,4 +805,17 @@ func trimLeadingSIPCRLF(stream []byte) []byte {
 		stream = stream[2:]
 	}
 	return stream
+}
+
+func normalizedTCPDataACKTimeouts(action string, values []time.Duration) ([]time.Duration, error) {
+	if len(values) == 0 {
+		return append([]time.Duration(nil), tcpDataACKTimeouts...), nil
+	}
+	timeouts := append([]time.Duration(nil), values...)
+	for _, timeout := range timeouts {
+		if timeout <= 0 {
+			return nil, fmt.Errorf("%s: tcp data ack timeout must be > 0", action)
+		}
+	}
+	return timeouts, nil
 }

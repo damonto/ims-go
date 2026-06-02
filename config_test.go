@@ -199,6 +199,16 @@ func TestConfigNormalized(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "invalid tcp data ack timeout fails",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				IMS: IMSConfig{
+					TCPDataACKTimeouts: []time.Duration{0},
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name: "negative ims registration retry base fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},

@@ -61,6 +61,7 @@ type IMSConfig struct {
 	UseTelURIForPIDFXML      bool
 	SIPServerPort            int
 	SIPTimers                imssession.TransactionTimers
+	TCPDataACKTimeouts       []time.Duration
 	SMSSubmitReportTimeout   time.Duration
 	SMSDeliveryReportTimeout time.Duration
 	Voice                    imsvoice.Config

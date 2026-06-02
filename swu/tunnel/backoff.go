@@ -143,7 +143,10 @@ func BackoffPolicyFor(err error) (BackoffPolicy, bool) {
 		return BackoffPolicy{}, false
 	}
 	policy := backoff.BackoffPolicy()
-	return policy, policy.Deactivated || policy.Delay > 0
+	if policy.Deactivated || policy.Delay > 0 {
+		return policy, true
+	}
+	return policy, policy.Scope != 0
 }
 
 func backoffTimerDelay(notify *ike.NotifyPayload) (time.Duration, bool) {

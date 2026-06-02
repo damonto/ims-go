@@ -24,6 +24,18 @@ type Transport interface {
 }
 
 type SecureTCPConfig struct {
+	LocalPort       int
+	RemotePort      int
+	DataACKTimeouts []time.Duration
+	OutboundSPI     uint32
+	InboundSPI      uint32
+	Encryption      string
+	EncryptionKey   []byte
+	Integrity       string
+	IntegrityKey    []byte
+}
+
+type SecureUDPConfig struct {
 	LocalPort     int
 	RemotePort    int
 	OutboundSPI   uint32
@@ -33,8 +45,6 @@ type SecureTCPConfig struct {
 	Integrity     string
 	IntegrityKey  []byte
 }
-
-type SecureUDPConfig = SecureTCPConfig
 
 type Config struct {
 	Transport         string
@@ -54,6 +64,7 @@ const (
 	sipStatusMethodNotAllowed            = 405
 	sipStatusCallTransactionDoesNotExist = 481
 	sipStatusRequestTerminated           = 487
+	sipStatusServiceUnavailable          = 503
 )
 
 type Handler interface {
@@ -335,6 +346,9 @@ func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport
 		return s.exchangeWithBootstrapReader(ctx, tx)
 	}
 	if err := tx.start(ctx); err != nil {
+		if resp, ok := transactionLayerErrorResponse(req, err); ok {
+			return resp, nil
+		}
 		return sip.Message{}, err
 	}
 	return tx.await(ctx)
@@ -342,6 +356,9 @@ func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport
 
 func (s *Session) exchangeWithBootstrapReader(ctx context.Context, tx *clientTransaction) (sip.Message, error) {
 	if err := tx.start(ctx); err != nil {
+		if resp, ok := transactionLayerErrorResponse(tx.request, err); ok {
+			return resp, nil
+		}
 		return sip.Message{}, err
 	}
 

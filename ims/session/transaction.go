@@ -56,6 +56,19 @@ type transactionResult struct {
 	err error
 }
 
+type transactionSendError struct {
+	err      error
+	reliable bool
+}
+
+func (e *transactionSendError) Error() string {
+	return e.err.Error()
+}
+
+func (e *transactionSendError) Unwrap() error {
+	return e.err
+}
+
 var defaultTransactionTimers = TransactionTimers{
 	T1: 500 * time.Millisecond,
 	T2: 4 * time.Second,
@@ -146,10 +159,31 @@ func (tx *clientTransaction) start(ctx context.Context) error {
 	}
 	if err := tx.send(ctx, tx.request); err != nil {
 		tx.abort(nil)
-		return err
+		return &transactionSendError{err: err, reliable: tx.reliable}
 	}
 	go tx.run()
 	return nil
+}
+
+func transactionLayerErrorResponse(req sip.Message, err error) (sip.Message, bool) {
+	var sendErr *transactionSendError
+	if !errors.As(err, &sendErr) {
+		return sip.Message{}, false
+	}
+	if !sendErr.reliable {
+		return sip.Message{}, false
+	}
+	cause := sendErr.Unwrap()
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return sip.Message{}, false
+	}
+	resp := sip.NewResponse(sipStatusServiceUnavailable, "Service Unavailable")
+	resp.Headers = sip.ResponseHeaders(req, sipStatusServiceUnavailable)
+	warning := sip.WarningValue{Code: 399, Agent: "vowifi-go", Text: cause.Error()}
+	if text, marshalErr := warning.MarshalText(); marshalErr == nil {
+		resp.Headers.Add("Warning", string(text))
+	}
+	return resp, true
 }
 
 func (tx *clientTransaction) await(ctx context.Context) (sip.Message, error) {

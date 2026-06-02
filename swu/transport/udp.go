@@ -15,8 +15,14 @@ import (
 
 var _ imssession.Transport = (*UDPConn)(nil)
 
+type UDPConfig struct {
+	LocalPort  int
+	RemotePort int
+	RemoteIP   net.IP
+}
+
 type SecureUDPConfig struct {
-	TCPConfig
+	UDPConfig
 	OutboundSPI  uint32
 	InboundSPI   uint32
 	Encryption   string

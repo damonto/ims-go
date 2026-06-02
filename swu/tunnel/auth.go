@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/eapaka"
+	"github.com/damonto/vowifi-go/eapaka"
 	"github.com/damonto/vowifi-go/swu/ike"
 	"github.com/damonto/vowifi-go/usim"
 )
@@ -1287,6 +1287,7 @@ func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorN
 	var backoffSeen bool
 	var backoffMalformed bool
 	var errorNotifySeen bool
+	var networkFailureSeen bool
 	var backoffCause uint16
 	var accessRejection uint16
 	for _, payload := range payloads {
@@ -1310,6 +1311,9 @@ func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorN
 				backoffCause = notify.NotifyType
 			}
 		}
+		if notify.NotifyType == notifyTypeNetworkFailure {
+			networkFailureSeen = true
+		}
 		if accessRejectedNotify(notify.NotifyType) {
 			accessRejection = notify.NotifyType
 		}
@@ -1319,13 +1323,16 @@ func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorN
 		return nil
 	}
 	err := fmt.Errorf("received %s ike_auth notify %s", protection, strings.Join(notifies, ", "))
+	if networkFailureSeen {
+		err = networkFailureErrorFor(err)
+	}
 	if accessRejection != 0 {
 		err = accessRejectionErrorFor(accessRejection, err)
 	}
 	if backoffMalformed && errorNotifySeen {
 		return fmt.Errorf("received malformed BACKOFF_TIMER notify: %w", err)
 	}
-	if backoffSeen && errorNotifySeen && (backoffDelay > 0 || backoffDeactivated) {
+	if backoffSeen && errorNotifySeen {
 		return &backoffTimerError{delay: backoffDelay, deactivated: backoffDeactivated, cause: backoffCause, err: err}
 	}
 	return err

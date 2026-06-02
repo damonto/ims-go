@@ -15,14 +15,12 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/damonto/vowifi-go/swu/eapaka"
+	"github.com/damonto/vowifi-go/eapaka"
 	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 var (
-	sha1DSSIncrement = big.NewInt(1)
-	sha1DSSModulus   = new(big.Int).Lsh(big.NewInt(1), 160)
-	dhPublicMin      = big.NewInt(1)
+	dhPublicMin = big.NewInt(1)
 
 	errMissingEncryptedPayload = errors.New("opening ike packet: missing encrypted payload")
 )
@@ -570,112 +568,17 @@ func (c *ikeCrypto) decryptCBC(key, iv, ciphertext []byte) ([]byte, error) {
 }
 
 func deriveEAPKeys(identity, ik, ck []byte) (eapKeys, error) {
-	mkHasher := sha1.New()
-	_, _ = mkHasher.Write(identity)
-	_, _ = mkHasher.Write(ik)
-	_, _ = mkHasher.Write(ck)
-	mk := mkHasher.Sum(nil)
-	result, err := sha1DSSExpand(mk, 160)
+	keys, err := eapaka.DeriveAKAKeys(identity, ik, ck)
 	if err != nil {
 		return eapKeys{}, err
 	}
 	return eapKeys{
-		MK:   append([]byte(nil), mk...),
-		ENCR: append([]byte(nil), result[:16]...),
-		AUT:  append([]byte(nil), result[16:32]...),
-		MSK:  append([]byte(nil), result[32:96]...),
-		EMSK: append([]byte(nil), result[96:160]...),
+		MK:   keys.MK,
+		ENCR: keys.ENCR,
+		AUT:  keys.AUT,
+		MSK:  keys.MSK,
+		EMSK: keys.EMSK,
 	}, nil
-}
-
-func sha1DSSExpand(seed []byte, size int) ([]byte, error) {
-	if len(seed) != 20 {
-		return nil, fmt.Errorf("sha1-dss expand: seed length %d", len(seed))
-	}
-	if size <= 0 {
-		return nil, fmt.Errorf("sha1-dss expand: size %d", size)
-	}
-	x := new(big.Int).SetBytes(seed)
-	result := make([]byte, 0, size)
-	for len(result) < size {
-		block, err := nextSHA1DSSBlock(x)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, block...)
-	}
-	return append([]byte(nil), result[:size]...), nil
-}
-
-func nextSHA1DSSBlock(x *big.Int) ([]byte, error) {
-	block, err := sha1DSS(x.FillBytes(make([]byte, 20)))
-	if err != nil {
-		return nil, err
-	}
-	x.Add(x, new(big.Int).SetBytes(block))
-	x.Add(x, sha1DSSIncrement)
-	x.Mod(x, sha1DSSModulus)
-	return block, nil
-}
-
-func sha1DSS(data []byte) ([]byte, error) {
-	if len(data) != 20 {
-		return nil, fmt.Errorf("sha1-dss: input length %d", len(data))
-	}
-	words := make([]uint32, 80)
-	block := make([]byte, 64)
-	copy(block, data)
-	for i := 0; i < 16; i++ {
-		words[i] = binary.BigEndian.Uint32(block[i*4 : i*4+4])
-	}
-	for i := 16; i < 80; i++ {
-		words[i] = rol(words[i-3]^words[i-8]^words[i-14]^words[i-16], 1)
-	}
-	h0 := uint32(0x67452301)
-	h1 := uint32(0xEFCDAB89)
-	h2 := uint32(0x98BADCFE)
-	h3 := uint32(0x10325476)
-	h4 := uint32(0xC3D2E1F0)
-	a, b, c, d, e := h0, h1, h2, h3, h4
-	for i := 0; i < 80; i++ {
-		var f, k uint32
-		switch {
-		case i < 20:
-			f = (b & c) | (^b & d)
-			k = 0x5A827999
-		case i < 40:
-			f = b ^ c ^ d
-			k = 0x6ED9EBA1
-		case i < 60:
-			f = (b & c) | (b & d) | (c & d)
-			k = 0x8F1BBCDC
-		default:
-			f = b ^ c ^ d
-			k = 0xCA62C1D6
-		}
-		temp := rol(a, 5) + f + e + k + words[i]
-		e = d
-		d = c
-		c = rol(b, 30)
-		b = a
-		a = temp
-	}
-	h0 += a
-	h1 += b
-	h2 += c
-	h3 += d
-	h4 += e
-	out := make([]byte, 20)
-	binary.BigEndian.PutUint32(out[0:4], h0)
-	binary.BigEndian.PutUint32(out[4:8], h1)
-	binary.BigEndian.PutUint32(out[8:12], h2)
-	binary.BigEndian.PutUint32(out[12:16], h3)
-	binary.BigEndian.PutUint32(out[16:20], h4)
-	return out, nil
-}
-
-func rol(value uint32, bits uint) uint32 {
-	return value<<bits | value>>(32-bits)
 }
 
 func modpGroup(group uint16) (*big.Int, int, error) {

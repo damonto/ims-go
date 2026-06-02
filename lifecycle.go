@@ -427,7 +427,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 	if setup.imsCfg.Transport != "tcp" {
 		setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			return swutransport.DialSecureUDP(ctx, setup.session, swutransport.SecureUDPConfig{
-				TCPConfig: swutransport.TCPConfig{
+				UDPConfig: swutransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
 					RemoteIP:   selectedPCSCF,
@@ -444,7 +444,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 		setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			_ = ctx
 			return swutransport.ListenSecureUDP(setup.session, swutransport.SecureUDPConfig{
-				TCPConfig: swutransport.TCPConfig{
+				UDPConfig: swutransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
 					RemoteIP:   selectedPCSCF,
@@ -470,9 +470,10 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 	setup.imsCfg.dialSecureTCP = func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
 		return swutransport.DialSecureTCP(ctx, setup.session, swutransport.SecureTCPConfig{
 			TCPConfig: swutransport.TCPConfig{
-				LocalPort:  cfg.LocalPort,
-				RemotePort: cfg.RemotePort,
-				RemoteIP:   selectedPCSCF,
+				LocalPort:       cfg.LocalPort,
+				RemotePort:      cfg.RemotePort,
+				RemoteIP:        selectedPCSCF,
+				DataACKTimeouts: configuredTCPDataACKTimeouts(cfg.DataACKTimeouts, setup.imsCfg.TCPDataACKTimeouts),
 			},
 			OutboundSPI:   cfg.OutboundSPI,
 			InboundSPI:    cfg.InboundSPI,
@@ -487,9 +488,10 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 		_ = ctx
 		return swutransport.ListenSecureTCP(setup.session, swutransport.SecureTCPConfig{
 			TCPConfig: swutransport.TCPConfig{
-				LocalPort:  cfg.LocalPort,
-				RemotePort: cfg.RemotePort,
-				RemoteIP:   selectedPCSCF,
+				LocalPort:       cfg.LocalPort,
+				RemotePort:      cfg.RemotePort,
+				RemoteIP:        selectedPCSCF,
+				DataACKTimeouts: configuredTCPDataACKTimeouts(cfg.DataACKTimeouts, setup.imsCfg.TCPDataACKTimeouts),
 			},
 			OutboundSPI:   cfg.OutboundSPI,
 			InboundSPI:    cfg.InboundSPI,
@@ -503,7 +505,7 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 	setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 		_ = ctx
 		return swutransport.ListenSecureUDP(setup.session, swutransport.SecureUDPConfig{
-			TCPConfig: swutransport.TCPConfig{
+			UDPConfig: swutransport.UDPConfig{
 				LocalPort:  cfg.LocalPort,
 				RemotePort: cfg.RemotePort,
 				RemoteIP:   selectedPCSCF,
@@ -528,8 +530,9 @@ func (c *Client) dialPCSCFTCP(setup *connectSetup, pcscfIPs []net.IP) (*swutrans
 	var errs error
 	for _, ip := range candidates {
 		tcpTransport, err := swutransport.DialTCP(setup.setupCtx, setup.session, swutransport.TCPConfig{
-			RemotePort: setup.tunnelCfg.SIPPort,
-			RemoteIP:   ip,
+			RemotePort:      setup.tunnelCfg.SIPPort,
+			RemoteIP:        ip,
+			DataACKTimeouts: setup.imsCfg.TCPDataACKTimeouts,
 		})
 		if err == nil {
 			return tcpTransport, tcpRemoteIP(tcpTransport), nil
@@ -557,6 +560,13 @@ func firstPCSCFIP(ips []net.IP) net.IP {
 func tcpRemoteIP(conn *swutransport.TCPConn) net.IP {
 	remote := conn.RemoteAddr().(*net.TCPAddr)
 	return append(net.IP(nil), remote.IP...)
+}
+
+func configuredTCPDataACKTimeouts(primary, fallback []time.Duration) []time.Duration {
+	if len(primary) > 0 {
+		return append([]time.Duration(nil), primary...)
+	}
+	return append([]time.Duration(nil), fallback...)
 }
 
 func uniqueIPs(ips []net.IP) []net.IP {

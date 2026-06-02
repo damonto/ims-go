@@ -163,6 +163,12 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
 	cfg.SIPTimers = timers
+	cfg.TCPDataACKTimeouts = append([]time.Duration(nil), cfg.TCPDataACKTimeouts...)
+	for _, timeout := range cfg.TCPDataACKTimeouts {
+		if timeout <= 0 {
+			return IMSConfig{}, errors.New("normalizing ims config: tcp data ack timeout must be > 0")
+		}
+	}
 
 	if cfg.Transport == "" {
 		cfg.Transport = "udp"

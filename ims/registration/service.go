@@ -2136,6 +2136,19 @@ func secureTransportConfigWithKeys(verify *security.Param, localPort, remotePort
 	}
 }
 
+func secureDatagramConfigWithKeys(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32, ck, ik []byte) session.SecureUDPConfig {
+	return session.SecureUDPConfig{
+		LocalPort:     localPort,
+		RemotePort:    remotePort,
+		OutboundSPI:   outboundSPI,
+		InboundSPI:    inboundSPI,
+		Encryption:    verify.EAlg,
+		EncryptionKey: append([]byte(nil), ck...),
+		Integrity:     verify.Alg,
+		IntegrityKey:  espIntegrityKey(verify.Alg, ik),
+	}
+}
+
 func espIntegrityKey(alg string, ik []byte) []byte {
 	key := append([]byte(nil), ik...)
 	switch strings.ToLower(strings.TrimSpace(alg)) {
@@ -2162,7 +2175,7 @@ func (s *Service) dialSecureTransport(ctx context.Context, verify *security.Para
 		if s.cfg.DialSecureUDP == nil {
 			return nil, errors.New("dialing secure IMS datagram transport: UDP dialer is not configured")
 		}
-		secureTransport, err := s.cfg.DialSecureUDP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
+		secureTransport, err := s.cfg.DialSecureUDP(ctx, secureDatagramConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure IMS datagram transport: %w", err)
 		}
@@ -2194,7 +2207,7 @@ func (s *Service) startSecureServerTransportsWithKeys(ctx context.Context, verif
 		attachments = append(attachments, attachment)
 	}
 	if s.cfg.ListenSecureUDP != nil {
-		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS, ck, ik))
+		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, secureDatagramConfigWithKeys(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS, ck, ik))
 		if err != nil {
 			closeAttachments(attachments)
 			return nil, nil, fmt.Errorf("listening secure IMS datagram transport: %w", err)
