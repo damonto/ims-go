@@ -348,7 +348,7 @@ func (h *rseqHeader) UnmarshalText(text []byte) error {
 	return nil
 }
 
-func (c *Call) recordReliableProvisionalLocked(msg sip.Message) (bool, error) {
+func (c *Call) recordReliableProvisional(msg sip.Message) (bool, error) {
 	tag := sip.HeaderTag(msg.Header("To"))
 	if tag == "" {
 		return false, errors.New("handling reliable provisional response: missing To tag")

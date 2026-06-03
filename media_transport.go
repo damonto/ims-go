@@ -78,7 +78,7 @@ func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cf
 		onPacket: cfg.OnPacket,
 	}
 	if len(cfg.RemoteIP) != 0 && cfg.RemotePort != 0 {
-		if err := transport.applyRemoteConfigLocked(cfg); err != nil {
+		if err := transport.applyRemoteConfig(cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -112,7 +112,7 @@ func (t *tunnelMediaTransport) ConfigureRemote(ctx context.Context, cfg imsvoice
 		t.mu.Unlock()
 		return errors.New("configuring voice media remote: transport is closed")
 	}
-	if err := t.applyRemoteConfigLocked(cfg); err != nil {
+	if err := t.applyRemoteConfig(cfg); err != nil {
 		t.mu.Unlock()
 		return err
 	}
@@ -121,7 +121,7 @@ func (t *tunnelMediaTransport) ConfigureRemote(ctx context.Context, cfg imsvoice
 	return nil
 }
 
-func (t *tunnelMediaTransport) applyRemoteConfigLocked(cfg imsvoice.MediaConfig) error {
+func (t *tunnelMediaTransport) applyRemoteConfig(cfg imsvoice.MediaConfig) error {
 	if cfg.RemoteRTCPPort < 0 || cfg.RemoteRTCPPort > 65535 {
 		return errors.New("configuring voice media remote: remote rtcp port must be 0 or between 1 and 65535")
 	}
@@ -154,9 +154,9 @@ func (t *tunnelMediaTransport) WriteRTCP(ctx context.Context, data []byte) error
 func (t *tunnelMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp bool) error {
 	t.mu.Lock()
 	closed := t.closed
-	local := t.localMediaAddrLocked(rtcp)
-	remote := t.remoteMediaAddrLocked(rtcp)
-	count := t.nextMediaCountLocked(rtcp, false)
+	local := t.localMediaAddr(rtcp)
+	remote := t.remoteMediaAddr(rtcp)
+	count := t.nextMediaCount(rtcp, false)
 	t.mu.Unlock()
 	if closed {
 		return errors.New("writing voice media packet: transport is closed")
@@ -214,8 +214,8 @@ func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	t.mu.Lock()
 	closed := t.closed
 	local := cloneMediaUDPAddr(t.local)
-	rtcpLocal := t.localMediaAddrLocked(true)
-	remote := t.remoteMediaAddrLocked(false)
+	rtcpLocal := t.localMediaAddr(true)
+	remote := t.remoteMediaAddr(false)
 	rtcpMux := t.rtcpMux
 	t.mu.Unlock()
 	if local == nil {
@@ -235,7 +235,7 @@ func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
 			return false
 		}
 		t.mu.Lock()
-		wantRemote := t.remoteMediaAddrLocked(rtcp)
+		wantRemote := t.remoteMediaAddr(rtcp)
 		t.mu.Unlock()
 		return mediaAddrMatches(pkt.UDP.Src, wantRemote)
 	}
@@ -243,7 +243,7 @@ func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		return true
 	}
 	t.mu.Lock()
-	count := t.nextMediaCountLocked(rtcp, true)
+	count := t.nextMediaCount(rtcp, true)
 	t.mu.Unlock()
 	t.logMediaPacket("recv", rtcp, count, pkt.UDP.Dst, pkt.UDP.Src, len(pkt.UDP.Payload))
 	t.notifyPacket(rtcp, pkt.UDP.Payload)
@@ -259,7 +259,7 @@ func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	return true
 }
 
-func (t *tunnelMediaTransport) nextMediaCountLocked(rtcp bool, inbound bool) int {
+func (t *tunnelMediaTransport) nextMediaCount(rtcp bool, inbound bool) int {
 	if inbound {
 		if rtcp {
 			t.inRTCP++
@@ -365,14 +365,14 @@ func mediaPortAddr(addr *net.UDPAddr, rtcp bool) *net.UDPAddr {
 	return cloned
 }
 
-func (t *tunnelMediaTransport) localMediaAddrLocked(rtcp bool) *net.UDPAddr {
+func (t *tunnelMediaTransport) localMediaAddr(rtcp bool) *net.UDPAddr {
 	if rtcp && t.rtcpMux {
 		return cloneMediaUDPAddr(t.local)
 	}
 	return mediaPortAddr(t.local, rtcp)
 }
 
-func (t *tunnelMediaTransport) remoteMediaAddrLocked(rtcp bool) *net.UDPAddr {
+func (t *tunnelMediaTransport) remoteMediaAddr(rtcp bool) *net.UDPAddr {
 	if !rtcp {
 		return cloneMediaUDPAddr(t.remote)
 	}

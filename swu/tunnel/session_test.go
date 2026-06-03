@@ -591,8 +591,8 @@ func TestIKESALifecycleState(t *testing.T) {
 			if tt.prepare != nil {
 				tt.prepare(session)
 			}
-			if got := session.ikeSALifecycleLocked(); got != tt.want {
-				t.Fatalf("ikeSALifecycleLocked() = %v, want %v", got, tt.want)
+			if got := session.ikeSALifecycle(); got != tt.want {
+				t.Fatalf("ikeSALifecycle() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -640,8 +640,8 @@ func TestChildSALifecycleState(t *testing.T) {
 			if tt.prepare != nil {
 				tt.prepare(session)
 			}
-			if got := session.childSALifecycleLocked(); got != tt.want {
-				t.Fatalf("childSALifecycleLocked() = %v, want %v", got, tt.want)
+			if got := session.childSALifecycle(); got != tt.want {
+				t.Fatalf("childSALifecycle() = %v, want %v", got, tt.want)
 			}
 		})
 	}

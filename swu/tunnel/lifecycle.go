@@ -220,7 +220,7 @@ func (s *Session) notifyDetachedAttachments(attachments []*sessionAttachment, ca
 	}
 }
 
-func (s *Session) disconnectedTunnelErrLocked() error {
+func (s *Session) disconnectedTunnelErr() error {
 	if s.connected || s.ike == nil {
 		return nil
 	}
@@ -233,13 +233,13 @@ func (s *Session) disconnectedTunnelErrLocked() error {
 func (s *Session) currentDisconnectedTunnelErr(action string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.disconnectedTunnelErrLocked(); err != nil {
+	if err := s.disconnectedTunnelErr(); err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	return nil
 }
 
-func (s *Session) ikeSALifecycleLocked() ikeSALifecycleState {
+func (s *Session) ikeSALifecycle() ikeSALifecycleState {
 	if s.ike == nil {
 		return ikeSALifecycleNone
 	}
@@ -252,7 +252,7 @@ func (s *Session) ikeSALifecycleLocked() ikeSALifecycleState {
 	return ikeSALifecycleActive
 }
 
-func (s *Session) childSALifecycleLocked() childSALifecycleState {
+func (s *Session) childSALifecycle() childSALifecycleState {
 	if !s.connected {
 		return childSALifecycleNone
 	}
@@ -320,17 +320,17 @@ func randomSARekeyJitter(maxDelay time.Duration) time.Duration {
 	return time.Duration(n.Int64())
 }
 
-func (s *Session) ikeSAExpiredLocked(now time.Time) bool {
+func (s *Session) ikeSAExpired(now time.Time) bool {
 	return s.ike != nil && !s.ikeSAExpiresAt.IsZero() && !now.Before(s.ikeSAExpiresAt)
 }
 
-func (s *Session) ikeSAByteExpiredLocked(add uint64) bool {
+func (s *Session) ikeSAByteExpired(add uint64) bool {
 	return s.ike != nil && byteLifetimeWouldExpire(s.ikeSAOutboundBytes, add, s.ikeSAByteExpiresAt)
 }
 
 func (s *Session) expireIKESAIfNeeded(action string) error {
 	s.mu.RLock()
-	expired := s.ikeSAExpiredLocked(time.Now()) || s.ikeSAByteExpiredLocked(0)
+	expired := s.ikeSAExpired(time.Now()) || s.ikeSAByteExpired(0)
 	s.mu.RUnlock()
 	if !expired {
 		return nil
@@ -397,17 +397,17 @@ func (s *Session) acceptIKESAInboundBytes(protectedBytes uint64, now time.Time) 
 	return result
 }
 
-func (s *Session) childSAExpiredLocked(now time.Time) bool {
+func (s *Session) childSAExpired(now time.Time) bool {
 	return s.connected && !s.childSAExpiresAt.IsZero() && !now.Before(s.childSAExpiresAt)
 }
 
-func (s *Session) childSAByteExpiredLocked(add uint64) bool {
+func (s *Session) childSAByteExpired(add uint64) bool {
 	return s.connected && byteLifetimeWouldExpire(s.childSAOutboundBytes, add, s.childSAByteExpiresAt)
 }
 
 func (s *Session) expireChildSAIfNeeded(action string) error {
 	s.mu.RLock()
-	expired := s.childSAExpiredLocked(time.Now())
+	expired := s.childSAExpired(time.Now())
 	s.mu.RUnlock()
 	if !expired {
 		return nil
@@ -464,7 +464,7 @@ func (s *Session) acceptESPSequence(spi, sequence uint32, protectedBytes uint64)
 	rekeyNow := false
 	s.mu.Lock()
 	now := time.Now()
-	s.pruneRetiredChildSAsLocked(now)
+	s.pruneRetiredChildSAs(now)
 	if !s.connected && len(s.retiredChildSAs) == 0 {
 		s.mu.Unlock()
 		return espAcceptResult{}

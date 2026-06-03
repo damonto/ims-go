@@ -220,22 +220,22 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if state := s.ikeSALifecycleLocked(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
+	if state := s.ikeSALifecycle(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
 		return childSARekeyState{}, nil, errIKESARekeyInProgress
 	}
-	switch state := s.childSALifecycleLocked(); state {
+	switch state := s.childSALifecycle(); state {
 	case childSALifecycleRekeying, childSALifecyclePendingOutbound:
 		return childSARekeyState{}, nil, errChildSARekeyInProgress
 	case childSALifecycleNone:
-		if err := s.disconnectedTunnelErrLocked(); err != nil {
+		if err := s.disconnectedTunnelErr(); err != nil {
 			return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", err)
 		}
 		return childSARekeyState{}, nil, errors.New("rekeying child sa: child sa is not established")
 	}
-	if s.ikeSAExpiredLocked(time.Now()) {
+	if s.ikeSAExpired(time.Now()) {
 		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errIKESAExpired)
 	}
-	if s.childSAExpiredLocked(time.Now()) {
+	if s.childSAExpired(time.Now()) {
 		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errChildSAExpired)
 	}
 	state := childSARekeyState{
@@ -541,7 +541,7 @@ func trafficSelectorsContainAll(selectors, subset []ike.TrafficSelector) bool {
 func (s *Session) installChildSecurityAssociations(result childSARekeyResult) {
 	now := time.Now()
 	s.mu.Lock()
-	s.retireInboundChildSALocked(now)
+	s.retireInboundChildSA(now)
 	s.connected = true
 	s.tunnelErr = nil
 	s.tunnel = cloneInfo(result.info)
@@ -564,7 +564,7 @@ func (s *Session) installChildSecurityAssociations(result childSARekeyResult) {
 func (s *Session) stageResponderChildSecurityAssociations(result childSARekeyResult) {
 	now := time.Now()
 	s.mu.Lock()
-	s.retireInboundChildSALocked(now)
+	s.retireInboundChildSA(now)
 	s.connected = true
 	s.tunnelErr = nil
 	s.tunnel = cloneInfo(result.info)
@@ -608,7 +608,7 @@ func (s *Session) promotePendingChildSecurityAssociation() bool {
 	return true
 }
 
-func (s *Session) retireInboundChildSALocked(now time.Time) {
+func (s *Session) retireInboundChildSA(now time.Time) {
 	if s.inboundESP.SPI == 0 {
 		return
 	}
@@ -631,22 +631,22 @@ func (s *Session) retireInboundChildSALocked(now time.Time) {
 		protectedBytes: s.childSAInboundBytes,
 		byteExpiresAt:  s.childSAByteExpiresAt,
 	})
-	s.pruneRetiredChildSAsLocked(now)
+	s.pruneRetiredChildSAs(now)
 }
 
 func (s *Session) removeRetiredChildSA(inboundSPI uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.removeRetiredChildSALocked(inboundSPI)
+	s.removeRetiredChildSAState(inboundSPI)
 }
 
-func (s *Session) removeRetiredChildSALocked(inboundSPI uint32) {
+func (s *Session) removeRetiredChildSAState(inboundSPI uint32) {
 	s.retiredChildSAs = slices.DeleteFunc(s.retiredChildSAs, func(child retiredChildSA) bool {
 		return child.inbound.SPI == inboundSPI
 	})
 }
 
-func (s *Session) pruneRetiredChildSAsLocked(now time.Time) {
+func (s *Session) pruneRetiredChildSAs(now time.Time) {
 	kept := s.retiredChildSAs[:0]
 	for _, child := range s.retiredChildSAs {
 		timeLive := child.expiresAt.IsZero() || now.Before(child.expiresAt)

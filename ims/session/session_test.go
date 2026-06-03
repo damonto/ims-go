@@ -760,6 +760,135 @@ func TestWriteResponseTargetsUDPSourceAndFallsBack(t *testing.T) {
 	}
 }
 
+func TestWriteResponseUsesRequestPeerForBareRPort(t *testing.T) {
+	transport := newStubTransport(5062, 5060)
+	sess, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	req := Request{
+		Message:   newInboundRequest("MESSAGE", "call-1", "1 MESSAGE"),
+		Transport: transport,
+		PeerAddr:  &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 33109},
+	}
+	req.Message.Headers.Set("Via", "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1;received=198.51.100.10;rport")
+
+	if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+		t.Fatalf("WriteStatus() error = %v", err)
+	}
+
+	if len(transport.writeAddrs) != 1 {
+		t.Fatalf("len(writeAddrs) = %d, want 1", len(transport.writeAddrs))
+	}
+	got, ok := transport.writeAddrs[0].(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("writeAddrs[0] = %T, want *net.UDPAddr", transport.writeAddrs[0])
+	}
+	want := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 33109}
+	if !got.IP.Equal(want.IP) || got.Port != want.Port {
+		t.Fatalf("response target = %v, want %v", got, want)
+	}
+}
+
+func TestWriteResponseUsesTransportMatchingResponseTarget(t *testing.T) {
+	primary := newStubTransport(10553, 6000)
+	primary.local = &net.TCPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 10553}
+	primary.remote = &net.TCPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 6000}
+	inbound := newStubTransport(28789, 32813)
+	inbound.local = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 28789}
+	inbound.remote = &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 32813}
+	response := newStubTransport(10553, 6000)
+	response.local = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 10553}
+	response.remote = &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 6000}
+	sess, err := Open(Config{}, primary)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if _, err := sess.AddTransport(inbound); err != nil {
+		t.Fatalf("AddTransport(inbound) error = %v", err)
+	}
+	if _, err := sess.AddTransport(response); err != nil {
+		t.Fatalf("AddTransport(response) error = %v", err)
+	}
+	req := Request{
+		Message:   newInboundRequest("MESSAGE", "call-1", "1 MESSAGE"),
+		Transport: inbound,
+		PeerAddr:  &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 32813},
+	}
+	req.Message.Headers.Set("Via", "SIP/2.0/UDP 198.51.100.10:6000;branch=z9hG4bK-1")
+
+	if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+		t.Fatalf("WriteStatus() error = %v", err)
+	}
+
+	if got := inbound.writeCount(); got != 0 {
+		t.Fatalf("inbound write count = %d, want 0", got)
+	}
+	if got := response.writeCount(); got != 1 {
+		t.Fatalf("response write count = %d, want 1", got)
+	}
+	got, ok := response.writeAddrs[0].(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("response write addr = %T, want *net.UDPAddr", response.writeAddrs[0])
+	}
+	want := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 6000}
+	if !got.IP.Equal(want.IP) || got.Port != want.Port {
+		t.Fatalf("response target = %v, want %v", got, want)
+	}
+}
+
+func TestWriteResponseUsesExplicitResponseRoute(t *testing.T) {
+	primary := newStubTransport(10553, 6000)
+	primary.local = &net.TCPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 10553}
+	primary.remote = &net.TCPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 6000}
+	inbound := newStubTransport(28789, 32813)
+	inbound.local = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 28789}
+	inbound.remote = &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 32813}
+	oldResponse := newStubTransport(10552, 6000)
+	oldResponse.local = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 10552}
+	oldResponse.remote = &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 6000}
+	newResponse := newStubTransport(10553, 6000)
+	newResponse.local = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 10553}
+	newResponse.remote = &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 6000}
+	sess, err := Open(Config{}, primary)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	transports := []struct {
+		name      string
+		transport Transport
+	}{
+		{"inbound", inbound},
+		{"oldResponse", oldResponse},
+		{"newResponse", newResponse},
+	}
+	for _, item := range transports {
+		if _, err := sess.AddTransport(item.transport); err != nil {
+			t.Fatalf("AddTransport(%s) error = %v", item.name, err)
+		}
+	}
+	if _, err := sess.RouteResponses(inbound, newResponse); err != nil {
+		t.Fatalf("RouteResponses() error = %v", err)
+	}
+	req := Request{
+		Message:   newInboundRequest("MESSAGE", "call-1", "1 MESSAGE"),
+		Transport: inbound,
+		PeerAddr:  &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 32813},
+	}
+	req.Message.Headers.Set("Via", "SIP/2.0/UDP 198.51.100.10:6000;branch=z9hG4bK-1")
+
+	if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+		t.Fatalf("WriteStatus() error = %v", err)
+	}
+
+	if got := oldResponse.writeCount(); got != 0 {
+		t.Fatalf("old response write count = %d, want 0", got)
+	}
+	if got := newResponse.writeCount(); got != 1 {
+		t.Fatalf("new response write count = %d, want 1", got)
+	}
+}
+
 func TestResponseDestinationUsesTopViaReceivedAndPort(t *testing.T) {
 	tests := []struct {
 		name   string

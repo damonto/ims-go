@@ -147,7 +147,7 @@ func (s *Service) completePending(msg sip.Message, report rpMessage) bool {
 		return s.completePendingByCallID(msg, report, inReplyTo, now)
 	}
 	s.mu.Lock()
-	callID, entry, ok := s.pendingByReferenceLocked(report.Reference)
+	callID, entry, ok := s.pendingByReference(report.Reference)
 	if ok {
 		if submitReportRequiresInReplyTo(entry.segment) {
 			s.mu.Unlock()
@@ -173,7 +173,7 @@ func (s *Service) completePending(msg sip.Message, report rpMessage) bool {
 		s.mu.Unlock()
 		return true
 	}
-	callID, submitted, ok := s.submittedByReferenceLocked(report.Reference, now)
+	callID, submitted, ok := s.submittedByReference(report.Reference, now)
 	s.mu.Unlock()
 	if ok {
 		if submitReportRequiresInReplyTo(submitted.segment) {
@@ -253,7 +253,7 @@ func submitReportRequiresInReplyTo(segment outboundSegment) bool {
 	return isSIPURI(segment.to)
 }
 
-func (s *Service) pendingByReferenceLocked(ref byte) (string, pendingEntry, bool) {
+func (s *Service) pendingByReference(ref byte) (string, pendingEntry, bool) {
 	for callID, entry := range s.pending {
 		if entry.rpRef == ref {
 			return callID, entry, true
@@ -262,7 +262,7 @@ func (s *Service) pendingByReferenceLocked(ref byte) (string, pendingEntry, bool
 	return "", pendingEntry{}, false
 }
 
-func (s *Service) submittedByReferenceLocked(ref byte, now time.Time) (string, submittedEntry, bool) {
+func (s *Service) submittedByReference(ref byte, now time.Time) (string, submittedEntry, bool) {
 	var completedCallID string
 	var completed submittedEntry
 	for callID, entry := range s.submitted {
@@ -290,10 +290,10 @@ func (s *Service) submittedByReferenceLocked(ref byte, now time.Time) (string, s
 func (s *Service) knowsSubmit(ref byte, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, _, ok := s.pendingByReferenceLocked(ref); ok {
+	if _, _, ok := s.pendingByReference(ref); ok {
 		return true
 	}
-	_, _, ok := s.submittedByReferenceLocked(ref, now)
+	_, _, ok := s.submittedByReference(ref, now)
 	return ok
 }
 

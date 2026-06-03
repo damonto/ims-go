@@ -134,7 +134,7 @@ func TestTunnelMediaTransportConfiguresRemoteAfterPrepare(t *testing.T) {
 				t.Fatalf("RemoteAddr() = %v, want 192.0.2.10:50000", remote)
 			}
 			transport.mu.Lock()
-			rtcpRemote := transport.remoteMediaAddrLocked(true)
+			rtcpRemote := transport.remoteMediaAddr(true)
 			rtcpMux := transport.rtcpMux
 			transport.mu.Unlock()
 			if rtcpMux != tt.wantRTCPMux {

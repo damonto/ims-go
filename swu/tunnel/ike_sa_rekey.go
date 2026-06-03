@@ -150,13 +150,13 @@ func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if state := s.ikeSALifecycleLocked(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
+	if state := s.ikeSALifecycle(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
 		return ikeSARekeyState{}, nil, errIKESARekeyInProgress
 	}
-	if state := s.childSALifecycleLocked(); state == childSALifecycleRekeying || state == childSALifecyclePendingOutbound {
+	if state := s.childSALifecycle(); state == childSALifecycleRekeying || state == childSALifecyclePendingOutbound {
 		return ikeSARekeyState{}, nil, errChildSARekeyInProgress
 	}
-	if s.ikeSAExpiredLocked(time.Now()) {
+	if s.ikeSAExpired(time.Now()) {
 		return ikeSARekeyState{}, nil, fmt.Errorf("rekeying ike sa: %w", errIKESAExpired)
 	}
 	state := ikeSARekeyState{
@@ -415,7 +415,7 @@ func (s *Session) installIKESecurityAssociation(result ikeSARekeyResult) {
 	now := time.Now()
 	s.mu.Lock()
 	waiters := s.informWaiters
-	s.retireIKESALocked(now)
+	s.retireIKESA(now)
 	s.ike = result.crypto
 	s.ikeLocalInitiator = result.localInitiator
 	s.initiatorSPI = result.initiatorSPI
@@ -432,7 +432,7 @@ func (s *Session) installIKESecurityAssociation(result ikeSARekeyResult) {
 	s.ikeSAOutboundBytes = 0
 	s.pendingIKESA = ikeSARekeyResult{}
 	s.pendingIKESAReady = false
-	s.pruneRetiredIKESAsLocked(now)
+	s.pruneRetiredIKESAs(now)
 	s.informWaiters = make(map[ikeMessageKey]chan inboundIKE)
 	s.informResponses = make(map[uint32][]byte)
 	s.informResponseReqs = make(map[uint32][]byte)
@@ -480,7 +480,7 @@ func (s *Session) promotePendingIKESecurityAssociation() bool {
 	return true
 }
 
-func (s *Session) retireIKESALocked(now time.Time) {
+func (s *Session) retireIKESA(now time.Time) {
 	if s.ike == nil || s.initiatorSPI == 0 || s.responderSPI == 0 {
 		return
 	}
@@ -549,7 +549,7 @@ func (s *Session) removeRetiredIKESA(state informationalState) {
 	}
 }
 
-func (s *Session) pruneRetiredIKESAsLocked(now time.Time) {
+func (s *Session) pruneRetiredIKESAs(now time.Time) {
 	kept := s.retiredIKESAs[:0]
 	for _, retired := range s.retiredIKESAs {
 		if retired.expiresAt.IsZero() || now.Before(retired.expiresAt) {
@@ -648,7 +648,7 @@ func (s *Session) ikeSALifetimeState() (time.Time, time.Time) {
 func (s *Session) ikeSARekeyActive() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	state := s.ikeSALifecycleLocked()
+	state := s.ikeSALifecycle()
 	return state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall
 }
 

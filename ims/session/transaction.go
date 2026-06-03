@@ -468,7 +468,7 @@ func (s *Session) registerTransaction(tx *clientTransaction) error {
 		return fmt.Errorf("registering transaction: duplicate key %q", tx.key)
 	}
 	s.transactions[tx.key] = tx
-	s.notifyTransactionsChangedLocked()
+	s.notifyTransactionsChanged()
 	s.mu.Unlock()
 	return nil
 }
@@ -477,7 +477,7 @@ func (s *Session) unregisterTransaction(tx *clientTransaction) {
 	s.mu.Lock()
 	if current, ok := s.transactions[tx.key]; ok && current == tx {
 		delete(s.transactions, tx.key)
-		s.notifyTransactionsChangedLocked()
+		s.notifyTransactionsChanged()
 	}
 	s.mu.Unlock()
 }

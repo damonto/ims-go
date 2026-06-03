@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 type serverTransaction struct {
 	session   *Session
 	transport Transport
+	peer      net.Addr
 	request   sip.Message
 	key       string
 	reliable  bool
@@ -53,6 +55,7 @@ func newServerTransaction(s *Session, req Request) *serverTransaction {
 	return &serverTransaction{
 		session:    s,
 		transport:  req.Transport,
+		peer:       req.PeerAddr,
 		request:    msg,
 		key:        serverTransactionKey(msg),
 		reliable:   transportIsReliable(req.Transport),
@@ -113,7 +116,7 @@ func (s *Session) registerServerTransaction(tx *serverTransaction) {
 	s.mu.Lock()
 	if !s.closed {
 		s.serverTxs[tx.key] = tx
-		s.notifyTransactionsChangedLocked()
+		s.notifyTransactionsChanged()
 		registered = true
 	}
 	s.mu.Unlock()
@@ -130,7 +133,7 @@ func (s *Session) unregisterServerTransaction(tx *serverTransaction) {
 	s.mu.Lock()
 	if current, ok := s.serverTxs[tx.key]; ok && current == tx {
 		delete(s.serverTxs, tx.key)
-		s.notifyTransactionsChangedLocked()
+		s.notifyTransactionsChanged()
 	}
 	s.mu.Unlock()
 }
@@ -142,7 +145,7 @@ func (s *Session) clearServerTransactions() {
 		transactions = append(transactions, tx)
 	}
 	s.serverTxs = make(map[string]*serverTransaction)
-	s.notifyTransactionsChangedLocked()
+	s.notifyTransactionsChanged()
 	s.mu.Unlock()
 	for _, tx := range transactions {
 		tx.markTerminated()
@@ -218,7 +221,7 @@ func (tx *serverTransaction) recordResponse(resp sip.Message) {
 			tx.retryDelay = timers.T1
 			tx.retryTimer = time.AfterFunc(tx.retryDelay, tx.retransmitInviteFinal)
 		}
-		tx.startLifetimeTimerLocked(timers.TH)
+		tx.startLifetimeTimer(timers.TH)
 	}
 	tx.mu.Unlock()
 	stopTimer(tryingTimer)
@@ -257,6 +260,7 @@ func (tx *serverTransaction) sendAutomaticTrying() {
 	}
 	req := cloneSIPMessage(tx.request)
 	transport := tx.transport
+	peer := tx.peer
 	resp := sip.NewResponse(sipStatusTrying, "Trying")
 	resp.Headers = sip.ResponseHeaders(req, sipStatusTrying)
 	tx.session.applyResponseDecorator(&resp)
@@ -265,7 +269,7 @@ func (tx *serverTransaction) sendAutomaticTrying() {
 	tx.tryingTimer = nil
 	tx.mu.Unlock()
 
-	if err := tx.session.writeResponse(context.Background(), transport, req, resp); err != nil {
+	if err := tx.session.writeResponse(context.Background(), transport, peer, req, resp); err != nil {
 		tx.session.logger.Warn("sending automatic invite trying response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "err", err)
 	}
 }
@@ -275,11 +279,12 @@ func (tx *serverTransaction) retransmit(ctx context.Context) error {
 	resp := cloneSIPMessage(tx.lastResponse)
 	req := cloneSIPMessage(tx.request)
 	transport := tx.transport
+	peer := tx.peer
 	tx.mu.Unlock()
 	if resp.StartLine == "" {
 		return nil
 	}
-	return tx.session.writeResponse(ctx, transport, req, resp)
+	return tx.session.writeResponse(ctx, transport, peer, req, resp)
 }
 
 func (tx *serverTransaction) handleCancel(ctx context.Context) error {
@@ -288,6 +293,7 @@ func (tx *serverTransaction) handleCancel(ctx context.Context) error {
 	method := tx.method
 	req := cloneSIPMessage(tx.request)
 	transport := tx.transport
+	peer := tx.peer
 	tx.mu.Unlock()
 	if final || method != "INVITE" {
 		return nil
@@ -295,7 +301,7 @@ func (tx *serverTransaction) handleCancel(ctx context.Context) error {
 	resp := sip.NewResponse(sipStatusRequestTerminated, "Request Terminated")
 	resp.Headers = sip.ResponseHeaders(req, sipStatusRequestTerminated)
 	tx.session.applyResponseDecorator(&resp)
-	if err := tx.session.writeResponse(ctx, transport, req, resp); err != nil {
+	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
 		return err
 	}
 	tx.recordResponse(resp)
@@ -324,7 +330,7 @@ func (tx *serverTransaction) confirmInviteErrorACK() {
 			timeout = 0
 		}
 		if timeout > 0 {
-			tx.startLifetimeTimerLocked(timeout)
+			tx.startLifetimeTimer(timeout)
 		}
 		tx.mu.Unlock()
 		if timeout <= 0 {
@@ -346,12 +352,13 @@ func (tx *serverTransaction) retransmitInviteFinal() {
 	resp := cloneSIPMessage(tx.lastResponse)
 	req := cloneSIPMessage(tx.request)
 	transport := tx.transport
+	peer := tx.peer
 	timers := tx.session.cfg.TransactionTimers
 	tx.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), max(timers.T1, 250*time.Millisecond))
 	defer cancel()
-	if err := tx.session.writeResponse(ctx, transport, req, resp); err != nil {
+	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
 		tx.session.logger.Warn("retransmitting invite final response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "status", resp.StatusCode(), "err", err)
 	}
 
@@ -375,10 +382,10 @@ func (tx *serverTransaction) scheduleTermination(timeout time.Duration) {
 	}
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	tx.startLifetimeTimerLocked(timeout)
+	tx.startLifetimeTimer(timeout)
 }
 
-func (tx *serverTransaction) startLifetimeTimerLocked(timeout time.Duration) {
+func (tx *serverTransaction) startLifetimeTimer(timeout time.Duration) {
 	if tx.lifetimeTimer != nil {
 		tx.lifetimeTimer.Reset(timeout)
 		return

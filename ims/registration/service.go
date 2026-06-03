@@ -126,13 +126,14 @@ type Service struct {
 	regInfoVersion       int
 	regInfoVersionSet    bool
 
-	registrationEvents       chan error
-	subscribeRefreshRequests chan struct{}
-	registrationGate         chan struct{}
-	secureServerAttachments  []session.Attachment
-	drainTimers              []*attachmentDrain
-	activeSecureSAExpiresAt  time.Time
-	activeSecureSATimer      *time.Timer
+	registrationEvents        chan error
+	subscribeRefreshRequests  chan struct{}
+	registrationGate          chan struct{}
+	secureServerAttachments   []session.Attachment
+	secureResponseAttachments []session.Attachment
+	drainTimers               []*attachmentDrain
+	activeSecureSAExpiresAt   time.Time
+	activeSecureSATimer       *time.Timer
 }
 
 const defaultIMSExpires = 600000 * time.Second
@@ -196,10 +197,11 @@ type attachmentDrain struct {
 }
 
 type registerSecurity struct {
-	outbound           session.Transport
-	outboundAttachment session.Attachment
-	inboundTransports  []session.Transport
-	inboundAttachments []session.Attachment
+	outbound            session.Transport
+	outboundAttachment  session.Attachment
+	inboundTransports   []session.Transport
+	inboundAttachments  []session.Attachment
+	responseAttachments []session.Attachment
 }
 
 func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
@@ -1699,6 +1701,12 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 	}
 	cleanup = append(cleanup, inboundAttachments...)
 
+	responseAttachments, err := s.startSecureResponseTransportsWithKeys(ctx, verify, nextFlow, outbound, inboundTransports, ck, ik)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
+	cleanup = append(cleanup, responseAttachments...)
+
 	req := s.buildRegisterForFlow(auth, verify, nextFlow)
 	responseTransports := reauthResponseTransports(outbound, inboundTransports)
 	resp, err := s.sess.ExchangeWithTransport(ctx, outbound, req, session.ExchangeOptions{
@@ -1720,7 +1728,8 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 		return fmt.Errorf("refreshing IMS registration: promoting secure IMS transport: %w", err)
 	}
 	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
-	s.closeAttachmentsAfter(append(oldServerAttachments, oldAttachment), saDrainDelayBefore(oldExpiresAt, s.sess.TransactionTimers()))
+	oldResponseAttachments := s.replaceSecureResponseAttachments(responseAttachments)
+	s.closeAttachmentsAfter(append(append(oldServerAttachments, oldResponseAttachments...), oldAttachment), saDrainDelayBefore(oldExpiresAt, s.sess.TransactionTimers()))
 	s.commitReauthentication(challenge, nextFlow, ck, ik, password)
 	s.applyRegisterSuccess(resp)
 	committed = true
@@ -1821,6 +1830,8 @@ func (r *registerSecurity) close() {
 	closeAttachments(r.inboundAttachments)
 	r.inboundAttachments = nil
 	r.inboundTransports = nil
+	closeAttachments(r.responseAttachments)
+	r.responseAttachments = nil
 	if r.outboundAttachment != nil {
 		_ = r.outboundAttachment.Close()
 		r.outboundAttachment = nil
@@ -1846,6 +1857,14 @@ func (s *Service) replaceSecureServerAttachments(next []session.Attachment) []se
 	defer s.mu.Unlock()
 	old := s.secureServerAttachments
 	s.secureServerAttachments = append([]session.Attachment(nil), next...)
+	return old
+}
+
+func (s *Service) replaceSecureResponseAttachments(next []session.Attachment) []session.Attachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.secureResponseAttachments
+	s.secureResponseAttachments = append([]session.Attachment(nil), next...)
 	return old
 }
 
@@ -1928,6 +1947,8 @@ func (s *Service) closeSecureResources() {
 	s.mu.Lock()
 	attachments := s.secureServerAttachments
 	s.secureServerAttachments = nil
+	responseAttachments := s.secureResponseAttachments
+	s.secureResponseAttachments = nil
 	drains := s.drainTimers
 	s.drainTimers = nil
 	expiryTimer := s.activeSecureSATimer
@@ -1942,6 +1963,7 @@ func (s *Service) closeSecureResources() {
 		drain.close()
 	}
 	closeAttachments(attachments)
+	closeAttachments(responseAttachments)
 }
 
 func saDrainDelay(timers session.TransactionTimers) time.Duration {
@@ -2080,6 +2102,12 @@ func (s *Service) openRegisterSecurity(ctx context.Context) (*registerSecurity, 
 	}
 	registration.inboundTransports = inboundTransports
 	registration.inboundAttachments = inboundAttachments
+	responseAttachments, err := s.startSecureResponseTransportsWithKeys(ctx, verify, flow, outbound, inboundTransports, s.authCK, s.authIK)
+	if err != nil {
+		registration.close()
+		return nil, err
+	}
+	registration.responseAttachments = responseAttachments
 	return registration, nil
 }
 
@@ -2100,9 +2128,12 @@ func (s *Service) commitRegisterSecurity(registration *registerSecurity) error {
 		return fmt.Errorf("promoting secure IMS transport: %w", err)
 	}
 	oldServers := s.replaceSecureServerAttachments(registration.inboundAttachments)
+	oldResponses := s.replaceSecureResponseAttachments(registration.responseAttachments)
 	registration.outboundAttachment = nil
 	registration.inboundAttachments = nil
+	registration.responseAttachments = nil
 	closeAttachments(oldServers)
+	closeAttachments(oldResponses)
 	if oldPrimary != nil {
 		_ = oldPrimary.Close()
 	}
@@ -2114,6 +2145,28 @@ func sameSessionEndpoint(transport session.Transport, local, remote net.Addr) bo
 		return false
 	}
 	return sameAddr(transport.LocalAddr(), local) && sameAddr(transport.RemoteAddr(), remote)
+}
+
+func secureDatagramTransport(transports []session.Transport) session.Transport {
+	for _, transport := range transports {
+		if transport != nil && strings.EqualFold(sip.TransportToken(transport.LocalAddr()), "UDP") {
+			return transport
+		}
+	}
+	return nil
+}
+
+func sameSessionDatagramEndpoint(local, remote net.Addr, localPort, remotePort int) bool {
+	localUDP, ok := local.(*net.UDPAddr)
+	if !ok || localUDP == nil {
+		return false
+	}
+	remoteUDP, ok := remote.(*net.UDPAddr)
+	if !ok || remoteUDP == nil {
+		return false
+	}
+	return sameAddr(localUDP, &net.UDPAddr{IP: localUDP.IP, Port: localPort, Zone: localUDP.Zone}) &&
+		sameAddr(remoteUDP, &net.UDPAddr{IP: remoteUDP.IP, Port: remotePort, Zone: remoteUDP.Zone})
 }
 
 func sameAddr(left, right net.Addr) bool {
@@ -2222,6 +2275,37 @@ func (s *Service) startSecureServerTransportsWithKeys(ctx context.Context, verif
 		attachments = append(attachments, attachment)
 	}
 	return transports, attachments, nil
+}
+
+func (s *Service) startSecureResponseTransportsWithKeys(ctx context.Context, verify *security.Param, flow Flow, outbound session.Transport, inboundTransports []session.Transport, ck, ik []byte) ([]session.Attachment, error) {
+	if outbound == nil || strings.EqualFold(sip.TransportToken(outbound.LocalAddr()), "UDP") {
+		return nil, nil
+	}
+	if s.cfg.DialSecureUDP == nil {
+		return nil, nil
+	}
+	inboundDatagramTransport := secureDatagramTransport(inboundTransports)
+	if inboundDatagramTransport == nil {
+		return nil, nil
+	}
+	if sameSessionDatagramEndpoint(s.sess.LocalAddr(), s.sess.RemoteAddr(), flow.SecurityClient.PortC, verify.PortS) {
+		return nil, nil
+	}
+	responseTransport, err := s.cfg.DialSecureUDP(ctx, secureDatagramConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
+	if err != nil {
+		return nil, fmt.Errorf("dialing secure IMS datagram response transport: %w", err)
+	}
+	attachment, err := s.sess.AddTransport(responseTransport)
+	if err != nil {
+		responseTransport.Close()
+		return nil, fmt.Errorf("adding secure IMS datagram response transport: %w", err)
+	}
+	route, err := s.sess.RouteResponses(inboundDatagramTransport, responseTransport)
+	if err != nil {
+		_ = attachment.Close()
+		return nil, fmt.Errorf("routing secure IMS datagram responses: %w", err)
+	}
+	return []session.Attachment{attachment, route}, nil
 }
 
 func (s *Service) buildRegister(auth *security.Authorization, verify *security.Param) sip.Message {

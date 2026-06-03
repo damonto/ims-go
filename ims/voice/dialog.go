@@ -170,7 +170,7 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 	if isReliableProvisional(msg) {
 		c.mu.Lock()
 		var err error
-		needsPRACK, err = c.recordReliableProvisionalLocked(msg)
+		needsPRACK, err = c.recordReliableProvisional(msg)
 		if err != nil {
 			c.mu.Unlock()
 			return err

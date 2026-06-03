@@ -3619,9 +3619,9 @@ func TestCallHoldPreconditionReINVITEMarksQoSMet(t *testing.T) {
 					"a=des:qos mandatory local sendrecv\r\n" +
 					"a=des:qos optional remote sendrecv\r\n"),
 			}
-			body, err := call.localSDPWithDirectionLocked(mediaDirectionInactive)
+			body, err := call.localSDPWithDirection(mediaDirectionInactive)
 			if err != nil {
-				t.Fatalf("localSDPWithDirectionLocked() error = %v", err)
+				t.Fatalf("localSDPWithDirection() error = %v", err)
 			}
 			snap := dialogSnapshot{targetURI: "sip:remote@example.com", preconditions: true}
 			msg := snap.buildMediaReINVITE(2, sessionTimerState{}, body)

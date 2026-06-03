@@ -106,7 +106,7 @@ func (s *Session) beginConnect() (func(), error) {
 		s.mu.Unlock()
 		return nil, errors.New("already connected")
 	}
-	if err := s.disconnectedTunnelErrLocked(); err != nil {
+	if err := s.disconnectedTunnelErr(); err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("close and redial session: %w", err)
 	}

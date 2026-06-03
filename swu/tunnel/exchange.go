@@ -218,7 +218,7 @@ func (s *Session) writeProtectedWire(ctx context.Context, action string, crypto 
 	}
 	if protectedBytes != 0 {
 		s.mu.RLock()
-		expired := s.ikeSAByteExpiredLocked(protectedBytes)
+		expired := s.ikeSAByteExpired(protectedBytes)
 		s.mu.RUnlock()
 		if expired {
 			s.failSecurityAssociations(errIKESAExpired)

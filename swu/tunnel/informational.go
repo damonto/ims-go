@@ -321,12 +321,12 @@ type informationalAction struct {
 func (s *Session) currentInformationalState() informationalState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.currentInformationalStateLocked()
+	return s.currentInformationalStateSnapshot()
 }
 
-func (s *Session) currentInformationalStateLocked() informationalState {
-	ikeLifecycle := s.ikeSALifecycleLocked()
-	childLifecycle := s.childSALifecycleLocked()
+func (s *Session) currentInformationalStateSnapshot() informationalState {
+	ikeLifecycle := s.ikeSALifecycle()
+	childLifecycle := s.childSALifecycle()
 	return informationalState{
 		connected:         s.connected,
 		ike:               s.ike,
@@ -366,8 +366,8 @@ func (s *Session) informationalStateForPacket(packet ike.IKEPacket) (information
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	s.pruneRetiredIKESAsLocked(now)
-	state := s.currentInformationalStateLocked()
+	s.pruneRetiredIKESAs(now)
+	state := s.currentInformationalStateSnapshot()
 	if state.matches(packet) {
 		return state, true
 	}

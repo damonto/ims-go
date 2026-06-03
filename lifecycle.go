@@ -424,40 +424,40 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 	selectedPCSCF := firstPCSCFIP(pcscfIPs)
 	associations := swutransport.NewSecurityAssociations()
 	var transport imssession.Transport = tunnelDatagramTransport{session: setup.session}
+	setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
+		return swutransport.DialSecureUDP(ctx, setup.session, swutransport.SecureUDPConfig{
+			UDPConfig: swutransport.UDPConfig{
+				LocalPort:  cfg.LocalPort,
+				RemotePort: cfg.RemotePort,
+				RemoteIP:   selectedPCSCF,
+			},
+			OutboundSPI:   cfg.OutboundSPI,
+			InboundSPI:    cfg.InboundSPI,
+			Encryption:    cfg.Encryption,
+			EncryptionKey: cfg.EncryptionKey,
+			Integrity:     cfg.Integrity,
+			IntegrityKey:  cfg.IntegrityKey,
+			Associations:  associations,
+		})
+	}
+	setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
+		_ = ctx
+		return swutransport.ListenSecureUDP(setup.session, swutransport.SecureUDPConfig{
+			UDPConfig: swutransport.UDPConfig{
+				LocalPort:  cfg.LocalPort,
+				RemotePort: cfg.RemotePort,
+				RemoteIP:   selectedPCSCF,
+			},
+			OutboundSPI:   cfg.OutboundSPI,
+			InboundSPI:    cfg.InboundSPI,
+			Encryption:    cfg.Encryption,
+			EncryptionKey: cfg.EncryptionKey,
+			Integrity:     cfg.Integrity,
+			IntegrityKey:  cfg.IntegrityKey,
+			Associations:  associations,
+		})
+	}
 	if setup.imsCfg.Transport != "tcp" {
-		setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-			return swutransport.DialSecureUDP(ctx, setup.session, swutransport.SecureUDPConfig{
-				UDPConfig: swutransport.UDPConfig{
-					LocalPort:  cfg.LocalPort,
-					RemotePort: cfg.RemotePort,
-					RemoteIP:   selectedPCSCF,
-				},
-				OutboundSPI:   cfg.OutboundSPI,
-				InboundSPI:    cfg.InboundSPI,
-				Encryption:    cfg.Encryption,
-				EncryptionKey: cfg.EncryptionKey,
-				Integrity:     cfg.Integrity,
-				IntegrityKey:  cfg.IntegrityKey,
-				Associations:  associations,
-			})
-		}
-		setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-			_ = ctx
-			return swutransport.ListenSecureUDP(setup.session, swutransport.SecureUDPConfig{
-				UDPConfig: swutransport.UDPConfig{
-					LocalPort:  cfg.LocalPort,
-					RemotePort: cfg.RemotePort,
-					RemoteIP:   selectedPCSCF,
-				},
-				OutboundSPI:   cfg.OutboundSPI,
-				InboundSPI:    cfg.InboundSPI,
-				Encryption:    cfg.Encryption,
-				EncryptionKey: cfg.EncryptionKey,
-				Integrity:     cfg.Integrity,
-				IntegrityKey:  cfg.IntegrityKey,
-				Associations:  associations,
-			})
-		}
 		return transport, nil
 	}
 
@@ -492,23 +492,6 @@ func (c *Client) buildIMSTransport(setup *connectSetup, tunnelInfo swutunnel.Inf
 				RemotePort:      cfg.RemotePort,
 				RemoteIP:        selectedPCSCF,
 				DataACKTimeouts: configuredTCPDataACKTimeouts(cfg.DataACKTimeouts, setup.imsCfg.TCPDataACKTimeouts),
-			},
-			OutboundSPI:   cfg.OutboundSPI,
-			InboundSPI:    cfg.InboundSPI,
-			Encryption:    cfg.Encryption,
-			EncryptionKey: cfg.EncryptionKey,
-			Integrity:     cfg.Integrity,
-			IntegrityKey:  cfg.IntegrityKey,
-			Associations:  associations,
-		})
-	}
-	setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-		_ = ctx
-		return swutransport.ListenSecureUDP(setup.session, swutransport.SecureUDPConfig{
-			UDPConfig: swutransport.UDPConfig{
-				LocalPort:  cfg.LocalPort,
-				RemotePort: cfg.RemotePort,
-				RemoteIP:   selectedPCSCF,
 			},
 			OutboundSPI:   cfg.OutboundSPI,
 			InboundSPI:    cfg.InboundSPI,

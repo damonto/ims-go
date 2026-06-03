@@ -76,7 +76,7 @@ func TestTCPConnReserveSendSeqAcceptsFastACK(t *testing.T) {
 	}
 
 	conn.mu.Lock()
-	conn.noteAckLocked(wantAck)
+	conn.noteAck(wantAck)
 	got := conn.ackedSeq
 	conn.mu.Unlock()
 	if got != wantAck {
@@ -296,7 +296,7 @@ func TestTCPConnACKWindow(t *testing.T) {
 				associations: NewSecurityAssociations(),
 			}
 			conn.mu.Lock()
-			conn.noteAckLocked(tt.ack)
+			conn.noteAck(tt.ack)
 			got := conn.ackedSeq
 			conn.mu.Unlock()
 			if got != tt.wantAcked {
@@ -312,12 +312,12 @@ func TestTCPConnIgnoresAckNumberWithoutACKFlag(t *testing.T) {
 	conn.ackedSeq = ^uint32(0) - 4
 
 	conn.mu.Lock()
-	_, err := conn.handleSegmentLocked(packet.TCPSegment{Seq: 2001, Ack: 3})
+	_, err := conn.processSegment(packet.TCPSegment{Seq: 2001, Ack: 3})
 	got := conn.ackedSeq
 	conn.mu.Unlock()
 
 	if err != nil {
-		t.Fatalf("handleSegmentLocked() error = %v", err)
+		t.Fatalf("processSegment() error = %v", err)
 	}
 	if got != ^uint32(0)-4 {
 		t.Fatalf("ackedSeq = %d, want %d", got, ^uint32(0)-4)
@@ -360,7 +360,7 @@ func TestTCPConnActiveHandshakeRequiresValidSYNACK(t *testing.T) {
 			conn.recvSeq = 0
 
 			conn.mu.Lock()
-			response, err := conn.handleSegmentLocked(packet.TCPSegment{
+			response, err := conn.processSegment(packet.TCPSegment{
 				Seq:   2000,
 				Ack:   tt.ack,
 				Flags: packet.TCPFlagSYN | packet.TCPFlagACK,
@@ -371,7 +371,7 @@ func TestTCPConnActiveHandshakeRequiresValidSYNACK(t *testing.T) {
 			conn.mu.Unlock()
 
 			if err != nil {
-				t.Fatalf("handleSegmentLocked() error = %v", err)
+				t.Fatalf("processSegment() error = %v", err)
 			}
 			if established != tt.wantEstablished {
 				t.Fatalf("established = %t, want %t", established, tt.wantEstablished)
@@ -399,7 +399,7 @@ func TestTCPConnPassiveHandshakeProcessesACKPayload(t *testing.T) {
 	payload := "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"
 
 	conn.mu.Lock()
-	response, err := conn.handleSegmentLocked(packet.TCPSegment{
+	response, err := conn.processSegment(packet.TCPSegment{
 		Seq:     2001,
 		Ack:     1001,
 		Flags:   packet.TCPFlagACK | packet.TCPFlagPSH,
@@ -411,7 +411,7 @@ func TestTCPConnPassiveHandshakeProcessesACKPayload(t *testing.T) {
 	conn.mu.Unlock()
 
 	if err != nil {
-		t.Fatalf("handleSegmentLocked() error = %v", err)
+		t.Fatalf("processSegment() error = %v", err)
 	}
 	if !established {
 		t.Fatal("established = false, want true")
@@ -472,7 +472,7 @@ func TestTCPConnIgnoresOutOfOrderFIN(t *testing.T) {
 	conn := newEstablishedTCPConnForTest(t)
 
 	conn.mu.Lock()
-	response, err := conn.handleSegmentLocked(packet.TCPSegment{
+	response, err := conn.processSegment(packet.TCPSegment{
 		Seq:   2002,
 		Ack:   1001,
 		Flags: packet.TCPFlagFIN | packet.TCPFlagACK,
@@ -482,7 +482,7 @@ func TestTCPConnIgnoresOutOfOrderFIN(t *testing.T) {
 	conn.mu.Unlock()
 
 	if err != nil {
-		t.Fatalf("handleSegmentLocked() error = %v", err)
+		t.Fatalf("processSegment() error = %v", err)
 	}
 	if closed {
 		t.Fatal("closed = true, want false")
@@ -516,7 +516,7 @@ func TestTCPConnConsumesFINSequence(t *testing.T) {
 			conn := newEstablishedTCPConnForTest(t)
 
 			conn.mu.Lock()
-			response, err := conn.handleSegmentLocked(packet.TCPSegment{
+			response, err := conn.processSegment(packet.TCPSegment{
 				Seq:     2001,
 				Ack:     1001,
 				Flags:   packet.TCPFlagPSH | packet.TCPFlagACK | packet.TCPFlagFIN,
@@ -533,7 +533,7 @@ func TestTCPConnConsumesFINSequence(t *testing.T) {
 				t.Fatalf("recvSeq = %d, want %d", recvSeq, wantAck)
 			}
 			if err == nil || !strings.Contains(err.Error(), "peer closed connection") {
-				t.Fatalf("handleSegmentLocked() error = %v, want peer closed connection", err)
+				t.Fatalf("processSegment() error = %v, want peer closed connection", err)
 			}
 			if tt.wantMessage {
 				select {
@@ -560,7 +560,7 @@ func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
 	payload := "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"
 
 	conn.mu.Lock()
-	_, err := conn.handleSegmentLocked(packet.TCPSegment{
+	_, err := conn.processSegment(packet.TCPSegment{
 		Seq:     2001,
 		Ack:     1001,
 		Flags:   packet.TCPFlagPSH | packet.TCPFlagACK | packet.TCPFlagFIN,
@@ -568,7 +568,7 @@ func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
 	})
 	conn.mu.Unlock()
 	if err == nil {
-		t.Fatal("handleSegmentLocked() error = nil, want peer close")
+		t.Fatal("processSegment() error = nil, want peer close")
 	}
 	conn.closeWithError(err)
 

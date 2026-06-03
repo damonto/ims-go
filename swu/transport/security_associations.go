@@ -39,7 +39,7 @@ func (s *SecurityAssociations) sealESP(codec esp.Codec, nextHeader byte, payload
 	key := newAssociationKey(codec)
 
 	s.mu.Lock()
-	s.initLocked()
+	s.ensureState()
 	outbound := s.outbound[key]
 	if outbound == nil {
 		outbound = &outboundAssociation{}
@@ -61,7 +61,7 @@ func (s *SecurityAssociations) acceptInboundESP(codec esp.Codec, sequence uint32
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.initLocked()
+	s.ensureState()
 	inbound := s.inbound[key]
 	if inbound == nil {
 		inbound = &inboundAssociation{}
@@ -70,7 +70,7 @@ func (s *SecurityAssociations) acceptInboundESP(codec esp.Codec, sequence uint32
 	return inbound.replay.Accept(sequence)
 }
 
-func (s *SecurityAssociations) initLocked() {
+func (s *SecurityAssociations) ensureState() {
 	if s.outbound == nil {
 		s.outbound = make(map[associationKey]*outboundAssociation)
 	}

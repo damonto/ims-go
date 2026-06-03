@@ -95,7 +95,7 @@ func (c *Call) beginLocalHoldModification(action string, hold bool, direction me
 		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, nil
 	}
 
-	body, err := c.localSDPWithDirectionLocked(direction)
+	body, err := c.localSDPWithDirection(direction)
 	if err != nil {
 		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, err
 	}
@@ -108,7 +108,7 @@ func (c *Call) beginLocalHoldModification(action string, hold bool, direction me
 	return c.dialogSnapshot(), c.sessionTimer, body, c.hold, append([]byte(nil), c.localSDP...), clearPending, nil
 }
 
-func (c *Call) localSDPWithDirectionLocked(direction mediaDirection) ([]byte, error) {
+func (c *Call) localSDPWithDirection(direction mediaDirection) ([]byte, error) {
 	if len(c.localSDP) != 0 {
 		return sdpWithDirection(c.localSDP, direction, c.service.cfg.Preconditions), nil
 	}

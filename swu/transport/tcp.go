@@ -284,7 +284,7 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 
 	t.mu.Lock()
 	if t.closed {
-		err := t.closedErrLocked("writing tcp packet: transport is closed")
+		err := t.terminalErrOr("writing tcp packet: transport is closed")
 		t.mu.Unlock()
 		return err
 	}
@@ -299,7 +299,7 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 		}
 		t.mu.Lock()
 		if t.closed {
-			err := t.closedErrLocked("writing tcp packet: transport is closed")
+			err := t.terminalErrOr("writing tcp packet: transport is closed")
 			t.mu.Unlock()
 			return err
 		}
@@ -532,7 +532,7 @@ func (t *TCPConn) waitForAck(ctx context.Context, want uint32) error {
 	}
 }
 
-func (t *TCPConn) noteAckLocked(ack uint32) {
+func (t *TCPConn) noteAck(ack uint32) {
 	if !tcpSeqAfter(ack, t.ackedSeq) || tcpSeqAfter(ack, t.sendSeq) {
 		return
 	}
@@ -547,7 +547,7 @@ func (t *TCPConn) reserveSendSeq(payloadLen int) (uint32, uint32, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
-		return 0, 0, t.closedErrLocked("writing tcp packet: transport is closed")
+		return 0, 0, t.terminalErrOr("writing tcp packet: transport is closed")
 	}
 	seq := t.sendSeq
 	nextSeq := seq + uint32(payloadLen)
@@ -565,7 +565,7 @@ func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.Ca
 
 func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 	t.mu.Lock()
-	response, terminalErr := t.handleSegmentLocked(segment)
+	response, terminalErr := t.processSegment(segment)
 	t.mu.Unlock()
 
 	if response.flags != 0 {
@@ -581,7 +581,7 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 	}
 }
 
-func (t *TCPConn) handleSegmentLocked(segment packet.TCPSegment) (tcpSegmentResponse, error) {
+func (t *TCPConn) processSegment(segment packet.TCPSegment) (tcpSegmentResponse, error) {
 	if t.closed {
 		return tcpSegmentResponse{}, nil
 	}
@@ -600,20 +600,20 @@ func (t *TCPConn) handleSegmentLocked(segment packet.TCPSegment) (tcpSegmentResp
 				return tcpSegmentResponse{seq: synSeq, ack: ack, flags: packet.TCPFlagSYN | packet.TCPFlagACK}, nil
 			}
 			if segment.Flags&packet.TCPFlagACK != 0 && segment.Ack == t.sendSeq {
-				t.noteAckLocked(segment.Ack)
+				t.noteAck(segment.Ack)
 				t.established = true
 				t.signalReady()
 				if len(segment.Payload) == 0 && segment.Flags&packet.TCPFlagFIN == 0 {
 					return tcpSegmentResponse{}, nil
 				}
-				return t.handleEstablishedSegmentLocked(segment)
+				return t.processEstablishedSegment(segment)
 			}
 		} else if segment.Flags&(packet.TCPFlagSYN|packet.TCPFlagACK) == packet.TCPFlagSYN|packet.TCPFlagACK {
 			if segment.Ack != t.sendSeq {
 				return tcpSegmentResponse{}, nil
 			}
 			t.recvSeq = segment.Seq + 1
-			t.noteAckLocked(segment.Ack)
+			t.noteAck(segment.Ack)
 			t.established = true
 			t.signalReady()
 			ack := t.recvSeq
@@ -622,12 +622,12 @@ func (t *TCPConn) handleSegmentLocked(segment packet.TCPSegment) (tcpSegmentResp
 		return tcpSegmentResponse{}, nil
 	}
 
-	return t.handleEstablishedSegmentLocked(segment)
+	return t.processEstablishedSegment(segment)
 }
 
-func (t *TCPConn) handleEstablishedSegmentLocked(segment packet.TCPSegment) (tcpSegmentResponse, error) {
+func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegmentResponse, error) {
 	if segment.Flags&packet.TCPFlagACK != 0 {
-		t.noteAckLocked(segment.Ack)
+		t.noteAck(segment.Ack)
 	}
 	fin := segment.Flags&packet.TCPFlagFIN != 0
 	if len(segment.Payload) == 0 && !fin {
@@ -681,10 +681,10 @@ func (t *TCPConn) signalReady() {
 func (t *TCPConn) closedErr(fallback string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.closedErrLocked(fallback)
+	return t.terminalErrOr(fallback)
 }
 
-func (t *TCPConn) closedErrLocked(fallback string) error {
+func (t *TCPConn) terminalErrOr(fallback string) error {
 	if t.terminalErr != nil {
 		return t.terminalErr
 	}
@@ -698,7 +698,7 @@ func (t *TCPConn) readyResult(action string) error {
 		return nil
 	}
 	if t.closed {
-		return fmt.Errorf("%s: %w", action, t.closedErrLocked("transport is closed"))
+		return fmt.Errorf("%s: %w", action, t.terminalErrOr("transport is closed"))
 	}
 	return fmt.Errorf("%s: transport is not established", action)
 }

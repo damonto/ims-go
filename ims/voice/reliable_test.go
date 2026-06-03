@@ -202,18 +202,18 @@ func TestRecordReliableProvisionalRSeq(t *testing.T) {
 	call := &Call{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := call.recordReliableProvisionalLocked(tt.msg)
+			got, err := call.recordReliableProvisional(tt.msg)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("recordReliableProvisionalLocked() error = nil, want non-nil")
+					t.Fatal("recordReliableProvisional() error = nil, want non-nil")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("recordReliableProvisionalLocked() error = %v", err)
+				t.Fatalf("recordReliableProvisional() error = %v", err)
 			}
 			if got != tt.want {
-				t.Fatalf("recordReliableProvisionalLocked() = %t, want %t", got, tt.want)
+				t.Fatalf("recordReliableProvisional() = %t, want %t", got, tt.want)
 			}
 		})
 	}

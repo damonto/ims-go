@@ -56,6 +56,7 @@ type Config struct {
 type Request struct {
 	Message   sip.Message
 	Transport Transport
+	PeerAddr  net.Addr
 }
 
 const (
@@ -95,25 +96,26 @@ type Session struct {
 	cfg    Config
 	logger *slog.Logger
 
-	mu           sync.Mutex
-	sendMu       sync.Mutex
-	readWG       sync.WaitGroup
-	primary      Transport
-	aux          []Transport
-	active       map[Transport]struct{}
-	runCtx       context.Context
-	inboundCh    chan<- inboundMessage
-	dialogs      map[string][]*dialogEntry
-	transactions map[string]*clientTransaction
-	serverTxs    map[string]*serverTransaction
-	txChanged    chan struct{}
-	handlers     []*handlerEntry
-	startedCh    chan struct{}
-	closedCh     chan struct{}
-	closed       bool
-	started      bool
-	ready        bool
-	running      bool
+	mu             sync.Mutex
+	sendMu         sync.Mutex
+	readWG         sync.WaitGroup
+	primary        Transport
+	aux            []Transport
+	active         map[Transport]struct{}
+	responseRoutes map[Transport]Transport
+	runCtx         context.Context
+	inboundCh      chan<- inboundMessage
+	dialogs        map[string][]*dialogEntry
+	transactions   map[string]*clientTransaction
+	serverTxs      map[string]*serverTransaction
+	txChanged      chan struct{}
+	handlers       []*handlerEntry
+	startedCh      chan struct{}
+	closedCh       chan struct{}
+	closed         bool
+	started        bool
+	ready          bool
+	running        bool
 
 	responseDecorator func(*sip.Message)
 	notifyOnce        sync.Once
@@ -131,9 +133,17 @@ type transportAttachment struct {
 	closed    bool
 }
 
+type responseRouteAttachment struct {
+	session *Session
+	from    Transport
+	to      Transport
+	closed  bool
+}
+
 type inboundMessage struct {
 	msg       sip.Message
 	transport Transport
+	peer      net.Addr
 	err       error
 }
 
@@ -150,16 +160,17 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		return nil, fmt.Errorf("opening session: %w", err)
 	}
 	return &Session{
-		cfg:          cfg,
-		logger:       cfg.Logger.With("component", "ims-session"),
-		primary:      primary,
-		active:       map[Transport]struct{}{primary: {}},
-		dialogs:      make(map[string][]*dialogEntry),
-		transactions: make(map[string]*clientTransaction),
-		serverTxs:    make(map[string]*serverTransaction),
-		txChanged:    make(chan struct{}),
-		startedCh:    make(chan struct{}),
-		closedCh:     make(chan struct{}),
+		cfg:            cfg,
+		logger:         cfg.Logger.With("component", "ims-session"),
+		primary:        primary,
+		active:         map[Transport]struct{}{primary: {}},
+		responseRoutes: make(map[Transport]Transport),
+		dialogs:        make(map[string][]*dialogEntry),
+		transactions:   make(map[string]*clientTransaction),
+		serverTxs:      make(map[string]*serverTransaction),
+		txChanged:      make(chan struct{}),
+		startedCh:      make(chan struct{}),
+		closedCh:       make(chan struct{}),
 	}, nil
 }
 
@@ -206,7 +217,7 @@ func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transpor
 	}
 	for {
 		s.mu.Lock()
-		if s.transportsIdleLocked(watched) {
+		if s.transportsIdle(watched) {
 			s.mu.Unlock()
 			return nil
 		}
@@ -266,6 +277,29 @@ func (s *Session) AddTransport(t Transport) (Attachment, error) {
 		s.startReadLoop(runCtx, t, inboundCh)
 	}
 	return &transportAttachment{session: s, transport: t}, nil
+}
+
+// RouteResponses binds requests received on one transport to responses sent on another.
+func (s *Session) RouteResponses(from, to Transport) (Attachment, error) {
+	if from == nil {
+		return nil, errors.New("routing responses: source transport is nil")
+	}
+	if to == nil {
+		return nil, errors.New("routing responses: response transport is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("routing responses: session is closed")
+	}
+	if _, ok := s.active[from]; !ok {
+		return nil, errors.New("routing responses: source transport is not active")
+	}
+	if _, ok := s.active[to]; !ok {
+		return nil, errors.New("routing responses: response transport is not active")
+	}
+	s.responseRoutes[from] = to
+	return &responseRouteAttachment{session: s, from: from, to: to}, nil
 }
 
 func (s *Session) ReplacePrimary(t Transport) error {
@@ -414,7 +448,7 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 		return err
 	}
 	s.applyResponseDecorator(&resp)
-	if err := s.writeResponse(ctx, req.Transport, req.Message, resp); err != nil {
+	if err := s.writeResponse(ctx, req.Transport, req.PeerAddr, req.Message, resp); err != nil {
 		return err
 	}
 	s.recordServerTransactionResponse(req, resp)
@@ -492,7 +526,7 @@ func (s *Session) Run(ctx context.Context) error {
 			}
 			s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
 			if inbound.msg.IsRequest() {
-				if err := s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport}); err != nil {
+				if err := s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport, PeerAddr: inbound.peer}); err != nil {
 					return err
 				}
 				continue
@@ -557,9 +591,10 @@ func (s *Session) CloseContext(ctx context.Context) error {
 	primary := s.primary
 	aux := append([]Transport(nil), s.aux...)
 	transports := uniqueTransports(append(aux, primary))
-	handlers := s.handlerSnapshotLocked()
+	handlers := s.handlerSnapshotCopy()
 	closedCh := s.closedCh
 	s.active = make(map[Transport]struct{})
+	s.responseRoutes = make(map[Transport]Transport)
 	s.mu.Unlock()
 	close(closedCh)
 
@@ -648,7 +683,7 @@ func responseMatchesRequestTransaction(req, resp sip.Message) bool {
 }
 
 func readTransportMessage(ctx context.Context, transport Transport) (inboundMessage, error) {
-	packet, _, err := transport.ReadPacket(ctx)
+	packet, peer, err := transport.ReadPacket(ctx)
 	if err != nil {
 		return inboundMessage{}, err
 	}
@@ -656,7 +691,7 @@ func readTransportMessage(ctx context.Context, transport Transport) (inboundMess
 	if err != nil {
 		return inboundMessage{}, err
 	}
-	return inboundMessage{msg: msg, transport: transport}, nil
+	return inboundMessage{msg: msg, transport: transport, peer: peer}, nil
 }
 
 func exchangeReadTransports(requestTransport Transport, responseTransports []Transport) []Transport {
@@ -688,7 +723,7 @@ func (s *Session) startBootstrapReadLoop(ctx context.Context, transport Transpor
 func (s *Session) dispatchBootstrapInbound(ctx context.Context, inbound inboundMessage) error {
 	s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "sip_message", string(inbound.msg.Bytes()))
 	if inbound.msg.IsRequest() {
-		return s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport})
+		return s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport, PeerAddr: inbound.peer})
 	}
 	if !s.dispatchResponse(inbound) {
 		return s.handleInboundResponse(ctx, inbound.msg)
@@ -791,14 +826,54 @@ func (s *Session) writePacketTo(ctx context.Context, transport Transport, data [
 	return writer.WritePacketTo(ctx, data, addr)
 }
 
-func (s *Session) writeResponse(ctx context.Context, transport Transport, req sip.Message, resp sip.Message) error {
+func (s *Session) writeResponse(ctx context.Context, transport Transport, peer net.Addr, req sip.Message, resp sip.Message) error {
 	data, err := messagePacket(resp)
 	if err != nil {
 		return fmt.Errorf("encoding %d response: %w", resp.StatusCode(), err)
 	}
-	target := responseDestination(transport.RemoteAddr(), req.Header("Via"))
+	remote := peer
+	if remote == nil {
+		remote = transport.RemoteAddr()
+	}
+	target := responseDestination(remote, req.Header("Via"))
+	if peer != nil {
+		transport = s.responseTransport(transport, target)
+	}
 	s.logger.Debug("sip message", "direction", "send", "start_line", resp.StartLine, "sip_message", string(data), "target_addr", target)
 	return s.writePacketTo(ctx, transport, data, target)
+}
+
+func (s *Session) responseTransport(fallback Transport, target net.Addr) Transport {
+	if fallback != nil {
+		s.mu.Lock()
+		routed := s.responseRoutes[fallback]
+		_, active := s.active[routed]
+		s.mu.Unlock()
+		if active && (target == nil || sameAddr(routed.RemoteAddr(), target)) {
+			return routed
+		}
+	}
+	if target == nil {
+		return fallback
+	}
+	if fallback != nil && sameAddr(fallback.RemoteAddr(), target) {
+		return fallback
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for transport := range s.active {
+		if sameAddr(transport.RemoteAddr(), target) {
+			return transport
+		}
+	}
+	return fallback
+}
+
+func sameAddr(left, right net.Addr) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Network() == right.Network() && left.String() == right.String()
 }
 
 func messagePacket(msg sip.Message) ([]byte, error) {
@@ -888,10 +963,10 @@ func stripHostBrackets(host string) string {
 func (s *Session) handlerSnapshot() []*handlerEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.handlerSnapshotLocked()
+	return s.handlerSnapshotCopy()
 }
 
-func (s *Session) handlerSnapshotLocked() []*handlerEntry {
+func (s *Session) handlerSnapshotCopy() []*handlerEntry {
 	snapshot := make([]*handlerEntry, 0, len(s.handlers))
 	for _, entry := range s.handlers {
 		if entry.closed {
@@ -951,14 +1026,15 @@ func (s *Session) removeFailedAuxTransport(transport Transport) bool {
 		return true
 	}
 	delete(s.active, transport)
+	s.removeResponseRoutesFor(transport)
 	s.aux = removeTransport(s.aux, transport)
-	s.notifyTransactionsChangedLocked()
+	s.notifyTransactionsChanged()
 	s.mu.Unlock()
 	_ = transport.Close()
 	return true
 }
 
-func (s *Session) transportsIdleLocked(transports map[Transport]struct{}) bool {
+func (s *Session) transportsIdle(transports map[Transport]struct{}) bool {
 	for _, tx := range s.transactions {
 		if _, ok := transports[tx.transport]; ok {
 			return false
@@ -972,7 +1048,7 @@ func (s *Session) transportsIdleLocked(transports map[Transport]struct{}) bool {
 	return true
 }
 
-func (s *Session) notifyTransactionsChangedLocked() {
+func (s *Session) notifyTransactionsChanged() {
 	close(s.txChanged)
 	s.txChanged = make(chan struct{})
 }
@@ -1034,6 +1110,7 @@ func (a *transportAttachment) Close() error {
 	}
 	a.closed = true
 	delete(a.session.active, a.transport)
+	a.session.removeResponseRoutesFor(a.transport)
 	a.session.aux = removeTransport(a.session.aux, a.transport)
 	a.session.mu.Unlock()
 	return a.transport.Close()
@@ -1041,4 +1118,25 @@ func (a *transportAttachment) Close() error {
 
 func (a *transportAttachment) Transport() Transport {
 	return a.transport
+}
+
+func (a *responseRouteAttachment) Close() error {
+	a.session.mu.Lock()
+	defer a.session.mu.Unlock()
+	if a.closed {
+		return nil
+	}
+	a.closed = true
+	if a.session.responseRoutes[a.from] == a.to {
+		delete(a.session.responseRoutes, a.from)
+	}
+	return nil
+}
+
+func (s *Session) removeResponseRoutesFor(transport Transport) {
+	for from, to := range s.responseRoutes {
+		if from == transport || to == transport {
+			delete(s.responseRoutes, from)
+		}
+	}
 }

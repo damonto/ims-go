@@ -2423,6 +2423,125 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 	}
 }
 
+func TestRegisterKeepsUDPResponseTransportForTCPFlow(t *testing.T) {
+	initial := newTCPTransport(5062, 5060)
+	outboundTCP := newTCPTransport(10553, 6000)
+	inboundTCP := newTCPTransport(28789, 32813)
+	inboundUDP := newUDPTransport(28789, 32813)
+	responseUDP := newUDPTransport(10553, 6000)
+
+	var responseCfg session.SecureUDPConfig
+	dialUDPCount := 0
+	svc := newTestService(t, Config{
+		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			return outboundTCP, nil
+		},
+		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			dialUDPCount++
+			responseCfg = cfg
+			return responseUDP, nil
+		},
+		ListenSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			return inboundTCP, nil
+		},
+		ListenSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			return inboundUDP, nil
+		},
+	}, initial, stubCard{})
+
+	initial.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 32813))
+	}
+	outboundTCP.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		outboundTCP.queue(newResponse(req, 200, "OK", sip.Header{Name: "Authentication-Info", Value: `nextnonce="` + testNonce + `"`}))
+	}
+
+	if err := svc.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if dialUDPCount != 1 {
+		t.Fatalf("DialSecureUDP calls = %d, want 1", dialUDPCount)
+	}
+	flow := svc.CurrentFlow()
+	if responseCfg.LocalPort != flow.SecurityClient.PortC {
+		t.Fatalf("response local port = %d, want UE protected client port %d", responseCfg.LocalPort, flow.SecurityClient.PortC)
+	}
+	if responseCfg.RemotePort != flow.SecurityVerify.PortS {
+		t.Fatalf("response remote port = %d, want P-CSCF protected server port %d", responseCfg.RemotePort, flow.SecurityVerify.PortS)
+	}
+	if responseCfg.OutboundSPI != flow.SecurityVerify.SPIS || responseCfg.InboundSPI != flow.SecurityClient.SPIC {
+		t.Fatalf("response SPIs = outbound %d inbound %d, want %d/%d", responseCfg.OutboundSPI, responseCfg.InboundSPI, flow.SecurityVerify.SPIS, flow.SecurityClient.SPIC)
+	}
+	svc.mu.Lock()
+	responseAttachments := len(svc.secureResponseAttachments)
+	svc.mu.Unlock()
+	if responseAttachments != 2 {
+		t.Fatalf("secure response attachments = %d, want 2", responseAttachments)
+	}
+	msg := sip.NewRequest("MESSAGE", "sip:user@example.net")
+	msg.Headers.Add("Via", "SIP/2.0/UDP 127.0.0.1:6000;branch=z9hG4bK-submit-report")
+	msg.Headers.Add("Call-ID", "submit-report-call")
+	msg.Headers.Add("From", "<sip:one.att.net>;tag=network")
+	msg.Headers.Add("To", "<sip:user@example.net>")
+	msg.Headers.Add("CSeq", "1 MESSAGE")
+	req := session.Request{Message: msg, Transport: inboundUDP, PeerAddr: inboundUDP.RemoteAddr()}
+	if err := svc.sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+		t.Fatalf("WriteStatus() error = %v", err)
+	}
+	if got := countWrites(inboundUDP); got != 0 {
+		t.Fatalf("inbound UDP writes = %d, want 0", got)
+	}
+	if got := countWrites(responseUDP); got != 1 {
+		t.Fatalf("response UDP writes = %d, want 1", got)
+	}
+}
+
+func TestSecureResponseTransportSkipsDuplicateSessionEndpoint(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "duplicates session udp endpoint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newUDPTransport(10553, 6000)
+			outboundTCP := newTCPTransport(10553, 6000)
+			responseUDP := newUDPTransport(10553, 6000)
+			dialUDPCount := 0
+			svc := newTestService(t, Config{
+				DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+					dialUDPCount++
+					return responseUDP, nil
+				},
+			}, primary, stubCard{})
+			verify := security.Param{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", PortS: 6000, SPIS: 20}
+			flow := Flow{
+				SecurityClient: security.Param{PortC: 10553, SPIC: 10},
+				SecurityVerify: &verify,
+			}
+
+			attachments, err := svc.startSecureResponseTransportsWithKeys(context.Background(), &verify, flow, outboundTCP, []session.Transport{newUDPTransport(28789, 32813)}, []byte("ck"), []byte("ik"))
+			if err != nil {
+				t.Fatalf("startSecureResponseTransportsWithKeys() error = %v", err)
+			}
+			if len(attachments) != 0 {
+				t.Fatalf("attachments = %d, want 0", len(attachments))
+			}
+			if dialUDPCount != 0 {
+				t.Fatalf("DialSecureUDP calls = %d, want 0", dialUDPCount)
+			}
+			responseUDP.mu.Lock()
+			closeCount := responseUDP.closeCount
+			responseUDP.mu.Unlock()
+			if closeCount != 0 {
+				t.Fatalf("response transport closes = %d, want 0", closeCount)
+			}
+		})
+	}
+}
+
 func TestRefreshUsesAuthenticationInfoNextNonce(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})

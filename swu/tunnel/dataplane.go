@@ -29,7 +29,7 @@ func (s *Session) WritePacket(ctx context.Context, data []byte) error {
 	}
 	s.mu.RLock()
 	connected := s.connected
-	tunnelErr := s.disconnectedTunnelErrLocked()
+	tunnelErr := s.disconnectedTunnelErr()
 	innerLocal := cloneUDPAddr(s.innerLocal)
 	innerRemote := cloneUDPAddr(s.innerRemote)
 	outerRemote := cloneUDPAddr(s.outerRemote)
@@ -58,7 +58,7 @@ func (s *Session) prepareInnerWrite(payloadLen int) (innerWriteState, error) {
 	}
 	s.mu.Lock()
 	if !s.connected {
-		if err := s.disconnectedTunnelErrLocked(); err != nil {
+		if err := s.disconnectedTunnelErr(); err != nil {
 			s.mu.Unlock()
 			return innerWriteState{}, fmt.Errorf("writing packet: %w", err)
 		}
@@ -69,7 +69,7 @@ func (s *Session) prepareInnerWrite(payloadLen int) (innerWriteState, error) {
 		}
 		return innerWriteState{outer: outer}, nil
 	}
-	if s.childSAExpiredLocked(time.Now()) {
+	if s.childSAExpired(time.Now()) {
 		s.mu.Unlock()
 		s.discardChildSecurityAssociations(errChildSAExpired)
 		return innerWriteState{}, fmt.Errorf("writing packet: %w", errChildSAExpired)
@@ -80,7 +80,7 @@ func (s *Session) prepareInnerWrite(payloadLen int) (innerWriteState, error) {
 		s.mu.Unlock()
 		return innerWriteState{}, fmt.Errorf("writing packet: %w", err)
 	}
-	if s.childSAByteExpiredLocked(protectedBytes) {
+	if s.childSAByteExpired(protectedBytes) {
 		s.mu.Unlock()
 		s.discardChildSecurityAssociations(errChildSAExpired)
 		return innerWriteState{}, fmt.Errorf("writing packet: %w", errChildSAExpired)
@@ -257,7 +257,7 @@ type inboundESPContext struct {
 func (s *Session) inboundPacketContexts(spi uint32) []inboundESPContext {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pruneRetiredChildSAsLocked(time.Now())
+	s.pruneRetiredChildSAs(time.Now())
 	contexts := make([]inboundESPContext, 0, 1+len(s.retiredChildSAs))
 	if s.inboundESP.SPI == spi {
 		contexts = append(contexts, inboundESPContext{codec: s.inboundESP, info: cloneInfo(s.tunnel), localUDPPort: s.cfg.LocalSIPPort})

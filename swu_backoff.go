@@ -79,7 +79,7 @@ func (c *Client) swuBackoffPolicyFor(err error) (swutunnel.BackoffPolicy, bool) 
 func (c *Client) clearCurrentSWUBackoff() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, key := range c.swuBackoffKeysLocked() {
+	for _, key := range c.swuBackoffKeys() {
 		delete(c.swuBackoff.entries, key)
 	}
 }
@@ -105,7 +105,7 @@ func (c *Client) swuBackoffDelay(now time.Time) (time.Duration, bool, bool) {
 	defer c.mu.Unlock()
 
 	var delay time.Duration
-	for _, key := range c.swuBackoffKeysLocked() {
+	for _, key := range c.swuBackoffKeys() {
 		entry, ok := c.swuBackoff.entries[key]
 		if !ok {
 			continue
@@ -122,7 +122,7 @@ func (c *Client) swuBackoffDelay(now time.Time) (time.Duration, bool, bool) {
 	return delay, false, delay > 0
 }
 
-func (c *Client) swuBackoffKeysLocked() []swuBackoffKey {
+func (c *Client) swuBackoffKeys() []swuBackoffKey {
 	keys := make([]swuBackoffKey, 0, 2)
 	for _, scope := range []swutunnel.BackoffScope{swutunnel.BackoffScopeEPDG, swutunnel.BackoffScopePLMNAPN} {
 		key, ok := swuBackoffKeyFor(c.cfg, c.card, scope)
