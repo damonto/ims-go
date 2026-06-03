@@ -105,6 +105,7 @@ type SMS struct {
 	From          string
 	FromURI       string
 	To            string
+	ToURI         string
 	ServiceCenter string
 	Text          string
 	ReceivedAt    time.Time

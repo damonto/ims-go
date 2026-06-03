@@ -729,8 +729,10 @@ func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, repor
 
 func (s *Service) deliverIncoming(msg sip.Message, rp rpMessage, tpdu deliverTPDU) {
 	incoming := tpdu.Message
+	recipient := incomingRecipient(msg)
 	incoming.CallID = strings.TrimSpace(msg.Header("Call-ID"))
-	incoming.To = incomingRecipient(msg)
+	incoming.To = recipient.Number
+	incoming.ToURI = recipient.URI
 	incoming.ServiceCenter = rp.Originator
 	if tpdu.Concat != nil {
 		s.deliverConcat(incoming, *tpdu.Concat)
@@ -751,27 +753,32 @@ func (s *Service) deliverIncomingStatusReport(msg sip.Message, rp rpMessage, rep
 	s.logger.Debug("suppressing duplicate sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "message_reference", report.MessageReference, "status", report.Status)
 }
 
-func incomingRecipient(msg sip.Message) string {
+type endpoint struct {
+	Number string
+	URI    string
+}
+
+func incomingRecipient(msg sip.Message) endpoint {
 	for _, candidate := range []string{msg.Header("To"), sip.RequestURI(msg)} {
-		if target := envelopeAddress(candidate); target != "" {
+		if target := envelopeEndpoint(candidate); target.URI != "" || target.Number != "" {
 			return target
 		}
 	}
-	return ""
+	return endpoint{}
 }
 
-func envelopeAddress(value string) string {
+func envelopeEndpoint(value string) endpoint {
 	uri := sip.AddressURI(value)
 	if uri == "" {
-		return ""
+		return endpoint{}
 	}
 	switch lower := strings.ToLower(uri); {
 	case strings.HasPrefix(lower, "tel:"):
-		return uri[len("tel:"):]
+		return endpoint{Number: identity.MSISDN(uri), URI: uri}
 	case strings.HasPrefix(lower, "sip:"), strings.HasPrefix(lower, "sips:"):
-		return uri
+		return endpoint{Number: identity.MSISDN(uri), URI: uri}
 	default:
-		return uri
+		return endpoint{Number: uri}
 	}
 }
 

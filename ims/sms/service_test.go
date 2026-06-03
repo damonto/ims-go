@@ -481,7 +481,9 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
-	req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport}
+	msg := newInboundRequest("call-1", "1 MESSAGE", rpdu)
+	msg.Headers.Set("To", "<sip:+19293101226@one.att.net>")
+	req := session.Request{Message: msg, Transport: inboundTransport}
 	handled, err := svc.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
@@ -493,6 +495,9 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	case got := <-gotCh:
 		if got.Text != "hello" || got.From != "+15551234567" || got.ServiceCenter != "+15550000000" {
 			t.Fatalf("IncomingSMS = %+v", got)
+		}
+		if got.To != "+19293101226" || got.ToURI != "sip:+19293101226@one.att.net" {
+			t.Fatalf("IncomingSMS recipient = %q/%q, want +19293101226/sip:+19293101226@one.att.net", got.To, got.ToURI)
 		}
 		if !bytes.Equal(got.RawTPDU, tpdu) {
 			t.Fatalf("IncomingSMS.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
@@ -1235,6 +1240,30 @@ func TestDecodeSMSXMLInfoAcceptsDocumentNamespace(t *testing.T) {
 	}
 	if got.DeliveryOutcome != smsDeliveryOutcomeSuccessfulTransfer {
 		t.Fatalf("DeliveryOutcome = %q, want %q", got.DeliveryOutcome, smsDeliveryOutcomeSuccessfulTransfer)
+	}
+}
+
+func TestEnvelopeEndpointSplitsNumberAndURI(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		wantNumber string
+		wantURI    string
+	}{
+		{name: "sip phone uri", value: "sip:+19293101226@one.att.net", wantNumber: "+19293101226", wantURI: "sip:+19293101226@one.att.net"},
+		{name: "sips phone uri", value: "sips:+19293101226@one.att.net", wantNumber: "+19293101226", wantURI: "sips:+19293101226@one.att.net"},
+		{name: "tel phone uri", value: "tel:+19293101226", wantNumber: "+19293101226", wantURI: "tel:+19293101226"},
+		{name: "name address", value: "<sip:+19293101226@one.att.net>;tag=abc", wantNumber: "+19293101226", wantURI: "sip:+19293101226@one.att.net"},
+		{name: "non dialable sip uri", value: "sip:alice@one.att.net", wantURI: "sip:alice@one.att.net"},
+		{name: "legacy bare target", value: "+19293101226", wantNumber: "+19293101226"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := envelopeEndpoint(tt.value)
+			if got.Number != tt.wantNumber || got.URI != tt.wantURI {
+				t.Fatalf("envelopeEndpoint() = %+v, want number %q uri %q", got, tt.wantNumber, tt.wantURI)
+			}
+		})
 	}
 }
 

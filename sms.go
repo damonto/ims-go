@@ -62,6 +62,7 @@ func (c *Client) handleSMS(msg imssms.IncomingSMS) {
 		From:          msg.From,
 		FromURI:       msg.FromURI,
 		To:            msg.To,
+		ToURI:         msg.ToURI,
 		ServiceCenter: msg.ServiceCenter,
 		Text:          msg.Text,
 		ReceivedAt:    time.Now(),

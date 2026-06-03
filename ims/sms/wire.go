@@ -152,6 +152,7 @@ type IncomingSMS struct {
 	From          string
 	FromURI       string
 	To            string
+	ToURI         string
 	ServiceCenter string
 	Text          string
 	RawTPDU       []byte
