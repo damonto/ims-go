@@ -7,14 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go/ims/registration"
 	imssession "github.com/damonto/vowifi-go/ims/session"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
-	"github.com/damonto/vowifi-go/usim"
-	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type connectionRuntime struct {
@@ -219,7 +219,7 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 
 func (c *Client) ensureReady(ctx context.Context) error {
 	var ready bool
-	var reader usimreader.Reader
+	var reader usimcard.Reader
 	var cfg Config
 	c.withStateLock(func(s *clientState) {
 		ready = c.card != nil
@@ -233,7 +233,7 @@ func (c *Client) ensureReady(ctx context.Context) error {
 		return nil
 	}
 
-	card, err := usim.Load(ctx, reader, cfg.Logger)
+	card, err := usim.New(ctx, reader, cfg.Logger)
 	if err != nil {
 		return fmt.Errorf("loading USIM: %w", err)
 	}

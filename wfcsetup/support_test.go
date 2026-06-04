@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/vowifi-go/usim"
+	"github.com/damonto/uicc-go/usim"
 )
 
 type testCard struct {

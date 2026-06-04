@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/swu/esp"
 	"github.com/damonto/vowifi-go/swu/handshake"
 	"github.com/damonto/vowifi-go/swu/ike"
-	"github.com/damonto/vowifi-go/usim"
 )
 
 type Config struct {

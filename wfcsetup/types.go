@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/usim"
+	"github.com/damonto/uicc-go/usim"
 )
 
 const defaultTimeout = 30 * time.Second

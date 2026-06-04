@@ -10,10 +10,8 @@ import (
 	"sync"
 	"time"
 
-	ts43http "github.com/damonto/ts43-go/http"
-	"github.com/damonto/ts43-go/sim"
-	"github.com/damonto/ts43-go/ts43"
-	"github.com/damonto/vowifi-go/usim"
+	ts43 "github.com/damonto/ts43-go"
+	"github.com/damonto/uicc-go/usim"
 )
 
 const ts43ActivationRecheckMaxAttempts = 6
@@ -198,7 +196,7 @@ func ts43WebsheetKind(status ts43.WFCStatus) WebsheetKind {
 	return WebsheetKindEmergencyAddress
 }
 
-func ts43TokenKey(identity sim.Identity, cfg ts43.WFCConfig) string {
+func ts43TokenKey(identity ts43.Identity, cfg ts43.WFCConfig) string {
 	return identity.IMSI + "\x00" + cfg.Server
 }
 
@@ -226,7 +224,7 @@ func ts43StoreToken(key string, token ts43.AuthToken) {
 }
 
 func ts43RetryAfter(err error) (time.Duration, bool) {
-	var httpErr *ts43http.HTTPError
+	var httpErr *ts43.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
 		return 0, false
 	}
@@ -258,19 +256,19 @@ func retryAfterDuration(header http.Header) time.Duration {
 
 type ts43Channel struct {
 	card     Card
-	identity sim.Identity
+	identity ts43.Identity
 }
 
 type eapAKACard interface {
 	EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error)
 }
 
-func (c ts43Channel) Identity(context.Context) (*sim.Identity, error) {
+func (c ts43Channel) Identity(context.Context) (*ts43.Identity, error) {
 	identity := c.identity
 	return &identity, nil
 }
 
-func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *sim.AKARequest) (*sim.AKAResponse, error) {
+func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *ts43.AKARequest) (*ts43.AKAResponse, error) {
 	result, err := c.authenticateAKA(ctx, req.Rand, req.Autn)
 	if err != nil {
 		return nil, err
@@ -278,7 +276,7 @@ func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *sim.AKARequest) (
 	if result.Reject {
 		return nil, errors.New("USIM rejected AKA challenge")
 	}
-	return &sim.AKAResponse{
+	return &ts43.AKAResponse{
 		Res:  result.RES,
 		CK:   result.CK,
 		IK:   result.IK,
@@ -293,8 +291,8 @@ func (c ts43Channel) authenticateAKA(ctx context.Context, rand, autn []byte) (us
 	return c.card.AKA(ctx, rand, autn)
 }
 
-func ts43Identity(card Card) sim.Identity {
-	return sim.Identity{
+func ts43Identity(card Card) ts43.Identity {
+	return ts43.Identity{
 		ICCID: card.ICCID(),
 		IMSI:  card.IMSI(),
 		MCC:   card.MCC(),

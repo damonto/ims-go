@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/damonto/vowifi-go/usim"
+	"github.com/damonto/uicc-go/usim"
 )
 
 func (s *Service) resolveServiceCenter() (serviceCenter, error) {

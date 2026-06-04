@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
 	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
-	"github.com/damonto/vowifi-go/usim"
 )
 
 type wfcTestCard struct{}

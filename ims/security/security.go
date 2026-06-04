@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/damonto/vowifi-go/usim"
+	"github.com/damonto/uicc-go/usim"
 )
 
 const AlgorithmAKAv1MD5 = "AKAv1-MD5"

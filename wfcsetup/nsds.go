@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/ts43-go/sim"
+	ts43 "github.com/damonto/ts43-go"
 )
 
 const nsdsDefaultEAPAkaRealm = "nai.epc"
@@ -219,13 +219,27 @@ func nsdsIMSIEAP(card Card) (string, error) {
 	mnc := strings.TrimSpace(card.MNC())
 	switch n := cardMNCLength(card); n {
 	case 2, 3:
-		formatted, err := sim.FormatMNC(card.IMSI(), n)
+		formatted, err := nsdsFormatMNC(card.IMSI(), n)
 		if err != nil {
 			return "", err
 		}
 		mnc = formatted
 	}
-	return sim.IMSIEAPIdentity(mcc+mnc, card.IMSI(), nsdsDefaultEAPAkaRealm)
+	return ts43.IMSIEAPIdentity(mcc+mnc, card.IMSI(), nsdsDefaultEAPAkaRealm)
+}
+
+func nsdsFormatMNC(imsi string, mncLength int) (string, error) {
+	if len(imsi) < 3+mncLength {
+		return "", errors.New("IMSI is too short for MNC length")
+	}
+	switch mncLength {
+	case 2:
+		return "0" + imsi[3:5], nil
+	case 3:
+		return imsi[3:6], nil
+	default:
+		return "", fmt.Errorf("unsupported MNC length %d", mncLength)
+	}
 }
 
 type nsdsClient struct {

@@ -10,7 +10,7 @@ import (
 	"hash"
 	"testing"
 
-	"github.com/damonto/vowifi-go/usim"
+	"github.com/damonto/uicc-go/usim"
 )
 
 type stubAKAProvider struct{}

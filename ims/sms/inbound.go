@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/ims/identity"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
-	"github.com/damonto/vowifi-go/usim"
 )
 
 func (s *Service) handleMessageRequest(ctx context.Context, req session.Request) error {

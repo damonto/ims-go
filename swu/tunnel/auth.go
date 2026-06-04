@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/eapaka"
 	"github.com/damonto/vowifi-go/swu/ike"
-	"github.com/damonto/vowifi-go/usim"
 )
 
 type akaAuthFlow struct {

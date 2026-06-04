@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ts43-go/ts43"
+	ts43 "github.com/damonto/ts43-go"
 )
 
 func TestTS43WebsheetClientName(t *testing.T) {

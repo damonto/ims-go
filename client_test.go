@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go/ims/registration"
 	imssession "github.com/damonto/vowifi-go/ims/session"
 	imssip "github.com/damonto/vowifi-go/ims/sip"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
-	"github.com/damonto/vowifi-go/usim"
-	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type stubCard struct{}
@@ -111,52 +111,52 @@ func (stubCard) AKA(_ context.Context, _, _ []byte) (usim.AKAResult, error) {
 type readerStub struct {
 	closeCalls        int
 	closeErr          error
-	listApplications  func(context.Context) ([]usimreader.Application, error)
-	getFileAttributes func(context.Context, usimreader.FileRef) (usimreader.FileAttributes, error)
-	readTransparent   func(context.Context, usimreader.TransparentRead) ([]byte, error)
-	readRecord        func(context.Context, usimreader.RecordRead) ([]byte, error)
-	authenticate3G    func(context.Context, usimreader.AuthenticateRequest) ([]byte, error)
-	smsPPDownload     func(context.Context, usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error)
+	listApplications  func(context.Context) ([]usimcard.Application, error)
+	getFileAttributes func(context.Context, usimcard.FileRef) (usimcard.FileAttributes, error)
+	readTransparent   func(context.Context, usimcard.TransparentRead) ([]byte, error)
+	readRecord        func(context.Context, usimcard.RecordRead) ([]byte, error)
+	authenticate3G    func(context.Context, usimcard.AuthenticateRequest) ([]byte, error)
+	smsPPDownload     func(context.Context, usimcard.SMSPPDownloadRequest) (usimcard.SMSPPDownloadResponse, error)
 }
 
-func (r *readerStub) ListApplications(ctx context.Context) ([]usimreader.Application, error) {
+func (r *readerStub) ListApplications(ctx context.Context) ([]usimcard.Application, error) {
 	if r.listApplications == nil {
 		return nil, errors.New("ListApplications was not expected")
 	}
 	return r.listApplications(ctx)
 }
 
-func (r *readerStub) FileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *readerStub) FileAttributes(ctx context.Context, file usimcard.FileRef) (usimcard.FileAttributes, error) {
 	if r.getFileAttributes == nil {
-		return usimreader.FileAttributes{}, errors.New("FileAttributes was not expected")
+		return usimcard.FileAttributes{}, errors.New("FileAttributes was not expected")
 	}
 	return r.getFileAttributes(ctx, file)
 }
 
-func (r *readerStub) ReadTransparent(ctx context.Context, req usimreader.TransparentRead) ([]byte, error) {
+func (r *readerStub) ReadTransparent(ctx context.Context, req usimcard.TransparentRead) ([]byte, error) {
 	if r.readTransparent == nil {
 		return nil, errors.New("ReadTransparent was not expected")
 	}
 	return r.readTransparent(ctx, req)
 }
 
-func (r *readerStub) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]byte, error) {
+func (r *readerStub) ReadRecord(ctx context.Context, req usimcard.RecordRead) ([]byte, error) {
 	if r.readRecord == nil {
 		return nil, errors.New("ReadRecord was not expected")
 	}
 	return r.readRecord(ctx, req)
 }
 
-func (r *readerStub) Authenticate3G(ctx context.Context, req usimreader.AuthenticateRequest) ([]byte, error) {
+func (r *readerStub) Authenticate3G(ctx context.Context, req usimcard.AuthenticateRequest) ([]byte, error) {
 	if r.authenticate3G == nil {
 		return nil, errors.New("Authenticate3G was not expected")
 	}
 	return r.authenticate3G(ctx, req)
 }
 
-func (r *readerStub) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
+func (r *readerStub) SMSPPDownload(ctx context.Context, req usimcard.SMSPPDownloadRequest) (usimcard.SMSPPDownloadResponse, error) {
 	if r.smsPPDownload == nil {
-		return usimreader.SMSPPDownloadResponse{}, errors.New("SMSPPDownload was not expected")
+		return usimcard.SMSPPDownloadResponse{}, errors.New("SMSPPDownload was not expected")
 	}
 	return r.smsPPDownload(ctx, req)
 }
@@ -935,7 +935,7 @@ func TestNewNilDriver(t *testing.T) {
 
 func TestConnectReportsUSIMLoadError(t *testing.T) {
 	reader := &readerStub{
-		listApplications: func(context.Context) ([]usimreader.Application, error) {
+		listApplications: func(context.Context) ([]usimcard.Application, error) {
 			return nil, errors.New("boom")
 		},
 	}
@@ -979,7 +979,7 @@ func TestConnectUsesContextForUSIMLoad(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := &readerStub{
-				listApplications: func(ctx context.Context) ([]usimreader.Application, error) {
+				listApplications: func(ctx context.Context) ([]usimcard.Application, error) {
 					return nil, ctx.Err()
 				},
 			}
@@ -999,7 +999,7 @@ func TestConnectUsesContextForUSIMLoad(t *testing.T) {
 func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 	started := make(chan struct{})
 	reader := &readerStub{
-		listApplications: func(ctx context.Context) ([]usimreader.Application, error) {
+		listApplications: func(ctx context.Context) ([]usimcard.Application, error) {
 			close(started)
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -1041,7 +1041,7 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 func TestConnectLeavesReaderOwnedAfterUSIMLoadError(t *testing.T) {
 	reader := &readerStub{
 		closeErr: errors.New("close boom"),
-		listApplications: func(context.Context) ([]usimreader.Application, error) {
+		listApplications: func(context.Context) ([]usimcard.Application, error) {
 			return nil, errors.New("load boom")
 		},
 	}
@@ -2267,27 +2267,27 @@ func newReaderStubForUSIMLoad() *readerStub {
 	usimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 
 	return &readerStub{
-		listApplications: func(context.Context) ([]usimreader.Application, error) {
-			return []usimreader.Application{{
+		listApplications: func(context.Context) ([]usimcard.Application, error) {
+			return []usimcard.Application{{
 				AID:   append([]byte(nil), usimAID...),
 				Label: "USIM",
 			}}, nil
 		},
-		getFileAttributes: func(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+		getFileAttributes: func(_ context.Context, file usimcard.FileRef) (usimcard.FileAttributes, error) {
 			switch {
 			case len(file.AID) == 0 && slices.Equal(file.Path, []byte{0x2F, 0xE2}):
-				return usimreader.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 10}, nil
+				return usimcard.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 10}, nil
 			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0x07}):
-				return usimreader.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 9}, nil
+				return usimcard.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 9}, nil
 			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0xAD}):
-				return usimreader.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 4}, nil
+				return usimcard.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 4}, nil
 			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0x42}):
-				return usimreader.FileAttributes{FileStructure: fileStructureLinearFixed, RecordSize: 32, RecordCount: 0}, nil
+				return usimcard.FileAttributes{FileStructure: fileStructureLinearFixed, RecordSize: 32, RecordCount: 0}, nil
 			default:
-				return usimreader.FileAttributes{}, errors.New("file not found")
+				return usimcard.FileAttributes{}, errors.New("file not found")
 			}
 		},
-		readTransparent: func(_ context.Context, req usimreader.TransparentRead) ([]byte, error) {
+		readTransparent: func(_ context.Context, req usimcard.TransparentRead) ([]byte, error) {
 			switch {
 			case len(req.File.AID) == 0 && slices.Equal(req.File.Path, []byte{0x2F, 0xE2}):
 				return []byte{0x98, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0}, nil

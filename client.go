@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	imssession "github.com/damonto/vowifi-go/ims/session"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
-	"github.com/damonto/vowifi-go/usim"
-	usimreader "github.com/damonto/vowifi-go/usim/reader"
 )
 
 type Config struct {
@@ -122,7 +122,7 @@ type clientState struct {
 type Client struct {
 	cfg    Config
 	card   Card
-	reader usimreader.Reader
+	reader usimcard.Reader
 	logger *slog.Logger
 
 	state clientState
@@ -141,7 +141,7 @@ type Client struct {
 // callers can cancel the first connect attempt with ctx.
 // On construction failure it closes reader before returning the error.
 // The returned Client closes the underlying reader when Close is called.
-func New(reader usimreader.Reader, cfg *Config) (*Client, error) {
+func New(reader usimcard.Reader, cfg *Config) (*Client, error) {
 	if reader == nil {
 		return nil, errors.New("creating client: reader is nil")
 	}

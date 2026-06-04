@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ts43-go/sim"
+	ts43 "github.com/damonto/ts43-go"
 )
 
 func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
@@ -206,7 +206,7 @@ func writeNSDSResponses(t *testing.T, w http.ResponseWriter, responses []nsdsRes
 
 func nsdsAKAChallengeText(t *testing.T) string {
 	t.Helper()
-	challenge := sim.AKAChallenge{
+	challenge := ts43.AKAChallenge{
 		Identifier: 1,
 		Rand:       bytes.Repeat([]byte{0x11}, 16),
 		Autn:       bytes.Repeat([]byte{0x22}, 16),

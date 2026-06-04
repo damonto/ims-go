@@ -13,23 +13,21 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/ElMostafaIdrassi/goscard"
-
+	uiccat "github.com/damonto/uicc-go/at"
+	uiccccid "github.com/damonto/uicc-go/ccid"
+	uiccqmi "github.com/damonto/uicc-go/qualcomm/qmi"
+	uiccqrtr "github.com/damonto/uicc-go/qualcomm/qrtr"
+	uiccuim "github.com/damonto/uicc-go/qualcomm/uim"
+	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go"
-	"github.com/damonto/vowifi-go/driver/at"
-	"github.com/damonto/vowifi-go/driver/ccid"
-	"github.com/damonto/vowifi-go/driver/mbim"
-	"github.com/damonto/vowifi-go/driver/qmi"
 	imssession "github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/swu/tunnel"
-	"github.com/damonto/vowifi-go/usim"
-	usimreader "github.com/damonto/vowifi-go/usim/reader"
 	"github.com/damonto/vowifi-go/wfcsetup"
 )
 
@@ -101,13 +99,13 @@ func main() {
 func parseFlags() options {
 	opt := options{}
 	flag.BoolVar(&opt.debug, "debug", false, "enable verbose debug logs")
-	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, ccid-tcp, at, qmi, qrtr, or mbim")
+	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, ccid-tcp, at, qmi, or qrtr")
 	flag.BoolVar(&opt.listReaders, "list-readers", false, "list available PC/SC readers and exit")
 	flag.StringVar(&opt.readerName, "reader", "", "PC/SC reader name; required for -driver pcsc")
-	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device, QMI/MBIM modem path, or ccid-tcp host:port")
+	flag.StringVar(&opt.device, "device", "", "AT+CSIM serial device, QMI modem path, or ccid-tcp host:port")
 	flag.StringVar(&opt.ccidTCPListen, "ccid-tcp-listen", "", "listen address for temporary CCID TCP APDU server, for example :9999")
 	flag.DurationVar(&opt.apduTimeout, "apdu-timeout", defaultAPDUTimeout, "APDU TCP read/write timeout for -driver ccid-tcp")
-	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi or -driver mbim")
+	flag.IntVar(&opt.slot, "slot", 1, "physical SIM slot for -driver qmi or -driver qrtr")
 	flag.StringVar(&opt.imei, "imei", "", "UE IMEI used for SWu authentication")
 	flag.StringVar(&opt.epdgAddr, "epdg", "", "optional ePDG host:port or host; default uses MCC/MNC from the card")
 	flag.StringVar(&opt.transport, "transport", "", "IMS SIP transport override: tcp or udp")
@@ -565,18 +563,18 @@ func listCCIDReaders(ctx context.Context) error {
 }
 
 func availableCCIDReaders(ctx context.Context) ([]string, error) {
-	readers, err := ccid.ListReaders(ctx)
+	readers, err := uiccccid.ListReaders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing pcsc readers: %w", err)
 	}
 	return readers, nil
 }
 
-func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
+func openDriver(ctx context.Context, opt options) (usimcard.Reader, error) {
 	switch strings.ToLower(strings.TrimSpace(opt.driverKind)) {
 	case "pcsc":
 		if opt.readerName == "" {
-			readers, err := ccid.ListReaders(ctx)
+			readers, err := uiccccid.ListReaders(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("listing pcsc readers: %w", err)
 			}
@@ -585,20 +583,20 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 			}
 			return nil, fmt.Errorf("opening pcsc driver: -reader is required; available readers: %s", strings.Join(readers, ", "))
 		}
-		drv, err := ccid.Open(ctx, opt.readerName)
+		tx, err := uiccccid.Open(ctx, opt.readerName)
 		if err != nil {
 			return nil, fmt.Errorf("opening pcsc driver: %w", err)
 		}
-		return drv, nil
+		return openAPDUReader(tx)
 	case "at", "at+csim", "serial":
 		if opt.device == "" {
 			return nil, errors.New("opening AT driver: -device is required")
 		}
-		drv, err := at.Open(ctx, opt.device, 0)
+		tx, err := uiccat.Open(ctx, opt.device, 0)
 		if err != nil {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
 		}
-		return drv, nil
+		return openAPDUReader(tx)
 	case "ccid-tcp", "tcp-ccid":
 		if opt.device == "" {
 			return nil, errors.New("opening CCID TCP driver: -device host:port is required")
@@ -612,29 +610,81 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening QMI driver: -device is required")
 		}
-		drv, err := qmi.Open(ctx, opt.device, opt.slot)
+		drv, err := openQualcommQMIReader(ctx, opt.device, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QMI driver: %w", err)
 		}
 		return drv, nil
 	case "qrtr":
-		drv, err := qmi.OpenQRTR(ctx, opt.slot)
+		drv, err := openQualcommQRTRReader(ctx, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QRTR driver: %w", err)
-		}
-		return drv, nil
-	case "mbim":
-		if opt.device == "" {
-			return nil, errors.New("opening MBIM driver: -device is required")
-		}
-		drv, err := mbim.Open(ctx, opt.device, opt.slot)
-		if err != nil {
-			return nil, fmt.Errorf("opening MBIM driver: %w", err)
 		}
 		return drv, nil
 	default:
 		return nil, fmt.Errorf("opening driver: unsupported kind %q", opt.driverKind)
 	}
+}
+
+func openAPDUReader(tx usimcard.Transmitter) (usimcard.Reader, error) {
+	reader, err := usim.NewReader(tx)
+	if err != nil {
+		return nil, errors.Join(err, tx.Close())
+	}
+	return reader, nil
+}
+
+func openQualcommQMIReader(ctx context.Context, device string, slot int) (usimcard.Reader, error) {
+	qmiSlot, err := qualcommSlot(slot)
+	if err != nil {
+		return nil, err
+	}
+	transport, err := uiccqmi.Open(ctx, uiccqmi.WithProxy(device))
+	if err != nil {
+		return nil, err
+	}
+	reader, err := uiccuim.New(ctx, transport, uiccuim.WithSlot(qmiSlot))
+	if err != nil {
+		return nil, err
+	}
+	if err := reader.ActivateSlot(ctx); err != nil {
+		return nil, errors.Join(err, reader.Close())
+	}
+	return openQualcommAdapter(reader)
+}
+
+func openQualcommQRTRReader(ctx context.Context, slot int) (usimcard.Reader, error) {
+	qmiSlot, err := qualcommSlot(slot)
+	if err != nil {
+		return nil, err
+	}
+	transport, err := uiccqrtr.Open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := uiccuim.New(ctx, transport, uiccuim.WithSlot(qmiSlot))
+	if err != nil {
+		return nil, err
+	}
+	if err := reader.ActivateSlot(ctx); err != nil {
+		return nil, errors.Join(err, reader.Close())
+	}
+	return openQualcommAdapter(reader)
+}
+
+func openQualcommAdapter(reader *uiccuim.Reader) (usimcard.Reader, error) {
+	adapter, err := usim.NewQualcomm(reader)
+	if err != nil {
+		return nil, errors.Join(err, reader.Close())
+	}
+	return adapter, nil
+}
+
+func qualcommSlot(slot int) (uint8, error) {
+	if slot < 1 || slot > 5 {
+		return 0, fmt.Errorf("slot %d is out of range", slot)
+	}
+	return uint8(slot), nil
 }
 
 type tcpAPDUTransmitter struct {
@@ -645,7 +695,7 @@ type tcpAPDUTransmitter struct {
 	closed bool
 }
 
-func openTCPAPDUReader(ctx context.Context, addr string, timeout time.Duration) (usimreader.Reader, error) {
+func openTCPAPDUReader(ctx context.Context, addr string, timeout time.Duration) (usimcard.Reader, error) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return nil, errors.New("opening TCP APDU reader: address is empty")
@@ -658,10 +708,10 @@ func openTCPAPDUReader(ctx context.Context, addr string, timeout time.Duration) 
 	if err != nil {
 		return nil, fmt.Errorf("dialing %s: %w", addr, err)
 	}
-	return usim.New(&tcpAPDUTransmitter{
+	return openAPDUReader(&tcpAPDUTransmitter{
 		conn:    conn,
 		timeout: timeout,
-	}), nil
+	})
 }
 
 func (t *tcpAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, error) {
@@ -768,17 +818,7 @@ func writeAll(w io.Writer, data []byte) error {
 	return nil
 }
 
-var _ usimreader.Transmitter = (*tcpAPDUTransmitter)(nil)
-
-type pcscAPDUTransmitter struct {
-	ctx  *goscard.Context
-	card *goscard.Card
-}
-
-var (
-	examplePCSCInitOnce sync.Once
-	examplePCSCInitErr  error
-)
+var _ usimcard.Transmitter = (*tcpAPDUTransmitter)(nil)
 
 func serveTCPAPDUServer(ctx context.Context, opt options) error {
 	addr := strings.TrimSpace(opt.ccidTCPListen)
@@ -796,7 +836,7 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 		return fmt.Errorf("serving CCID TCP: -reader is required; available readers: %s", strings.Join(readers, ", "))
 	}
 
-	tx, err := openExamplePCSCTransmitter(ctx, opt.readerName)
+	tx, err := uiccccid.Open(ctx, opt.readerName)
 	if err != nil {
 		return fmt.Errorf("opening server pcsc reader: %w", err)
 	}
@@ -841,7 +881,7 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 	}
 }
 
-func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimreader.Transmitter, timeout time.Duration) error {
+func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimcard.Transmitter, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = defaultAPDUTimeout
 	}
@@ -895,106 +935,6 @@ func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimreader.Transmit
 func isCleanTCPAPDUClose(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }
-
-func openExamplePCSCTransmitter(ctx context.Context, readerName string) (usimreader.Transmitter, error) {
-	readerName = strings.TrimSpace(readerName)
-	if readerName == "" {
-		return nil, errors.New("opening pcsc reader: reader name is empty")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("opening pcsc reader: %w", err)
-	}
-
-	pcscCtx, err := newExamplePCSCContext()
-	if err != nil {
-		return nil, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		_, _ = pcscCtx.Release()
-		return nil, fmt.Errorf("opening pcsc reader: %w", err)
-	}
-	readers, _, err := pcscCtx.ListReaders(nil)
-	if err != nil {
-		_, _ = pcscCtx.Release()
-		return nil, fmt.Errorf("listing pcsc readers: %w", err)
-	}
-	if !slices.Contains(readers, readerName) {
-		_, _ = pcscCtx.Release()
-		return nil, fmt.Errorf("selecting %q: %w", readerName, ccid.ErrReaderNotFound)
-	}
-
-	if err := ctx.Err(); err != nil {
-		_, _ = pcscCtx.Release()
-		return nil, fmt.Errorf("opening pcsc reader: %w", err)
-	}
-	card, _, err := pcscCtx.Connect(readerName, goscard.SCardShareShared, goscard.SCardProtocolT0|goscard.SCardProtocolT1)
-	if err != nil {
-		_, _ = pcscCtx.Release()
-		return nil, fmt.Errorf("connecting to %s: %w", readerName, err)
-	}
-
-	return &pcscAPDUTransmitter{
-		ctx:  &pcscCtx,
-		card: &card,
-	}, nil
-}
-
-func newExamplePCSCContext() (goscard.Context, error) {
-	examplePCSCInitOnce.Do(func() {
-		examplePCSCInitErr = goscard.Initialize(goscard.NewDefaultLogger(goscard.LogLevelNone))
-	})
-	if examplePCSCInitErr != nil {
-		return goscard.Context{}, fmt.Errorf("initializing pcsc: %w", examplePCSCInitErr)
-	}
-
-	ctx, _, err := goscard.NewContext(goscard.SCardScopeSystem, nil, nil)
-	if err != nil {
-		return goscard.Context{}, fmt.Errorf("creating pcsc context: %w", err)
-	}
-	return ctx, nil
-}
-
-func (p *pcscAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, error) {
-	if p.card == nil {
-		return nil, errors.New("transmitting APDU: pcsc reader is closed")
-	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	pci := goscard.SCardIoRequestT1
-	if p.card.ActiveProtocol() == goscard.SCardProtocolT0 {
-		pci = goscard.SCardIoRequestT0
-	}
-
-	resp, _, err := p.card.Transmit(&pci, req, nil)
-	if err != nil {
-		return nil, fmt.Errorf("transmitting APDU %X: %w", req, err)
-	}
-	return resp, nil
-}
-
-func (p *pcscAPDUTransmitter) Close() error {
-	var errs []error
-	if p.card != nil {
-		if _, err := p.card.Disconnect(goscard.SCardLeaveCard); err != nil {
-			errs = append(errs, fmt.Errorf("disconnecting pcsc card: %w", err))
-		}
-		p.card = nil
-	}
-	if p.ctx != nil {
-		if _, err := p.ctx.Release(); err != nil {
-			errs = append(errs, fmt.Errorf("releasing pcsc context: %w", err))
-		}
-		p.ctx = nil
-	}
-	return errors.Join(errs...)
-}
-
-var _ usimreader.Transmitter = (*pcscAPDUTransmitter)(nil)
 
 func logClientEvents(events *vowifi.Events) {
 	for {

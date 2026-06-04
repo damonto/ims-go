@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/ims/security"
 	"github.com/damonto/vowifi-go/ims/sip"
-	"github.com/damonto/vowifi-go/usim"
 )
 
 func (s *Service) storeAuthChallenge(challenge security.Challenge) {

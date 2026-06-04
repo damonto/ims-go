@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/eapaka"
-	"github.com/damonto/vowifi-go/usim"
 )
 
 func akaPrimeNetworkNamesMatch(peerNetworkName, serverNetworkName string) bool {
