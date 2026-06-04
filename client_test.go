@@ -22,6 +22,7 @@ import (
 	imssip "github.com/damonto/vowifi-go/ims/sip"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 )
 
@@ -118,6 +119,28 @@ type readerStub struct {
 	authenticate3G    func(context.Context, usimcard.AuthenticateRequest) ([]byte, error)
 	smsPPDownload     func(context.Context, usimcard.SMSPPDownloadRequest) (usimcard.SMSPPDownloadResponse, error)
 }
+
+type clientTestPacketConn struct {
+	local net.Addr
+}
+
+func (c *clientTestPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("ReadFrom was not expected")
+}
+
+func (c *clientTestPacketConn) WriteTo([]byte, net.Addr) (int, error) {
+	return 0, errors.New("WriteTo was not expected")
+}
+
+func (c *clientTestPacketConn) Close() error { return nil }
+
+func (c *clientTestPacketConn) LocalAddr() net.Addr { return c.local }
+
+func (c *clientTestPacketConn) SetDeadline(time.Time) error { return nil }
+
+func (c *clientTestPacketConn) SetReadDeadline(time.Time) error { return nil }
+
+func (c *clientTestPacketConn) SetWriteDeadline(time.Time) error { return nil }
 
 func (r *readerStub) ListApplications(ctx context.Context) ([]usimcard.Application, error) {
 	if r.listApplications == nil {
@@ -261,6 +284,44 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 			}
 			if connErr.State.Closed != tt.closed {
 				t.Fatalf("ConnectionError.State.Closed = %v, want %v", connErr.State.Closed, tt.closed)
+			}
+		})
+	}
+}
+
+func TestCurrentVoiceServiceRejectsInactiveTunnel(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "active tunnel is not connected"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newClient(Config{Logger: testLogger()})
+			session, err := swutunnel.Dial(context.Background(), swutunnel.Config{
+				RemoteAddr: "198.51.100.1",
+				PacketConn: &clientTestPacketConn{
+					local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				},
+				Logger: testLogger(),
+			})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			client.emitStatus(StatusRegistered)
+			setClientActive(t, client, &activeConn{
+				tunnel: session,
+				ims: imsRuntime{
+					voice: new(imsvoice.Service),
+				},
+			})
+
+			_, err = client.currentVoiceService()
+			if !errors.Is(err, ErrClientNotConnected) {
+				t.Fatalf("currentVoiceService() error = %v, want ErrClientNotConnected", err)
+			}
+			if !strings.Contains(err.Error(), "tunnel not ready") || !strings.Contains(err.Error(), "child sa is unavailable") {
+				t.Fatalf("currentVoiceService() error = %v, want tunnel not ready cause", err)
 			}
 		})
 	}

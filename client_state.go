@@ -261,6 +261,11 @@ func currentIMSService[T any](c *Client, pick func(imsRuntime) *T) (*T, error) {
 	if err != nil {
 		return nil, err
 	}
+	if active.tunnel != nil {
+		if _, err := active.tunnel.ReadyInfo(); err != nil {
+			return nil, c.connectionError(fmt.Errorf("%w: tunnel not ready: %w", ErrClientNotConnected, err))
+		}
+	}
 	service := pick(active.ims)
 	if service == nil {
 		return nil, c.connectionError(ErrClientNotConnected)

@@ -58,9 +58,9 @@ func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cf
 		return nil, ctx.Err()
 	default:
 	}
-	info := session.Tunnel()
-	if len(info.InnerIP) == 0 {
-		return nil, errors.New("opening voice media transport: tunnel inner ip is empty")
+	info, err := session.ReadyInfo()
+	if err != nil {
+		return nil, fmt.Errorf("opening voice media transport: %w", err)
 	}
 	if cfg.LocalPort == 0 {
 		return nil, errors.New("opening voice media transport: local port is required")

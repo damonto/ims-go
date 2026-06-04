@@ -285,6 +285,88 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	}
 }
 
+func TestReadyInfoReportsTunnelState(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(*Session)
+		wantErr error
+		wantMsg string
+	}{
+		{
+			name: "connected",
+			setup: func(session *Session) {
+				session.mu.Lock()
+				session.connected = true
+				session.tunnel = Info{InnerIP: net.IPv4(10, 0, 0, 1)}
+				session.mu.Unlock()
+			},
+		},
+		{
+			name: "connected without inner ip",
+			setup: func(session *Session) {
+				session.mu.Lock()
+				session.connected = true
+				session.mu.Unlock()
+			},
+			wantMsg: "tunnel inner ip is empty",
+		},
+		{
+			name: "child sa unavailable",
+			setup: func(session *Session) {
+				session.mu.Lock()
+				session.ike = &ikeCrypto{}
+				session.tunnelErr = errChildSAUnavailable
+				session.mu.Unlock()
+			},
+			wantErr: errChildSAUnavailable,
+		},
+		{
+			name: "child sa expired",
+			setup: func(session *Session) {
+				session.mu.Lock()
+				session.ike = &ikeCrypto{}
+				session.tunnelErr = errChildSAExpired
+				session.mu.Unlock()
+			},
+			wantErr: errChildSAExpired,
+		},
+		{
+			name: "closed",
+			setup: func(session *Session) {
+				session.closeSession()
+			},
+			wantErr: errSessionClosed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			session := mustDialSession(t, conn)
+			tt.setup(session)
+
+			info, err := session.ReadyInfo()
+			if tt.wantErr == nil {
+				if tt.wantMsg != "" {
+					if err == nil || !strings.Contains(err.Error(), tt.wantMsg) {
+						t.Fatalf("ReadyInfo() error = %v, want %q", err, tt.wantMsg)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("ReadyInfo() error = %v", err)
+				}
+				if !info.InnerIP.Equal(net.IPv4(10, 0, 0, 1)) {
+					t.Fatalf("ReadyInfo().InnerIP = %v, want 10.0.0.1", info.InnerIP)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ReadyInfo() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 	conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 	session := mustDialSession(t, conn)

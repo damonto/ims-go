@@ -3382,8 +3382,8 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 			if len(invites) != 3 {
 				t.Fatalf("INVITE count = %d, want initial plus hold plus resume", len(invites))
 			}
-			if !strings.Contains(string(invites[1].Body), "a=inactive\r\n") {
-				t.Fatalf("hold re-INVITE body missing inactive:\n%s", string(invites[1].Body))
+			if !strings.Contains(string(invites[1].Body), "a=sendonly\r\n") {
+				t.Fatalf("hold re-INVITE body missing sendonly:\n%s", string(invites[1].Body))
 			}
 			if !strings.Contains(string(invites[2].Body), "a=sendrecv\r\n") {
 				t.Fatalf("resume re-INVITE body missing sendrecv:\n%s", string(invites[2].Body))
@@ -3589,7 +3589,7 @@ func TestCallHoldAllowsEmergencyOverride(t *testing.T) {
 				emergency: true,
 				localSDP:  inviteWithSDP().Body,
 			}
-			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification("holding call", true, mediaDirectionInactive); err != nil {
+			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification("holding call", true, mediaDirectionSendOnly); err != nil {
 				t.Fatalf("beginLocalHoldModification() error = %v", err)
 			} else {
 				clearPending()
@@ -3627,7 +3627,7 @@ func TestCallHoldPreconditionReINVITEMarksQoSMet(t *testing.T) {
 					"a=des:qos mandatory local sendrecv\r\n" +
 					"a=des:qos optional remote sendrecv\r\n"),
 			}
-			body, err := call.localSDPWithDirection(mediaDirectionInactive)
+			body, err := call.localSDPWithDirection(mediaDirectionSendOnly)
 			if err != nil {
 				t.Fatalf("localSDPWithDirection() error = %v", err)
 			}
@@ -3635,7 +3635,7 @@ func TestCallHoldPreconditionReINVITEMarksQoSMet(t *testing.T) {
 			msg := snap.buildMediaReINVITE(2, sessionTimerState{}, body)
 			got := string(msg.Body)
 			for _, want := range []string{
-				"a=inactive\r\n",
+				"a=sendonly\r\n",
 				"a=curr:qos local sendrecv\r\n",
 				"a=curr:qos remote sendrecv\r\n",
 			} {
@@ -6675,7 +6675,7 @@ func TestCallHoldBlocksRTPButAllowsRTCP(t *testing.T) {
 		direction mediaDirection
 		wantRTP   bool
 	}{
-		{name: "local hold", hold: CallHoldLocal, direction: mediaDirectionInactive},
+		{name: "local hold", hold: CallHoldLocal, direction: mediaDirectionSendOnly},
 		{name: "inactive media", hold: CallHoldRemote, direction: mediaDirectionInactive},
 		{name: "remote hold sendonly answer allows rtp", hold: CallHoldRemote, direction: mediaDirectionSendOnly, wantRTP: true},
 	}

@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 )
@@ -48,6 +49,25 @@ func (s *Session) Tunnel() Info {
 
 func (s *Session) Info() Info {
 	return s.Tunnel()
+}
+
+func (s *Session) ReadyInfo() (Info, error) {
+	if s.isClosed() {
+		return Info{}, errSessionClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.connected {
+		if err := s.disconnectedTunnelErr(); err != nil {
+			return Info{}, err
+		}
+		return Info{}, errChildSAUnavailable
+	}
+	info := cloneInfo(s.tunnel)
+	if len(info.InnerIP) == 0 {
+		return Info{}, errors.New("tunnel inner ip is empty")
+	}
+	return info, nil
 }
 
 func (s *Session) Logger() *slog.Logger {

@@ -1022,7 +1022,7 @@ func TestBuildSDPOfferWithDirection(t *testing.T) {
 		direction mediaDirection
 		want      string
 	}{
-		{name: "local hold", direction: mediaDirectionInactive, want: "a=inactive\r\n"},
+		{name: "local hold", direction: mediaDirectionSendOnly, want: "a=sendonly\r\n"},
 		{name: "resume", direction: mediaDirectionSendRecv, want: "a=sendrecv\r\n"},
 	}
 	for _, tt := range tests {
@@ -1047,7 +1047,7 @@ func TestSDPWithDirectionMarksSessionModificationQoSMet(t *testing.T) {
 	}{
 		{
 			name:      "hold keeps preconditions met",
-			direction: mediaDirectionInactive,
+			direction: mediaDirectionSendOnly,
 			body: "v=0\r\n" +
 				"o=- 1 1 IN IP4 10.0.0.1\r\n" +
 				"s=-\r\n" +
@@ -1061,7 +1061,7 @@ func TestSDPWithDirectionMarksSessionModificationQoSMet(t *testing.T) {
 				"a=des:qos mandatory local sendrecv\r\n" +
 				"a=des:qos optional remote sendrecv\r\n",
 			want: []string{
-				"a=inactive\r\n",
+				"a=sendonly\r\n",
 				"a=curr:qos local sendrecv\r\n",
 				"a=curr:qos remote sendrecv\r\n",
 			},
