@@ -53,36 +53,36 @@ type ReadSMSCRecord struct {
 	RecordSize uint16
 }
 
-func (c ReadBinary) APDU() []byte {
+func (c ReadBinary) MarshalBinary() ([]byte, error) {
 	return apdu.Request{
 		CLA: 0x00,
 		INS: 0xB0,
 		P1:  byte(c.Offset >> 8),
 		P2:  byte(c.Offset),
 		Le:  &c.Length,
-	}.APDU()
+	}.MarshalBinary()
 }
 
 func (c ReadBinary) DecodeResponse(resp apdu.Response) ([]byte, error) {
 	return slices.Clone(resp.Data()), nil
 }
 
-func (c ReadRecord) APDU() []byte {
+func (c ReadRecord) MarshalBinary() ([]byte, error) {
 	return apdu.Request{
 		CLA: 0x00,
 		INS: 0xB2,
 		P1:  c.Record,
 		P2:  0x04,
 		Le:  &c.Length,
-	}.APDU()
+	}.MarshalBinary()
 }
 
 func (c ReadRecord) DecodeResponse(resp apdu.Response) ([]byte, error) {
 	return slices.Clone(resp.Data()), nil
 }
 
-func (c ReadIMSI) APDU() []byte {
-	return ReadBinary{Length: byte(c.FileSize)}.APDU()
+func (c ReadIMSI) MarshalBinary() ([]byte, error) {
+	return ReadBinary{Length: byte(c.FileSize)}.MarshalBinary()
 }
 
 func (c ReadIMSI) Decode(data []byte) (IMSI, error) {
@@ -111,8 +111,8 @@ func (c ReadIMSI) DecodeResponse(resp apdu.Response) (IMSI, error) {
 	return c.Decode(resp.Data())
 }
 
-func (c ReadICCID) APDU() []byte {
-	return ReadBinary{Length: byte(c.FileSize)}.APDU()
+func (c ReadICCID) MarshalBinary() ([]byte, error) {
+	return ReadBinary{Length: byte(c.FileSize)}.MarshalBinary()
 }
 
 func (c ReadICCID) Decode(data []byte) (string, error) {
@@ -123,8 +123,8 @@ func (c ReadICCID) DecodeResponse(resp apdu.Response) (string, error) {
 	return c.Decode(resp.Data())
 }
 
-func (c ReadEFDirRecord) APDU() []byte {
-	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.APDU()
+func (c ReadEFDirRecord) MarshalBinary() ([]byte, error) {
+	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.MarshalBinary()
 }
 
 func (c ReadEFDirRecord) Decode(data []byte) (simfile.EFDirRecord, error) {
@@ -139,8 +139,8 @@ func (c ReadEFDirRecord) DecodeResponse(resp apdu.Response) (simfile.EFDirRecord
 	return c.Decode(resp.Data())
 }
 
-func (c ReadTextBinary) APDU() []byte {
-	return ReadBinary{Length: byte(c.FileSize)}.APDU()
+func (c ReadTextBinary) MarshalBinary() ([]byte, error) {
+	return ReadBinary{Length: byte(c.FileSize)}.MarshalBinary()
 }
 
 func (c ReadTextBinary) Decode(data []byte) (string, error) {
@@ -151,8 +151,8 @@ func (c ReadTextBinary) DecodeResponse(resp apdu.Response) (string, error) {
 	return c.Decode(resp.Data())
 }
 
-func (c ReadTextRecord) APDU() []byte {
-	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.APDU()
+func (c ReadTextRecord) MarshalBinary() ([]byte, error) {
+	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.MarshalBinary()
 }
 
 func (c ReadTextRecord) Decode(data []byte) (string, error) {
@@ -163,8 +163,8 @@ func (c ReadTextRecord) DecodeResponse(resp apdu.Response) (string, error) {
 	return c.Decode(resp.Data())
 }
 
-func (c ReadSMSCRecord) APDU() []byte {
-	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.APDU()
+func (c ReadSMSCRecord) MarshalBinary() ([]byte, error) {
+	return ReadRecord{Record: c.Record, Length: byte(c.RecordSize)}.MarshalBinary()
 }
 
 func (c ReadSMSCRecord) Decode(data []byte) (string, error) {

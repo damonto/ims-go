@@ -96,26 +96,8 @@ if err != nil {
     - 长期运行 Goroutine 必须有 `context` 取消或 `close channel` 机制。
 - **锁 vs Channel**：不要为了秀技巧而用 Channel。简单的状态保护（计数器、缓存）直接用 `sync.RWMutex`。
 
-### 2.4 HTTP API 设计 (RESTful Design)
 
-- **面向资源 (Resource-Oriented)**：URL 路径必须是名词及其复数形式。**严禁** 写出 POST /getUser 或 GET /deleteData 这种 RPC 风格的伪 REST。
-- **动词与状态码匹配**：
-    - GET /users -> 获取列表 (200 OK)
-    - POST /users -> 创建资源 (201 Created)
-    - PUT /users/{id} -> 替换资源 (200 OK 或 204 No Content)
-    - DELETE /users/{id} -> 删除资源 (204 No Content)
-- **拥抱 Go 1.25+ 路由**：强制使用标准库的新路由特性绑定 HTTP 动词与路径参数。
-
-    **✅ 现代 Go 路由示范：**
-
-    ```go
-    mux := http.NewServeMux()
-    mux.HandleFunc("GET /users/{id}", handleGetUser)
-    mux.HandleFunc("POST /users", handleCreateUser)
-    ```
-
-
-### 2.5 API 契约与不变量 (Contracts & Invariants)
+### 2.4 API 契约与不变量 (Contracts & Invariants)
 
 - **入口建立不变量**：在构造函数、`NewXxx(...)`、`Load(...)`、`Normalized()` 中一次性完成依赖注入与默认值归一化，例如 `logger`、`client`、`session`、channel、map、关闭状态。
 - **非导出方法不兜底**：包内 helper 一律假设调用方已经满足契约。不要在深层重复写 `if x == nil`、`if ctx == nil`、`logger == nil -> slog.Default()` 这类补救逻辑。

@@ -112,8 +112,18 @@ func (t *serviceStubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr
 		return pkt, t.remote, nil
 	}
 }
-func (t *serviceStubTransport) Close() error          { return nil }
-func (t *serviceStubTransport) queue(msg sip.Message) { t.readCh <- msg.Bytes() }
+func (t *serviceStubTransport) Close() error { return nil }
+func (t *serviceStubTransport) queue(msg sip.Message) {
+	t.readCh <- marshalSIPMessageForTest(msg)
+}
+
+func marshalSIPMessageForTest(msg sip.Message) []byte {
+	data, err := msg.MarshalText()
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
 
 func (serviceStubCard) IMSI() string { return "001010123456789" }
 func (serviceStubCard) MCC() string  { return "001" }
@@ -168,8 +178,8 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 		if got := req.Header("P-Preferred-Identity"); got != "<tel:+15551234567>" {
 			t.Fatalf("P-Preferred-Identity = %q", got)
 		}
-		if got := req.Header("Accept-Contact"); got != smsAcceptContact {
-			t.Fatalf("Accept-Contact = %q, want %q", got, smsAcceptContact)
+		if got := req.Header("Accept-Contact"); got != acceptContact {
+			t.Fatalf("Accept-Contact = %q, want %q", got, acceptContact)
 		}
 		if got := req.Header("User-Agent"); got == "" {
 			t.Fatal("User-Agent = empty")
@@ -460,8 +470,8 @@ func TestHandleMalformedInboundSMSReturns200(t *testing.T) {
 func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan IncomingSMS, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	gotCh := make(chan Incoming, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -494,16 +504,16 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	select {
 	case got := <-gotCh:
 		if got.Text != "hello" || got.From != "+15551234567" || got.ServiceCenter != "+15550000000" {
-			t.Fatalf("IncomingSMS = %+v", got)
+			t.Fatalf("Incoming = %+v", got)
 		}
 		if got.To != "+19293101226" || got.ToURI != "sip:+19293101226@one.att.net" {
-			t.Fatalf("IncomingSMS recipient = %q/%q, want +19293101226/sip:+19293101226@one.att.net", got.To, got.ToURI)
+			t.Fatalf("Incoming recipient = %q/%q, want +19293101226/sip:+19293101226@one.att.net", got.To, got.ToURI)
 		}
 		if !bytes.Equal(got.RawTPDU, tpdu) {
-			t.Fatalf("IncomingSMS.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
+			t.Fatalf("Incoming.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
 		}
 		if got.ReservedMTI {
-			t.Fatal("IncomingSMS.ReservedMTI = true, want false")
+			t.Fatal("Incoming.ReservedMTI = true, want false")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
@@ -513,8 +523,8 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan IncomingSMS, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	gotCh := make(chan Incoming, 1)
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -545,13 +555,13 @@ func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
 	select {
 	case got := <-gotCh:
 		if got.Text != "hello" || got.From != "+15551234567" {
-			t.Fatalf("IncomingSMS = %+v, want decoded reserved-MTI deliver", got)
+			t.Fatalf("Incoming = %+v, want decoded reserved-MTI deliver", got)
 		}
 		if !got.ReservedMTI {
-			t.Fatal("IncomingSMS.ReservedMTI = false, want true")
+			t.Fatal("Incoming.ReservedMTI = false, want true")
 		}
 		if !bytes.Equal(got.RawTPDU, tpdu) {
-			t.Fatalf("IncomingSMS.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
+			t.Fatalf("Incoming.RawTPDU = % X, want original % X", got.RawTPDU, tpdu)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
@@ -584,9 +594,9 @@ func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newServiceTransport()
 			sess, reg := registeredService(t, transport)
-			gotCh := make(chan IncomingSMS, 1)
+			gotCh := make(chan Incoming, 1)
 			reportCh := make(chan sip.Message, 1)
-			svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
+			svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -630,7 +640,7 @@ func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) 
 			select {
 			case got := <-gotCh:
 				if got.From != tt.wantFrom || got.FromURI != tt.wantFromURI || got.Text != "hello" {
-					t.Fatalf("IncomingSMS = %+v, want From %q FromURI %q text hello", got, tt.wantFrom, tt.wantFromURI)
+					t.Fatalf("Incoming = %+v, want From %q FromURI %q text hello", got, tt.wantFrom, tt.wantFromURI)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("waiting for incoming sms callback")
@@ -662,9 +672,9 @@ func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) 
 func TestHandleInboundMSISDNLessSMSRequiresFeatureCaps(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan IncomingSMS, 1)
+	gotCh := make(chan Incoming, 1)
 	reportCh := make(chan sip.Message, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -715,9 +725,9 @@ func TestHandleInboundMSISDNLessSMSRequiresFeatureCaps(t *testing.T) {
 func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	gotCh := make(chan IncomingSMS, 1)
+	gotCh := make(chan Incoming, 1)
 	reportCh := make(chan sip.Message, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in IncomingSMS) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -759,7 +769,7 @@ func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
 	select {
 	case got := <-gotCh:
 		if got.From != "+15551234567" || got.FromURI != "" || got.Text != "hello" {
-			t.Fatalf("IncomingSMS = %+v, want TP-OA +15551234567, empty FromURI, text hello", got)
+			t.Fatalf("Incoming = %+v, want TP-OA +15551234567, empty FromURI, text hello", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
@@ -770,8 +780,8 @@ func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseMediaType() error = %v", err)
 		}
-		if mediaType != smsContentType {
-			t.Fatalf("delivery report Content-Type = %q, want %q", mediaType, smsContentType)
+		if mediaType != messageContentType {
+			t.Fatalf("delivery report Content-Type = %q, want %q", mediaType, messageContentType)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for delivery report")
@@ -842,8 +852,8 @@ func TestHandleInboundMSISDNLessStatusReportUsesPlainDeliveryReport(t *testing.T
 		if err != nil {
 			t.Fatalf("ParseMediaType() error = %v", err)
 		}
-		if mediaType != smsContentType {
-			t.Fatalf("delivery report Content-Type = %q, want %q", mediaType, smsContentType)
+		if mediaType != messageContentType {
+			t.Fatalf("delivery report Content-Type = %q, want %q", mediaType, messageContentType)
 		}
 		var got rpMessage
 		if err := got.UnmarshalBinary(report.Body); err != nil {
@@ -925,7 +935,7 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 	callbackRelease := make(chan struct{})
 	reportCh := make(chan sip.Message, 1)
 	svc, err := New(Config{Logger: testLogger(),
-		OnIncoming: func(in IncomingSMS) {
+		OnIncoming: func(in Incoming) {
 			close(callbackStarted)
 			<-callbackRelease
 		},
@@ -1047,7 +1057,7 @@ func TestReportTargetUsesIPSMGWAssertedIdentity(t *testing.T) {
 	}
 }
 
-func TestDecodeSMSXMLInfoRejectsDuplicateElements(t *testing.T) {
+func TestDecodeXMLInfoRejectsDuplicateElements(t *testing.T) {
 	tests := []struct {
 		name string
 		xml  string
@@ -1071,14 +1081,14 @@ func TestDecodeSMSXMLInfoRejectsDuplicateElements(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
-				t.Fatal("decodeSMSXMLInfo() error = nil, want duplicate element error")
+			if _, err := decodeXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeXMLInfo() error = nil, want duplicate element error")
 			}
 		})
 	}
 }
 
-func TestDecodeSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
+func TestDecodeXMLInfoRejectsNonSIPURIs(t *testing.T) {
 	tests := []struct {
 		name string
 		xml  string
@@ -1102,30 +1112,30 @@ func TestDecodeSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
-				t.Fatal("decodeSMSXMLInfo() error = nil, want SIP URI validation error")
+			if _, err := decodeXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeXMLInfo() error = nil, want SIP URI validation error")
 			}
 		})
 	}
 }
 
-func TestMarshalSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
+func TestMarshalXMLInfoRejectsNonSIPURIs(t *testing.T) {
 	tests := []struct {
 		name string
-		info smsXMLInfo
+		info xmlInfo
 	}{
 		{
 			name: "To tel URI",
-			info: smsXMLInfo{To: "tel:+15551234567"},
+			info: xmlInfo{To: "tel:+15551234567"},
 		},
 		{
 			name: "From plain string",
-			info: smsXMLInfo{From: "alice@example.net"},
+			info: xmlInfo{From: "alice@example.net"},
 		},
 		{
 			name: "Correlation Sender tel URI",
-			info: smsXMLInfo{
-				CorrelationID: smsXMLCorrelationID{
+			info: xmlInfo{
+				CorrelationID: xmlCorrelationID{
 					Sender:   "tel:+15551234567",
 					Receiver: "sip:bob@example.net",
 					HLRID:    "hlr",
@@ -1135,8 +1145,8 @@ func TestMarshalSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
 		},
 		{
 			name: "Correlation Receiver plain string",
-			info: smsXMLInfo{
-				CorrelationID: smsXMLCorrelationID{
+			info: xmlInfo{
+				CorrelationID: xmlCorrelationID{
 					Sender:   "sip:alice@example.net",
 					Receiver: "bob@example.net",
 					HLRID:    "hlr",
@@ -1154,22 +1164,22 @@ func TestMarshalSMSXMLInfoRejectsNonSIPURIs(t *testing.T) {
 	}
 }
 
-func TestSMSXMLInfoRoundTripIncludesCorrelationAndOutcome(t *testing.T) {
+func TestXMLInfoRoundTripIncludesCorrelationAndOutcome(t *testing.T) {
 	tests := []struct {
 		name string
-		info smsXMLInfo
+		info xmlInfo
 	}{
 		{
 			name: "addressing",
-			info: smsXMLInfo{
+			info: xmlInfo{
 				To:   "sip:bob@example.net",
 				From: "sip:alice@example.net",
 			},
 		},
 		{
 			name: "correlation and delivery outcome",
-			info: smsXMLInfo{
-				CorrelationID: smsXMLCorrelationID{
+			info: xmlInfo{
+				CorrelationID: xmlCorrelationID{
 					Sender:   "sip:alice@example.net",
 					Receiver: "sip:bob@example.net",
 					HLRID:    "hlr.example.net",
@@ -1186,7 +1196,7 @@ func TestSMSXMLInfoRoundTripIncludesCorrelationAndOutcome(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalText() error = %v", err)
 			}
-			var got smsXMLInfo
+			var got xmlInfo
 			if err := got.UnmarshalText(text); err != nil {
 				t.Fatalf("UnmarshalText() error = %v", err)
 			}
@@ -1197,7 +1207,59 @@ func TestSMSXMLInfoRoundTripIncludesCorrelationAndOutcome(t *testing.T) {
 	}
 }
 
-func TestDecodeSMSXMLInfoNormalizesUnknownDeliveryOutcome(t *testing.T) {
+func TestXMLInfoReadFromWriteTo(t *testing.T) {
+	tests := []struct {
+		name string
+		info xmlInfo
+	}{
+		{
+			name: "addresses",
+			info: xmlInfo{
+				To:   "sip:bob@example.net",
+				From: "sip:alice@example.net",
+			},
+		},
+		{
+			name: "correlation",
+			info: xmlInfo{
+				CorrelationID: xmlCorrelationID{
+					Sender:   "sip:alice@example.net",
+					Receiver: "sip:bob@example.net",
+					HLRID:    "hlr.example.net",
+				},
+				HasCorrelationID: true,
+				DeliveryOutcome:  deliveryOutcomeSuccessfulTransfer,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			written, err := tt.info.WriteTo(&out)
+			if err != nil {
+				t.Fatalf("WriteTo() error = %v", err)
+			}
+			if written != int64(out.Len()) {
+				t.Fatalf("WriteTo() bytes = %d, want %d", written, out.Len())
+			}
+
+			var got xmlInfo
+			read, err := got.ReadFrom(bytes.NewReader(out.Bytes()))
+			if err != nil {
+				t.Fatalf("ReadFrom() error = %v", err)
+			}
+			if read != int64(out.Len()) {
+				t.Fatalf("ReadFrom() bytes = %d, want %d", read, out.Len())
+			}
+			if got != tt.info {
+				t.Fatalf("ReadFrom() = %+v, want %+v body=%s", got, tt.info, out.String())
+			}
+		})
+	}
+}
+
+func TestDecodeXMLInfoNormalizesUnknownDeliveryOutcome(t *testing.T) {
 	tests := []struct {
 		name string
 		xml  string
@@ -1206,19 +1268,19 @@ func TestDecodeSMSXMLInfoNormalizesUnknownDeliveryOutcome(t *testing.T) {
 		{
 			name: "known outcome",
 			xml:  `<short-message-info><Delivery-Outcome>SuccessfulTransfer</Delivery-Outcome></short-message-info>`,
-			want: smsDeliveryOutcomeSuccessfulTransfer,
+			want: deliveryOutcomeSuccessfulTransfer,
 		},
 		{
 			name: "unknown outcome",
 			xml:  `<short-message-info><Delivery-Outcome>FutureOutcome</Delivery-Outcome></short-message-info>`,
-			want: smsDeliveryOutcomeSMDeliveryFailure,
+			want: deliveryOutcomeSMDeliveryFailure,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := decodeSMSXMLInfo([]byte(tt.xml))
+			got, err := decodeXMLInfo([]byte(tt.xml))
 			if err != nil {
-				t.Fatalf("decodeSMSXMLInfo() error = %v", err)
+				t.Fatalf("decodeXMLInfo() error = %v", err)
 			}
 			if got.DeliveryOutcome != tt.want {
 				t.Fatalf("DeliveryOutcome = %q, want %q", got.DeliveryOutcome, tt.want)
@@ -1227,10 +1289,10 @@ func TestDecodeSMSXMLInfoNormalizesUnknownDeliveryOutcome(t *testing.T) {
 	}
 }
 
-func TestDecodeSMSXMLInfoAcceptsDocumentNamespace(t *testing.T) {
-	got, err := decodeSMSXMLInfo([]byte(`<short-message-info xmlns="urn:vendor"><To>sip:bob@example.net</To><From>sip:alice@example.net</From><Correlation-ID><Sender>sip:a@example.net</Sender><Receiver>sip:b@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID><Delivery-Outcome>SuccessfulTransfer</Delivery-Outcome></short-message-info>`))
+func TestDecodeXMLInfoAcceptsDocumentNamespace(t *testing.T) {
+	got, err := decodeXMLInfo([]byte(`<short-message-info xmlns="urn:vendor"><To>sip:bob@example.net</To><From>sip:alice@example.net</From><Correlation-ID><Sender>sip:a@example.net</Sender><Receiver>sip:b@example.net</Receiver><HLR-ID>hlr</HLR-ID></Correlation-ID><Delivery-Outcome>SuccessfulTransfer</Delivery-Outcome></short-message-info>`))
 	if err != nil {
-		t.Fatalf("decodeSMSXMLInfo() error = %v", err)
+		t.Fatalf("decodeXMLInfo() error = %v", err)
 	}
 	if got.To != "sip:bob@example.net" || got.From != "sip:alice@example.net" {
 		t.Fatalf("To/From = %q/%q, want namespaced values", got.To, got.From)
@@ -1238,8 +1300,8 @@ func TestDecodeSMSXMLInfoAcceptsDocumentNamespace(t *testing.T) {
 	if !got.HasCorrelationID || got.CorrelationID.Sender != "sip:a@example.net" || got.CorrelationID.Receiver != "sip:b@example.net" || got.CorrelationID.HLRID != "hlr" {
 		t.Fatalf("CorrelationID = %+v has=%t, want namespaced correlation id", got.CorrelationID, got.HasCorrelationID)
 	}
-	if got.DeliveryOutcome != smsDeliveryOutcomeSuccessfulTransfer {
-		t.Fatalf("DeliveryOutcome = %q, want %q", got.DeliveryOutcome, smsDeliveryOutcomeSuccessfulTransfer)
+	if got.DeliveryOutcome != deliveryOutcomeSuccessfulTransfer {
+		t.Fatalf("DeliveryOutcome = %q, want %q", got.DeliveryOutcome, deliveryOutcomeSuccessfulTransfer)
 	}
 }
 
@@ -1267,18 +1329,18 @@ func TestEnvelopeEndpointSplitsNumberAndURI(t *testing.T) {
 	}
 }
 
-func TestMarshalSMSXMLInfoRejectsUnknownDeliveryOutcome(t *testing.T) {
+func TestMarshalXMLInfoRejectsUnknownDeliveryOutcome(t *testing.T) {
 	tests := []struct {
 		name string
-		info smsXMLInfo
+		info xmlInfo
 	}{
 		{
 			name: "unknown outcome",
-			info: smsXMLInfo{DeliveryOutcome: "FutureOutcome"},
+			info: xmlInfo{DeliveryOutcome: "FutureOutcome"},
 		},
 		{
 			name: "case mismatch",
-			info: smsXMLInfo{DeliveryOutcome: "smdeliveryfailure"},
+			info: xmlInfo{DeliveryOutcome: "smdeliveryfailure"},
 		},
 	}
 	for _, tt := range tests {
@@ -1290,7 +1352,7 @@ func TestMarshalSMSXMLInfoRejectsUnknownDeliveryOutcome(t *testing.T) {
 	}
 }
 
-func TestDecodeSMSXMLInfoRejectsDuplicateCorrelationIDChildren(t *testing.T) {
+func TestDecodeXMLInfoRejectsDuplicateCorrelationIDChildren(t *testing.T) {
 	tests := []struct {
 		name string
 		xml  string
@@ -1310,14 +1372,14 @@ func TestDecodeSMSXMLInfoRejectsDuplicateCorrelationIDChildren(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
-				t.Fatal("decodeSMSXMLInfo() error = nil, want duplicate child error")
+			if _, err := decodeXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeXMLInfo() error = nil, want duplicate child error")
 			}
 		})
 	}
 }
 
-func TestDecodeSMSXMLInfoRejectsIncompleteCorrelationID(t *testing.T) {
+func TestDecodeXMLInfoRejectsIncompleteCorrelationID(t *testing.T) {
 	tests := []struct {
 		name string
 		xml  string
@@ -1337,8 +1399,8 @@ func TestDecodeSMSXMLInfoRejectsIncompleteCorrelationID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := decodeSMSXMLInfo([]byte(tt.xml)); err == nil {
-				t.Fatal("decodeSMSXMLInfo() error = nil, want incomplete Correlation-ID error")
+			if _, err := decodeXMLInfo([]byte(tt.xml)); err == nil {
+				t.Fatal("decodeXMLInfo() error = nil, want incomplete Correlation-ID error")
 			}
 		})
 	}
@@ -1352,8 +1414,8 @@ func TestDecodeMultipartSMSPayloadRejectsDuplicateXMLPart(t *testing.T) {
 		`<short-message-info><From>sip:bob@example.net</From></short-message-info>`,
 	} {
 		part, err := writer.CreatePart(textproto.MIMEHeader{
-			"Content-Type":        {smsXMLContentType},
-			"Content-Disposition": {smsXMLDisposition},
+			"Content-Type":        {xmlContentType},
+			"Content-Disposition": {xmlDisposition},
 		})
 		if err != nil {
 			t.Fatalf("CreatePart(xml) error = %v", err)
@@ -1362,14 +1424,14 @@ func TestDecodeMultipartSMSPayloadRejectsDuplicateXMLPart(t *testing.T) {
 			t.Fatalf("Write(xml) error = %v", err)
 		}
 	}
-	smsPart, err := writer.CreatePart(textproto.MIMEHeader{
-		"Content-Type":              {smsContentType},
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {messageContentType},
 		"Content-Transfer-Encoding": {binaryTransferValue},
 	})
 	if err != nil {
 		t.Fatalf("CreatePart(sms) error = %v", err)
 	}
-	if _, err := smsPart.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
+	if _, err := part.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
 		t.Fatalf("Write(sms) error = %v", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -1399,7 +1461,7 @@ func TestDecodeMultipartSMSPayloadRejectsInvalidXMLDisposition(t *testing.T) {
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)
 			xmlHeader := textproto.MIMEHeader{
-				"Content-Type": {smsXMLContentType},
+				"Content-Type": {xmlContentType},
 			}
 			if tt.disposition != "" {
 				xmlHeader.Set("Content-Disposition", tt.disposition)
@@ -1411,14 +1473,14 @@ func TestDecodeMultipartSMSPayloadRejectsInvalidXMLDisposition(t *testing.T) {
 			if _, err := xmlPart.Write([]byte(`<short-message-info><From>sip:alice@example.net</From></short-message-info>`)); err != nil {
 				t.Fatalf("Write(xml) error = %v", err)
 			}
-			smsPart, err := writer.CreatePart(textproto.MIMEHeader{
-				"Content-Type":              {smsContentType},
+			part, err := writer.CreatePart(textproto.MIMEHeader{
+				"Content-Type":              {messageContentType},
 				"Content-Transfer-Encoding": {binaryTransferValue},
 			})
 			if err != nil {
 				t.Fatalf("CreatePart(sms) error = %v", err)
 			}
-			if _, err := smsPart.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
+			if _, err := part.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
 				t.Fatalf("Write(sms) error = %v", err)
 			}
 			if err := writer.Close(); err != nil {
@@ -1483,14 +1545,14 @@ func TestDecodeMultipartSMSPayloadUnsupportedBodyPartHandling(t *testing.T) {
 			if _, err := unknownPart.Write([]byte("ignored")); err != nil {
 				t.Fatalf("Write(unknown) error = %v", err)
 			}
-			smsPart, err := writer.CreatePart(textproto.MIMEHeader{
-				"Content-Type":              {smsContentType},
+			part, err := writer.CreatePart(textproto.MIMEHeader{
+				"Content-Type":              {messageContentType},
 				"Content-Transfer-Encoding": {binaryTransferValue},
 			})
 			if err != nil {
 				t.Fatalf("CreatePart(sms) error = %v", err)
 			}
-			if _, err := smsPart.Write(rpdu); err != nil {
+			if _, err := part.Write(rpdu); err != nil {
 				t.Fatalf("Write(sms) error = %v", err)
 			}
 			if err := writer.Close(); err != nil {
@@ -1537,14 +1599,14 @@ func TestDecodeMessagePayloadRejectsNonBinaryTransferEncoding(t *testing.T) {
 				t.Helper()
 				var body bytes.Buffer
 				writer := multipart.NewWriter(&body)
-				smsPart, err := writer.CreatePart(textproto.MIMEHeader{
-					"Content-Type":              {smsContentType},
+				part, err := writer.CreatePart(textproto.MIMEHeader{
+					"Content-Type":              {messageContentType},
 					"Content-Transfer-Encoding": {"quoted-printable"},
 				})
 				if err != nil {
 					t.Fatalf("CreatePart(sms) error = %v", err)
 				}
-				if _, err := smsPart.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
+				if _, err := part.Write([]byte{rpDataNetworkToMS, 0x01}); err != nil {
 					t.Fatalf("Write(sms) error = %v", err)
 				}
 				if err := writer.Close(); err != nil {
@@ -1600,8 +1662,8 @@ func TestHandleMessageRejectsNonBinaryTransferEncoding(t *testing.T) {
 	if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
 		t.Fatalf("response status = %d, want %d", got, sipStatusUnsupportedMediaType)
 	}
-	if got := resp.Header("Accept"); got != smsAcceptHeader {
-		t.Fatalf("Accept = %q, want %q", got, smsAcceptHeader)
+	if got := resp.Header("Accept"); got != acceptHeader {
+		t.Fatalf("Accept = %q, want %q", got, acceptHeader)
 	}
 	for _, data := range transport.writes {
 		req := mustParseMessage(t, data)
@@ -1641,12 +1703,12 @@ func TestHandleMessageRejectsUnsupportedContentType(t *testing.T) {
 	if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
 		t.Fatalf("response status = %d, want %d", got, sipStatusUnsupportedMediaType)
 	}
-	if got := resp.Header("Accept"); got != smsAcceptHeader {
-		t.Fatalf("Accept = %q, want %q", got, smsAcceptHeader)
+	if got := resp.Header("Accept"); got != acceptHeader {
+		t.Fatalf("Accept = %q, want %q", got, acceptHeader)
 	}
 }
 
-func TestSendDoesNotRetrySubmitReportTimeout(t *testing.T) {
+func TestSendIgnoresMissingSubmitReport(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	errCh := make(chan error, 1)
@@ -1681,11 +1743,8 @@ func TestSendDoesNotRetrySubmitReportTimeout(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		if !strings.Contains(err.Error(), "submit report not received") {
-			t.Fatalf("OnError = %v, want submit report timeout", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("OnError not called for submit report timeout")
+		t.Fatalf("OnError = %v, want none", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 	select {
 	case retry := <-requests:
@@ -2127,8 +2186,8 @@ func multipartSMSBody(t *testing.T, xmlBody string, rpdu []byte) ([]byte, string
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	xmlPart, err := writer.CreatePart(textproto.MIMEHeader{
-		"Content-Type":        {smsXMLContentType},
-		"Content-Disposition": {smsXMLDisposition},
+		"Content-Type":        {xmlContentType},
+		"Content-Disposition": {xmlDisposition},
 	})
 	if err != nil {
 		t.Fatalf("CreatePart(xml) error = %v", err)
@@ -2136,14 +2195,14 @@ func multipartSMSBody(t *testing.T, xmlBody string, rpdu []byte) ([]byte, string
 	if _, err := xmlPart.Write([]byte(xmlBody)); err != nil {
 		t.Fatalf("Write(xml) error = %v", err)
 	}
-	smsPart, err := writer.CreatePart(textproto.MIMEHeader{
-		"Content-Type":              {smsContentType},
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {messageContentType},
 		"Content-Transfer-Encoding": {binaryTransferValue},
 	})
 	if err != nil {
 		t.Fatalf("CreatePart(sms) error = %v", err)
 	}
-	if _, err := smsPart.Write(rpdu); err != nil {
+	if _, err := part.Write(rpdu); err != nil {
 		t.Fatalf("Write(sms) error = %v", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -2152,7 +2211,7 @@ func multipartSMSBody(t *testing.T, xmlBody string, rpdu []byte) ([]byte, string
 	return body.Bytes(), mixedMultipartType + "; boundary=" + writer.Boundary()
 }
 
-func multipartSMSReport(t *testing.T, msg sip.Message) (smsXMLInfo, []byte) {
+func multipartSMSReport(t *testing.T, msg sip.Message) (xmlInfo, []byte) {
 	t.Helper()
 	mediaType, params, err := mime.ParseMediaType(msg.Header("Content-Type"))
 	if err != nil {
@@ -2162,7 +2221,7 @@ func multipartSMSReport(t *testing.T, msg sip.Message) (smsXMLInfo, []byte) {
 		t.Fatalf("Content-Type = %q, want %q", mediaType, mixedMultipartType)
 	}
 	reader := multipart.NewReader(bytes.NewReader(msg.Body), params["boundary"])
-	var info smsXMLInfo
+	var info xmlInfo
 	var rpdu []byte
 	for {
 		part, err := reader.NextPart()
@@ -2181,15 +2240,15 @@ func multipartSMSReport(t *testing.T, msg sip.Message) (smsXMLInfo, []byte) {
 			t.Fatalf("part ParseMediaType() error = %v", err)
 		}
 		switch mediaType {
-		case smsXMLContentType:
-			if err := validateSMSXMLDisposition(part.Header.Get("Content-Disposition")); err != nil {
+		case xmlContentType:
+			if err := validateXMLDisposition(part.Header.Get("Content-Disposition")); err != nil {
 				t.Fatalf("XML Content-Disposition error = %v", err)
 			}
-			info, err = decodeSMSXMLInfo(data)
+			info, err = decodeXMLInfo(data)
 			if err != nil {
-				t.Fatalf("decodeSMSXMLInfo() error = %v", err)
+				t.Fatalf("decodeXMLInfo() error = %v", err)
 			}
-		case smsContentType:
+		case messageContentType:
 			rpdu = append([]byte(nil), data...)
 		}
 	}

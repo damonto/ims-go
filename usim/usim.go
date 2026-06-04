@@ -3,6 +3,7 @@ package usim
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"errors"
 	"fmt"
 	"slices"
@@ -69,7 +70,7 @@ func (r *reader) ListApplications(ctx context.Context) ([]usimreader.Application
 	return apps, nil
 }
 
-func (r *reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *reader) FileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	info, err := r.selectFile(ctx, file)
 	if err != nil {
 		return usimreader.FileAttributes{}, err
@@ -125,10 +126,10 @@ func (r *reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 		}
 		r.selected = selection{}
 	}
-	raw, err := r.transmit(ctx, command.Authenticate3G{
+	raw, err := r.transmitCommand(ctx, command.Authenticate3G{
 		Rand: slices.Clone(req.Rand),
 		AUTN: slices.Clone(req.AUTN),
-	}.APDU())
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -136,14 +137,10 @@ func (r *reader) Authenticate3G(ctx context.Context, req usimreader.Authenticate
 }
 
 func (r *reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownloadRequest) (usimreader.SMSPPDownloadResponse, error) {
-	apduRequest, err := command.SMSPPDownload{
+	raw, err := r.transmitEnvelopeCommand(ctx, command.SMSPPDownload{
 		ServiceCenterAddress: req.ServiceCenterAddress,
 		TPDU:                 slices.Clone(req.TPDU),
-	}.APDU()
-	if err != nil {
-		return usimreader.SMSPPDownloadResponse{}, err
-	}
-	raw, err := r.transmitEnvelope(ctx, apduRequest)
+	})
 	if err != nil {
 		return usimreader.SMSPPDownloadResponse{}, err
 	}
@@ -155,9 +152,6 @@ func (r *reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownload
 }
 
 func (r *reader) Close() error {
-	if r.tx == nil {
-		return nil
-	}
 	return r.tx.Close()
 }
 
@@ -204,19 +198,19 @@ func (r *reader) selectFile(ctx context.Context, file usimreader.FileRef) (simfi
 }
 
 func (r *reader) selectID(ctx context.Context, id []byte) (simfile.FCI, error) {
-	return r.decodeFCI(ctx, command.SelectID{ID: slices.Clone(id)}.APDU())
+	return r.decodeFCI(ctx, command.SelectID{ID: slices.Clone(id)})
 }
 
 func (r *reader) selectName(ctx context.Context, name []byte) (simfile.FCI, error) {
-	return r.decodeFCI(ctx, command.SelectName{Name: slices.Clone(name)}.APDU())
+	return r.decodeFCI(ctx, command.SelectName{Name: slices.Clone(name)})
 }
 
 func (r *reader) selectPath(ctx context.Context, path []byte) (simfile.FCI, error) {
-	return r.decodeFCI(ctx, command.SelectPath{Path: slices.Clone(path)}.APDU())
+	return r.decodeFCI(ctx, command.SelectPath{Path: slices.Clone(path)})
 }
 
-func (r *reader) decodeFCI(ctx context.Context, req []byte) (simfile.FCI, error) {
-	raw, err := r.transmit(ctx, req)
+func (r *reader) decodeFCI(ctx context.Context, cmd encoding.BinaryMarshaler) (simfile.FCI, error) {
+	raw, err := r.transmitCommand(ctx, cmd)
 	if err != nil {
 		return simfile.FCI{}, err
 	}
@@ -236,10 +230,10 @@ func (r *reader) readBinaryRaw(ctx context.Context, offset, length uint16) ([]by
 	data := make([]byte, 0, length)
 	for length > 0 {
 		chunk := minUint16(length, 0xFF)
-		raw, err := r.transmit(ctx, command.ReadBinary{
+		raw, err := r.transmitCommand(ctx, command.ReadBinary{
 			Offset: offset,
 			Length: byte(chunk),
-		}.APDU())
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -258,14 +252,30 @@ func (r *reader) readRecordRaw(ctx context.Context, record, length uint16) ([]by
 		return nil, fmt.Errorf("reading record file: record length %d exceeds APDU limit", length)
 	}
 
-	raw, err := r.transmit(ctx, command.ReadRecord{
+	raw, err := r.transmitCommand(ctx, command.ReadRecord{
 		Record: byte(record),
 		Length: byte(length),
-	}.APDU())
+	})
 	if err != nil {
 		return nil, err
 	}
 	return slices.Clone(raw.Data()), nil
+}
+
+func (r *reader) transmitCommand(ctx context.Context, cmd encoding.BinaryMarshaler) (apdu.Response, error) {
+	req, err := cmd.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return r.transmit(ctx, req)
+}
+
+func (r *reader) transmitEnvelopeCommand(ctx context.Context, cmd encoding.BinaryMarshaler) (apdu.Response, error) {
+	req, err := cmd.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return r.transmitEnvelope(ctx, req)
 }
 
 func (r *reader) transmit(ctx context.Context, req []byte) (apdu.Response, error) {
@@ -285,13 +295,17 @@ func (r *reader) transmit(ctx context.Context, req []byte) (apdu.Response, error
 	data := append([]byte(nil), resp.Data()...)
 	for resp.HasMore() {
 		length := resp.SW2()
-		follow, err := r.tx.Transmit(ctx, apdu.Request{
+		req, err := (apdu.Request{
 			CLA: 0x00,
 			INS: 0xC0,
 			P1:  0x00,
 			P2:  0x00,
 			Le:  &length,
-		}.APDU())
+		}).MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("building GET RESPONSE APDU: %w", err)
+		}
+		follow, err := r.tx.Transmit(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("reading response body: %w", err)
 		}
@@ -325,13 +339,17 @@ func (r *reader) transmitEnvelope(ctx context.Context, req []byte) (apdu.Respons
 	data := append([]byte(nil), resp.Data()...)
 	for resp.HasMore() {
 		length := resp.SW2()
-		follow, err := r.tx.Transmit(ctx, apdu.Request{
+		req, err := (apdu.Request{
 			CLA: 0x00,
 			INS: 0xC0,
 			P1:  0x00,
 			P2:  0x00,
 			Le:  &length,
-		}.APDU())
+		}).MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("building GET RESPONSE APDU: %w", err)
+		}
+		follow, err := r.tx.Transmit(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("reading response body: %w", err)
 		}

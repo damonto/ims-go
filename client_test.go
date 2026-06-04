@@ -126,9 +126,9 @@ func (r *readerStub) ListApplications(ctx context.Context) ([]usimreader.Applica
 	return r.listApplications(ctx)
 }
 
-func (r *readerStub) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *readerStub) FileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	if r.getFileAttributes == nil {
-		return usimreader.FileAttributes{}, errors.New("GetFileAttributes was not expected")
+		return usimreader.FileAttributes{}, errors.New("FileAttributes was not expected")
 	}
 	return r.getFileAttributes(ctx, file)
 }
@@ -164,6 +164,164 @@ func (r *readerStub) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDown
 func (r *readerStub) Close() error {
 	r.closeCalls++
 	return r.closeErr
+}
+
+func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       ClientStatus
+		lastErr      error
+		connecting   bool
+		reconnecting bool
+		closed       bool
+		active       bool
+		wantErr      error
+		call         func(*Client) error
+	}{
+		{
+			name:         "sms",
+			status:       StatusReconnecting,
+			lastErr:      errors.New("transport dropped"),
+			reconnecting: true,
+			wantErr:      ErrClientReconnecting,
+			call: func(client *Client) error {
+				_, err := client.currentSMSService()
+				return err
+			},
+		},
+		{
+			name:       "ussd",
+			status:     StatusFailed,
+			lastErr:    errors.New("registration failed"),
+			connecting: true,
+			wantErr:    ErrClientConnecting,
+			call: func(client *Client) error {
+				_, err := client.currentUSSDService()
+				return err
+			},
+		},
+		{
+			name:    "voice",
+			status:  StatusClosed,
+			closed:  true,
+			wantErr: ErrClientClosed,
+			call: func(client *Client) error {
+				_, err := client.currentVoiceService()
+				return err
+			},
+		},
+		{
+			name:    "active missing sms service",
+			status:  StatusRegistered,
+			active:  true,
+			wantErr: ErrClientNotConnected,
+			call: func(client *Client) error {
+				_, err := client.currentSMSService()
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newClient(Config{Logger: testLogger()})
+			client.emitStatusError(tt.status, tt.lastErr)
+			setClientState(t, client, clientStateSetup{
+				connecting:   tt.connecting,
+				reconnecting: tt.reconnecting,
+				closed:       tt.closed,
+				active:       tt.active,
+			})
+
+			err := tt.call(client)
+			if !errors.Is(err, ErrClientNotConnected) {
+				t.Fatalf("error = %v, want ErrClientNotConnected", err)
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tt.wantErr)
+			}
+			var connErr *ConnectionError
+			if !errors.As(err, &connErr) {
+				t.Fatalf("error type = %T, want *ConnectionError", err)
+			}
+			if connErr.Status() != tt.status {
+				t.Fatalf("ConnectionError.Status() = %s, want %s", connErr.Status(), tt.status)
+			}
+			if connErr.State.Status != tt.status {
+				t.Fatalf("ConnectionError.State.Status = %s, want %s", connErr.State.Status, tt.status)
+			}
+			if !errors.Is(connErr.State.LastError, tt.lastErr) {
+				t.Fatalf("ConnectionError.State.LastError = %v, want %v", connErr.State.LastError, tt.lastErr)
+			}
+			if connErr.State.Connecting != tt.connecting {
+				t.Fatalf("ConnectionError.State.Connecting = %v, want %v", connErr.State.Connecting, tt.connecting)
+			}
+			if connErr.State.Reconnecting != tt.reconnecting {
+				t.Fatalf("ConnectionError.State.Reconnecting = %v, want %v", connErr.State.Reconnecting, tt.reconnecting)
+			}
+			if connErr.State.Closed != tt.closed {
+				t.Fatalf("ConnectionError.State.Closed = %v, want %v", connErr.State.Closed, tt.closed)
+			}
+		})
+	}
+}
+
+func TestEmitStatusErrorRecordsStateAndPublishesEvents(t *testing.T) {
+	tests := []struct {
+		name   string
+		status ClientStatus
+		err    error
+	}{
+		{
+			name:   "failed",
+			status: StatusFailed,
+			err:    errors.New("registration dropped"),
+		},
+		{
+			name:   "reconnecting",
+			status: StatusReconnecting,
+			err:    errors.New("transport dropped"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newClient(Config{Logger: testLogger()})
+			events := client.Events()
+			defer events.Close()
+
+			client.emitStatusError(tt.status, tt.err)
+
+			state := client.State()
+			if state.Status != tt.status {
+				t.Fatalf("State().Status = %s, want %s", state.Status, tt.status)
+			}
+			if !errors.Is(state.LastError, tt.err) {
+				t.Fatalf("State().LastError = %v, want %v", state.LastError, tt.err)
+			}
+
+			select {
+			case got := <-events.Errors:
+				if !errors.Is(got, tt.err) {
+					t.Fatalf("error event = %v, want %v", got, tt.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for error event")
+			}
+
+			select {
+			case got := <-events.State:
+				if got.Status != tt.status {
+					t.Fatalf("state event status = %s, want %s", got.Status, tt.status)
+				}
+				if !errors.Is(got.LastError, tt.err) {
+					t.Fatalf("state event LastError = %v, want %v", got.LastError, tt.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for state event")
+			}
+		})
+	}
 }
 
 type gatedCancelTransport struct {
@@ -234,7 +392,15 @@ func (t *gatedCancelTransport) Close() error {
 }
 
 func (t *gatedCancelTransport) queueRead(msg imssip.Message) {
-	t.readCh <- msg.Bytes()
+	t.readCh <- marshalSIPMessageForTest(msg)
+}
+
+func marshalSIPMessageForTest(msg imssip.Message) []byte {
+	data, err := msg.MarshalText()
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func (t *gatedCancelTransport) failRead(err error) {
@@ -278,6 +444,48 @@ func newReadyClient(t *testing.T, cfg Config) *Client {
 	return client
 }
 
+type clientStateSetup struct {
+	connecting   bool
+	reconnecting bool
+	closed       bool
+	active       bool
+}
+
+func setClientState(t *testing.T, client *Client, setup clientStateSetup) {
+	t.Helper()
+	client.state.mu.Lock()
+	client.state.connecting = setup.connecting
+	client.state.reconnecting = setup.reconnecting
+	client.state.closed = setup.closed
+	if setup.active {
+		client.state.active = &activeConn{}
+	}
+	client.state.mu.Unlock()
+}
+
+func setClientActive(t *testing.T, client *Client, active *activeConn) {
+	t.Helper()
+	client.state.mu.Lock()
+	client.state.active = active
+	client.state.mu.Unlock()
+}
+
+func currentClientActive(t *testing.T, client *Client) *activeConn {
+	t.Helper()
+	client.state.mu.Lock()
+	active := client.state.active
+	client.state.mu.Unlock()
+	return active
+}
+
+func clientDone(t *testing.T, client *Client) <-chan struct{} {
+	t.Helper()
+	client.state.mu.Lock()
+	done := client.state.done
+	client.state.mu.Unlock()
+	return done
+}
+
 func testNonce() string {
 	return base64.StdEncoding.EncodeToString(append(bytesOf(0x01, 16), bytesOf(0x02, 16)...))
 }
@@ -313,25 +521,15 @@ func newRegisteredIMSRuntime(t *testing.T, transport *gatedCancelTransport, regi
 	return sess, reg
 }
 
-func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
+func TestSMSEventsFanOut(t *testing.T) {
 	client := newStandaloneClient(t)
-	clientEvents := client.Events()
-	defer clientEvents.Close()
 
 	smsEventsA := client.SMS().Events()
 	defer smsEventsA.Close()
 	smsEventsB := client.SMS().Events()
 	defer smsEventsB.Close()
 
-	stop := client.SMS().Subscribe(func(msg SMS) error {
-		if msg.Text != "hello" {
-			t.Fatalf("msg.Text = %q, want hello", msg.Text)
-		}
-		return errors.New("boom")
-	})
-	defer stop()
-
-	client.handleSMS(imssms.IncomingSMS{CallID: "sms-call-id", From: "+1", FromURI: "sip:+1@example.net", To: "+2", ToURI: "sip:+2@example.net", ServiceCenter: "+3", Text: "hello"})
+	client.handleSMS(imssms.Incoming{CallID: "sms-call-id", From: "+1", FromURI: "sip:+1@example.net", To: "+2", ToURI: "sip:+2@example.net", ServiceCenter: "+3", Text: "hello"})
 
 	for i, events := range []*SMSEvents{smsEventsA, smsEventsB} {
 		select {
@@ -351,15 +549,6 @@ func TestSMSEventsFanOutAndSubscribeError(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("waiting for sms subscriber %d", i)
 		}
-	}
-
-	select {
-	case err := <-clientEvents.Errors:
-		if !strings.Contains(err.Error(), "sms subscriber") {
-			t.Fatalf("client error = %v, want sms subscriber callback error", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("waiting for callback error")
 	}
 }
 
@@ -408,6 +597,92 @@ func TestBroadcasterConcurrentPublishAndClose(t *testing.T) {
 			t.Fatal("waiting for concurrent broadcaster close")
 		}
 	}
+}
+
+type eventCounts struct {
+	state       int
+	errors      int
+	smsIncoming int
+	smsReports  int
+	ussd        int
+	voiceIn     int
+	voiceEvents int
+}
+
+func TestEventsUseRequestedBroadcasters(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*Client) func()
+		want eventCounts
+	}{
+		{
+			name: "client events",
+			open: func(c *Client) func() {
+				events := c.Events()
+				return events.Close
+			},
+			want: eventCounts{state: 1, errors: 1},
+		},
+		{
+			name: "sms events",
+			open: func(c *Client) func() {
+				events := c.SMS().Events()
+				return events.Close
+			},
+			want: eventCounts{smsIncoming: 1, smsReports: 1},
+		},
+		{
+			name: "ussd events",
+			open: func(c *Client) func() {
+				events := c.USSD().Events()
+				return events.Close
+			},
+			want: eventCounts{ussd: 1},
+		},
+		{
+			name: "voice events",
+			open: func(c *Client) func() {
+				events := c.Voice().Events()
+				return events.Close
+			},
+			want: eventCounts{voiceIn: 1, voiceEvents: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStandaloneClient(t)
+			closeEvents := tt.open(client)
+			if got := eventSubscriberCounts(t, client); got != tt.want {
+				t.Fatalf("subscriber counts = %+v, want %+v", got, tt.want)
+			}
+
+			closeEvents()
+			if got := eventSubscriberCounts(t, client); got != (eventCounts{}) {
+				t.Fatalf("subscriber counts after close = %+v, want zero", got)
+			}
+		})
+	}
+}
+
+func eventSubscriberCounts(t *testing.T, c *Client) eventCounts {
+	t.Helper()
+	return eventCounts{
+		state:       broadcasterSubscriberCount(t, &c.events.state),
+		errors:      broadcasterSubscriberCount(t, &c.events.errors),
+		smsIncoming: broadcasterSubscriberCount(t, &c.events.smsIncoming),
+		smsReports:  broadcasterSubscriberCount(t, &c.events.smsReports),
+		ussd:        broadcasterSubscriberCount(t, &c.events.ussd),
+		voiceIn:     broadcasterSubscriberCount(t, &c.events.voiceIn),
+		voiceEvents: broadcasterSubscriberCount(t, &c.events.voiceEvents),
+	}
+}
+
+func broadcasterSubscriberCount[T any](t *testing.T, b *broadcaster[T]) int {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs)
 }
 
 func TestHandleUSSDEventFanOutUsesWrapper(t *testing.T) {
@@ -514,12 +789,12 @@ func TestSMSStatusReportLinkKeepsRetryingReports(t *testing.T) {
 	}{
 		{
 			name:       "temporary retrying keeps link",
-			status:     SMSReportStatusRetryingSMEBusy,
+			status:     imssms.ReportStatusRetryingSMEBusy,
 			wantLinked: true,
 		},
 		{
 			name:       "final delivered removes link after report",
-			status:     SMSReportStatusReceivedBySME,
+			status:     imssms.ReportStatusReceivedBySME,
 			wantLinked: false,
 		},
 	}
@@ -746,10 +1021,8 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 		t.Fatal("waiting for USIM load to start")
 	}
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := client.CloseContext(closeCtx); err != nil {
-		t.Fatalf("CloseContext() error = %v", err)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 
 	select {
@@ -759,32 +1032,6 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for Connect to exit")
-	}
-	if reader.closeCalls != 1 {
-		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
-	}
-}
-
-func TestCloseContextReturnsWhenCloseTaskDoesNotExit(t *testing.T) {
-	client := newStandaloneClient(t)
-	reader := &readerStub{}
-	client.reader = reader
-
-	done, ok := client.reserveCloseTask()
-	if !ok {
-		t.Fatal("reserveCloseTask() = false, want true")
-	}
-	defer done()
-
-	closeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	err := client.CloseContext(closeCtx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("CloseContext() error = %v, want context deadline exceeded", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("CloseContext() took %s, want bounded by context", elapsed)
 	}
 	if reader.closeCalls != 1 {
 		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
@@ -843,7 +1090,7 @@ func TestClientCloseClosesOwnedReaderOnce(t *testing.T) {
 	}
 }
 
-func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
+func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
 	transport.onWrite = func(data []byte) {
@@ -892,30 +1139,29 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	})
 	defer client.Close()
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
+	runtime := newConnectionRuntime()
 	active := &activeConn{
-		runCtx:     runCtx,
-		cancel:     cancelRun,
-		imsSession: sess,
-		reg:        reg,
+		runtime: runtime,
+		ims: imsRuntime{
+			sip: sess,
+			reg: reg,
+		},
 	}
 
-	client.mu.Lock()
-	client.active = active
-	client.mu.Unlock()
+	setClientActive(t, client, active)
 
 	done, ok := client.reserveCloseTask()
 	if !ok {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
-	runDone := client.startIMSRunner(active, done)
+	runDone := client.startConnectionRunner(active, done)
 	if err := sess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
 	cleanupDone := make(chan struct{})
 	go func() {
-		client.abortConnectStart(active, runDone)
+		client.cancelConnectStart(active, runDone)
 		close(cleanupDone)
 	}()
 
@@ -924,10 +1170,10 @@ func TestAbortConnectStartWaitsForIMSLoopExitBeforeDeregister(t *testing.T) {
 	select {
 	case <-cleanupDone:
 	case <-time.After(time.Second):
-		t.Fatal("abortConnectStart() did not finish after IMS loop exit")
+		t.Fatal("cancelConnectStart() did not finish after IMS loop exit")
 	}
-	if got := transport.writeCount(); got != 4 {
-		t.Fatalf("write count after cleanup = %d, want 4", got)
+	if got := transport.writeCount(); got != 2 {
+		t.Fatalf("write count after cleanup = %d, want 2", got)
 	}
 	if reg.State().Registered {
 		t.Fatal("Registered = true, want false")
@@ -971,10 +1217,8 @@ func TestCloseActiveRuntimeSkipsDeregister(t *testing.T) {
 	}
 
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
-	active := &activeConn{imsSession: sess, reg: reg, ussd: ussdSvc}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := client.closeActiveRuntime(ctx, active); err != nil {
+	active := &activeConn{ims: imsRuntime{sip: sess, reg: reg, ussd: ussdSvc}}
+	if err := client.closeActiveRuntime(active); err != nil {
 		t.Fatalf("closeActiveRuntime() error = %v", err)
 	}
 	if got := transport.writeCount(); got != 2 {
@@ -1028,22 +1272,21 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
 	defer client.Close()
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
+	runtime := newConnectionRuntime()
 	active := &activeConn{
-		runCtx:     runCtx,
-		cancel:     cancelRun,
-		imsSession: sess,
-		reg:        reg,
+		runtime: runtime,
+		ims: imsRuntime{
+			sip: sess,
+			reg: reg,
+		},
 	}
-	client.mu.Lock()
-	client.active = active
-	client.mu.Unlock()
+	setClientActive(t, client, active)
 
 	done, ok := client.reserveCloseTask()
 	if !ok {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
-	runDone := client.startIMSRunner(active, done)
+	runDone := client.startConnectionRunner(active, done)
 	if err := sess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
@@ -1054,7 +1297,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 		t.Fatal("waiting for registration refresh")
 	}
 
-	cancelRun()
+	runtime.stop()
 	close(transport.cancelReadRelease)
 	select {
 	case <-runDone:
@@ -1106,29 +1349,28 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 	events := client.Events()
 	defer events.Close()
 
-	oldRunCtx, oldCancel := context.WithCancel(context.Background())
-	oldActive := &activeConn{runCtx: oldRunCtx, cancel: oldCancel, imsSession: oldSess, reg: oldReg}
-	newRunCtx, newCancel := context.WithCancel(context.Background())
-	newActive := &activeConn{runCtx: newRunCtx, cancel: newCancel, imsSession: newSess, reg: newReg}
-	defer newCancel()
+	oldActive := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: oldSess, reg: oldReg}}
+	newActive := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: newSess, reg: newReg}}
+	defer newActive.runtime.stop()
 
 	reconnected := make(chan struct{})
-	client.reconnectFn = func(error) (*activeConn, error) {
-		client.mu.Lock()
-		client.active = newActive
-		client.mu.Unlock()
+	reconnect := func(error) (*activeConn, error) {
+		setClientActive(t, client, newActive)
 		close(reconnected)
 		return newActive, nil
 	}
-	client.mu.Lock()
-	client.active = oldActive
-	client.mu.Unlock()
+	setClientActive(t, client, oldActive)
 
 	done, ok := client.reserveCloseTask()
 	if !ok {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
-	runDone := client.startIMSRunner(oldActive, done)
+	runDone := connectionRunner{
+		client:    client,
+		active:    oldActive,
+		done:      done,
+		reconnect: reconnect,
+	}.start()
 	if err := oldSess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("old WaitStarted() error = %v", err)
 	}
@@ -1146,31 +1388,49 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 	}
 	select {
 	case state := <-events.State:
-		if state != StateFailed {
-			t.Fatalf("state event = %s, want %s", state, StateFailed)
+		if state.Status != StatusReconnecting {
+			t.Fatalf("state event status = %s, want %s", state.Status, StatusReconnecting)
+		}
+		if !state.Reconnecting {
+			t.Fatal("state event Reconnecting = false, want true")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("waiting for failed state event")
+		t.Fatal("waiting for reconnecting state event")
 	}
 	select {
 	case <-reconnected:
 	case <-time.After(time.Second):
 		t.Fatal("waiting for reconnect")
 	}
+	select {
+	case state := <-events.State:
+		if state.Status != StatusRegistered {
+			t.Fatalf("state event status = %s, want %s", state.Status, StatusRegistered)
+		}
+		if state.Reconnecting {
+			t.Fatal("registered state event Reconnecting = true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for registered state event")
+	}
+	state := client.State()
+	if state.Reconnecting {
+		t.Fatal("State().Reconnecting = true after registered reconnect event")
+	}
+	if state.Status != StatusRegistered {
+		t.Fatalf("State().Status = %s, want %s", state.Status, StatusRegistered)
+	}
 	if err := newSess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("new WaitStarted() error = %v", err)
 	}
-	client.mu.Lock()
-	active := client.active
-	client.mu.Unlock()
-	if active != newActive {
+	if currentClientActive(t, client) != newActive {
 		t.Fatal("client active connection was not replaced after reconnect")
 	}
 	if oldReg.State().Registered {
 		t.Fatal("old registration state still registered after runtime abort")
 	}
 
-	newCancel()
+	newActive.runtime.stop()
 	close(newTransport.cancelReadRelease)
 	select {
 	case <-runDone:
@@ -1213,7 +1473,7 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 	})
 	defer client.Close()
 	delayCh := make(chan time.Duration, 1)
-	client.reconnectFn = func(cause error) (*activeConn, error) {
+	reconnect := func(cause error) (*activeConn, error) {
 		delay := client.reconnectDelay(
 			cause,
 			newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
@@ -1223,18 +1483,20 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 		return nil, context.Canceled
 	}
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	defer cancelRun()
-	active := &activeConn{runCtx: runCtx, cancel: cancelRun, imsSession: sess, reg: reg}
-	client.mu.Lock()
-	client.active = active
-	client.mu.Unlock()
+	active := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: sess, reg: reg}}
+	defer active.runtime.stop()
+	setClientActive(t, client, active)
 
 	done, ok := client.reserveCloseTask()
 	if !ok {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
-	runDone := client.startIMSRunner(active, done)
+	runDone := connectionRunner{
+		client:    client,
+		active:    active,
+		done:      done,
+		reconnect: reconnect,
+	}.start()
 	if err := sess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
@@ -1276,23 +1538,26 @@ func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
 
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
 	reconnectStarted := make(chan struct{})
-	client.reconnectFn = func(error) (*activeConn, error) {
+	doneCh := clientDone(t, client)
+	reconnect := func(error) (*activeConn, error) {
 		close(reconnectStarted)
-		<-client.lifecycleCtx.Done()
-		return nil, client.lifecycleCtx.Err()
+		<-doneCh
+		return nil, context.Canceled
 	}
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	active := &activeConn{runCtx: runCtx, cancel: cancelRun, imsSession: sess, reg: reg}
-	client.mu.Lock()
-	client.active = active
-	client.mu.Unlock()
+	active := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: sess, reg: reg}}
+	setClientActive(t, client, active)
 
 	done, ok := client.reserveCloseTask()
 	if !ok {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
-	client.startIMSRunner(active, done)
+	connectionRunner{
+		client:    client,
+		active:    active,
+		done:      done,
+		reconnect: reconnect,
+	}.start()
 	if err := sess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
@@ -1304,10 +1569,8 @@ func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
 		t.Fatal("waiting for reconnect to start")
 	}
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := client.CloseContext(closeCtx); err != nil {
-		t.Fatalf("CloseContext() error = %v", err)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 
@@ -1834,7 +2097,7 @@ func registrationTestInitialRequiredError(t *testing.T) error {
 	return err
 }
 
-func TestRunActiveIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) {
+func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
 	released := make(chan struct{})
@@ -1876,37 +2139,39 @@ func TestRunActiveIMSKeepsParentContextOnRegistrationRefreshError(t *testing.T) 
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	defer cancelRun()
+	runtime := newConnectionRuntime()
+	defer runtime.stop()
 	active := &activeConn{
-		runCtx:     runCtx,
-		cancel:     cancelRun,
-		imsSession: sess,
-		reg:        reg,
+		runtime: runtime,
+		ims: imsRuntime{
+			sip: sess,
+			reg: reg,
+		},
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runActiveIMS(active)
+		runner := connectionRunner{active: active}
+		errCh <- runner.runIMSRuntime()
 	}()
 
 	select {
 	case err := <-errCh:
 		if err == nil {
-			t.Fatal("runActiveIMS() error = nil, want refresh error")
+			t.Fatal("connectionRunner.runIMSRuntime() error = nil, want refresh error")
 		}
 		if !strings.Contains(err.Error(), "maintaining IMS registration") {
-			t.Fatalf("runActiveIMS() error = %v, want maintaining IMS registration", err)
+			t.Fatalf("connectionRunner.runIMSRuntime() error = %v, want maintaining IMS registration", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("waiting for runActiveIMS refresh error")
+		t.Fatal("waiting for connectionRunner.runIMSRuntime refresh error")
 	}
-	if runCtx.Err() != nil {
-		t.Fatalf("runCtx.Err() = %v, want nil", runCtx.Err())
+	if runtime.stopped() {
+		t.Fatal("runtime stopped, want active")
 	}
 }
 
-func TestRunActiveIMSReturnsRegistrationEventTermination(t *testing.T) {
+func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
 	transport.onWrite = func(data []byte) {
@@ -1938,18 +2203,20 @@ func TestRunActiveIMSReturnsRegistrationEventTermination(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	defer cancelRun()
+	runtime := newConnectionRuntime()
+	defer runtime.stop()
 	active := &activeConn{
-		runCtx:     runCtx,
-		cancel:     cancelRun,
-		imsSession: sess,
-		reg:        reg,
+		runtime: runtime,
+		ims: imsRuntime{
+			sip: sess,
+			reg: reg,
+		},
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runActiveIMS(active)
+		runner := connectionRunner{active: active}
+		errCh <- runner.runIMSRuntime()
 	}()
 	if err := sess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
@@ -1973,18 +2240,18 @@ func TestRunActiveIMSReturnsRegistrationEventTermination(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if err == nil {
-			t.Fatal("runActiveIMS() error = nil, want registration event termination")
+			t.Fatal("connectionRunner.runIMSRuntime() error = nil, want registration event termination")
 		}
 		if !strings.Contains(err.Error(), "ims registration terminated by network") {
-			t.Fatalf("runActiveIMS() error = %v, want network deregistration", err)
+			t.Fatalf("connectionRunner.runIMSRuntime() error = %v, want network deregistration", err)
 		}
 	case <-time.After(time.Second):
-		cancelRun()
+		runtime.stop()
 		close(transport.cancelReadRelease)
-		t.Fatal("waiting for runActiveIMS registration event termination")
+		t.Fatal("waiting for connectionRunner.runIMSRuntime registration event termination")
 	}
-	if runCtx.Err() != nil {
-		t.Fatalf("runCtx.Err() = %v, want nil", runCtx.Err())
+	if runtime.stopped() {
+		t.Fatal("runtime stopped, want active")
 	}
 	if reg.State().Registered {
 		t.Fatal("Registered = true, want false")

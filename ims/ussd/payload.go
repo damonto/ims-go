@@ -55,7 +55,7 @@ func readMultipartMessageBody(action string, params map[string]string, data []by
 }
 
 func decodeMultipartPayload(action string, body multipartBody) (Message, error) {
-	payload, ok, err := body.ussdPayload()
+	payload, ok, err := body.payload()
 	if err != nil {
 		return Message{}, err
 	}

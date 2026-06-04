@@ -63,7 +63,11 @@ func (s *Service) NotifyMemoryAvailable(ctx context.Context, target string) erro
 		s.releaseReference(rpRef)
 		return fmt.Errorf("notifying SMS memory available: %w", err)
 	}
-	msg := s.buildMessage(strings.TrimSpace(target), rpdu, "")
+	msg, err := s.buildMessage(target, rpdu, "")
+	if err != nil {
+		s.releaseReference(rpRef)
+		return err
+	}
 	callID := msg.Header("Call-ID")
 	reportCh, err := s.registerPending(callID, rpRef)
 	if err != nil {
@@ -205,9 +209,13 @@ func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDat
 		s.releaseReference(rpRef)
 		return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)
 	}
-	msg := s.buildMessage(sc.target, rpdu, "")
+	msg, err := s.buildMessage(sc.target, rpdu, "")
+	if err != nil {
+		s.releaseReference(rpRef)
+		return outboundSegment{}, err
+	}
 	if isSIPURI(to) {
-		body, contentType, err := buildMultipartSMSPayload(smsXMLInfo{To: to}, rpdu)
+		body, contentType, err := buildMultipartPayload(xmlInfo{To: to}, rpdu)
 		if err != nil {
 			s.releaseReference(rpRef)
 			return outboundSegment{}, fmt.Errorf("sending SMS: %w", err)

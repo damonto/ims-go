@@ -91,13 +91,15 @@ func (t *Transport) Do(ctx context.Context, req protocol.Request) (protocol.Resp
 	}
 }
 
-func MarshalRequest(req protocol.Request) []byte {
-	packet, _ := marshalRequest(req)
-	return packet
+func MarshalRequest(req protocol.Request) ([]byte, error) {
+	return marshalRequest(req)
 }
 
 func marshalRequest(req protocol.Request) ([]byte, error) {
-	payload := req.TLVs.MarshalBinary()
+	payload, err := req.TLVs.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("marshal QMI TLVs: %w", err)
+	}
 	maxPayloadLength := protocol.MaxQMUXServiceTLVLength
 	if req.Service == protocol.ServiceControl {
 		maxPayloadLength = protocol.MaxQMUXControlTLVLength

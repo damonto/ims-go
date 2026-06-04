@@ -1,511 +1,17 @@
 package sms
 
 import (
-	"bytes"
 	"context"
-	"encoding"
-	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
-	"mime/multipart"
-	"net/textproto"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/damonto/vowifi-go/ims/identity"
-	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
 	"github.com/damonto/vowifi-go/usim"
 )
-
-var (
-	_ encoding.TextMarshaler   = smsXMLInfo{}
-	_ encoding.TextUnmarshaler = (*smsXMLInfo)(nil)
-)
-
-const (
-	smsContentType                 = "application/vnd.3gpp.sms"
-	smsXMLContentType              = "application/vnd.3gpp.sms+xml"
-	mixedMultipartType             = "multipart/mixed"
-	smsAcceptHeader                = smsContentType + ", " + smsXMLContentType + ", " + mixedMultipartType
-	smsXMLDisposition              = "render;handling=optional"
-	smsXMLDispositionType          = "render"
-	smsXMLDispositionHandlingParam = "handling"
-	smsXMLDispositionHandlingValue = "optional"
-	binaryTransferValue            = "binary"
-	smsIPFeatureTag                = "+g.3gpp.smsip"
-	smsIPMSISDNLessFeatureTag      = "+g.3gpp.smsip-msisdn-less"
-	dummyMSISDN                    = "+000000000000000"
-)
-
-const (
-	smsDeliveryOutcomeSuccessfulTransfer        = "SuccessfulTransfer"
-	smsDeliveryOutcomeAbsentSubscriber          = "AbsentSubscriber"
-	smsDeliveryOutcomeUserBusyForMTSMS          = "UserBusyForMTSMS"
-	smsDeliveryOutcomeIllegalUser               = "IllegalUser"
-	smsDeliveryOutcomeIllegalEquipment          = "IllegalEquipment"
-	smsDeliveryOutcomeSMDeliveryFailure         = "SMDeliveryFailure"
-	smsDeliveryOutcomeServiceBarred             = "ServiceBarred"
-	smsDeliveryOutcomeTeleserviceNotProvisioned = "TeleserviceNotProvisioned"
-)
-
-type messagePayload struct {
-	RPDU []byte
-	Info smsXMLInfo
-}
-
-type smsXMLInfo struct {
-	To               string
-	From             string
-	CorrelationID    smsXMLCorrelationID
-	HasCorrelationID bool
-	DeliveryOutcome  string
-}
-
-type smsXMLCorrelationID struct {
-	Sender   string
-	Receiver string
-	HLRID    string
-}
-
-func decodeMessagePayload(msg sip.Message) (messagePayload, error) {
-	mediaType, params, err := mime.ParseMediaType(msg.Header("Content-Type"))
-	if err != nil {
-		return messagePayload{}, fmt.Errorf("parsing sms content type: %w", err)
-	}
-	switch {
-	case strings.EqualFold(mediaType, smsContentType):
-		if err := validateBinaryTransferEncoding(msg.Header("Content-Transfer-Encoding")); err != nil {
-			return messagePayload{}, err
-		}
-		return messagePayload{RPDU: bytes.Clone(msg.Body)}, nil
-	case strings.EqualFold(mediaType, mixedMultipartType):
-		return decodeMultipartMessagePayload(msg, params)
-	default:
-		return messagePayload{}, fmt.Errorf("unsupported sms content type: %s", mediaType)
-	}
-}
-
-func decodeMultipartMessagePayload(msg sip.Message, params map[string]string) (messagePayload, error) {
-	boundary := strings.TrimSpace(params["boundary"])
-	if boundary == "" {
-		return messagePayload{}, errors.New("multipart sms boundary is empty")
-	}
-	var payload messagePayload
-	var xmlSeen bool
-	reader := multipart.NewReader(bytes.NewReader(msg.Body), boundary)
-	for {
-		part, err := reader.NextRawPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return messagePayload{}, fmt.Errorf("reading multipart sms body: %w", err)
-		}
-		mediaType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
-		if err != nil {
-			if isOptionalBodyPart(part.Header.Get("Content-Disposition")) {
-				_ = part.Close()
-				continue
-			}
-			_ = part.Close()
-			return messagePayload{}, fmt.Errorf("parsing multipart sms part content type: %w", err)
-		}
-		switch {
-		case strings.EqualFold(mediaType, smsContentType):
-			if err := validateBinaryTransferEncoding(part.Header.Get("Content-Transfer-Encoding")); err != nil {
-				_ = part.Close()
-				return messagePayload{}, err
-			}
-		case strings.EqualFold(mediaType, smsXMLContentType):
-			if err := validateSMSXMLDisposition(part.Header.Get("Content-Disposition")); err != nil {
-				_ = part.Close()
-				return messagePayload{}, err
-			}
-		default:
-			if isOptionalBodyPart(part.Header.Get("Content-Disposition")) {
-				_ = part.Close()
-				continue
-			}
-			_ = part.Close()
-			return messagePayload{}, fmt.Errorf("unsupported multipart sms part content type: %s", mediaType)
-		}
-		data, err := io.ReadAll(part)
-		if err != nil {
-			_ = part.Close()
-			return messagePayload{}, fmt.Errorf("reading multipart sms part: %w", err)
-		}
-		if err := part.Close(); err != nil {
-			return messagePayload{}, fmt.Errorf("closing multipart sms part: %w", err)
-		}
-		switch {
-		case strings.EqualFold(mediaType, smsContentType):
-			if payload.RPDU != nil {
-				return messagePayload{}, errors.New("multipart sms body contains duplicate RP-DATA part")
-			}
-			payload.RPDU = bytes.Clone(data)
-		case strings.EqualFold(mediaType, smsXMLContentType):
-			if xmlSeen {
-				return messagePayload{}, errors.New("multipart sms body contains duplicate XML info part")
-			}
-			xmlSeen = true
-			info, err := decodeSMSXMLInfo(data)
-			if err != nil {
-				return messagePayload{}, err
-			}
-			payload.Info = info
-		}
-	}
-	if payload.RPDU == nil {
-		return messagePayload{}, errors.New("multipart sms body missing RP-DATA part")
-	}
-	return payload, nil
-}
-
-func isOptionalBodyPart(value string) bool {
-	_, params, err := mime.ParseMediaType(value)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(params["handling"], smsXMLDispositionHandlingValue)
-}
-
-func validateBinaryTransferEncoding(value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" || strings.EqualFold(value, binaryTransferValue) {
-		return nil
-	}
-	return fmt.Errorf("unsupported sms content transfer encoding: %s", value)
-}
-
-func validateSMSXMLDisposition(value string) error {
-	disposition, params, err := mime.ParseMediaType(value)
-	if err != nil {
-		return fmt.Errorf("parsing sms xml content disposition: %w", err)
-	}
-	if !strings.EqualFold(disposition, smsXMLDispositionType) {
-		return fmt.Errorf("unsupported sms xml content disposition: %s", disposition)
-	}
-	if !strings.EqualFold(params[smsXMLDispositionHandlingParam], smsXMLDispositionHandlingValue) {
-		return fmt.Errorf("unsupported sms xml handling: %s", params[smsXMLDispositionHandlingParam])
-	}
-	return nil
-}
-
-func decodeSMSXMLInfo(data []byte) (smsXMLInfo, error) {
-	var info smsXMLInfo
-	if err := info.UnmarshalText(data); err != nil {
-		return smsXMLInfo{}, err
-	}
-	return info, nil
-}
-
-func (info smsXMLInfo) MarshalText() ([]byte, error) {
-	if err := info.validate(); err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	encoder := xml.NewEncoder(&buf)
-	if err := info.marshalXML(encoder); err != nil {
-		return nil, err
-	}
-	if err := encoder.Flush(); err != nil {
-		return nil, fmt.Errorf("marshaling sms xml info: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-func (info smsXMLInfo) marshalXML(encoder *xml.Encoder) error {
-	start := xml.StartElement{Name: xml.Name{Local: "short-message-info"}}
-	if err := encoder.EncodeToken(start); err != nil {
-		return fmt.Errorf("marshaling sms xml info: %w", err)
-	}
-	if to := strings.TrimSpace(info.To); to != "" {
-		if err := encoder.EncodeElement(to, xml.StartElement{Name: xml.Name{Local: "To"}}); err != nil {
-			return fmt.Errorf("marshaling sms xml To: %w", err)
-		}
-	}
-	if from := strings.TrimSpace(info.From); from != "" {
-		if err := encoder.EncodeElement(from, xml.StartElement{Name: xml.Name{Local: "From"}}); err != nil {
-			return fmt.Errorf("marshaling sms xml From: %w", err)
-		}
-	}
-	if info.HasCorrelationID || info.CorrelationID != (smsXMLCorrelationID{}) {
-		if err := info.CorrelationID.marshalXML(encoder); err != nil {
-			return err
-		}
-	}
-	if outcome := strings.TrimSpace(info.DeliveryOutcome); outcome != "" {
-		if err := encoder.EncodeElement(outcome, xml.StartElement{Name: xml.Name{Local: "Delivery-Outcome"}}); err != nil {
-			return fmt.Errorf("marshaling sms xml Delivery-Outcome: %w", err)
-		}
-	}
-	if err := encoder.EncodeToken(start.End()); err != nil {
-		return fmt.Errorf("marshaling sms xml info: %w", err)
-	}
-	return nil
-}
-
-func (id smsXMLCorrelationID) marshalXML(encoder *xml.Encoder) error {
-	sender := strings.TrimSpace(id.Sender)
-	receiver := strings.TrimSpace(id.Receiver)
-	hlrID := strings.TrimSpace(id.HLRID)
-	if sender == "" || receiver == "" || hlrID == "" {
-		return errors.New("marshaling sms xml Correlation-ID: sender, receiver, and HLR-ID are required")
-	}
-	if err := validateSMSXMLSIPURI("Correlation-ID Sender", sender); err != nil {
-		return err
-	}
-	if err := validateSMSXMLSIPURI("Correlation-ID Receiver", receiver); err != nil {
-		return err
-	}
-	start := xml.StartElement{Name: xml.Name{Local: "Correlation-ID"}}
-	if err := encoder.EncodeToken(start); err != nil {
-		return fmt.Errorf("marshaling sms xml Correlation-ID: %w", err)
-	}
-	if err := encoder.EncodeElement(sender, xml.StartElement{Name: xml.Name{Local: "Sender"}}); err != nil {
-		return fmt.Errorf("marshaling sms xml Sender: %w", err)
-	}
-	if err := encoder.EncodeElement(receiver, xml.StartElement{Name: xml.Name{Local: "Receiver"}}); err != nil {
-		return fmt.Errorf("marshaling sms xml Receiver: %w", err)
-	}
-	if err := encoder.EncodeElement(hlrID, xml.StartElement{Name: xml.Name{Local: "HLR-ID"}}); err != nil {
-		return fmt.Errorf("marshaling sms xml HLR-ID: %w", err)
-	}
-	if err := encoder.EncodeToken(start.End()); err != nil {
-		return fmt.Errorf("marshaling sms xml Correlation-ID: %w", err)
-	}
-	return nil
-}
-
-func (info *smsXMLInfo) UnmarshalText(data []byte) error {
-	decoder := xml.NewDecoder(bytes.NewReader(data))
-	var out smsXMLInfo
-	var rootSeen bool
-	var toSeen bool
-	var fromSeen bool
-	var correlationIDSeen bool
-	var deliveryOutcomeSeen bool
-	var depth int
-	var rootNamespace string
-	for {
-		token, err := decoder.Token()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("parsing sms xml info: %w", err)
-		}
-		switch tok := token.(type) {
-		case xml.StartElement:
-			depth++
-			if !rootSeen {
-				if tok.Name.Local != "short-message-info" {
-					return errors.New("sms xml root is not short-message-info")
-				}
-				rootSeen = true
-				rootNamespace = tok.Name.Space
-				continue
-			}
-			if depth != 2 || !smsXMLElementInDocumentNamespace(tok.Name, rootNamespace) {
-				continue
-			}
-			switch tok.Name.Local {
-			case "To":
-				if toSeen {
-					return errors.New("sms xml info contains duplicate To")
-				}
-				toSeen = true
-				var value string
-				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return fmt.Errorf("parsing sms xml To: %w", err)
-				}
-				out.To = strings.TrimSpace(value)
-				if err := validateSMSXMLSIPURI("To", out.To); err != nil {
-					return fmt.Errorf("parsing sms xml To: %w", err)
-				}
-				depth--
-			case "From":
-				if fromSeen {
-					return errors.New("sms xml info contains duplicate From")
-				}
-				fromSeen = true
-				var value string
-				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return fmt.Errorf("parsing sms xml From: %w", err)
-				}
-				out.From = strings.TrimSpace(value)
-				if err := validateSMSXMLSIPURI("From", out.From); err != nil {
-					return fmt.Errorf("parsing sms xml From: %w", err)
-				}
-				depth--
-			case "Correlation-ID":
-				if correlationIDSeen {
-					return errors.New("sms xml info contains duplicate Correlation-ID")
-				}
-				correlationIDSeen = true
-				correlationID, err := decodeSMSXMLCorrelationID(decoder, tok.Name.Space)
-				if err != nil {
-					return fmt.Errorf("parsing sms xml Correlation-ID: %w", err)
-				}
-				out.CorrelationID = correlationID
-				out.HasCorrelationID = true
-				depth--
-			case "Delivery-Outcome":
-				if deliveryOutcomeSeen {
-					return errors.New("sms xml info contains duplicate Delivery-Outcome")
-				}
-				deliveryOutcomeSeen = true
-				var value string
-				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return fmt.Errorf("parsing sms xml Delivery-Outcome: %w", err)
-				}
-				out.DeliveryOutcome = normalizeSMSDeliveryOutcome(strings.TrimSpace(value))
-				depth--
-			}
-		case xml.EndElement:
-			depth--
-		}
-	}
-	if !rootSeen {
-		return errors.New("sms xml info is empty")
-	}
-	*info = out
-	return nil
-}
-
-func decodeSMSXMLCorrelationID(decoder *xml.Decoder, documentNamespace string) (smsXMLCorrelationID, error) {
-	var out smsXMLCorrelationID
-	var senderSeen, receiverSeen, hlrIDSeen bool
-	depth := 0
-	for {
-		token, err := decoder.Token()
-		if errors.Is(err, io.EOF) {
-			return smsXMLCorrelationID{}, errors.New("unexpected EOF")
-		}
-		if err != nil {
-			return smsXMLCorrelationID{}, err
-		}
-		switch tok := token.(type) {
-		case xml.StartElement:
-			depth++
-			if depth != 1 || !smsXMLElementInDocumentNamespace(tok.Name, documentNamespace) {
-				if err := decoder.Skip(); err != nil {
-					return smsXMLCorrelationID{}, err
-				}
-				depth--
-				continue
-			}
-			var value string
-			switch tok.Name.Local {
-			case "Sender":
-				if senderSeen {
-					return smsXMLCorrelationID{}, errors.New("duplicate Sender")
-				}
-				senderSeen = true
-				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return smsXMLCorrelationID{}, fmt.Errorf("Sender: %w", err)
-				}
-				out.Sender = strings.TrimSpace(value)
-				if err := validateSMSXMLSIPURI("Correlation-ID Sender", out.Sender); err != nil {
-					return smsXMLCorrelationID{}, err
-				}
-				depth--
-			case "Receiver":
-				if receiverSeen {
-					return smsXMLCorrelationID{}, errors.New("duplicate Receiver")
-				}
-				receiverSeen = true
-				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return smsXMLCorrelationID{}, fmt.Errorf("Receiver: %w", err)
-				}
-				out.Receiver = strings.TrimSpace(value)
-				if err := validateSMSXMLSIPURI("Correlation-ID Receiver", out.Receiver); err != nil {
-					return smsXMLCorrelationID{}, err
-				}
-				depth--
-			case "HLR-ID":
-				if hlrIDSeen {
-					return smsXMLCorrelationID{}, errors.New("duplicate HLR-ID")
-				}
-				hlrIDSeen = true
-				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return smsXMLCorrelationID{}, fmt.Errorf("HLR-ID: %w", err)
-				}
-				out.HLRID = strings.TrimSpace(value)
-				depth--
-			default:
-				if err := decoder.Skip(); err != nil {
-					return smsXMLCorrelationID{}, err
-				}
-				depth--
-			}
-		case xml.EndElement:
-			if depth == 0 && smsXMLElementInDocumentNamespace(tok.Name, documentNamespace) && tok.Name.Local == "Correlation-ID" {
-				if out.Sender == "" || out.Receiver == "" || out.HLRID == "" {
-					return smsXMLCorrelationID{}, errors.New("missing Sender, Receiver, or HLR-ID")
-				}
-				return out, nil
-			}
-			depth--
-		}
-	}
-}
-
-func smsXMLElementInDocumentNamespace(name xml.Name, documentNamespace string) bool {
-	return name.Space == "" || name.Space == documentNamespace
-}
-
-func (info smsXMLInfo) validate() error {
-	if err := validateSMSXMLSIPURI("To", info.To); err != nil {
-		return fmt.Errorf("marshaling sms xml To: %w", err)
-	}
-	if err := validateSMSXMLSIPURI("From", info.From); err != nil {
-		return fmt.Errorf("marshaling sms xml From: %w", err)
-	}
-	if outcome := strings.TrimSpace(info.DeliveryOutcome); outcome != "" && !validSMSDeliveryOutcome(outcome) {
-		return fmt.Errorf("marshaling sms xml Delivery-Outcome: unsupported value %q", outcome)
-	}
-	return nil
-}
-
-func normalizeSMSDeliveryOutcome(outcome string) string {
-	if outcome == "" || validSMSDeliveryOutcome(outcome) {
-		return outcome
-	}
-	return smsDeliveryOutcomeSMDeliveryFailure
-}
-
-func validSMSDeliveryOutcome(outcome string) bool {
-	switch outcome {
-	case smsDeliveryOutcomeSuccessfulTransfer,
-		smsDeliveryOutcomeAbsentSubscriber,
-		smsDeliveryOutcomeUserBusyForMTSMS,
-		smsDeliveryOutcomeIllegalUser,
-		smsDeliveryOutcomeIllegalEquipment,
-		smsDeliveryOutcomeSMDeliveryFailure,
-		smsDeliveryOutcomeServiceBarred,
-		smsDeliveryOutcomeTeleserviceNotProvisioned:
-		return true
-	default:
-		return false
-	}
-}
-
-func validateSMSXMLSIPURI(field, value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	if !isSIPURI(value) {
-		return fmt.Errorf("%s %q is not a SIP URI", field, value)
-	}
-	return nil
-}
 
 func (s *Service) handleMessageRequest(ctx context.Context, req session.Request) error {
 	msg := req.Message
@@ -574,12 +80,12 @@ func (s *Service) writeMessageStatus(ctx context.Context, req session.Request, c
 	resp := sip.NewResponse(code, reason)
 	resp.Headers = sip.ResponseHeaders(req.Message, code)
 	if code == sipStatusUnsupportedMediaType {
-		resp.Headers.Add("Accept", smsAcceptHeader)
+		resp.Headers.Add("Accept", acceptHeader)
 	}
 	return s.sess.WriteResponse(ctx, req, resp)
 }
 
-func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMessage, info smsXMLInfo) error {
+func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) error {
 	if rp.Type != rpDataNetworkToMS {
 		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageTypeNotImplemented), info)
 		return nil
@@ -607,7 +113,7 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 			s.handlePPDataDownload(ctx, msg, rp, info)
 			return nil
 		}
-		ackInfo := smsXMLInfo{}
+		ackInfo := xmlInfo{}
 		if strings.TrimSpace(fields.from) == dummyMSISDN {
 			if !hasMSISDNLessFeatureCaps(msg) {
 				s.logger.Debug("discarding msisdn-less sms without feature-caps", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference)
@@ -642,7 +148,7 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 			return nil
 		}
 		s.deliverIncomingStatusReport(msg, rp, tpdu.Message)
-		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), smsXMLInfo{}); !ok {
+		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), xmlInfo{}); !ok {
 			return nil
 		}
 	default:
@@ -651,7 +157,7 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 	return nil
 }
 
-func (s *Service) handlePPDataDownload(ctx context.Context, msg sip.Message, rp rpMessage, info smsXMLInfo) {
+func (s *Service) handlePPDataDownload(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) {
 	downloader, ok := s.card.(ppDownloader)
 	if !ok {
 		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", "card does not support SMS-PP download")
@@ -676,35 +182,29 @@ func isSubmitReport(rp rpMessage) bool {
 	return rp.Type == rpAckNetworkToMS || rp.Type == rpErrorNetworkToMS
 }
 
-func (s *Service) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info smsXMLInfo) bool {
+func (s *Service) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) bool {
 	if !s.markDeliveryReportSent(msg) {
 		return true
 	}
 
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		s.clearDeliveryReportSent(msg)
-		return false
-	}
-	s.cleanupWG.Add(1)
-	s.mu.Unlock()
-
-	go func() {
-		defer s.cleanupWG.Done()
-		reportCtx, cancel := context.WithTimeout(s.cleanupCtx, s.cfg.DeliveryReportTimeout)
+	started := s.startBackgroundTask(func(done <-chan struct{}) {
+		reportCtx, cancel := contextWithDoneTimeout(done, s.cfg.DeliveryReportTimeout)
 		defer cancel()
 		if err := s.sendDeliveryReport(reportCtx, msg, report, info); err != nil {
 			s.clearDeliveryReportSent(msg)
-			if ctx.Err() == nil && s.cleanupCtx.Err() == nil {
+			if ctx.Err() == nil && !s.cleanupStopped() {
 				s.logger.Warn("sending inbound sms delivery report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
 			}
 		}
-	}()
+	})
+	if !started {
+		s.clearDeliveryReportSent(msg)
+		return false
+	}
 	return true
 }
 
-func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info smsXMLInfo) error {
+func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) error {
 	target := s.reportTarget(msg)
 	if target == "" {
 		return errors.New("delivery report target is empty")
@@ -782,7 +282,7 @@ func envelopeEndpoint(value string) endpoint {
 	}
 }
 
-func (s *Service) deliverSingle(msg sip.Message, incoming IncomingSMS) {
+func (s *Service) deliverSingle(msg sip.Message, incoming Incoming) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
@@ -793,117 +293,12 @@ func (s *Service) deliverSingle(msg sip.Message, incoming IncomingSMS) {
 	s.logger.Debug("suppressing duplicate sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "from", incoming.From, "from_uri", incoming.FromURI, "text", incoming.Text)
 }
 
-func (s *Service) buildMessage(target string, body []byte, inReplyTo string) sip.Message {
-	state := s.reg.State()
-	if target == "" {
-		target = s.mustResolveServiceCenterTarget()
-	}
-	callID, _, tag, branch := sip.NewTransaction()
-	senderIdentity := preferredIdentity(state)
-	msg := sip.NewRequest("MESSAGE", target)
-	msg.Headers.Add("Call-ID", callID)
-	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", senderIdentity, tag))
-	msg.Headers.Add("To", fmt.Sprintf("<%s>", target))
-	msg.Headers.Add("Request-Disposition", "no-fork")
-	msg.Headers.Add("Accept-Contact", smsAcceptContact)
-	msg.Headers.Add("CSeq", fmt.Sprintf("%d MESSAGE", atomic.AddInt64(&s.cseq, 1)))
-	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, state.MessagePort, branch))
-	msg.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", senderIdentity))
-	s.reg.RequestPolicy().Apply(&msg)
-	msg.Headers.Add("Content-Type", smsContentType)
-	msg.Headers.Add("Content-Transfer-Encoding", binaryTransferValue)
-	if inReplyTo != "" {
-		msg.Headers.Add("In-Reply-To", inReplyTo)
-	}
-	msg.Body = body
-	return msg
-}
-
-func (s *Service) buildDeliveryReportMessage(target string, body []byte, inReplyTo string, info smsXMLInfo) (sip.Message, error) {
-	if strings.TrimSpace(info.From) == "" {
-		return s.buildMessage(target, body, inReplyTo), nil
-	}
-	payload, contentType, err := buildMultipartSMSPayload(smsXMLInfo{To: strings.TrimSpace(info.From)}, body)
-	if err != nil {
-		return sip.Message{}, fmt.Errorf("building sms delivery report multipart body: %w", err)
-	}
-
-	msg := s.buildMessage(target, payload, inReplyTo)
-	msg.Headers.Set("Content-Type", contentType)
-	msg.Headers.Del("Content-Transfer-Encoding")
-	return msg, nil
-}
-
-func buildMultipartSMSPayload(info smsXMLInfo, rpdu []byte) ([]byte, string, error) {
-	var payload bytes.Buffer
-	writer := multipart.NewWriter(&payload)
-	xmlPart, err := writer.CreatePart(textproto.MIMEHeader{
-		"Content-Type":        {smsXMLContentType},
-		"Content-Disposition": {smsXMLDisposition},
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("creating sms xml part: %w", err)
-	}
-	xmlBody, err := info.MarshalText()
-	if err != nil {
-		return nil, "", fmt.Errorf("marshaling sms xml body: %w", err)
-	}
-	if _, err := xmlPart.Write(xmlBody); err != nil {
-		return nil, "", fmt.Errorf("writing sms xml part: %w", err)
-	}
-	smsPart, err := writer.CreatePart(textproto.MIMEHeader{
-		"Content-Type":              {smsContentType},
-		"Content-Transfer-Encoding": {binaryTransferValue},
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("creating sms RP-DATA part: %w", err)
-	}
-	if _, err := smsPart.Write(rpdu); err != nil {
-		return nil, "", fmt.Errorf("writing sms RP-DATA part: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, "", fmt.Errorf("closing sms multipart body: %w", err)
-	}
-	return payload.Bytes(), fmt.Sprintf("%s; boundary=%q", mixedMultipartType, writer.Boundary()), nil
-}
-
-func preferredIdentity(state registration.State) string {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(state.TelPublicID)), "tel:") {
-		return state.TelPublicID
-	}
-	if identity := strings.TrimSpace(state.DefaultPublicID); identity != "" {
-		return identity
-	}
-	return state.PublicIdentity
-}
-
-func (s *Service) mustResolveServiceCenterTarget() string {
-	sc, _ := s.resolveServiceCenter()
-	return sc.target
-}
-
-func (s *Service) reportTarget(msg sip.Message) string {
-	return sipMessageTarget(sip.AddressURI(msg.Header("P-Asserted-Identity")))
-}
-
-func sipMessageTarget(uri string) string {
-	uri = strings.TrimSpace(uri)
-	if uri == "" {
-		return ""
-	}
-	lower := strings.ToLower(uri)
-	if strings.HasPrefix(lower, "sip:") || strings.HasPrefix(lower, "sips:") {
-		return uri
-	}
-	return ""
-}
-
 func hasMSISDNLessFeatureCaps(msg sip.Message) bool {
 	for _, value := range msg.HeadersByName("Feature-Caps") {
 		for _, featureCap := range sip.SplitHeaderList(value) {
 			for _, param := range strings.Split(featureCap, ";") {
 				name, _, _ := strings.Cut(strings.TrimSpace(param), "=")
-				if strings.EqualFold(name, smsIPMSISDNLessFeatureTag) {
+				if strings.EqualFold(name, ipMSISDNLessFeatureTag) {
 					return true
 				}
 			}

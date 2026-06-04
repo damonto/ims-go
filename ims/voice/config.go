@@ -108,6 +108,18 @@ type RTCPMediaTransport interface {
 	WriteRTCP(ctx context.Context, data []byte) error
 }
 
+type rtcpReader interface {
+	ReadRTCP(ctx context.Context) ([]byte, net.Addr, error)
+}
+
+type rtcpWriter interface {
+	WriteRTCP(ctx context.Context, data []byte) error
+}
+
+type mediaConfigurator interface {
+	ConfigureRemote(ctx context.Context, cfg MediaConfig) error
+}
+
 const (
 	defaultRTPProfile        = "RTP/AVP"
 	defaultPTime             = 20 * time.Millisecond

@@ -22,7 +22,7 @@ func (state *concatState) reset(total int) {
 	*state = newConcatState(total)
 }
 
-func (state *concatState) addPart(sequence int, msg IncomingSMS, now time.Time) {
+func (state *concatState) addPart(sequence int, msg Incoming, now time.Time) {
 	if state.parts == nil {
 		state.parts = make(map[int]string, max(state.total, 0))
 	}
@@ -60,7 +60,7 @@ func (state concatState) joinedRawTPDUs() [][]byte {
 	return raw
 }
 
-func (s *Service) deliverConcat(msg IncomingSMS, concat concatInfo) {
+func (s *Service) deliverConcat(msg Incoming, concat concatInfo) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
@@ -77,7 +77,7 @@ func (s *Service) markConcatSeen(key string) bool {
 	return s.markRecentKey("concat|"+key, concatRetention)
 }
 
-func (s *Service) concatKey(msg IncomingSMS, concat concatInfo) string {
+func (s *Service) concatKey(msg Incoming, concat concatInfo) string {
 	sender := msg.From
 	if sender == "" {
 		sender = msg.FromURI
@@ -93,7 +93,7 @@ func (s *Service) evictExpiredConcat(now time.Time) {
 	}
 }
 
-func (s *Service) appendConcat(msg IncomingSMS, concat concatInfo) (IncomingSMS, bool, string) {
+func (s *Service) appendConcat(msg Incoming, concat concatInfo) (Incoming, bool, string) {
 	key := s.concatKey(msg, concat)
 	now := time.Now()
 	s.mu.Lock()
@@ -107,7 +107,7 @@ func (s *Service) appendConcat(msg IncomingSMS, concat concatInfo) (IncomingSMS,
 	if !ok {
 		s.concat[key] = state
 		s.mu.Unlock()
-		return IncomingSMS{}, false, key
+		return Incoming{}, false, key
 	}
 	delete(s.concat, key)
 	s.mu.Unlock()

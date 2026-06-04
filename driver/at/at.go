@@ -25,7 +25,7 @@ type Reader struct {
 	closed bool
 }
 
-func New(device string, baudRate int) (usimreader.Reader, error) {
+func Open(ctx context.Context, device string, baudRate int) (usimreader.Reader, error) {
 	device = strings.TrimSpace(device)
 	if device == "" {
 		return nil, errors.New("opening AT reader: device is empty")
@@ -36,21 +36,28 @@ func New(device string, baudRate int) (usimreader.Reader, error) {
 		return nil, fmt.Errorf("opening serial port %s: %w", device, err)
 	}
 
-	reader := &Reader{
-		port:   port,
-		reader: bufio.NewReader(port),
-	}
-	for _, command := range defaultInitCommands() {
-		if _, err := reader.run(context.Background(), command); err != nil {
-			_ = port.Close()
-			return nil, fmt.Errorf("running init command %q: %w", command, err)
-		}
+	reader := newReader(port)
+	if err := reader.init(ctx); err != nil {
+		_ = port.Close()
+		return nil, err
 	}
 	return usim.New(reader), nil
 }
 
-func Open(device string, baudRate int) (usimreader.Reader, error) {
-	return New(device, baudRate)
+func newReader(port io.ReadWriteCloser) *Reader {
+	return &Reader{
+		port:   port,
+		reader: bufio.NewReader(port),
+	}
+}
+
+func (d *Reader) init(ctx context.Context) error {
+	for _, command := range defaultInitCommands() {
+		if _, err := d.run(ctx, command); err != nil {
+			return fmt.Errorf("running init command %q: %w", command, err)
+		}
+	}
+	return nil
 }
 
 func newCSIMCommand(req []byte) (CSIMCommand, error) {

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestRequestAPDU(t *testing.T) {
+func TestRequestMarshalBinary(t *testing.T) {
 	le := byte(0x10)
 	tests := []struct {
 		name string
@@ -49,8 +49,12 @@ func TestRequestAPDU(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.req.APDU(); !bytes.Equal(got, tt.want) {
-				t.Fatalf("APDU() = %X, want %X", got, tt.want)
+			got, err := tt.req.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalBinary() = %X, want %X", got, tt.want)
 			}
 		})
 	}
@@ -97,6 +101,32 @@ func TestRequestMarshalBinaryRoundTrip(t *testing.T) {
 			}
 			if !bytes.Equal(roundTrip, data) {
 				t.Fatalf("round trip = % X, want % X", roundTrip, data)
+			}
+		})
+	}
+}
+
+func TestRequestMarshalBinaryErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		req  Request
+	}{
+		{
+			name: "data too long",
+			req: Request{
+				CLA:  0x00,
+				INS:  0xA4,
+				P1:   0x00,
+				P2:   0x04,
+				Data: bytes.Repeat([]byte{0x01}, maxShortCommandData+1),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.req.MarshalBinary(); err == nil {
+				t.Fatal("MarshalBinary() error = nil, want non-nil")
 			}
 		})
 	}

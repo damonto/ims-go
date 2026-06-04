@@ -29,62 +29,81 @@ var pcsc struct {
 	refs int
 }
 
-func ListReaders() ([]string, error) {
-	ctx, err := newContext()
+func ListReaders(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("listing readers: %w", err)
+	}
+	pcscCtx, err := newContext()
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		releasePCSC()
 	}()
 
-	readers, _, err := ctx.ListReaders(nil)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("listing readers: %w", err)
+	}
+	readers, _, err := pcscCtx.ListReaders(nil)
 	if err != nil {
 		return nil, fmt.Errorf("listing readers: %w", err)
 	}
 	return slices.Clone(readers), nil
 }
 
-func Open(readerName string) (usimreader.Reader, error) {
+func Open(ctx context.Context, readerName string) (usimreader.Reader, error) {
 	readerName = strings.TrimSpace(readerName)
 	if readerName == "" {
 		return nil, errors.New("opening reader: reader name is empty")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("opening reader: %w", err)
+	}
 
-	ctx, err := newContext()
+	pcscCtx, err := newContext()
 	if err != nil {
 		return nil, err
 	}
 
-	readers, _, err := ctx.ListReaders(nil)
+	if err := ctx.Err(); err != nil {
+		_, _ = pcscCtx.Release()
+		releasePCSC()
+		return nil, fmt.Errorf("opening reader: %w", err)
+	}
+	readers, _, err := pcscCtx.ListReaders(nil)
 	if err != nil {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		releasePCSC()
 		return nil, fmt.Errorf("listing readers: %w", err)
 	}
 	if !slices.Contains(readers, readerName) {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		releasePCSC()
 		return nil, fmt.Errorf("selecting %q: %w", readerName, ErrReaderNotFound)
 	}
 
-	card, _, err := ctx.Connect(readerName, goscard.SCardShareShared, goscard.SCardProtocolAny)
+	if err := ctx.Err(); err != nil {
+		_, _ = pcscCtx.Release()
+		releasePCSC()
+		return nil, fmt.Errorf("opening reader: %w", err)
+	}
+	card, _, err := pcscCtx.Connect(readerName, goscard.SCardShareShared, goscard.SCardProtocolAny)
 	if err != nil {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		releasePCSC()
 		return nil, fmt.Errorf("connecting to %s: %w", readerName, err)
 	}
 	ioSend, err := ioRequestForProtocol(card.ActiveProtocol())
 	if err != nil {
 		_, _ = card.Disconnect(goscard.SCardLeaveCard)
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		releasePCSC()
 		return nil, err
 	}
 
 	return usim.New(&Reader{
-		ctx:    &ctx,
+		ctx:    &pcscCtx,
 		card:   &card,
 		ioSend: ioSend,
 	}), nil

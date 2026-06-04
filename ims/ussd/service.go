@@ -12,7 +12,6 @@ import (
 
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
 	cfg.Language = strings.TrimSpace(cfg.Language)
-	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	s := &Service{
 		cfg:           cfg,
 		sess:          sess,
@@ -20,8 +19,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		logger:        cfg.Logger.With("component", "ims-ussd"),
 		sessions:      make(map[string]*Session),
 		incomingIndex: make(map[string]string),
-		cleanupCtx:    cleanupCtx,
-		cleanupCancel: cleanupCancel,
+		done:          make(chan struct{}),
 	}
 	attachment, err := sess.Attach(s)
 	if err != nil {
@@ -42,7 +40,7 @@ func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 	resp, err := s.sess.Exchange(ctx, invite)
 	if err != nil {
 		if ctx.Err() != nil {
-			s.cancelInvite(ctx, invite)
+			s.cancelInvite(invite)
 		}
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
@@ -54,66 +52,34 @@ func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
 	return s.startSession(ctx, start, invite, resp)
 }
 
-func (s *Service) CloseContext(ctx context.Context) error {
+func (s *Service) Close() error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
+	attachment := s.attachment
+	s.attachment = nil
 	sessions := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		sessions = append(sessions, sess)
 	}
 	s.sessions = make(map[string]*Session)
 	s.incomingIndex = make(map[string]string)
+	close(s.done)
 	s.mu.Unlock()
 
-	if s.cleanupCancel != nil {
-		s.cleanupCancel()
-	}
-	if s.attachment != nil {
-		_ = s.attachment.Close()
+	var err error
+	if attachment != nil {
+		err = attachment.Close()
 	}
 
-	var err error
-	for _, ussdSession := range sessions {
-		if !ussdSession.isClosed() {
-			err = errors.Join(err, ussdSession.endDirect(ctx, ""))
-		}
-		ussdSession.finish(false)
+	for _, session := range sessions {
+		session.finish(false)
 	}
 	s.bgWG.Wait()
 	return err
-}
-
-// Abort tears down local USSD state after transport loss without sending BYE.
-func (s *Service) Abort() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	s.closed = true
-	sessions := make([]*Session, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		sessions = append(sessions, sess)
-	}
-	s.sessions = make(map[string]*Session)
-	s.incomingIndex = make(map[string]string)
-	s.mu.Unlock()
-
-	if s.cleanupCancel != nil {
-		s.cleanupCancel()
-	}
-	if s.attachment != nil {
-		_ = s.attachment.Close()
-	}
-
-	for _, ussdSession := range sessions {
-		ussdSession.finish(false)
-	}
-	s.bgWG.Wait()
 }
 
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
@@ -124,22 +90,22 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 		}
 		return true, s.handleIncomingInvite(ctx, req)
 	case "ACK":
-		ussdSession := s.lookupSessionForMessage(req.Message)
-		if ussdSession == nil {
+		session := s.lookupSessionForMessage(req.Message)
+		if session == nil {
 			return false, nil
 		}
-		return true, ussdSession.handleRequest(ctx, req)
+		return true, session.handleRequest(ctx, req)
 	case "CANCEL":
-		ussdSession := s.lookupIncomingInviteSession(req.Message)
-		if ussdSession == nil {
+		session := s.lookupIncomingInviteSession(req.Message)
+		if session == nil {
 			return false, nil
 		}
-		ussdSession.finish(false)
+		session.finish(false)
 		return true, nil
 	case "INFO", "BYE":
-		ussdSession := s.lookupSessionForMessage(req.Message)
-		if ussdSession != nil {
-			return true, ussdSession.handleRequest(ctx, req)
+		session := s.lookupSessionForMessage(req.Message)
+		if session != nil {
+			return true, session.handleRequest(ctx, req)
 		}
 		if looksLikeDialogMessage(req.Message) {
 			return true, s.sess.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
@@ -160,6 +126,6 @@ func (s *Service) HandleError(err error) {
 func (s *Service) writeUnsupportedMediaType(ctx context.Context, req session.Request) error {
 	resp := sip.NewResponse(sipStatusUnsupportedMediaType, "Unsupported Media Type")
 	resp.Headers = sip.ResponseHeaders(req.Message, sipStatusUnsupportedMediaType)
-	resp.Headers.Add("Accept", ussdAcceptHeader)
+	resp.Headers.Add("Accept", acceptHeader)
 	return s.sess.WriteResponse(ctx, req, resp)
 }

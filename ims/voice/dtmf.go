@@ -27,9 +27,6 @@ type DTMFRequest struct {
 }
 
 func (c *Call) SendDTMF(ctx context.Context, req DTMFRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	req.Digits = strings.TrimSpace(req.Digits)
 	if req.Digits == "" {
 		return errors.New("sending dtmf: digits are empty")

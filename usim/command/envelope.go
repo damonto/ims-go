@@ -40,7 +40,7 @@ func (c SMSPPDownload) Envelope() ([]byte, error) {
 	return out, nil
 }
 
-func (c SMSPPDownload) APDU() ([]byte, error) {
+func (c SMSPPDownload) MarshalBinary() ([]byte, error) {
 	envelope, err := c.Envelope()
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func (c SMSPPDownload) APDU() ([]byte, error) {
 			P2:   0x00,
 			Data: envelope,
 			Le:   &le,
-		}.APDU(), nil
+		}.MarshalBinary()
 	}
 	if len(envelope) > 0xFFFF {
 		return nil, fmt.Errorf("building SMS-PP download APDU: envelope length %d exceeds extended APDU limit", len(envelope))

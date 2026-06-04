@@ -206,7 +206,7 @@ func (a App) file(path []byte) usimreader.FileRef {
 }
 
 func (a App) fileStructure(ctx context.Context, file usimreader.FileRef, action string, want byte) (usimreader.FileAttributes, error) {
-	attrs, err := a.Reader.GetFileAttributes(ctx, file)
+	attrs, err := a.Reader.FileAttributes(ctx, file)
 	if err != nil {
 		return usimreader.FileAttributes{}, err
 	}

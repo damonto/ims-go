@@ -26,6 +26,10 @@ type CallEvent struct {
 	At     time.Time
 }
 
+type VoiceService struct {
+	client *Client
+}
+
 func (s *VoiceService) Dial(ctx context.Context, req imsvoice.DialRequest) (*imsvoice.Call, error) {
 	low, err := s.client.currentVoiceService()
 	if err != nil {
@@ -42,13 +46,7 @@ func (s *VoiceService) Dial(ctx context.Context, req imsvoice.DialRequest) (*ims
 }
 
 func (c *Client) currentVoiceService() (*imsvoice.Service, error) {
-	c.mu.Lock()
-	active := c.active
-	c.mu.Unlock()
-	if active == nil || active.voice == nil {
-		return nil, ErrClientNotConnected
-	}
-	return active.voice, nil
+	return currentIMSService(c, func(ims imsRuntime) *imsvoice.Service { return ims.voice })
 }
 
 func (c *Client) handleIncomingVoice(event imsvoice.IncomingCall) {

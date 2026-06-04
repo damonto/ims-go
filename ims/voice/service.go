@@ -3,10 +3,11 @@ package voice
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
-	"strings"
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
@@ -23,6 +24,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 		nextPort:  normalized.LocalRTPPortMin,
 		calls:     make(map[string]*Call),
 		incomings: make(map[string]*Call),
+		bgDone:    make(chan struct{}),
 	}
 	attachment, err := sess.Attach(svc)
 	if err != nil {
@@ -40,21 +42,26 @@ func (s *Service) Close() error {
 		return nil
 	}
 	s.closed = true
+	attachment := s.attachment
+	s.attachment = nil
 	calls := make([]*Call, 0, len(s.calls))
 	for _, call := range s.calls {
 		calls = append(calls, call)
 	}
 	s.calls = make(map[string]*Call)
 	s.incomings = make(map[string]*Call)
+	close(s.bgDone)
 	s.mu.Unlock()
 
-	if s.attachment != nil {
-		_ = s.attachment.Close()
+	var err error
+	if attachment != nil {
+		err = attachment.Close()
 	}
 	for _, call := range calls {
 		call.finish(CallStateEnded, "")
 	}
-	return nil
+	s.bgWG.Wait()
+	return err
 }
 
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
@@ -101,7 +108,7 @@ func (s *Service) HandleResponse(ctx context.Context, msg sip.Message) (bool, er
 		return false, nil
 	}
 	if msg.StatusCode() >= sipStatusTrying && msg.StatusCode() < sipStatusOK {
-		call.markInviteResponse(ctx)
+		call.markInviteResponse()
 		if msg.StatusCode() == sipStatusTrying {
 			return true, nil
 		}

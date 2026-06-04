@@ -150,7 +150,15 @@ func (t *stubTransport) Close() error {
 }
 
 func (t *stubTransport) queueRead(msg sip.Message) {
-	t.readCh <- msg.Bytes()
+	t.readCh <- marshalSIPMessageForTest(msg)
+}
+
+func marshalSIPMessageForTest(msg sip.Message) []byte {
+	data, err := msg.MarshalText()
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func (t *blockingWriteTransport) LocalAddr() net.Addr  { return t.local }
@@ -1245,7 +1253,7 @@ func TestWaitTransportsIdleWaitsForClientTransactions(t *testing.T) {
 	}
 }
 
-func TestCloseContextClosesTransportsAndFansOutErrorOnce(t *testing.T) {
+func TestCloseClosesTransportsAndFansOutErrorOnce(t *testing.T) {
 	primary := newStubTransport(5062, 5060)
 	aux := newStubTransport(15062, 15060)
 	sess, err := Open(Config{}, primary)
@@ -1265,8 +1273,8 @@ func TestCloseContextClosesTransportsAndFansOutErrorOnce(t *testing.T) {
 		t.Fatalf("Attach(second) error = %v", err)
 	}
 
-	if err := sess.CloseContext(context.Background()); err != nil {
-		t.Fatalf("CloseContext() error = %v", err)
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 	if primary.closeCount != 1 {
 		t.Fatalf("primary closeCount = %d, want 1", primary.closeCount)

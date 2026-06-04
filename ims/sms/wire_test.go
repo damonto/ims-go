@@ -111,6 +111,13 @@ func TestUCS2BinaryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUCS2UnmarshalBinaryRejectsOddLength(t *testing.T) {
+	var got UCS2
+	if err := got.UnmarshalBinary([]byte{0x00}); err == nil {
+		t.Fatal("UnmarshalBinary() error = nil, want odd length error")
+	}
+}
+
 func TestRPEncodeDecode(t *testing.T) {
 	tests := []struct {
 		name string
@@ -276,8 +283,12 @@ func TestEncodeDecodeMultipartSMS(t *testing.T) {
 			var reference uint16
 			var sixteenBit bool
 			for i, part := range parts {
+				payload, err := newDeliverTPDU("+12345", part).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary(part %d) error = %v", i, err)
+				}
 				var deliver deliverTPDU
-				if err := deliver.UnmarshalBinary(part.marshalDeliver("+12345")); err != nil {
+				if err := deliver.UnmarshalBinary(payload); err != nil {
 					t.Fatalf("UnmarshalBinary(part %d) error = %v", i, err)
 				}
 				if deliver.Concat == nil {
@@ -303,8 +314,12 @@ func TestDecodeMultipartSMS16BitReference(t *testing.T) {
 	header := []byte{0x06, concatIEI16Bit, 0x04, 0x12, 0x34, 0x02, 0x01}
 	userData := append(header, encodeUCS2(text)...)
 	part := userDataPart{udhi: true, dcs: 0x08, udl: len(userData), userData: userData}
+	payload, err := newDeliverTPDU("+12345", part).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
 	var deliver deliverTPDU
-	if err := deliver.UnmarshalBinary(part.marshalDeliver("+12345")); err != nil {
+	if err := deliver.UnmarshalBinary(payload); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 	if deliver.Concat == nil || !deliver.Concat.SixteenBit || deliver.Concat.Reference != 0x1234 || deliver.Concat.Total != 2 || deliver.Concat.Sequence != 1 {

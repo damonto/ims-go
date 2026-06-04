@@ -23,6 +23,15 @@ type apduScriptStep struct {
 	err      error
 }
 
+func mustMarshal(t *testing.T, value interface{ MarshalBinary() ([]byte, error) }) []byte {
+	t.Helper()
+	data, err := value.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	return data
+}
+
 func (s *apduScriptTransmitter) Transmit(_ context.Context, req []byte) ([]byte, error) {
 	s.t.Helper()
 	if s.idx >= len(s.steps) {
@@ -89,7 +98,7 @@ func TestReaderReadRecordFollowsGetResponse(t *testing.T) {
 func TestReaderAuthenticate3GUsesExpectedAPDU(t *testing.T) {
 	rand := []byte{0x01, 0x02, 0x03, 0x04}
 	autn := []byte{0xAA, 0xBB, 0xCC, 0xDD}
-	want := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+	want := mustMarshal(t, command.Authenticate3G{Rand: rand, AUTN: autn})
 
 	reader := New(&apduScriptTransmitter{
 		t: t,
@@ -137,7 +146,7 @@ func TestReaderAuthenticate3GSelectsApplicationWhenAIDProvided(t *testing.T) {
 	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 	rand := []byte{0x01, 0x02, 0x03, 0x04}
 	autn := []byte{0xAA, 0xBB, 0xCC, 0xDD}
-	want := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+	want := mustMarshal(t, command.Authenticate3G{Rand: rand, AUTN: autn})
 
 	reader := New(&apduScriptTransmitter{
 		t: t,
@@ -170,7 +179,7 @@ func TestReaderAuthenticate3GClearsSelectedFileCache(t *testing.T) {
 	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 	rand := []byte{0x01, 0x02, 0x03, 0x04}
 	autn := []byte{0xAA, 0xBB, 0xCC, 0xDD}
-	auth := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+	auth := mustMarshal(t, command.Authenticate3G{Rand: rand, AUTN: autn})
 
 	reader := New(&apduScriptTransmitter{
 		t: t,

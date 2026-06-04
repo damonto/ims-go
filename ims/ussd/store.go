@@ -8,29 +8,29 @@ import (
 
 var errSessionActive = errors.New("ussd session is active")
 
-func (s *Service) storeSession(ussdSession *Session) error {
-	key := ussdSession.sessionKey()
+func (s *Service) storeSession(session *Session) error {
+	key := session.sessionKey()
 	if s.hasActiveSession() {
 		return fmt.Errorf("storing USSD session: %w", errSessionActive)
 	}
 	attachment, err := s.sess.RegisterDialog(sip.DialogID{
-		CallID:    ussdSession.callID,
-		LocalTag:  ussdSession.localTag,
-		RemoteTag: ussdSession.remoteTag,
+		CallID:    session.callID,
+		LocalTag:  session.localTag,
+		RemoteTag: session.remoteTag,
 	}, key)
 	if err != nil {
 		return fmt.Errorf("storing USSD session: %w", err)
 	}
-	ussdSession.dialogAttachment = attachment
+	session.dialogAttachment = attachment
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sessions) > 0 {
 		_ = attachment.Close()
-		ussdSession.dialogAttachment = nil
+		session.dialogAttachment = nil
 		return fmt.Errorf("storing USSD session: %w", errSessionActive)
 	}
-	s.sessions[key] = ussdSession
-	if inviteKey := ussdSession.inviteRequestKey(); inviteKey != "" {
+	s.sessions[key] = session
+	if inviteKey := session.inviteRequestKey(); inviteKey != "" {
 		s.incomingIndex[inviteKey] = key
 	}
 	return nil
@@ -52,9 +52,9 @@ func (s *Service) hasActiveSession() bool {
 func (s *Service) lookupSessionByCallID(callID string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, ussdSession := range s.sessions {
-		if ussdSession.callID == callID {
-			return ussdSession
+	for _, session := range s.sessions {
+		if session.callID == callID {
+			return session
 		}
 	}
 	return nil
@@ -86,16 +86,16 @@ func (s *Service) lookupSessionForMessage(msg sip.Message) *Session {
 
 func (s *Service) removeSession(key string) {
 	s.mu.Lock()
-	ussdSession := s.sessions[key]
-	if ussdSession != nil {
+	session := s.sessions[key]
+	if session != nil {
 		delete(s.sessions, key)
-		if inviteKey := ussdSession.inviteRequestKey(); inviteKey != "" {
+		if inviteKey := session.inviteRequestKey(); inviteKey != "" {
 			delete(s.incomingIndex, inviteKey)
 		}
 	}
 	s.mu.Unlock()
-	if ussdSession != nil && ussdSession.dialogAttachment != nil {
-		_ = ussdSession.dialogAttachment.Close()
-		ussdSession.dialogAttachment = nil
+	if session != nil && session.dialogAttachment != nil {
+		_ = session.dialogAttachment.Close()
+		session.dialogAttachment = nil
 	}
 }

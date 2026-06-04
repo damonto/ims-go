@@ -19,6 +19,7 @@ import (
 
 const (
 	DefaultRequestTimeout = 30 * time.Second
+	defaultCloseTimeout   = 5 * time.Second
 	slotStatusTimeout     = 1 * time.Second
 	slotReadyTimeout      = 5 * time.Second
 	slotPollInterval      = 500 * time.Millisecond
@@ -84,14 +85,14 @@ func Open(ctx context.Context, transport protocol.Transport, slot uint8, device 
 }
 
 func (r *Reader) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+	defer cancel()
 	r.closeOnce.Do(func() {
 		transport := r.Transport
 		if transport == nil {
 			r.ClientID = 0
 			return
 		}
-
-		ctx := context.Background()
 
 		var releaseErr error
 		if r.CATClientID != 0 {
@@ -116,7 +117,7 @@ func (r *Reader) Close() error {
 }
 
 func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application, error) {
-	attrs, err := r.GetFileAttributes(ctx, usimreader.FileRef{Path: []byte{0x2F, 0x00}})
+	attrs, err := r.FileAttributes(ctx, usimreader.FileRef{Path: []byte{0x2F, 0x00}})
 	if err != nil {
 		return nil, fmt.Errorf("reading EF_DIR: %w", err)
 	}
@@ -151,7 +152,7 @@ func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application
 	return apps, nil
 }
 
-func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *Reader) FileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	path := r.requestFilePath(file)
 	response, err := r.withFileSession(ctx, file, func(ctx context.Context, session sessionRequest) (protocol.Response, error) {
 		return r.getFileAttributesResponse(ctx, session, path)
@@ -166,7 +167,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 	path := r.requestFilePath(req.File)
 	length := req.Length
 	if length == 0 {
-		attrs, err := r.GetFileAttributes(ctx, req.File)
+		attrs, err := r.FileAttributes(ctx, req.File)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +202,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 
 	length := req.Length
 	if length == 0 {
-		attrs, err := r.GetFileAttributes(ctx, req.File)
+		attrs, err := r.FileAttributes(ctx, req.File)
 		if err != nil {
 			return nil, err
 		}

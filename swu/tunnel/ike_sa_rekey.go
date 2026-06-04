@@ -150,10 +150,10 @@ func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if state := s.ikeSALifecycle(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
+	if state := s.ikeSAState(); state == ikeSAStateRekeying || state == ikeSAStatePendingInstall {
 		return ikeSARekeyState{}, nil, errIKESARekeyInProgress
 	}
-	if state := s.childSALifecycle(); state == childSALifecycleRekeying || state == childSALifecyclePendingOutbound {
+	if state := s.childSAState(); state == childSAStateRekeying || state == childSAStatePendingOutbound {
 		return ikeSARekeyState{}, nil, errChildSARekeyInProgress
 	}
 	if s.ikeSAExpired(time.Now()) {
@@ -595,7 +595,7 @@ func (s *Session) ikeSARekeyLoop() {
 		if temporaryFailure.waiting(now) {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(s.closeCtx, 30*time.Second)
+		ctx, cancel := s.timeoutContext(30 * time.Second)
 		err := s.RekeyIKESA(ctx)
 		cancel()
 		if err == nil {
@@ -648,8 +648,8 @@ func (s *Session) ikeSALifetimeState() (time.Time, time.Time) {
 func (s *Session) ikeSARekeyActive() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	state := s.ikeSALifecycle()
-	return state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall
+	state := s.ikeSAState()
+	return state == ikeSAStateRekeying || state == ikeSAStatePendingInstall
 }
 
 func uint64Bytes(value uint64) []byte {

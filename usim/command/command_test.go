@@ -28,9 +28,9 @@ func (r *fakeReader) ListApplications(ctx context.Context) ([]usimreader.Applica
 	return r.listApplications(ctx)
 }
 
-func (r *fakeReader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *fakeReader) FileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	if r.getFileAttributes == nil {
-		return usimreader.FileAttributes{}, errors.New("GetFileAttributes was not expected")
+		return usimreader.FileAttributes{}, errors.New("FileAttributes was not expected")
 	}
 	return r.getFileAttributes(ctx, file)
 }
@@ -239,7 +239,7 @@ func TestAppReaders(t *testing.T) {
 				app := App{Reader: &fakeReader{
 					getFileAttributes: func(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 						if !bytes.Equal(file.AID, usimAID) || !bytes.Equal(file.Path, []byte{0x2F, 0xE2}) {
-							t.Fatalf("GetFileAttributes() file = %+v", file)
+							t.Fatalf("FileAttributes() file = %+v", file)
 						}
 						return usimreader.FileAttributes{FileStructure: simfile.StructureTransparent, FileSize: 10}, nil
 					},
@@ -266,7 +266,7 @@ func TestAppReaders(t *testing.T) {
 				app := App{Reader: &fakeReader{
 					getFileAttributes: func(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 						if !bytes.Equal(file.AID, isimAID) || !bytes.Equal(file.Path, []byte{0x6F, 0x04}) {
-							t.Fatalf("GetFileAttributes() file = %+v", file)
+							t.Fatalf("FileAttributes() file = %+v", file)
 						}
 						return usimreader.FileAttributes{FileStructure: simfile.StructureLinearFixed, RecordSize: 16, RecordCount: 2}, nil
 					},
@@ -343,7 +343,7 @@ func TestAppReaders(t *testing.T) {
 				app := App{Reader: &fakeReader{
 					getFileAttributes: func(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 						if !bytes.Equal(file.Path, []byte{0x7F, 0x10, 0x6F, 0xE5}) {
-							t.Fatalf("GetFileAttributes() file = %+v", file)
+							t.Fatalf("FileAttributes() file = %+v", file)
 						}
 						return usimreader.FileAttributes{FileStructure: simfile.StructureLinearFixed, RecordSize: 32, RecordCount: 1}, nil
 					},

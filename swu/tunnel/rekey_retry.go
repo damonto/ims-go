@@ -97,7 +97,7 @@ func (s *Session) waitForRekeyDeadline(lifetimeState func() (time.Time, time.Tim
 
 func (s *Session) waitForRekeyStateChange() bool {
 	select {
-	case <-s.closeCtx.Done():
+	case <-s.closeDone():
 		return false
 	case <-s.rekeyWake:
 		return true
@@ -108,7 +108,7 @@ func (s *Session) waitForRekeyStateChangeUntil(deadline time.Time) bool {
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
-	case <-s.closeCtx.Done():
+	case <-s.closeDone():
 		return false
 	case <-s.rekeyWake:
 		return true

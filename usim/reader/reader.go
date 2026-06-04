@@ -57,7 +57,7 @@ type Transmitter interface {
 
 type Reader interface {
 	ListApplications(ctx context.Context) ([]Application, error)
-	GetFileAttributes(ctx context.Context, file FileRef) (FileAttributes, error)
+	FileAttributes(ctx context.Context, file FileRef) (FileAttributes, error)
 	ReadTransparent(ctx context.Context, req TransparentRead) ([]byte, error)
 	ReadRecord(ctx context.Context, req RecordRead) ([]byte, error)
 	Authenticate3G(ctx context.Context, req AuthenticateRequest) ([]byte, error)

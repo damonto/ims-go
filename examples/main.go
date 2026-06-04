@@ -177,15 +177,15 @@ func parseDurationList(value string) ([]time.Duration, error) {
 }
 
 func run(opt options) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if opt.listReaders {
 		if !strings.EqualFold(strings.TrimSpace(opt.driverKind), "pcsc") {
 			return errors.New("listing readers: -list-readers requires -driver pcsc")
 		}
-		return listCCIDReaders()
+		return listCCIDReaders(ctx)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	if opt.ccidTCPListen != "" {
 		return serveTCPAPDUServer(ctx, opt)
@@ -548,8 +548,8 @@ func runUSSD(ctx context.Context, client *vowifi.Client, code string) error {
 	}
 }
 
-func listCCIDReaders() error {
-	readers, err := availableCCIDReaders()
+func listCCIDReaders(ctx context.Context) error {
+	readers, err := availableCCIDReaders(ctx)
 	if err != nil {
 		return err
 	}
@@ -564,8 +564,8 @@ func listCCIDReaders() error {
 	return nil
 }
 
-func availableCCIDReaders() ([]string, error) {
-	readers, err := ccid.ListReaders()
+func availableCCIDReaders(ctx context.Context) ([]string, error) {
+	readers, err := ccid.ListReaders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing pcsc readers: %w", err)
 	}
@@ -576,7 +576,7 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 	switch strings.ToLower(strings.TrimSpace(opt.driverKind)) {
 	case "pcsc":
 		if opt.readerName == "" {
-			readers, err := ccid.ListReaders()
+			readers, err := ccid.ListReaders(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("listing pcsc readers: %w", err)
 			}
@@ -585,7 +585,7 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 			}
 			return nil, fmt.Errorf("opening pcsc driver: -reader is required; available readers: %s", strings.Join(readers, ", "))
 		}
-		drv, err := ccid.Open(opt.readerName)
+		drv, err := ccid.Open(ctx, opt.readerName)
 		if err != nil {
 			return nil, fmt.Errorf("opening pcsc driver: %w", err)
 		}
@@ -594,7 +594,7 @@ func openDriver(ctx context.Context, opt options) (usimreader.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening AT driver: -device is required")
 		}
-		drv, err := at.New(opt.device, 0)
+		drv, err := at.Open(ctx, opt.device, 0)
 		if err != nil {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
 		}
@@ -786,7 +786,7 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 		return errors.New("serving CCID TCP: listen address is empty")
 	}
 	if strings.TrimSpace(opt.readerName) == "" {
-		readers, err := availableCCIDReaders()
+		readers, err := availableCCIDReaders(ctx)
 		if err != nil {
 			return err
 		}
@@ -796,7 +796,7 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 		return fmt.Errorf("serving CCID TCP: -reader is required; available readers: %s", strings.Join(readers, ", "))
 	}
 
-	tx, err := openExamplePCSCTransmitter(opt.readerName)
+	tx, err := openExamplePCSCTransmitter(ctx, opt.readerName)
 	if err != nil {
 		return fmt.Errorf("opening server pcsc reader: %w", err)
 	}
@@ -896,35 +896,46 @@ func isCleanTCPAPDUClose(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }
 
-func openExamplePCSCTransmitter(readerName string) (usimreader.Transmitter, error) {
+func openExamplePCSCTransmitter(ctx context.Context, readerName string) (usimreader.Transmitter, error) {
 	readerName = strings.TrimSpace(readerName)
 	if readerName == "" {
 		return nil, errors.New("opening pcsc reader: reader name is empty")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("opening pcsc reader: %w", err)
+	}
 
-	ctx, err := newExamplePCSCContext()
+	pcscCtx, err := newExamplePCSCContext()
 	if err != nil {
 		return nil, err
 	}
 
-	readers, _, err := ctx.ListReaders(nil)
+	if err := ctx.Err(); err != nil {
+		_, _ = pcscCtx.Release()
+		return nil, fmt.Errorf("opening pcsc reader: %w", err)
+	}
+	readers, _, err := pcscCtx.ListReaders(nil)
 	if err != nil {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		return nil, fmt.Errorf("listing pcsc readers: %w", err)
 	}
 	if !slices.Contains(readers, readerName) {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		return nil, fmt.Errorf("selecting %q: %w", readerName, ccid.ErrReaderNotFound)
 	}
 
-	card, _, err := ctx.Connect(readerName, goscard.SCardShareShared, goscard.SCardProtocolT0|goscard.SCardProtocolT1)
+	if err := ctx.Err(); err != nil {
+		_, _ = pcscCtx.Release()
+		return nil, fmt.Errorf("opening pcsc reader: %w", err)
+	}
+	card, _, err := pcscCtx.Connect(readerName, goscard.SCardShareShared, goscard.SCardProtocolT0|goscard.SCardProtocolT1)
 	if err != nil {
-		_, _ = ctx.Release()
+		_, _ = pcscCtx.Release()
 		return nil, fmt.Errorf("connecting to %s: %w", readerName, err)
 	}
 
 	return &pcscAPDUTransmitter{
-		ctx:  &ctx,
+		ctx:  &pcscCtx,
 		card: &card,
 	}, nil
 }
@@ -992,7 +1003,7 @@ func logClientEvents(events *vowifi.Events) {
 			if !ok {
 				return
 			}
-			slog.Info("registration state", "state", state)
+			slog.Info("client state", "status", state.Status, "active", state.Active, "connecting", state.Connecting, "reconnecting", state.Reconnecting, "closed", state.Closed, "last_error", state.LastError)
 		case err, ok := <-events.Errors:
 			if !ok {
 				return

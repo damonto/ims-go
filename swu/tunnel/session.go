@@ -137,8 +137,8 @@ type Session struct {
 	attachmentsMu sync.RWMutex
 	attachments   []*sessionAttachment
 
-	closeCtx      context.Context
-	closeCancel   context.CancelFunc
+	closeCh       chan struct{}
+	closeOnce     sync.Once
 	wg            sync.WaitGroup
 	readCh        chan inboundPacket
 	dataPlaneDone chan struct{}
@@ -185,22 +185,22 @@ type pendingChildSA struct {
 	oldInbound uint32
 }
 
-type ikeSALifecycleState uint8
+type ikeSAState uint8
 
 const (
-	ikeSALifecycleNone ikeSALifecycleState = iota
-	ikeSALifecycleActive
-	ikeSALifecycleRekeying
-	ikeSALifecyclePendingInstall
+	ikeSAStateNone ikeSAState = iota
+	ikeSAStateActive
+	ikeSAStateRekeying
+	ikeSAStatePendingInstall
 )
 
-type childSALifecycleState uint8
+type childSAState uint8
 
 const (
-	childSALifecycleNone childSALifecycleState = iota
-	childSALifecycleActive
-	childSALifecycleRekeying
-	childSALifecyclePendingOutbound
+	childSAStateNone childSAState = iota
+	childSAStateActive
+	childSAStateRekeying
+	childSAStatePendingOutbound
 )
 
 type simultaneousChildSARekey struct {
@@ -353,7 +353,6 @@ func ensureDialContext(ctx context.Context, conn net.PacketConn, owned bool) err
 }
 
 func newSession(cfg Config, conn net.PacketConn, owned bool, remote *net.UDPAddr) *Session {
-	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &Session{
 		conn:           conn,
 		owned:          owned,
@@ -361,8 +360,7 @@ func newSession(cfg Config, conn net.PacketConn, owned bool, remote *net.UDPAddr
 		outerNAT:       &net.UDPAddr{IP: append(net.IP(nil), remote.IP...), Port: cfg.NATTPort, Zone: remote.Zone},
 		cfg:            cfg,
 		logger:         cfg.Logger.With("component", "swu"),
-		closeCtx:       closeCtx,
-		closeCancel:    closeCancel,
+		closeCh:        make(chan struct{}),
 		readCh:         make(chan inboundPacket, 16),
 		ikeRequestGate: make(chan struct{}, 1),
 		rekeyWake:      make(chan struct{}, 1),

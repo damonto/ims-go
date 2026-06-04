@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	slotPollInterval = 500 * time.Millisecond
-	slotReadyTimeout = 5 * time.Second
+	slotPollInterval    = 500 * time.Millisecond
+	slotReadyTimeout    = 5 * time.Second
+	defaultCloseTimeout = 5 * time.Second
 )
 
 type Reader struct {
@@ -83,7 +84,7 @@ func (r *Reader) ListApplications(ctx context.Context) ([]usimreader.Application
 	return apps, nil
 }
 
-func (r *Reader) GetFileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *Reader) FileAttributes(ctx context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	if len(file.Path) == 0 {
 		return usimreader.FileAttributes{}, errors.New("reading MBIM file attributes: path is empty")
 	}
@@ -116,7 +117,7 @@ func (r *Reader) ReadTransparent(ctx context.Context, req usimreader.Transparent
 
 	length := req.Length
 	if length == 0 {
-		attrs, err := r.GetFileAttributes(ctx, req.File)
+		attrs, err := r.FileAttributes(ctx, req.File)
 		if err != nil {
 			return nil, err
 		}
@@ -164,7 +165,7 @@ func (r *Reader) ReadRecord(ctx context.Context, req usimreader.RecordRead) ([]b
 	}
 
 	if req.Length == 0 {
-		attrs, err := r.GetFileAttributes(ctx, req.File)
+		attrs, err := r.FileAttributes(ctx, req.File)
 		if err != nil {
 			return nil, err
 		}
@@ -234,10 +235,14 @@ func (r *Reader) authenticate3GWithApplication(ctx context.Context, req usimread
 		err = errors.Join(err, r.closeLogicalChannel(ctx, channel))
 	}()
 
-	return r.transmitAPDU(ctx, channel, usimcommand.Authenticate3G{
+	apduRequest, err := (usimcommand.Authenticate3G{
 		Rand: slices.Clone(req.Rand),
 		AUTN: slices.Clone(req.AUTN),
-	}.APDU())
+	}).MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return r.transmitAPDU(ctx, channel, apduRequest)
 }
 
 func (r *Reader) openLogicalChannel(ctx context.Context, aid []byte) (uint32, error) {
@@ -311,6 +316,8 @@ func (r *Reader) SMSPPDownload(ctx context.Context, req usimreader.SMSPPDownload
 }
 
 func (r *Reader) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+	defer cancel()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -320,7 +327,7 @@ func (r *Reader) Close() error {
 	r.closed = true
 
 	request := CloseRequest{TransactionID: r.nextTransactionID()}
-	err := request.Request().Transmit(context.Background(), r.conn)
+	err := request.Request().Transmit(ctx, r.conn)
 	return errors.Join(err, r.conn.Close())
 }
 

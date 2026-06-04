@@ -1,12 +1,13 @@
 package voice
 
 import (
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type CallDirection string
@@ -111,6 +112,8 @@ type Service struct {
 	nextPort  int
 	calls     map[string]*Call
 	incomings map[string]*Call
+	bgDone    chan struct{}
+	bgWG      sync.WaitGroup
 	closed    bool
 }
 

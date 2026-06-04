@@ -159,7 +159,15 @@ func (t *voiceStubTransport) Close() error {
 }
 
 func (t *voiceStubTransport) queue(msg sip.Message) {
-	t.readCh <- msg.Bytes()
+	t.readCh <- marshalSIPMessageForTest(msg)
+}
+
+func marshalSIPMessageForTest(msg sip.Message) []byte {
+	data, err := msg.MarshalText()
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func (t *voiceStubTransport) countMethod(method string) int {

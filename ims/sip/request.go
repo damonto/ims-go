@@ -160,14 +160,18 @@ func RandomHex(length int) string {
 
 func RandomUint32() uint32 {
 	var buf [4]byte
-	_, _ = rand.Read(buf[:])
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(err)
+	}
 	return binary.BigEndian.Uint32(buf[:])
 }
 
 func randomString(length int, alphabet string) string {
 	buf := make([]byte, length)
 	rnd := make([]byte, length)
-	_, _ = rand.Read(rnd)
+	if _, err := rand.Read(rnd); err != nil {
+		panic(err)
+	}
 	for i, b := range rnd {
 		buf[i] = alphabet[int(b)%len(alphabet)]
 	}

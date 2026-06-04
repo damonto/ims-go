@@ -1,15 +1,15 @@
 package ussd
 
 import (
-	"context"
 	"encoding/xml"
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
 	"log/slog"
 	"net/textproto"
 	"sync"
 	"time"
+
+	"github.com/damonto/vowifi-go/ims/registration"
+	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 	xmlContentType              = "application/vnd.3gpp.ussd+xml"
 	sdpContentType              = "application/sdp"
 	mixedMultipartType          = "multipart/mixed"
-	ussdAcceptHeader            = xmlContentType + ", " + sdpContentType + ", " + mixedMultipartType
+	acceptHeader                = xmlContentType + ", " + sdpContentType + ", " + mixedMultipartType
 	infoPackageDisposition      = "info-package"
 	renderOptionalDisposition   = "render;handling=optional"
 	handlingDispositionParam    = "handling"
@@ -72,16 +72,13 @@ type Message struct {
 	Request   bool
 }
 
-type USSDMessage = Message
-
 type Service struct {
-	cfg           Config
-	sess          *session.Session
-	reg           *registration.Service
-	logger        *slog.Logger
-	attachment    session.Attachment
-	cleanupCtx    context.Context
-	cleanupCancel context.CancelFunc
+	cfg        Config
+	sess       *session.Session
+	reg        *registration.Service
+	logger     *slog.Logger
+	attachment session.Attachment
+	done       chan struct{}
 
 	mu            sync.Mutex
 	sessions      map[string]*Session
@@ -121,8 +118,6 @@ type Session struct {
 
 	mu sync.Mutex
 }
-
-type USSDSession = Session
 
 type dialogKind uint8
 

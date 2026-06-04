@@ -23,8 +23,24 @@ func TestMarshalRequest(t *testing.T) {
 		0x02, 0x03, 0x00, 0x07, 0x6F, 0x00,
 		0x03, 0x04, 0x00, 0x00, 0x00, 0x09, 0x00,
 	}
-	if got := MarshalRequest(req); !bytes.Equal(got, want) {
+	got, err := MarshalRequest(req)
+	if err != nil {
+		t.Fatalf("MarshalRequest() error = %v", err)
+	}
+	if !bytes.Equal(got, want) {
 		t.Fatalf("MarshalRequest() = % X, want % X", got, want)
+	}
+}
+
+func TestMarshalRequestReturnsTLVError(t *testing.T) {
+	req := protocol.Request{
+		TransactionID: 3,
+		MessageID:     protocol.MessageReadTransparent,
+		TLVs:          protocol.TLVs{{Type: 0x01, Len: 2, Value: []byte{0x01}}},
+	}
+
+	if _, err := MarshalRequest(req); err == nil {
+		t.Fatal("MarshalRequest() error = nil, want TLV error")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -227,6 +228,49 @@ func TestBaudRateOrDefault(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReaderInit(t *testing.T) {
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		response  string
+		wantWrite string
+		wantErr   error
+	}{
+		{
+			name:      "runs default commands",
+			ctx:       context.Background(),
+			response:  "AT\r\nOK\r\nATE0\r\nOK\r\nAT+CMEE=2\r\nOK\r\n",
+			wantWrite: "AT\r\nATE0\r\nAT+CMEE=2\r\n",
+		},
+		{
+			name:    "uses caller context",
+			ctx:     canceledContext(),
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port := &scriptPort{readData: tt.response}
+			reader := newReader(port)
+
+			err := reader.init(tt.ctx)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("init() error = %v, want %v", err, tt.wantErr)
+			}
+			if string(port.written) != tt.wantWrite {
+				t.Fatalf("init() wrote %q, want %q", string(port.written), tt.wantWrite)
+			}
+		})
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
 
 func TestRunKeepsBufferedDataAcrossCalls(t *testing.T) {

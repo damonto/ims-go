@@ -30,58 +30,62 @@ type swuBackoffEntry struct {
 }
 
 func (c *Client) recordSWUBackoff(err error, now time.Time) {
-	policy, ok := c.swuBackoffPolicyFor(err)
-	if !ok {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	key, ok := swuBackoffKeyFor(c.cfg, c.card, policy.Scope)
-	if !ok {
-		return
-	}
+	c.withStateLock(func(s *clientState) {
+		policy, ok := swuBackoffPolicyFor(c.cfg, err)
+		if !ok {
+			return
+		}
+		key, ok := swuBackoffKeyFor(c.cfg, c.card, policy.Scope)
+		if !ok {
+			return
+		}
+		c.recordSWUBackoffLocked(s, key, policy, now)
+	})
+}
+
+func (c *Client) recordSWUBackoffLocked(s *clientState, key swuBackoffKey, policy swutunnel.BackoffPolicy, now time.Time) {
 	if !policy.Deactivated && policy.Delay == 0 {
-		delete(c.swuBackoff.entries, key)
+		delete(s.swuBackoff.entries, key)
 		return
 	}
-	if c.swuBackoff.entries == nil {
-		c.swuBackoff.entries = make(map[swuBackoffKey]swuBackoffEntry)
+	if s.swuBackoff.entries == nil {
+		s.swuBackoff.entries = make(map[swuBackoffKey]swuBackoffEntry)
 	}
 	entry := swuBackoffEntry{deactivated: policy.Deactivated}
 	if !policy.Deactivated {
 		entry.until = now.Add(policy.Delay)
 	}
-	current, exists := c.swuBackoff.entries[key]
+	current, exists := s.swuBackoff.entries[key]
 	if !exists || entry.deactivated || entry.until.After(current.until) {
-		c.swuBackoff.entries[key] = entry
+		s.swuBackoff.entries[key] = entry
 	}
 }
 
-func (c *Client) swuBackoffPolicyFor(err error) (swutunnel.BackoffPolicy, bool) {
+func swuBackoffPolicyFor(cfg Config, err error) (swutunnel.BackoffPolicy, bool) {
 	if policy, ok := swutunnel.BackoffPolicyFor(err); ok {
 		return policy, true
 	}
 	if swutunnel.NetworkFailure(err) {
 		return swutunnel.BackoffPolicy{
-			Delay: c.cfg.ReconnectDelay,
+			Delay: cfg.ReconnectDelay,
 			Scope: swutunnel.BackoffScopeEPDG,
-		}, c.cfg.ReconnectDelay > 0
+		}, cfg.ReconnectDelay > 0
 	}
 	if errors.Is(err, swutunnel.ErrNoAPNSubscription) {
 		return swutunnel.BackoffPolicy{
-			Delay: c.cfg.ReconnectDelay,
+			Delay: cfg.ReconnectDelay,
 			Scope: swutunnel.BackoffScopePLMNAPN,
-		}, c.cfg.ReconnectDelay > 0
+		}, cfg.ReconnectDelay > 0
 	}
 	return swutunnel.BackoffPolicy{}, false
 }
 
 func (c *Client) clearCurrentSWUBackoff() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, key := range c.swuBackoffKeys() {
-		delete(c.swuBackoff.entries, key)
-	}
+	c.withStateLock(func(s *clientState) {
+		for _, key := range c.swuBackoffKeys() {
+			delete(s.swuBackoff.entries, key)
+		}
+	})
 }
 
 func (c *Client) waitSWUBackoff(ctx context.Context) error {
@@ -101,23 +105,27 @@ func (c *Client) waitSWUBackoff(ctx context.Context) error {
 }
 
 func (c *Client) swuBackoffDelay(now time.Time) (time.Duration, bool, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	var delay time.Duration
-	for _, key := range c.swuBackoffKeys() {
-		entry, ok := c.swuBackoff.entries[key]
-		if !ok {
-			continue
+	var deactivated bool
+	c.withStateLock(func(s *clientState) {
+		for _, key := range c.swuBackoffKeys() {
+			entry, ok := s.swuBackoff.entries[key]
+			if !ok {
+				continue
+			}
+			if entry.deactivated {
+				deactivated = true
+				return
+			}
+			if !entry.until.After(now) {
+				delete(s.swuBackoff.entries, key)
+				continue
+			}
+			delay = max(delay, entry.until.Sub(now))
 		}
-		if entry.deactivated {
-			return 0, true, true
-		}
-		if !entry.until.After(now) {
-			delete(c.swuBackoff.entries, key)
-			continue
-		}
-		delay = max(delay, entry.until.Sub(now))
+	})
+	if deactivated {
+		return 0, true, true
 	}
 	return delay, false, delay > 0
 }

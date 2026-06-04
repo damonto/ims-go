@@ -852,8 +852,8 @@ func TestRekeyLoopFailsSecurityAssociationsAfterIncompleteRequest(t *testing.T) 
 			case <-time.After(2 * time.Second):
 				t.Fatal("rekey loop did not exit after incomplete request")
 			}
-			if err := session.closeCtx.Err(); !errors.Is(err, context.Canceled) {
-				t.Fatalf("closeCtx error = %v, want canceled after incomplete request", err)
+			if !session.isClosed() {
+				t.Fatal("session is active, want closed after incomplete request")
 			}
 		})
 	}
@@ -997,7 +997,7 @@ func TestHandleProtectedResponseWithoutWaiterDoesNotCountAsTraffic(t *testing.T)
 			oldRx := time.Now().Add(-time.Minute)
 			session := &Session{
 				logger:             testLogger(),
-				closeCtx:           context.Background(),
+				closeCh:            make(chan struct{}),
 				ike:                crypto,
 				lastProtectedRx:    oldRx,
 				ikeSAByteExpiresAt: 1,

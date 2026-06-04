@@ -238,7 +238,11 @@ func TestReaderAuthenticate3GWithAIDUsesUICCChannel(t *testing.T) {
 			return
 		}
 
-		wantAPDU := usimcommand.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+		wantAPDU, err := (usimcommand.Authenticate3G{Rand: rand, AUTN: autn}).MarshalBinary()
+		if err != nil {
+			errc <- err
+			return
+		}
 		wantAPDUData := binary.LittleEndian.AppendUint32(nil, 3)
 		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uiccSecureMessagingNone)
 		wantAPDUData = binary.LittleEndian.AppendUint32(wantAPDUData, uiccClassByteTypeInterIndustry)

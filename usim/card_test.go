@@ -50,7 +50,7 @@ func (r *loadReader) ListApplications(context.Context) ([]usimreader.Application
 	}, nil
 }
 
-func (r *loadReader) GetFileAttributes(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *loadReader) FileAttributes(_ context.Context, file usimreader.FileRef) (usimreader.FileAttributes, error) {
 	switch stringsUpperHex(file.Path) {
 	case "2FE2":
 		return transparentFile(10), nil
@@ -171,7 +171,7 @@ func TestCardAKA(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := command.Authenticate3G{Rand: rand, AUTN: autn}.APDU()
+			req := mustMarshal(t, command.Authenticate3G{Rand: rand, AUTN: autn})
 			card := &Card{
 				tx: New(&scriptTransmitter{steps: []scriptStep{
 					{wantAPDU: "00A4040407A0000000871002", resp: []byte{0x62, 0x08, 0x82, 0x02, 0x41, 0x38, 0x80, 0x02, 0x00, 0x02, 0x90, 0x00}},
@@ -229,7 +229,7 @@ func (r *akaFallbackReader) Close() error { return nil }
 func (r *akaFallbackReader) ListApplications(context.Context) ([]usimreader.Application, error) {
 	return nil, errors.New("unexpected list applications")
 }
-func (r *akaFallbackReader) GetFileAttributes(context.Context, usimreader.FileRef) (usimreader.FileAttributes, error) {
+func (r *akaFallbackReader) FileAttributes(context.Context, usimreader.FileRef) (usimreader.FileAttributes, error) {
 	return usimreader.FileAttributes{}, errors.New("unexpected file attributes")
 }
 func (r *akaFallbackReader) ReadTransparent(context.Context, usimreader.TransparentRead) ([]byte, error) {

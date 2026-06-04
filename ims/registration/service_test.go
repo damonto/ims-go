@@ -95,7 +95,15 @@ func (t *stubTransport) Close() error {
 }
 
 func (t *stubTransport) queue(msg sip.Message) {
-	t.readCh <- msg.Bytes()
+	t.readCh <- marshalSIPMessageForTest(msg)
+}
+
+func marshalSIPMessageForTest(msg sip.Message) []byte {
+	data, err := msg.MarshalText()
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func (stubCard) IMSI() string { return "001010123456789" }
@@ -3447,6 +3455,51 @@ func TestSecureAssociationLifetimeExpiryClosesSecureResources(t *testing.T) {
 	}
 }
 
+func TestSecureAssociationLifetimeExtensionCancelsStaleExpiry(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "extended lifetime keeps resources active"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newTCPTransport(5062, 4060)
+			activeInbound := newTCPTransport(5063, 4060)
+			sess, err := session.Open(session.Config{}, primary)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			activeAttachment, err := sess.AddTransport(activeInbound)
+			if err != nil {
+				t.Fatalf("AddTransport(active) error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer svc.closeSecureResources()
+
+			svc.setRegistered(true)
+			svc.replaceSecureServerAttachments([]session.Attachment{activeAttachment})
+			svc.extendActiveSecureAssociationLifetime(time.Now().Add(20 * time.Millisecond))
+			svc.extendActiveSecureAssociationLifetime(time.Now().Add(time.Hour))
+
+			select {
+			case err := <-svc.registrationEvents:
+				t.Fatalf("registration event = %v, want none", err)
+			case <-time.After(80 * time.Millisecond):
+			}
+			if !svc.State().Registered {
+				t.Fatal("Registered = false, want true")
+			}
+			if got := closeCount(activeInbound); got != 0 {
+				t.Fatalf("active inbound closeCount = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestSADrainDelayBeforeLifetimeExpiry(t *testing.T) {
 	timers := session.TransactionTimers{
 		T4: 100 * time.Millisecond,
@@ -3475,7 +3528,7 @@ func TestSADrainDelayBeforeLifetimeExpiry(t *testing.T) {
 	}
 }
 
-func TestAbortClosesSecureResourcesWithoutDeregister(t *testing.T) {
+func TestCloseClosesSecureResources(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
@@ -3507,7 +3560,9 @@ func TestAbortClosesSecureResourcesWithoutDeregister(t *testing.T) {
 			svc.replaceSecureServerAttachments([]session.Attachment{activeAttachment})
 			svc.closeAttachmentsAfter([]session.Attachment{drainAttachment}, time.Hour)
 
-			svc.Abort()
+			if err := svc.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
 
 			if svc.State().Registered {
 				t.Fatal("Registered = true, want false")
@@ -3527,6 +3582,61 @@ func TestAbortClosesSecureResourcesWithoutDeregister(t *testing.T) {
 			svc.mu.Unlock()
 			if gotActive != 0 || gotDrains != 0 {
 				t.Fatalf("secure resources = active %d drains %d, want 0", gotActive, gotDrains)
+			}
+		})
+	}
+}
+
+func TestCloseAttachmentsAfterClosedServiceClosesImmediately(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "closed service"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newTCPTransport(5062, 4060)
+			draining := newTCPTransport(5064, 4060)
+			sess, err := session.Open(session.Config{}, primary)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			attachment, err := sess.AddTransport(draining)
+			if err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			if err := svc.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			svc.closeAttachmentsAfter([]session.Attachment{attachment}, time.Hour)
+			svc.extendActiveSecureAssociationLifetime(time.Now().Add(time.Hour))
+
+			if got := closeCount(draining); got != 1 {
+				t.Fatalf("draining closeCount = %d, want 1", got)
+			}
+			svc.mu.Lock()
+			gotDrains := len(svc.drainTimers)
+			expiry := svc.activeSecureSAExpiry
+			expiresAt := svc.activeSecureSAExpiresAt
+			closed := svc.closed
+			svc.mu.Unlock()
+			if !closed {
+				t.Fatal("closed = false, want true")
+			}
+			if gotDrains != 0 {
+				t.Fatalf("drainTimers = %d, want 0", gotDrains)
+			}
+			if expiry != nil {
+				t.Fatal("activeSecureSAExpiry != nil, want nil")
+			}
+			if !expiresAt.IsZero() {
+				t.Fatalf("activeSecureSAExpiresAt = %v, want zero", expiresAt)
 			}
 		})
 	}
@@ -3702,7 +3812,7 @@ func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 	}
 }
 
-func TestDeregisterHandlesChallenge(t *testing.T) {
+func TestDeregisterRetriesAfterChallenge(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
@@ -3769,7 +3879,7 @@ func TestDeregisterAfterRunExitFallsBackToSynchronousExchange(t *testing.T) {
 	}
 }
 
-func TestCloseContextAttemptsDeregister(t *testing.T) {
+func TestDeregisterHandlesChallenge(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
@@ -3792,8 +3902,8 @@ func TestCloseContextAttemptsDeregister(t *testing.T) {
 		}
 	}
 
-	if err := svc.CloseContext(context.Background()); err != nil {
-		t.Fatalf("CloseContext() error = %v", err)
+	if err := svc.Deregister(context.Background()); err != nil {
+		t.Fatalf("Deregister() error = %v", err)
 	}
 	if svc.State().Registered {
 		t.Fatal("Registered = true, want false")
@@ -3803,7 +3913,7 @@ func TestCloseContextAttemptsDeregister(t *testing.T) {
 	}
 }
 
-func TestCloseContextReusesDigestCredentialForDeregister(t *testing.T) {
+func TestDeregisterReusesDigestCredential(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	card := &failAfterFirstAKACard{}
 	svc := newTestService(t, Config{}, transport, card)
@@ -3822,8 +3932,8 @@ func TestCloseContextReusesDigestCredentialForDeregister(t *testing.T) {
 		}
 	}
 
-	if err := svc.CloseContext(context.Background()); err != nil {
-		t.Fatalf("CloseContext() error = %v", err)
+	if err := svc.Deregister(context.Background()); err != nil {
+		t.Fatalf("Deregister() error = %v", err)
 	}
 	if svc.State().Registered {
 		t.Fatal("Registered = true, want false")

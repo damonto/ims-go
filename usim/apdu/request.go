@@ -18,10 +18,7 @@ type Request struct {
 	Le   *byte
 }
 
-func (r Request) APDU() []byte {
-	data, _ := r.MarshalBinary()
-	return data
-}
+const maxShortCommandData = 255
 
 func (r Request) MarshalBinary() ([]byte, error) {
 	var buf bytes.Buffer
@@ -72,6 +69,10 @@ func (r *Request) UnmarshalBinary(data []byte) error {
 }
 
 func (r Request) WriteTo(w io.Writer) (n int64, err error) {
+	if len(r.Data) > maxShortCommandData {
+		return 0, fmt.Errorf("writing APDU request: data too long: got %d bytes", len(r.Data))
+	}
+
 	var buf bytes.Buffer
 	buf.WriteByte(r.CLA)
 	buf.WriteByte(r.INS)
@@ -88,5 +89,9 @@ func (r Request) WriteTo(w io.Writer) (n int64, err error) {
 }
 
 func (r Request) String() string {
-	return strings.ToUpper(hex.EncodeToString(r.APDU()))
+	data, err := r.MarshalBinary()
+	if err != nil {
+		return "<invalid APDU request>"
+	}
+	return strings.ToUpper(hex.EncodeToString(data))
 }

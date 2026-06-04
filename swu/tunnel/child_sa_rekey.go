@@ -220,13 +220,13 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if state := s.ikeSALifecycle(); state == ikeSALifecycleRekeying || state == ikeSALifecyclePendingInstall {
+	if state := s.ikeSAState(); state == ikeSAStateRekeying || state == ikeSAStatePendingInstall {
 		return childSARekeyState{}, nil, errIKESARekeyInProgress
 	}
-	switch state := s.childSALifecycle(); state {
-	case childSALifecycleRekeying, childSALifecyclePendingOutbound:
+	switch state := s.childSAState(); state {
+	case childSAStateRekeying, childSAStatePendingOutbound:
 		return childSARekeyState{}, nil, errChildSARekeyInProgress
-	case childSALifecycleNone:
+	case childSAStateNone:
 		if err := s.disconnectedTunnelErr(); err != nil {
 			return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", err)
 		}
@@ -749,7 +749,7 @@ func (s *Session) childSARekeyLoop() {
 		if temporaryFailure.waiting(now) {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(s.closeCtx, 30*time.Second)
+		ctx, cancel := s.timeoutContext(30 * time.Second)
 		err := s.RekeyChildSA(ctx)
 		cancel()
 		if err == nil {

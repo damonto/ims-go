@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"slices"
@@ -28,17 +29,16 @@ func ParseTLVs(data []byte) (TLVs, error) {
 	return items, nil
 }
 
-func (ts TLVs) MarshalBinary() []byte {
+func (ts TLVs) MarshalBinary() ([]byte, error) {
 	size := 0
 	for _, tlv := range ts {
 		size += 3 + len(tlv.Value)
 	}
 
-	out := make([]byte, 0, size)
-	for _, tlv := range ts {
-		out = append(out, tlv.Type)
-		out = binary.LittleEndian.AppendUint16(out, uint16(len(tlv.Value)))
-		out = append(out, tlv.Value...)
+	var buf bytes.Buffer
+	buf.Grow(size)
+	if _, err := ts.WriteTo(&buf); err != nil {
+		return nil, err
 	}
-	return out
+	return buf.Bytes(), nil
 }

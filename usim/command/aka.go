@@ -33,7 +33,7 @@ func (r Authenticate3GResult) IsAuthenticationReject() bool {
 	return r.Reject
 }
 
-func (c Authenticate3G) APDU() []byte {
+func (c Authenticate3G) MarshalBinary() ([]byte, error) {
 	data := make([]byte, 0, len(c.Rand)+len(c.AUTN)+2)
 	data = append(data, byte(len(c.Rand)))
 	data = append(data, c.Rand...)
@@ -46,7 +46,7 @@ func (c Authenticate3G) APDU() []byte {
 		P1:   0x00,
 		P2:   0x81,
 		Data: data,
-	}.APDU()
+	}.MarshalBinary()
 }
 
 func (c Authenticate3G) Decode(data []byte) (Authenticate3GResult, error) {

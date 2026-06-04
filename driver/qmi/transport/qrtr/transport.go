@@ -80,13 +80,15 @@ func (t *Transport) Do(ctx context.Context, req protocol.Request) (protocol.Resp
 	}
 }
 
-func MarshalRequest(req protocol.Request) []byte {
-	packet, _ := marshalRequest(req)
-	return packet
+func MarshalRequest(req protocol.Request) ([]byte, error) {
+	return marshalRequest(req)
 }
 
 func marshalRequest(req protocol.Request) ([]byte, error) {
-	payload := req.TLVs.MarshalBinary()
+	payload, err := req.TLVs.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("marshal QRTR QMI TLVs: %w", err)
+	}
 	if len(payload) > protocol.MaxQRTRServiceTLVLength {
 		return nil, fmt.Errorf("QRTR QMI message TLVs length %d exceeds limit %d", len(payload), protocol.MaxQRTRServiceTLVLength)
 	}

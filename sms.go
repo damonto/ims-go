@@ -8,6 +8,72 @@ import (
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 )
 
+type SMS struct {
+	CallID        string
+	From          string
+	FromURI       string
+	To            string
+	ToURI         string
+	ServiceCenter string
+	Text          string
+	ReceivedAt    time.Time
+}
+
+type SMSReportStatus = imssms.ReportStatus
+
+type SMSReport struct {
+	SubmissionID          string
+	SegmentIndex          int
+	SegmentCount          int
+	ServiceCenter         string
+	Recipient             string
+	MessageReference      byte
+	Status                SMSReportStatus
+	MoreMessagesWaiting   bool
+	LoopPrevention        bool
+	FromCommand           bool
+	HasUserDataHeader     bool
+	ServiceCenterTime     time.Time
+	DischargeTime         time.Time
+	ProtocolIdentifier    byte
+	HasProtocolIdentifier bool
+	DataCodingScheme      byte
+	HasDataCodingScheme   bool
+	UserData              []byte
+	ReceivedAt            time.Time
+}
+
+type SMSSubmission struct {
+	ID           string
+	To           string
+	Text         string
+	SubmittedAt  time.Time
+	SegmentCount int
+	Segments     []SMSSubmissionSegment
+}
+
+type SMSSubmissionSegment struct {
+	Index         int
+	SubmittedAt   time.Time
+	Recipient     string
+	ServiceCenter string
+	CallID        string
+	RPReference   byte
+	TPReference   byte
+}
+
+type SMSService struct {
+	client *Client
+}
+
+type smsReportLink struct {
+	submissionID  string
+	segmentIndex  int
+	segmentCount  int
+	recipient     string
+	serviceCenter string
+}
+
 func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, error) {
 	low, err := s.client.currentSMSService()
 	if err != nil {
@@ -47,16 +113,10 @@ func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, 
 }
 
 func (c *Client) currentSMSService() (*imssms.Service, error) {
-	c.mu.Lock()
-	active := c.active
-	c.mu.Unlock()
-	if active == nil || active.sms == nil {
-		return nil, ErrClientNotConnected
-	}
-	return active.sms, nil
+	return currentIMSService(c, func(ims imsRuntime) *imssms.Service { return ims.sms })
 }
 
-func (c *Client) handleSMS(msg imssms.IncomingSMS) {
+func (c *Client) handleSMS(msg imssms.Incoming) {
 	c.emitSMS(SMS{
 		CallID:        msg.CallID,
 		From:          msg.From,

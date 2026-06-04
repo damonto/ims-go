@@ -84,6 +84,45 @@ func TestTCPConnReserveSendSeqAcceptsFastACK(t *testing.T) {
 	}
 }
 
+func TestTCPConnAckContext(t *testing.T) {
+	tests := []struct {
+		name   string
+		cancel func(done chan struct{}, stop context.CancelFunc)
+	}{
+		{
+			name: "transport done",
+			cancel: func(done chan struct{}, stop context.CancelFunc) {
+				close(done)
+			},
+		},
+		{
+			name: "caller stop",
+			cancel: func(done chan struct{}, stop context.CancelFunc) {
+				stop()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			done := make(chan struct{})
+			conn := &TCPConn{done: done}
+			ctx, stop := conn.ackContext(time.Hour)
+
+			tt.cancel(done, stop)
+
+			select {
+			case <-ctx.Done():
+				if !errors.Is(ctx.Err(), context.Canceled) {
+					t.Fatalf("ackContext() error = %v, want context canceled", ctx.Err())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("ackContext() did not stop")
+			}
+		})
+	}
+}
+
 func TestNormalizedTCPDataACKTimeouts(t *testing.T) {
 	tests := []struct {
 		name    string

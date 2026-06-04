@@ -126,12 +126,12 @@ func TestReaderUIMMessages(t *testing.T) {
 		ClientID: 7,
 	}
 
-	attrs, err := reader.GetFileAttributes(context.Background(), usimreader.FileRef{Path: []byte{0x2F, 0xE2}})
+	attrs, err := reader.FileAttributes(context.Background(), usimreader.FileRef{Path: []byte{0x2F, 0xE2}})
 	if err != nil {
-		t.Fatalf("GetFileAttributes() error = %v", err)
+		t.Fatalf("FileAttributes() error = %v", err)
 	}
 	if attrs.FileStructure != simfile.StructureTransparent || attrs.FileSize != 10 {
-		t.Fatalf("GetFileAttributes() = %+v", attrs)
+		t.Fatalf("FileAttributes() = %+v", attrs)
 	}
 
 	imsiRaw, err := reader.ReadTransparent(context.Background(), usimreader.TransparentRead{

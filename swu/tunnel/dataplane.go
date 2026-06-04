@@ -144,7 +144,7 @@ func (s *Session) readConnectedPacket(ctx context.Context) ([]byte, net.Addr, er
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
-		case <-s.closeCtx.Done():
+		case <-s.closeDone():
 			return nil, nil, errors.New("reading packet: session is closed")
 		case <-dataPlaneDone:
 			return nil, nil, s.currentDisconnectedTunnelErr("reading packet")
@@ -196,7 +196,7 @@ func (s *Session) readLoop() {
 }
 
 func (s *Session) readLoopPacket(buf []byte) ([]byte, net.Addr, bool) {
-	if s.closeCtx.Err() != nil {
+	if s.isClosed() {
 		return nil, nil, false
 	}
 	if err := s.conn.SetReadDeadline(time.Now().Add(outerReadPollDelay)); err != nil {
@@ -205,11 +205,11 @@ func (s *Session) readLoopPacket(buf []byte) ([]byte, net.Addr, bool) {
 	}
 	n, addr, err := s.conn.ReadFrom(buf)
 	if err != nil {
-		if errors.Is(err, net.ErrClosed) || s.closeCtx.Err() != nil {
+		if errors.Is(err, net.ErrClosed) || s.isClosed() {
 			return nil, nil, false
 		}
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			if s.closeCtx.Err() != nil {
+			if s.isClosed() {
 				return nil, nil, false
 			}
 			return nil, nil, true
@@ -461,14 +461,14 @@ func (s *Session) handleInnerUDPPacket(pkt packet.InnerPacket, localUDPPort int)
 	s.logger.Debug("read inner UDP packet", "peer_addr", peer, "payload_len", len(payload))
 	select {
 	case s.readCh <- inboundPacket{data: payload, addr: peer}:
-	case <-s.closeCtx.Done():
+	case <-s.closeDone():
 	}
 }
 
 func (s *Session) tryDeliverError(err error) {
 	select {
 	case s.readCh <- inboundPacket{err: err}:
-	case <-s.closeCtx.Done():
+	case <-s.closeDone():
 	default:
 	}
 }

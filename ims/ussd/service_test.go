@@ -54,8 +54,18 @@ func (t *stubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error
 		return pkt, t.remote, nil
 	}
 }
-func (t *stubTransport) Close() error          { return nil }
-func (t *stubTransport) queue(msg sip.Message) { t.readCh <- msg.Bytes() }
+func (t *stubTransport) Close() error { return nil }
+func (t *stubTransport) queue(msg sip.Message) {
+	t.readCh <- marshalSIPMessageForTest(msg)
+}
+
+func marshalSIPMessageForTest(msg sip.Message) []byte {
+	data, err := msg.MarshalText()
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
 
 func (t *stubTransport) writeCount() int {
 	t.mu.Lock()
@@ -618,8 +628,8 @@ func TestHandleInfoMapsPackageAndMediaErrors(t *testing.T) {
 				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
 			}
 			if tt.wantStatus == sipStatusUnsupportedMediaType {
-				if got := resp.Header("Accept"); got != ussdAcceptHeader {
-					t.Fatalf("Accept = %q, want %q", got, ussdAcceptHeader)
+				if got := resp.Header("Accept"); got != acceptHeader {
+					t.Fatalf("Accept = %q, want %q", got, acceptHeader)
 				}
 			}
 		})
@@ -679,8 +689,8 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 				t.Fatalf("StatusCode() = %d, want %d", got, tt.wantStatus)
 			}
 			if tt.wantStatus == sipStatusUnsupportedMediaType {
-				if got := resp.Header("Accept"); got != ussdAcceptHeader {
-					t.Fatalf("Accept = %q, want %q", got, ussdAcceptHeader)
+				if got := resp.Header("Accept"); got != acceptHeader {
+					t.Fatalf("Accept = %q, want %q", got, acceptHeader)
 				}
 			}
 			if got := us.isClosed(); got != tt.wantClosed {
@@ -817,7 +827,7 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	}
 }
 
-func TestAbortClosesUSSDLocallyWithoutBYE(t *testing.T) {
+func TestCloseClosesUSSDLocallyWithoutBYE(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
 	svc, err := New(Config{Logger: testLogger()}, sess, reg)
@@ -838,25 +848,27 @@ func TestAbortClosesUSSDLocallyWithoutBYE(t *testing.T) {
 				sip.Header{Name: "Content-Type", Value: "application/sdp"},
 			))
 		case "BYE":
-			t.Fatalf("unexpected BYE during local abort: %s", req.StartLine)
+			t.Fatalf("unexpected BYE during service close: %s", req.StartLine)
 		}
 	}
 
-	ussdSession, err := svc.Start(context.Background(), "*100#")
+	session, err := svc.Start(context.Background(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 	writesAfterStart := transport.writeCount()
-	svc.Abort()
+	if err := svc.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
 	if got := transport.writeCount(); got != writesAfterStart {
-		t.Fatalf("write count after Abort() = %d, want %d", got, writesAfterStart)
+		t.Fatalf("write count after Close() = %d, want %d", got, writesAfterStart)
 	}
-	if !ussdSession.isClosed() {
+	if !session.isClosed() {
 		t.Fatal("USSD session closed = false, want true")
 	}
 	select {
-	case _, ok := <-ussdSession.Events():
+	case _, ok := <-session.Events():
 		if ok {
 			t.Fatal("USSD events channel still open")
 		}
@@ -985,8 +997,8 @@ func TestHandleIncomingInviteMapsUnsupportedMediaTo415(t *testing.T) {
 			if got := resp.StatusCode(); got != sipStatusUnsupportedMediaType {
 				t.Fatalf("StatusCode() = %d, want %d", got, sipStatusUnsupportedMediaType)
 			}
-			if got := resp.Header("Accept"); got != ussdAcceptHeader {
-				t.Fatalf("Accept = %q, want %q", got, ussdAcceptHeader)
+			if got := resp.Header("Accept"); got != acceptHeader {
+				t.Fatalf("Accept = %q, want %q", got, acceptHeader)
 			}
 		})
 	}
@@ -1107,7 +1119,7 @@ func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	ussdSession := &Session{
+	session := &Session{
 		service:   svc,
 		targetURI: "sip:ussias@example.com",
 		routeSet: []string{
@@ -1121,7 +1133,7 @@ func TestBuildACKAppliesStrictRouteSet(t *testing.T) {
 		inviteSeq: 1,
 	}
 
-	ack := ussdSession.buildACK()
+	ack := session.buildACK()
 	if got := sip.RequestURI(ack); got != "sip:edge.example.com" {
 		t.Fatalf("RequestURI() = %q, want sip:edge.example.com", got)
 	}
@@ -1147,8 +1159,8 @@ func TestUSSDTargetURIUsesConfiguredPhoneContext(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if got := svc.ussdTargetURI("*100#"); got != "sip:*100%23;phone-context=wifi.example@ims.mnc001.mcc001.3gppnetwork.org;user=dialstring" {
-		t.Fatalf("ussdTargetURI() = %q", got)
+	if got := svc.targetURI("*100#"); got != "sip:*100%23;phone-context=wifi.example@ims.mnc001.mcc001.3gppnetwork.org;user=dialstring" {
+		t.Fatalf("targetURI() = %q", got)
 	}
 }
 

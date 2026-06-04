@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
 const (
@@ -140,12 +139,13 @@ func BuildRTPPacket(packet RTPPacket) ([]byte, error) {
 
 func randomRTCPSSRC() uint32 {
 	var data [4]byte
-	if _, err := rand.Read(data[:]); err == nil {
-		if ssrc := binary.BigEndian.Uint32(data[:]); ssrc != 0 {
-			return ssrc
-		}
+	if _, err := rand.Read(data[:]); err != nil {
+		panic(err)
 	}
-	return uint32(time.Now().UnixNano()) | 1
+	if ssrc := binary.BigEndian.Uint32(data[:]); ssrc != 0 {
+		return ssrc
+	}
+	return rtcpSSRCFallback
 }
 
 func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {

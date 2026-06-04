@@ -377,7 +377,7 @@ func (tx *clientTransaction) runInvite() {
 }
 
 func (tx *clientTransaction) notifyProvisional(resp sip.Message) error {
-	ctx, cancel := context.WithTimeout(context.Background(), max(tx.timers.T1, 250*time.Millisecond))
+	ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.session.handleInboundResponse(ctx, resp); err != nil {
 		return fmt.Errorf("handling provisional %s response: %w", tx.method, err)
@@ -389,7 +389,7 @@ func (tx *clientTransaction) notifyProvisional(resp sip.Message) error {
 }
 
 func (tx *clientTransaction) resend() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), max(tx.timers.T1, 250*time.Millisecond))
+	ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.send(ctx, tx.request); err != nil {
 		tx.abort(fmt.Errorf("sending %s retransmission: %w", tx.method, err))
@@ -437,7 +437,7 @@ func (tx *clientTransaction) awaitInviteCompleted(ack sip.Message, timeout time.
 }
 
 func (tx *clientTransaction) sendACK(ack sip.Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), max(tx.timers.T1, 250*time.Millisecond))
+	ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.send(ctx, ack); err != nil {
 		tx.session.logger.Warn("sending invite error ack", "call_id", ack.Header("Call-ID"), "cseq", ack.Header("CSeq"), "err", err)

@@ -1,6 +1,8 @@
 package ccid
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/ElMostafaIdrassi/goscard"
@@ -18,9 +20,36 @@ func TestOpenRejectsEmptyReaderName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Open(tt.reader)
+			_, err := Open(context.Background(), tt.reader)
 			if err == nil || err.Error() != tt.wantError {
 				t.Fatalf("Open() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestOpenUsesCallerContext(t *testing.T) {
+	tests := []struct {
+		name    string
+		context func() context.Context
+		wantErr error
+	}{
+		{
+			name: "canceled",
+			context: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Open(tt.context(), "reader")
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Open() error = %v, want %v", err, tt.wantErr)
 			}
 		})
 	}

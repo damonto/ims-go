@@ -2,12 +2,61 @@ package protocol
 
 import (
 	"bytes"
+	"encoding"
 	"errors"
 	"io"
 	"os"
 	"regexp"
 	"testing"
 )
+
+func TestTLVsImplementBinaryMarshaler(t *testing.T) {
+	var _ encoding.BinaryMarshaler = TLVs{}
+}
+
+func TestTLVMarshalBinary(t *testing.T) {
+	tests := []struct {
+		name    string
+		tlvs    TLVs
+		want    []byte
+		wantErr bool
+	}{
+		{
+			name: "valid",
+			tlvs: TLVs{
+				{Type: 0x02, Len: 4, Value: []byte{0x00, 0x00, 0x00, 0x00}},
+				{Type: 0x10, Len: 1, Value: []byte{0xaa}},
+			},
+			want: []byte{
+				0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x10, 0x01, 0x00, 0xaa,
+			},
+		},
+		{
+			name:    "length mismatch",
+			tlvs:    TLVs{{Type: 0x10, Len: 2, Value: []byte{0xaa}}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.tlvs.MarshalBinary()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("MarshalBinary() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("MarshalBinary() = % X, want % X", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestTLVReadFromReturnsWireLength(t *testing.T) {
 	data := []byte{

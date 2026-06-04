@@ -18,7 +18,7 @@ type Config struct {
 	SubmitReportTimeout   time.Duration
 	DeliveryReportTimeout time.Duration
 	RequestStatusReport   bool
-	OnIncoming            func(IncomingSMS)
+	OnIncoming            func(Incoming)
 	OnStatusReport        func(StatusReport)
 	OnError               func(error)
 	Logger                *slog.Logger
@@ -36,9 +36,8 @@ type Service struct {
 	logger     *slog.Logger
 	attachment session.Attachment
 
-	cleanupCtx    context.Context
-	cleanupCancel context.CancelFunc
-	cleanupWG     sync.WaitGroup
+	done chan struct{}
+	bgWG sync.WaitGroup
 
 	mu        sync.Mutex
 	cseq      int64
@@ -145,7 +144,7 @@ const (
 	defaultTR2Timeout = 15 * time.Second
 )
 
-const smsAcceptContact = "*;+g.3gpp.smsip;require;explicit"
+const acceptContact = "*;+g.3gpp.smsip;require;explicit"
 
 const (
 	sipStatusOK                   = 200

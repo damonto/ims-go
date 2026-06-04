@@ -1,14 +1,58 @@
 package vowifi
 
-import (
-	"fmt"
-	"sync"
-)
+import "sync"
 
 const eventBufferSize = 16
 
+type Events struct {
+	State  <-chan ClientState
+	Errors <-chan error
+
+	closeOnce sync.Once
+	closeFn   func()
+}
+
+func (e *Events) Close() {
+	e.closeOnce.Do(e.closeFn)
+}
+
+type SMSEvents struct {
+	Incoming <-chan SMS
+	Reports  <-chan SMSReport
+
+	closeOnce sync.Once
+	closeFn   func()
+}
+
+func (e *SMSEvents) Close() {
+	e.closeOnce.Do(e.closeFn)
+}
+
+type USSDEvents struct {
+	Incoming <-chan IncomingUSSD
+
+	closeOnce sync.Once
+	closeFn   func()
+}
+
+func (e *USSDEvents) Close() {
+	e.closeOnce.Do(e.closeFn)
+}
+
+type VoiceEvents struct {
+	Incoming <-chan IncomingCall
+	Events   <-chan CallEvent
+
+	closeOnce sync.Once
+	closeFn   func()
+}
+
+func (e *VoiceEvents) Close() {
+	e.closeOnce.Do(e.closeFn)
+}
+
 type eventHub struct {
-	state  broadcaster[RegistrationState]
+	state  broadcaster[ClientState]
 	errors broadcaster[error]
 
 	smsIncoming broadcaster[SMS]
@@ -20,7 +64,7 @@ type eventHub struct {
 
 func newEventHub() eventHub {
 	return eventHub{
-		state:       newBroadcaster[RegistrationState](),
+		state:       newBroadcaster[ClientState](),
 		errors:      newBroadcaster[error](),
 		smsIncoming: newBroadcaster[SMS](),
 		smsReports:  newBroadcaster[SMSReport](),
@@ -143,14 +187,6 @@ func (c *Client) Events() *Events {
 	}
 }
 
-func (c *Client) Subscribe(fn func(RegistrationState) error) func() {
-	events := c.Events()
-	if fn != nil {
-		go runSubscription(c, "state subscriber", events.State, fn)
-	}
-	return events.Close
-}
-
 func (s *SMSService) Events() *SMSEvents {
 	incomingSub := s.client.events.smsIncoming.subscribe(eventBufferSize)
 	reportSub := s.client.events.smsReports.subscribe(eventBufferSize)
@@ -164,36 +200,12 @@ func (s *SMSService) Events() *SMSEvents {
 	}
 }
 
-func (s *SMSService) Subscribe(fn func(SMS) error) func() {
-	events := s.Events()
-	if fn != nil {
-		go runSubscription(s.client, "sms subscriber", events.Incoming, fn)
-	}
-	return events.Close
-}
-
-func (s *SMSService) SubscribeReports(fn func(SMSReport) error) func() {
-	events := s.Events()
-	if fn != nil {
-		go runSubscription(s.client, "sms report subscriber", events.Reports, fn)
-	}
-	return events.Close
-}
-
 func (s *USSDService) Events() *USSDEvents {
 	sub := s.client.events.ussd.subscribe(eventBufferSize)
 	return &USSDEvents{
 		Incoming: sub.channel,
 		closeFn:  sub.close,
 	}
-}
-
-func (s *USSDService) Subscribe(fn func(IncomingUSSD) error) func() {
-	events := s.Events()
-	if fn != nil {
-		go runSubscription(s.client, "ussd subscriber", events.Incoming, fn)
-	}
-	return events.Close
 }
 
 func (s *VoiceService) Events() *VoiceEvents {
@@ -209,43 +221,38 @@ func (s *VoiceService) Events() *VoiceEvents {
 	}
 }
 
-func (s *VoiceService) SubscribeIncoming(fn func(IncomingCall) error) func() {
-	events := s.Events()
-	if fn != nil {
-		go runSubscription(s.client, "voice incoming subscriber", events.Incoming, fn)
-	}
-	return events.Close
-}
-
-func (s *VoiceService) SubscribeEvents(fn func(CallEvent) error) func() {
-	events := s.Events()
-	if fn != nil {
-		go runSubscription(s.client, "voice event subscriber", events.Events, fn)
-	}
-	return events.Close
-}
-
-func runSubscription[T any](client *Client, name string, ch <-chan T, fn func(T) error) {
-	for value := range ch {
-		if err := fn(value); err != nil {
-			client.logger.Warn("subscription callback", "subscriber", name, "err", err)
-			client.emitError(fmt.Errorf("%s: %w", name, err))
-		}
-	}
-}
-
-func (c *Client) emitState(state RegistrationState) {
-	c.logger.Info("registration state", "state", state)
-	c.events.state.publish(state, func() {
-		c.logger.Debug("dropping state event", "state", state)
-	})
+func (c *Client) emitStatus(status ClientStatus) {
+	snapshot := c.transitionStatus(status, nil)
+	c.publishState(snapshot)
 }
 
 func (c *Client) emitError(err error) {
 	if err == nil {
 		return
 	}
-	c.logger.Error("client error", "err", err)
+	snapshot := c.transitionStatus("", err)
+	c.publishError(snapshot, err)
+}
+
+func (c *Client) emitStatusError(status ClientStatus, err error) {
+	if err == nil {
+		c.emitStatus(status)
+		return
+	}
+	snapshot := c.transitionStatus(status, err)
+	c.publishError(snapshot, err)
+	c.publishState(snapshot)
+}
+
+func (c *Client) publishState(snapshot ClientState) {
+	c.logger.Info("client status", "status", snapshot.Status, "active", snapshot.Active, "connecting", snapshot.Connecting, "reconnecting", snapshot.Reconnecting)
+	c.events.state.publish(snapshot, func() {
+		c.logger.Debug("dropping status event", "status", snapshot.Status)
+	})
+}
+
+func (c *Client) publishError(snapshot ClientState, err error) {
+	c.logger.Error("client error", "err", err, "status", snapshot.Status, "active", snapshot.Active, "connecting", snapshot.Connecting, "reconnecting", snapshot.Reconnecting)
 	c.events.errors.publish(err, func() {
 		c.logger.Debug("dropping error event", "err", err)
 	})

@@ -560,7 +560,22 @@ func tcpSeqAfter(a, b uint32) bool {
 }
 
 func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	stop := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-t.done:
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		once.Do(func() {
+			close(stop)
+			cancel()
+		})
+	}
 }
 
 func (t *TCPConn) handleSegment(segment packet.TCPSegment) {

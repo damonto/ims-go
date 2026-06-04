@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
@@ -11,14 +12,46 @@ import (
 
 const ussdResultBufferSize = 16
 
-func (s *USSDService) Start() (*Session, error) {
+type USSDMessage = imsussd.Message
+
+type USSDResult struct {
+	Message    USSDMessage
+	HasMessage bool
+	Closed     bool
+	ReceivedAt time.Time
+}
+
+type IncomingUSSD struct {
+	Session    *USSDSession
+	Message    USSDMessage
+	ReceivedAt time.Time
+}
+
+type USSDService struct {
+	client *Client
+}
+
+type USSDSession struct {
+	client *Client
+
+	mu      sync.Mutex
+	low     *imsussd.Session
+	results chan USSDResult
+	started bool
+	closed  bool
+	busy    bool
+
+	watchOnce sync.Once
+}
+
+func (s *USSDService) Start() (*USSDSession, error) {
 	if _, err := s.client.currentUSSDService(); err != nil {
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
 	return newSession(s.client), nil
 }
 
-func (s *Session) Send(ctx context.Context, code string) (USSDResult, error) {
+func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error) {
 	if err := s.beginSend(); err != nil {
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
@@ -48,7 +81,7 @@ func (s *Session) Send(ctx context.Context, code string) (USSDResult, error) {
 	return result, nil
 }
 
-func (s *Session) Reply(ctx context.Context, text string) (USSDResult, error) {
+func (s *USSDSession) Reply(ctx context.Context, text string) (USSDResult, error) {
 	low, err := s.beginActive("replying USSD")
 	if err != nil {
 		return USSDResult{}, err
@@ -69,7 +102,7 @@ func (s *Session) Reply(ctx context.Context, text string) (USSDResult, error) {
 	return result, nil
 }
 
-func (s *Session) Close(ctx context.Context) (USSDResult, error) {
+func (s *USSDSession) Close(ctx context.Context) (USSDResult, error) {
 	low, started, err := s.beginClose()
 	if err != nil {
 		return USSDResult{}, fmt.Errorf("closing USSD: %w", err)
@@ -94,13 +127,7 @@ func (s *Session) Close(ctx context.Context) (USSDResult, error) {
 }
 
 func (c *Client) currentUSSDService() (*imsussd.Service, error) {
-	c.mu.Lock()
-	active := c.active
-	c.mu.Unlock()
-	if active == nil || active.ussd == nil {
-		return nil, ErrClientNotConnected
-	}
-	return active.ussd, nil
+	return currentIMSService(c, func(ims imsRuntime) *imsussd.Service { return ims.ussd })
 }
 
 func (c *Client) handleUSSD(low *imsussd.Session, msg imsussd.Message) {
@@ -117,21 +144,22 @@ func (c *Client) handleUSSD(low *imsussd.Session, msg imsussd.Message) {
 	})
 }
 
-func newSession(client *Client) *Session {
-	return &Session{
+func newSession(client *Client) *USSDSession {
+	return &USSDSession{
 		client:  client,
 		results: make(chan USSDResult, ussdResultBufferSize),
 	}
 }
 
-func (c *Client) bindUSSDSession(low *imsussd.Session, skipFirst bool) (*Session, error) {
-	c.mu.Lock()
-	session := c.ussdSessions[low]
-	if session == nil {
-		session = newSession(c)
-		c.ussdSessions[low] = session
-	}
-	c.mu.Unlock()
+func (c *Client) bindUSSDSession(low *imsussd.Session, skipFirst bool) (*USSDSession, error) {
+	var session *USSDSession
+	c.withStateLock(func(*clientState) {
+		session = c.ussdSessions[low]
+		if session == nil {
+			session = newSession(c)
+			c.ussdSessions[low] = session
+		}
+	})
 
 	if err := session.attachLowSession(low, skipFirst); err != nil {
 		return nil, err
@@ -143,18 +171,18 @@ func (c *Client) forgetUSSDSession(low *imsussd.Session) {
 	if low == nil {
 		return
 	}
-	c.mu.Lock()
-	delete(c.ussdSessions, low)
-	c.mu.Unlock()
+	c.withStateLock(func(*clientState) {
+		delete(c.ussdSessions, low)
+	})
 }
 
 func (c *Client) clearUSSDSessionBindings() {
-	c.mu.Lock()
-	c.ussdSessions = make(map[*imsussd.Session]*Session)
-	c.mu.Unlock()
+	c.withStateLock(func(*clientState) {
+		c.ussdSessions = make(map[*imsussd.Session]*USSDSession)
+	})
 }
 
-func (s *Session) attachLowSession(low *imsussd.Session, skipFirst bool) error {
+func (s *USSDSession) attachLowSession(low *imsussd.Session, skipFirst bool) error {
 	s.mu.Lock()
 	switch {
 	case s.closed:
@@ -179,7 +207,7 @@ func (s *Session) attachLowSession(low *imsussd.Session, skipFirst bool) error {
 	return nil
 }
 
-func (s *Session) watchLowEvents(low *imsussd.Session, skipFirst bool) {
+func (s *USSDSession) watchLowEvents(low *imsussd.Session, skipFirst bool) {
 	events := low.Events()
 	if events == nil {
 		return
@@ -203,7 +231,7 @@ func (s *Session) watchLowEvents(low *imsussd.Session, skipFirst bool) {
 	s.enqueueCloseOnly()
 }
 
-func (s *Session) enqueueResult(result USSDResult) {
+func (s *USSDSession) enqueueResult(result USSDResult) {
 	select {
 	case s.results <- result:
 	default:
@@ -211,14 +239,14 @@ func (s *Session) enqueueResult(result USSDResult) {
 	}
 }
 
-func (s *Session) enqueueCloseOnly() {
+func (s *USSDSession) enqueueCloseOnly() {
 	if !s.markClosed(s.currentLow()) {
 		return
 	}
 	s.enqueueResult(USSDResult{Closed: true, ReceivedAt: time.Now()})
 }
 
-func (s *Session) awaitResult(ctx context.Context, action string) (USSDResult, error) {
+func (s *USSDSession) awaitResult(ctx context.Context, action string) (USSDResult, error) {
 	select {
 	case result := <-s.results:
 		return result, nil
@@ -227,7 +255,7 @@ func (s *Session) awaitResult(ctx context.Context, action string) (USSDResult, e
 	}
 }
 
-func (s *Session) beginSend() error {
+func (s *USSDSession) beginSend() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -245,7 +273,7 @@ func (s *Session) beginSend() error {
 	return nil
 }
 
-func (s *Session) beginActive(action string) (*imsussd.Session, error) {
+func (s *USSDSession) beginActive(action string) (*imsussd.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -263,7 +291,7 @@ func (s *Session) beginActive(action string) (*imsussd.Session, error) {
 	return s.low, nil
 }
 
-func (s *Session) beginClose() (*imsussd.Session, bool, error) {
+func (s *USSDSession) beginClose() (*imsussd.Session, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -278,13 +306,13 @@ func (s *Session) beginClose() (*imsussd.Session, bool, error) {
 	return s.low, s.low != nil, nil
 }
 
-func (s *Session) finishOperation() {
+func (s *USSDSession) finishOperation() {
 	s.mu.Lock()
 	s.busy = false
 	s.mu.Unlock()
 }
 
-func (s *Session) markClosed(low *imsussd.Session) bool {
+func (s *USSDSession) markClosed(low *imsussd.Session) bool {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -301,7 +329,7 @@ func (s *Session) markClosed(low *imsussd.Session) bool {
 	return true
 }
 
-func (s *Session) currentLow() *imsussd.Session {
+func (s *USSDSession) currentLow() *imsussd.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.low

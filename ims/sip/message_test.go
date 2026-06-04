@@ -312,7 +312,7 @@ func TestParseMessageUsesContentLengthForBody(t *testing.T) {
 	}
 }
 
-func TestMessageBytesRecognizesCompactContentLength(t *testing.T) {
+func TestMessageMarshalTextRecognizesCompactContentLength(t *testing.T) {
 	msg := Message{
 		StartLine: "MESSAGE sip:+123@example.com SIP/2.0",
 		Headers: Headers{
@@ -321,12 +321,12 @@ func TestMessageBytesRecognizesCompactContentLength(t *testing.T) {
 		Body: []byte("hello"),
 	}
 
-	got := string(msg.Bytes())
+	got := mustMarshalText(t, msg)
 	if strings.Count(got, "Content-Length:") != 0 {
-		t.Fatalf("Bytes() emitted long Content-Length despite compact l: %q", got)
+		t.Fatalf("MarshalText() emitted long Content-Length despite compact l: %q", got)
 	}
 	if strings.Count(got, "\r\nl: 5\r\n") != 1 {
-		t.Fatalf("Bytes() = %q, want one compact l header", got)
+		t.Fatalf("MarshalText() = %q, want one compact l header", got)
 	}
 }
 
@@ -533,7 +533,7 @@ func TestMessageMarshalTextRoundTrip(t *testing.T) {
 			if err := parsed.UnmarshalText(text); err != nil {
 				t.Fatalf("UnmarshalText() error = %v", err)
 			}
-			if got, want := string(parsed.Bytes()), string(tt.msg.Bytes()); got != want {
+			if got, want := mustMarshalText(t, parsed), mustMarshalText(t, tt.msg); got != want {
 				t.Fatalf("round trip = %q, want %q", got, want)
 			}
 		})
@@ -576,8 +576,8 @@ func TestMessageWriteToReadFrom(t *testing.T) {
 			if written != int64(len(buf.Bytes())) {
 				t.Fatalf("WriteTo() bytes = %d, want %d", written, len(buf.Bytes()))
 			}
-			if got := buf.String(); got != string(tt.msg.Bytes()) {
-				t.Fatalf("WriteTo() output = %q, want %q", got, string(tt.msg.Bytes()))
+			if got, want := buf.String(), mustMarshalText(t, tt.msg); got != want {
+				t.Fatalf("WriteTo() output = %q, want %q", got, want)
 			}
 
 			var parsed Message
@@ -588,11 +588,20 @@ func TestMessageWriteToReadFrom(t *testing.T) {
 			if read != int64(len(buf.String())) {
 				t.Fatalf("ReadFrom() bytes = %d, want %d", read, len(buf.String()))
 			}
-			if got := string(parsed.Bytes()); got != buf.String() {
+			if got := mustMarshalText(t, parsed); got != buf.String() {
 				t.Fatalf("ReadFrom() parsed = %q, want %q", got, buf.String())
 			}
 		})
 	}
+}
+
+func mustMarshalText(t *testing.T, msg Message) string {
+	t.Helper()
+	text, err := msg.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText() error = %v", err)
+	}
+	return string(text)
 }
 
 func TestMessageReadFromWithoutContentLengthUsesRemainingBytes(t *testing.T) {

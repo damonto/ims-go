@@ -48,14 +48,14 @@ func TestSMSPPDownloadEnvelope(t *testing.T) {
 	}
 }
 
-func TestSMSPPDownloadAPDU(t *testing.T) {
+func TestSMSPPDownloadMarshalBinary(t *testing.T) {
 	cmd := SMSPPDownload{
 		ServiceCenterAddress: "+1234",
 		TPDU:                 []byte{0x00, 0x7F, 0xF6},
 	}
-	got, err := cmd.APDU()
+	got, err := cmd.MarshalBinary()
 	if err != nil {
-		t.Fatalf("APDU() error = %v", err)
+		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	want := []byte{
 		0x80, 0xC2, 0x00, 0x00, 0x10,
@@ -66,11 +66,11 @@ func TestSMSPPDownloadAPDU(t *testing.T) {
 		0x00,
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("APDU() = % X, want % X", got, want)
+		t.Fatalf("MarshalBinary() = % X, want % X", got, want)
 	}
 }
 
-func TestSMSPPDownloadAPDUUsesExtendedLength(t *testing.T) {
+func TestSMSPPDownloadMarshalBinaryUsesExtendedLength(t *testing.T) {
 	tpdu := bytes.Repeat([]byte{0xAA}, 250)
 	cmd := SMSPPDownload{
 		ServiceCenterAddress: "+1234",
@@ -84,18 +84,18 @@ func TestSMSPPDownloadAPDUUsesExtendedLength(t *testing.T) {
 		t.Fatalf("len(Envelope()) = %d, want extended APDU length", len(envelope))
 	}
 
-	got, err := cmd.APDU()
+	got, err := cmd.MarshalBinary()
 	if err != nil {
-		t.Fatalf("APDU() error = %v", err)
+		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	wantPrefix := []byte{0x80, 0xC2, 0x00, 0x00, 0x00, byte(len(envelope) >> 8), byte(len(envelope))}
 	if !bytes.Equal(got[:len(wantPrefix)], wantPrefix) {
-		t.Fatalf("APDU() prefix = % X, want % X", got[:len(wantPrefix)], wantPrefix)
+		t.Fatalf("MarshalBinary() prefix = % X, want % X", got[:len(wantPrefix)], wantPrefix)
 	}
 	if !bytes.Equal(got[len(wantPrefix):len(got)-2], envelope) {
-		t.Fatalf("APDU() data = % X, want % X", got[len(wantPrefix):len(got)-2], envelope)
+		t.Fatalf("MarshalBinary() data = % X, want % X", got[len(wantPrefix):len(got)-2], envelope)
 	}
 	if !bytes.Equal(got[len(got)-2:], []byte{0x00, 0x00}) {
-		t.Fatalf("APDU() Le = % X, want 00 00", got[len(got)-2:])
+		t.Fatalf("MarshalBinary() Le = % X, want 00 00", got[len(got)-2:])
 	}
 }

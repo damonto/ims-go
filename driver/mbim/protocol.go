@@ -20,16 +20,16 @@ type Request struct {
 }
 
 func (r *Request) Transmit(ctx context.Context, conn net.Conn) error {
-	if _, err := r.WriteTo(ctx, conn); err != nil {
+	if _, err := r.writeConn(ctx, conn); err != nil {
 		return err
 	}
-	if _, err := r.ReadFrom(ctx, conn); err != nil {
+	if _, err := r.readConn(ctx, conn); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (r *Request) WriteTo(ctx context.Context, conn net.Conn) (int, error) {
+func (r *Request) writeConn(ctx context.Context, conn net.Conn) (int, error) {
 	data, err := r.MarshalBinary()
 	if err != nil {
 		return 0, err
@@ -62,7 +62,7 @@ func (r *Request) WriteTo(ctx context.Context, conn net.Conn) (int, error) {
 	return written, nil
 }
 
-func (r *Request) ReadFrom(ctx context.Context, conn net.Conn) (int, error) {
+func (r *Request) readConn(ctx context.Context, conn net.Conn) (int, error) {
 	deadline, hasDeadline := requestDeadline(ctx, r.timeout())
 	var collector *fragmentCollector
 

@@ -15,27 +15,25 @@ func New(cfg Config, sess *session.Session, reg *registration.Service, card Card
 	if err != nil {
 		return nil, err
 	}
-	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	s := &Service{
-		cfg:           normalized,
-		sess:          sess,
-		reg:           reg,
-		card:          card,
-		logger:        normalized.Logger.With("component", "ims-sms"),
-		cleanupCtx:    cleanupCtx,
-		cleanupCancel: cleanupCancel,
-		rpRefs:        make(map[byte]struct{}),
-		pending:       make(map[string]pendingEntry),
-		submitted:     make(map[string]submittedEntry),
-		recent:        make(map[string]time.Time),
-		concat:        make(map[string]concatState),
+		cfg:       normalized,
+		sess:      sess,
+		reg:       reg,
+		card:      card,
+		logger:    normalized.Logger.With("component", "ims-sms"),
+		done:      make(chan struct{}),
+		rpRefs:    make(map[byte]struct{}),
+		pending:   make(map[string]pendingEntry),
+		submitted: make(map[string]submittedEntry),
+		recent:    make(map[string]time.Time),
+		concat:    make(map[string]concatState),
 	}
 	attachment, err := sess.Attach(s)
 	if err != nil {
 		return nil, fmt.Errorf("creating sms service: %w", err)
 	}
 	s.attachment = attachment
-	s.cleanupWG.Go(func() {
+	s.bgWG.Go(func() {
 		s.runSubmitCleanup()
 	})
 	return s, nil
@@ -48,15 +46,17 @@ func (s *Service) Close() error {
 		return nil
 	}
 	s.closed = true
+	attachment := s.attachment
+	s.attachment = nil
+	close(s.done)
 	s.mu.Unlock()
-	if s.cleanupCancel != nil {
-		s.cleanupCancel()
+
+	var err error
+	if attachment != nil {
+		err = attachment.Close()
 	}
-	if s.attachment != nil {
-		_ = s.attachment.Close()
-	}
-	s.cleanupWG.Wait()
-	return nil
+	s.bgWG.Wait()
+	return err
 }
 
 func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
@@ -67,7 +67,7 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 	if err != nil {
 		return true, s.writeMessageStatus(ctx, req, sipStatusUnsupportedMediaType, "Unsupported Media Type")
 	}
-	if !strings.EqualFold(mediaType, smsContentType) && !strings.EqualFold(mediaType, mixedMultipartType) {
+	if !strings.EqualFold(mediaType, messageContentType) && !strings.EqualFold(mediaType, mixedMultipartType) {
 		return true, s.writeMessageStatus(ctx, req, sipStatusUnsupportedMediaType, "Unsupported Media Type")
 	}
 	return true, s.handleMessageRequest(ctx, req)
@@ -82,4 +82,13 @@ func (s *Service) emitAsyncError(err error) {
 		return
 	}
 	s.cfg.OnError(err)
+}
+
+func (s *Service) cleanupStopped() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
 }

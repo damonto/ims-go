@@ -269,7 +269,9 @@ func (tx *serverTransaction) sendAutomaticTrying() {
 	tx.tryingTimer = nil
 	tx.mu.Unlock()
 
-	if err := tx.session.writeResponse(context.Background(), transport, peer, req, resp); err != nil {
+	ctx, cancel := tx.session.timeoutContext(max(tx.session.cfg.TransactionTimers.T1, 250*time.Millisecond))
+	defer cancel()
+	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
 		tx.session.logger.Warn("sending automatic invite trying response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "err", err)
 	}
 }
@@ -356,7 +358,7 @@ func (tx *serverTransaction) retransmitInviteFinal() {
 	timers := tx.session.cfg.TransactionTimers
 	tx.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), max(timers.T1, 250*time.Millisecond))
+	ctx, cancel := tx.session.timeoutContext(max(timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
 		tx.session.logger.Warn("retransmitting invite final response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "status", resp.StatusCode(), "err", err)

@@ -252,7 +252,7 @@ func (s *Session) acceptIKEProtectedBytes(crypto *ikeCrypto, wire []byte, now ti
 }
 
 func (s *Session) readOuterClosed() error {
-	if s.closeCtx.Err() != nil {
+	if s.isClosed() {
 		return errors.New("reading packet: session is closed")
 	}
 	return nil

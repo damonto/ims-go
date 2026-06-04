@@ -227,8 +227,8 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 		t.Fatal("HandleError() was not called")
 	}
 
-	if session.closeCtx.Err() != nil {
-		t.Fatalf("closeCtx.Err() = %v, want nil", session.closeCtx.Err())
+	if session.isClosed() {
+		t.Fatal("session is closed, want active")
 	}
 	if conn.closed {
 		t.Fatal("packet conn was closed")
@@ -386,7 +386,7 @@ func TestLivenessLoopDoesNotConfirmPeerDuringIKESARekey(t *testing.T) {
 	session.wg.Add(1)
 	go session.livenessLoop()
 	time.Sleep(1100 * time.Millisecond)
-	session.closeCancel()
+	session.closeSession()
 	session.wg.Wait()
 
 	session.mu.RLock()
@@ -415,7 +415,7 @@ func TestLivenessLoopFailsSecurityAssociationsAfterDPDTimeout(t *testing.T) {
 	session.wg.Add(1)
 	go session.livenessLoop()
 	defer func() {
-		session.closeCancel()
+		session.closeSession()
 		session.wg.Wait()
 	}()
 
@@ -473,7 +473,7 @@ func TestSARekeyTimeAppliesJitterInsideRekeyMargin(t *testing.T) {
 	}
 }
 
-func TestRekeyReleaseWakesLifecycleWaiters(t *testing.T) {
+func TestRekeyReleaseWakesStateWaiters(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(*Session)
@@ -543,28 +543,28 @@ func TestRekeyReleaseWakesLifecycleWaiters(t *testing.T) {
 					t.Fatal("waitForRekeyStateChange() = false, want true")
 				}
 			case <-time.After(time.Second):
-				t.Fatal("rekey release did not wake lifecycle waiter")
+				t.Fatal("rekey release did not wake state waiter")
 			}
 		})
 	}
 }
 
-func TestIKESALifecycleState(t *testing.T) {
+func TestIKESAState(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(*Session)
-		want    ikeSALifecycleState
+		want    ikeSAState
 	}{
 		{
 			name: "none without ike crypto",
-			want: ikeSALifecycleNone,
+			want: ikeSAStateNone,
 		},
 		{
 			name: "active",
 			prepare: func(session *Session) {
 				session.ike = testIKECrypto()
 			},
-			want: ikeSALifecycleActive,
+			want: ikeSAStateActive,
 		},
 		{
 			name: "rekeying",
@@ -572,7 +572,7 @@ func TestIKESALifecycleState(t *testing.T) {
 				session.ike = testIKECrypto()
 				session.ikeSARekeying = true
 			},
-			want: ikeSALifecycleRekeying,
+			want: ikeSAStateRekeying,
 		},
 		{
 			name: "pending install wins over rekeying",
@@ -581,7 +581,7 @@ func TestIKESALifecycleState(t *testing.T) {
 				session.ikeSARekeying = true
 				session.pendingIKESAReady = true
 			},
-			want: ikeSALifecyclePendingInstall,
+			want: ikeSAStatePendingInstall,
 		},
 	}
 
@@ -591,29 +591,29 @@ func TestIKESALifecycleState(t *testing.T) {
 			if tt.prepare != nil {
 				tt.prepare(session)
 			}
-			if got := session.ikeSALifecycle(); got != tt.want {
-				t.Fatalf("ikeSALifecycle() = %v, want %v", got, tt.want)
+			if got := session.ikeSAState(); got != tt.want {
+				t.Fatalf("ikeSAState() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestChildSALifecycleState(t *testing.T) {
+func TestChildSAState(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(*Session)
-		want    childSALifecycleState
+		want    childSAState
 	}{
 		{
 			name: "none without connected child sa",
-			want: childSALifecycleNone,
+			want: childSAStateNone,
 		},
 		{
 			name: "active",
 			prepare: func(session *Session) {
 				session.connected = true
 			},
-			want: childSALifecycleActive,
+			want: childSAStateActive,
 		},
 		{
 			name: "rekeying",
@@ -621,7 +621,7 @@ func TestChildSALifecycleState(t *testing.T) {
 				session.connected = true
 				session.childSARekeying = true
 			},
-			want: childSALifecycleRekeying,
+			want: childSAStateRekeying,
 		},
 		{
 			name: "pending outbound wins over rekeying",
@@ -630,7 +630,7 @@ func TestChildSALifecycleState(t *testing.T) {
 				session.childSARekeying = true
 				session.pendingChildSA.ready = true
 			},
-			want: childSALifecyclePendingOutbound,
+			want: childSAStatePendingOutbound,
 		},
 	}
 
@@ -640,14 +640,14 @@ func TestChildSALifecycleState(t *testing.T) {
 			if tt.prepare != nil {
 				tt.prepare(session)
 			}
-			if got := session.childSALifecycle(); got != tt.want {
-				t.Fatalf("childSALifecycle() = %v, want %v", got, tt.want)
+			if got := session.childSAState(); got != tt.want {
+				t.Fatalf("childSAState() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestBeginRekeyRejectsPendingLifecycleState(t *testing.T) {
+func TestBeginRekeyRejectsPendingState(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(*Session)
@@ -1409,8 +1409,8 @@ func TestHandleCreateChildSARequestMissingSAClosesIKESA(t *testing.T) {
 			if notify := ike.FindNotifyPayload(payloads, notifyTypeInvalidSyntax); notify == nil {
 				t.Fatalf("response payloads = %#v, want INVALID_SYNTAX", payloads)
 			}
-			if err := session.closeCtx.Err(); !errors.Is(err, context.Canceled) {
-				t.Fatalf("closeCtx error = %v, want canceled after fatal syntax error", err)
+			if !session.isClosed() {
+				t.Fatal("session is active, want closed after fatal syntax error")
 			}
 		})
 	}
@@ -3637,8 +3637,8 @@ func TestRetiredIKESecurityAssociationHandlesLateOldIKEMessages(t *testing.T) {
 				if currentIKE == nil {
 					t.Fatal("current IKE SA was cleared after retired delete")
 				}
-				if session.closeCtx.Err() != nil {
-					t.Fatalf("session close context = %v, want active", session.closeCtx.Err())
+				if session.isClosed() {
+					t.Fatal("session is closed, want active")
 				}
 			},
 		},

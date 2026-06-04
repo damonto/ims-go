@@ -22,7 +22,7 @@ var (
 )
 
 type xmlBody struct {
-	Message USSDMessage
+	Message Message
 }
 
 type multipartBody struct {
@@ -67,7 +67,7 @@ func (b *xmlBody) UnmarshalText(text []byte) error {
 	if err := validateLanguage(payload.Language); err != nil {
 		return err
 	}
-	msg := USSDMessage{
+	msg := Message{
 		Text:     payload.String,
 		Language: strings.TrimSpace(payload.Language),
 	}
@@ -150,7 +150,7 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 		}
 		switch elem := token.(type) {
 		case xml.StartElement:
-			if depth == 0 && ussdElementInDocumentNamespace(elem.Name, start.Name.Space) {
+			if depth == 0 && elementInDocumentNamespace(elem.Name, start.Name.Space) {
 				switch elem.Name.Local {
 				case "language", "ussd-string", "error-code":
 					counts[elem.Name.Local]++
@@ -171,7 +171,7 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 				case "UnstructuredSS-Notify":
 					p.ensureAnyExt().Notify = new(struct{})
 				}
-			} else if inAnyExt && depth == 1 && ussdElementInDocumentNamespace(elem.Name, start.Name.Space) {
+			} else if inAnyExt && depth == 1 && elementInDocumentNamespace(elem.Name, start.Name.Space) {
 				switch elem.Name.Local {
 				case "UnstructuredSS-Request":
 					p.AnyExt.Request = new(struct{})
@@ -205,7 +205,7 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 				}
 				field = ""
 			}
-			if inAnyExt && depth == 0 && ussdElementInDocumentNamespace(elem.Name, start.Name.Space) && elem.Name.Local == "anyExt" {
+			if inAnyExt && depth == 0 && elementInDocumentNamespace(elem.Name, start.Name.Space) && elem.Name.Local == "anyExt" {
 				inAnyExt = false
 			}
 		}
@@ -213,7 +213,7 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 	return errors.New("parsing USSD XML: missing ussd-data root element")
 }
 
-func ussdElementInDocumentNamespace(name xml.Name, documentNamespace string) bool {
+func elementInDocumentNamespace(name xml.Name, documentNamespace string) bool {
 	return name.Space == "" || name.Space == documentNamespace
 }
 
@@ -343,7 +343,7 @@ func (p multipartBodyPart) isOptional() bool {
 	return strings.EqualFold(params[handlingDispositionParam], optionalHandlingDisposition)
 }
 
-func (b multipartBody) ussdPayload() (USSDMessage, bool, error) {
+func (b multipartBody) payload() (Message, bool, error) {
 	var payloadPart multipartBodyPart
 	found := false
 	for _, part := range b.Parts {
@@ -352,17 +352,17 @@ func (b multipartBody) ussdPayload() (USSDMessage, bool, error) {
 			continue
 		}
 		if found {
-			return USSDMessage{}, false, fmt.Errorf("parsing multipart body: multiple %s parts", xmlContentType)
+			return Message{}, false, fmt.Errorf("parsing multipart body: multiple %s parts", xmlContentType)
 		}
 		payloadPart = part
 		found = true
 	}
 	if !found {
-		return USSDMessage{}, false, nil
+		return Message{}, false, nil
 	}
 	var payload xmlBody
 	if err := payload.UnmarshalText(payloadPart.Body); err != nil {
-		return USSDMessage{}, false, err
+		return Message{}, false, err
 	}
 	return payload.Message, true, nil
 }

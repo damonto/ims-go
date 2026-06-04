@@ -176,14 +176,12 @@ func (m Message) HeadersByName(name string) []string {
 	return m.Headers.Values(name)
 }
 
-func (m Message) Bytes() []byte {
-	var buf bytes.Buffer
-	_, _ = m.WriteTo(&buf)
-	return buf.Bytes()
-}
-
 func (m Message) MarshalText() ([]byte, error) {
-	return m.Bytes(), nil
+	var buf bytes.Buffer
+	if _, err := m.WriteTo(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (m *Message) UnmarshalText(text []byte) error {

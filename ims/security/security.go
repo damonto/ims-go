@@ -301,11 +301,15 @@ func akaChallengeFailure(aka usim.AKAResult) *AKAChallengeFailure {
 }
 
 func (p Param) MarshalText() ([]byte, error) {
+	return []byte(paramString(p)), nil
+}
+
+func paramString(p Param) string {
 	value := fmt.Sprintf("%s;alg=%s;ealg=%s;mod=%s;port-c=%d;port-s=%d;prot=%s;spi-c=%d;spi-s=%d", p.Mechanism, p.Alg, p.EAlg, p.Mod, p.PortC, p.PortS, p.Prot, p.SPIC, p.SPIS)
 	if p.Q != "" {
 		value += ";q=" + p.Q
 	}
-	return []byte(value), nil
+	return value
 }
 
 func (p *Param) UnmarshalText(text []byte) error {
@@ -327,15 +331,15 @@ func (ps *Params) UnmarshalText(text []byte) error {
 }
 
 func (ps Params) MarshalText() ([]byte, error) {
+	return []byte(paramsString(ps)), nil
+}
+
+func paramsString(ps Params) string {
 	values := make([]string, 0, len(ps))
 	for _, param := range ps {
-		text, err := param.MarshalText()
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, string(text))
+		values = append(values, paramString(param))
 	}
-	return []byte(strings.Join(values, ",")), nil
+	return strings.Join(values, ",")
 }
 
 func (c *Challenge) UnmarshalText(text []byte) error {
@@ -419,6 +423,10 @@ func (i Info) MarshalText() ([]byte, error) {
 }
 
 func (a Authorization) MarshalText() ([]byte, error) {
+	return []byte(authorizationString(a)), nil
+}
+
+func authorizationString(a Authorization) string {
 	algorithm := a.Algorithm
 	if algorithm == "" {
 		algorithm = AlgorithmAKAv1MD5
@@ -433,22 +441,19 @@ func (a Authorization) MarshalText() ([]byte, error) {
 	if a.AUTS != "" {
 		value += fmt.Sprintf(`,auts="%s"`, a.AUTS)
 	}
-	return []byte(value), nil
+	return value
 }
 
 func (p Param) String() string {
-	text, _ := p.MarshalText()
-	return string(text)
+	return paramString(p)
 }
 
 func (ps Params) String() string {
-	text, _ := ps.MarshalText()
-	return string(text)
+	return paramsString(ps)
 }
 
 func (a Authorization) String() string {
-	text, _ := a.MarshalText()
-	return string(text)
+	return authorizationString(a)
 }
 
 func (p *Param) unmarshalText(text string) error {
@@ -635,7 +640,9 @@ func randomHex(length int) string {
 func randomString(length int, alphabet string) string {
 	buf := make([]byte, length)
 	rnd := make([]byte, length)
-	_, _ = rand.Read(rnd)
+	if _, err := rand.Read(rnd); err != nil {
+		panic(err)
+	}
 	for i, b := range rnd {
 		buf[i] = alphabet[int(b)%len(alphabet)]
 	}

@@ -57,10 +57,28 @@ func TestMarshalRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := MarshalRequest(tt.req); !bytes.Equal(got, tt.want) {
+			got, err := MarshalRequest(tt.req)
+			if err != nil {
+				t.Fatalf("MarshalRequest() error = %v", err)
+			}
+			if !bytes.Equal(got, tt.want) {
 				t.Fatalf("MarshalRequest() = % X, want % X", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMarshalRequestReturnsTLVError(t *testing.T) {
+	req := protocol.Request{
+		Service:       protocol.ServiceUIM,
+		ClientID:      7,
+		TransactionID: 3,
+		MessageID:     protocol.MessageReadTransparent,
+		TLVs:          protocol.TLVs{{Type: 0x01, Len: 2, Value: []byte{0x01}}},
+	}
+
+	if _, err := MarshalRequest(req); err == nil {
+		t.Fatal("MarshalRequest() error = nil, want TLV error")
 	}
 }
 

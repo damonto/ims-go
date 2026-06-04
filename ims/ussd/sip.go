@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func (s *Service) ussdTargetURI(code string) string {
+func (s *Service) targetURI(code string) string {
 	realm := strings.TrimPrefix(s.reg.State().RegisterURI, "sip:")
 	phoneContext := strings.TrimSpace(s.cfg.PhoneContextDomain)
 	if phoneContext == "" {
@@ -21,7 +21,7 @@ func (s *Service) ussdTargetURI(code string) string {
 	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=dialstring", dial, phoneContext, realm)
 }
 
-func (s *Service) ussdSDP() string {
+func (s *Service) sdp() string {
 	host := s.reg.State().ContactHost
 	network := "IP4"
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
@@ -29,20 +29,6 @@ func (s *Service) ussdSDP() string {
 	}
 	sessionID := sip.RandomUint32()
 	return fmt.Sprintf("v=0\r\no=- %d %d IN %s %s\r\ns=-\r\nc=IN %s %s\r\nt=0 0\r\nm=audio 0 RTP/AVP 97 96\r\na=rtpmap:97 AMR\r\na=fmtp:97 mode-set=0,2,5,7; maxframes=2\r\na=rtpmap:96 telephone-event\r\n", sessionID, sessionID, network, host, network, host)
-}
-
-func (s *Service) startBackgroundTask(task func()) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	s.bgWG.Add(1)
-	s.mu.Unlock()
-	go func() {
-		defer s.bgWG.Done()
-		task()
-	}()
 }
 
 func buildCancel(invite sip.Message) sip.Message {
