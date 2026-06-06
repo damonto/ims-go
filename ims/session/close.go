@@ -27,7 +27,7 @@ func (s *Session) Close() error {
 
 type closeState struct {
 	transports []Transport
-	handlers  []*handlerEntry
+	handlers   []*handlerEntry
 }
 
 func (s *Session) beginClose() (closeState, bool) {
@@ -49,7 +49,7 @@ func (s *Session) beginClose() (closeState, bool) {
 
 	return closeState{
 		transports: transports,
-		handlers:  handlers,
+		handlers:   handlers,
 	}, true
 }
 
