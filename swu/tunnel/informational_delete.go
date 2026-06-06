@@ -8,7 +8,7 @@ import (
 	"github.com/damonto/vowifi-go/swu/ike"
 )
 
-func (state informationalState) sealDeleteRequest(messageID uint32) ([]byte, error) {
+func (state informationalState) sealDeleteRequest(messageID uint32) ([][]byte, error) {
 	return state.sealInitiatorRequest(messageID, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}})
 }
 
@@ -17,7 +17,7 @@ func (s *Session) sendDeleteRequest(ctx context.Context) error {
 	if !state.canSendDelete() {
 		return nil
 	}
-	release, err := s.acquireIKERequest(ctx, "closing swu session")
+	release, err := s.acquireIKERequest(ctx, ikeActionCloseSWUSession)
 	if err != nil {
 		return err
 	}
@@ -26,23 +26,26 @@ func (s *Session) sendDeleteRequest(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("closing swu session: %w", err)
 	}
-	key := state.messageKey(messageID)
+	key := state.responseMessageKey(messageID, exchangeTypeInformational)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
-	wire, err := state.sealDeleteRequest(messageID)
+	wires, err := state.sealDeleteRequest(messageID)
 	if err != nil {
 		return fmt.Errorf("closing swu session: sealing delete request: %w", err)
 	}
-	payloads, err := s.exchangeInformationalRequest(ctx, state, messageID, wire, waiter, "closing swu session", false)
+	payloads, err := s.exchangeInformationalRequest(ctx, state, messageID, wires, waiter, ikeActionCloseSWUSession, false)
 	if err != nil {
 		return err
 	}
-	return validateIKEDeleteResponsePayloads("closing swu session", payloads)
+	if err := validateIKEDeleteResponsePayloads(payloads); err != nil {
+		return fmt.Errorf("closing swu session: %w", err)
+	}
+	return nil
 }
 
-func validateIKEDeleteResponsePayloads(action string, payloads []ike.Payload) error {
+func validateIKEDeleteResponsePayloads(payloads []ike.Payload) error {
 	if len(payloads) != 0 {
-		return fmt.Errorf("%s: ike delete response payload count %d", action, len(payloads))
+		return fmt.Errorf("ike delete response payload count %d", len(payloads))
 	}
 	return nil
 }

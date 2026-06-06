@@ -72,7 +72,6 @@ func (c *Client) openIMSRuntime(ctx context.Context, setup *connectSetup, tunnel
 
 	sms, err := imssms.New(imssms.Config{
 		ServiceCenter:         setup.imsCfg.ServiceCenter,
-		SubmitReportTimeout:   setup.imsCfg.SMSSubmitReportTimeout,
 		DeliveryReportTimeout: setup.imsCfg.SMSDeliveryReportTimeout,
 		RequestStatusReport:   c.cfg.smsRequestStatusReport,
 		OnIncoming:            c.handleSMS,
@@ -88,6 +87,7 @@ func (c *Client) openIMSRuntime(ctx context.Context, setup *connectSetup, tunnel
 	ussd, err := imsussd.New(imsussd.Config{
 		Language:           setup.imsCfg.USSDLanguage,
 		PhoneContextDomain: setup.imsCfg.PhoneContextDomain,
+		Domain:             imsussd.Domain(setup.imsCfg.USSDDomain),
 		OnIncoming:         c.handleUSSD,
 		Logger:             c.cfg.Logger,
 	}, imsSession, reg)

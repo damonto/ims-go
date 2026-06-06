@@ -26,10 +26,10 @@ func (c *Call) Resume(ctx context.Context) error {
 
 func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 	direction := mediaDirectionSendRecv
-	action := "resuming call"
+	action := callActionResume
 	if hold {
 		direction = mediaDirectionSendOnly
-		action = "holding call"
+		action = callActionHold
 	}
 
 	snap, timer, body, previousHold, previousSDP, clearPending, err := c.beginLocalHoldModification(action, hold, direction)
@@ -73,7 +73,7 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 	return nil
 }
 
-func (c *Call) beginLocalHoldModification(action string, hold bool, direction mediaDirection) (dialogSnapshot, sessionTimerState, []byte, CallHoldState, []byte, func(), error) {
+func (c *Call) beginLocalHoldModification(action callAction, hold bool, direction mediaDirection) (dialogSnapshot, sessionTimerState, []byte, CallHoldState, []byte, func(), error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -208,7 +208,7 @@ func (c *Call) applyMediaReINVITEAnswer(ctx context.Context, resp sip.Message) e
 	return nil
 }
 
-func (c *Call) setHoldState(hold CallHoldState, cause string) {
+func (c *Call) setHoldState(hold CallHoldState, cause callAction) {
 	hold = normalizeHoldState(hold)
 	c.mu.Lock()
 	if normalizeHoldState(c.hold) == hold {
@@ -221,7 +221,7 @@ func (c *Call) setHoldState(hold CallHoldState, cause string) {
 	c.mu.Unlock()
 
 	c.restartMediaInactivityWatch()
-	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause, At: time.Now()})
+	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause.String(), At: time.Now()})
 }
 
 func setLocalHold(state CallHoldState, local bool) CallHoldState {

@@ -147,13 +147,16 @@ func (s *Session) readConnectedPacket(ctx context.Context) ([]byte, net.Addr, er
 		case <-s.closeDone():
 			return nil, nil, errors.New("reading packet: session is closed")
 		case <-dataPlaneDone:
-			return nil, nil, s.currentDisconnectedTunnelErr("reading packet")
+			if err := s.currentDisconnectedTunnelErr(); err != nil {
+				return nil, nil, fmt.Errorf("reading packet: %w", err)
+			}
+			return nil, nil, nil
 		case inbound, ok := <-s.readCh:
 			if !ok {
 				return nil, nil, errors.New("reading packet: session is closed")
 			}
-			if err := s.currentDisconnectedTunnelErr("reading packet"); err != nil {
-				return nil, nil, err
+			if err := s.currentDisconnectedTunnelErr(); err != nil {
+				return nil, nil, fmt.Errorf("reading packet: %w", err)
 			}
 			if inbound.err != nil {
 				return nil, nil, inbound.err
@@ -167,8 +170,8 @@ func (s *Session) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	if s.isClosed() {
 		return nil, nil, errors.New("reading packet: session is closed")
 	}
-	if err := s.currentDisconnectedTunnelErr("reading packet"); err != nil {
-		return nil, nil, err
+	if err := s.currentDisconnectedTunnelErr(); err != nil {
+		return nil, nil, fmt.Errorf("reading packet: %w", err)
 	}
 	s.mu.RLock()
 	connected := s.connected
@@ -271,8 +274,8 @@ func (s *Session) inboundPacketContexts(spi uint32) []inboundESPContext {
 }
 
 func (s *Session) handleESPPacket(data []byte) {
-	if err := s.expireChildSAIfNeeded("reading packet"); err != nil {
-		s.logger.Debug("dropping ESP packet after child SA expiry", "err", err)
+	if err := s.expireChildSAIfNeeded(); err != nil {
+		s.logger.Debug("dropping ESP packet after child SA expiry", "err", fmt.Errorf("reading packet: %w", err))
 		return
 	}
 	spi, ok := espPacketSPI(data)

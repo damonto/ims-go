@@ -3589,7 +3589,7 @@ func TestCallHoldAllowsEmergencyOverride(t *testing.T) {
 				emergency: true,
 				localSDP:  inviteWithSDP().Body,
 			}
-			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification("holding call", true, mediaDirectionSendOnly); err != nil {
+			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification(callActionHold, true, mediaDirectionSendOnly); err != nil {
 				t.Fatalf("beginLocalHoldModification() error = %v", err)
 			} else {
 				clearPending()

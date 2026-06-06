@@ -309,19 +309,19 @@ func (b multipartBody) part(mediaType string) (multipartBodyPart, bool) {
 	return multipartBodyPart{}, false
 }
 
-func (b multipartBody) rejectUnsupportedRequiredParts(action string, supportedTypes ...string) error {
+func (b multipartBody) rejectUnsupportedRequiredParts(context payloadContext, supportedTypes ...string) error {
 	for _, part := range b.Parts {
 		partType, err := part.mediaType()
 		if err != nil {
 			if part.isOptional() {
 				continue
 			}
-			return fmt.Errorf("%w: %s: multipart part content type: %w", errUnsupportedMediaType, action, err)
+			return fmt.Errorf("%w: %s: multipart part content type: %w", errUnsupportedMediaType, context, err)
 		}
 		if supportedMediaType(partType, supportedTypes) || part.isOptional() {
 			continue
 		}
-		return fmt.Errorf("%w: %s: unsupported multipart part content type %q", errUnsupportedMediaType, action, partType)
+		return fmt.Errorf("%w: %s: unsupported multipart part content type %q", errUnsupportedMediaType, context, partType)
 	}
 	return nil
 }

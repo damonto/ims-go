@@ -10,12 +10,12 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) beginRegistrationProcedure(ctx context.Context, action string) (func(), error) {
+func (s *Service) beginRegistrationProcedure(ctx context.Context) (func(), error) {
 	select {
 	case s.registrationGate <- struct{}{}:
 		return func() { <-s.registrationGate }, nil
 	case <-ctx.Done():
-		return nil, fmt.Errorf("%s: %w", action, ctx.Err())
+		return nil, ctx.Err()
 	}
 }
 
@@ -27,16 +27,16 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 			return sip.Message{}, fmt.Errorf("registering IMS: %w", err)
 		}
 		if resp.StatusCode() == sipStatusIntervalTooBrief {
-			if err := s.adjustRegisterExpiresFrom423("registering IMS", resp, &adjustedExpires); err != nil {
-				return sip.Message{}, err
+			if err := s.adjustRegisterExpiresFrom423(resp, &adjustedExpires); err != nil {
+				return sip.Message{}, fmt.Errorf("registering IMS: %w", err)
 			}
 			continue
 		}
-		if resp.StatusCode() != sipStatusUnauthorized {
+		if !registerAuthChallengeStatus(resp.StatusCode()) {
 			if initialRegistrationRetryResponse(resp) {
-				return sip.Message{}, initialRegistrationRequiredError("registering IMS", resp)
+				return sip.Message{}, fmt.Errorf("registering IMS: %w", initialRegistrationRequiredError(resp))
 			}
-			return sip.Message{}, fmt.Errorf("registering IMS: expected 401, got %d", resp.StatusCode())
+			return sip.Message{}, fmt.Errorf("registering IMS: expected authentication challenge, got %d", resp.StatusCode())
 		}
 		return resp, nil
 	}
@@ -60,9 +60,9 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			var err error
 			auth, err = s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP)
 			if err != nil {
-				resp, err := s.exchangeAKAFailure(ctx, "registering IMS", challenge, err)
+				resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), err)
 				if err != nil {
-					return err
+					return fmt.Errorf("registering IMS: %w", err)
 				}
 				if resynchronized {
 					return errors.New("registering IMS: repeated AKA synchronization failure")
@@ -92,16 +92,16 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			return fmt.Errorf("registering IMS: %w", err)
 		}
 		if resp.StatusCode() == sipStatusIntervalTooBrief {
-			if err := s.adjustRegisterExpiresFrom423("registering IMS", resp, &adjustedExpires); err != nil {
-				return err
+			if err := s.adjustRegisterExpiresFrom423(resp, &adjustedExpires); err != nil {
+				return fmt.Errorf("registering IMS: %w", err)
 			}
 			rechallenged = false
 			auth = nil
 			continue
 		}
-		if resp.StatusCode() == sipStatusUnauthorized {
+		if registerAuthChallengeStatus(resp.StatusCode()) {
 			if rechallenged {
-				return errors.New("registering IMS: repeated 401 response")
+				return errors.New("registering IMS: repeated authentication challenge")
 			}
 			nextChallenge, err := s.applyRegisterChallenge(resp)
 			if err != nil {
@@ -115,7 +115,7 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 		}
 		if resp.StatusCode() != sipStatusOK {
 			if initialRegistrationRetryResponse(resp) {
-				return initialRegistrationRequiredError("registering IMS", resp)
+				return fmt.Errorf("registering IMS: %w", initialRegistrationRequiredError(resp))
 			}
 			return fmt.Errorf("registering IMS: expected 200, got %w", sip.NewResponseError(resp))
 		}
@@ -132,10 +132,14 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 }
 
 func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.Message) error {
-	challenge, verify, raw, err := parseRegisterChallenge(challengeResp)
+	parsed, err := parseRegisterChallenge(challengeResp)
 	if err != nil {
 		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
+	challenge := parsed.challenge
+	verify := parsed.verify
+	raw := parsed.rawSecurityServer
+	authorizationHeader := parsed.authorizationHeader
 	var auth *security.Authorization
 	var ck, ik []byte
 	var password string
@@ -145,17 +149,21 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 		if err == nil {
 			break
 		}
-		resp, err := s.exchangeAKAFailure(ctx, "refreshing IMS registration", challenge, err)
+		resp, err := s.exchangeAKAFailure(ctx, challenge, authorizationHeader, err)
 		if err != nil {
-			return err
+			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
 		if resynchronized {
 			return errors.New("refreshing IMS registration: repeated AKA synchronization failure")
 		}
-		challenge, verify, raw, err = parseRegisterChallenge(resp)
+		parsed, err = parseRegisterChallenge(resp)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
+		challenge = parsed.challenge
+		verify = parsed.verify
+		raw = parsed.rawSecurityServer
+		authorizationHeader = parsed.authorizationHeader
 		resynchronized = true
 	}
 
@@ -164,18 +172,18 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 	nextFlow.SecurityServerRaw = append([]string(nil), raw...)
 	if verify == nil {
 		nextFlow.MessagePort = nextFlow.RegisterPort
-		req := s.buildRegisterForFlow(auth, nil, nextFlow)
+		req := s.buildRegisterForFlowWithAuthorizationHeader(auth, nil, nextFlow, authorizationHeader)
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: completing AKAv2 re-authentication: %w", err)
 		}
 		if resp.StatusCode() != sipStatusOK {
 			if reregistrationInitialRequiredStatus(resp.StatusCode()) {
-				return initialRegistrationRequiredError("refreshing IMS registration", resp)
+				return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
 			}
 			return fmt.Errorf("refreshing IMS registration: expected 200 after AKAv2 re-authentication, got %w", sip.NewResponseError(resp))
 		}
-		s.commitReauthentication(challenge, nextFlow, nil, nil, password)
+		s.commitReauthentication(challenge, authorizationHeader, nextFlow, nil, nil, password)
 		s.applyRegisterSuccess(resp)
 		return nil
 	}
@@ -215,7 +223,7 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 	}
 	cleanup = append(cleanup, responseAttachments...)
 
-	req := s.buildRegisterForFlow(auth, verify, nextFlow)
+	req := s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, nextFlow, authorizationHeader)
 	responseTransports := reauthResponseTransports(outbound, inboundTransports)
 	resp, err := s.sess.ExchangeWithTransport(ctx, outbound, req, session.ExchangeOptions{
 		AcceptResponseTransport: acceptResponseFrom(responseTransports),
@@ -226,7 +234,7 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 	}
 	if resp.StatusCode() != sipStatusOK {
 		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
-			return initialRegistrationRequiredError("refreshing IMS registration", resp)
+			return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
 		}
 		return fmt.Errorf("refreshing IMS registration: expected 200 after re-authentication, got %w", sip.NewResponseError(resp))
 	}
@@ -238,7 +246,7 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
 	oldResponseAttachments := s.replaceSecureResponseAttachments(responseAttachments)
 	s.closeAttachmentsAfter(append(append(oldServerAttachments, oldResponseAttachments...), oldAttachment), saDrainDelayBefore(oldExpiresAt, s.sess.TransactionTimers()))
-	s.commitReauthentication(challenge, nextFlow, ck, ik, password)
+	s.commitReauthentication(challenge, authorizationHeader, nextFlow, ck, ik, password)
 	s.applyRegisterSuccess(resp)
 	committed = true
 	return nil
@@ -256,19 +264,19 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 	switch resp.StatusCode() {
 	case sipStatusOK:
 		return true, nil
-	case sipStatusUnauthorized:
+	case sipStatusUnauthorized, sipStatusProxyAuthenticationRequired:
 		if *challenged {
-			return false, errors.New("deregistering IMS: repeated 401 response")
+			return false, errors.New("deregistering IMS: repeated authentication challenge")
 		}
-		challenge, err := selectRegisterChallenge(resp.HeadersByName("WWW-Authenticate"))
+		parsed, err := selectRegisterChallengeForResponse(resp)
 		if err != nil {
 			return false, fmt.Errorf("deregistering IMS: %w", err)
 		}
-		s.storeAuthChallenge(challenge)
-		*realm = challenge.Realm
-		*nonce = challenge.Nonce
-		*algorithm = challenge.Algorithm
-		*qop = challenge.QOP
+		s.storeAuthChallenge(parsed.challenge, parsed.authorizationHeader)
+		*realm = parsed.challenge.Realm
+		*nonce = parsed.challenge.Nonce
+		*algorithm = parsed.challenge.Algorithm
+		*qop = parsed.challenge.QOP
 		*challenged = true
 		return false, nil
 	default:

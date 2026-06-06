@@ -827,6 +827,35 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 	}
 }
 
+func TestStartUSSDRejectsNonIMSDomain(t *testing.T) {
+	tests := []struct {
+		name   string
+		domain Domain
+	}{
+		{name: "cs preferred", domain: DomainCS},
+		{name: "disabled", domain: DomainDisabled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTransport()
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger(), Domain: tt.domain}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			writesBefore := transport.writeCount()
+
+			_, err = svc.Start(context.Background(), "*100#")
+			if err == nil || !errors.Is(err, ErrIMSDomainNotAllowed) {
+				t.Fatalf("Start() error = %v, want ErrIMSDomainNotAllowed", err)
+			}
+			if got := transport.writeCount(); got != writesBefore {
+				t.Fatalf("transport writes after Start = %d, want %d", got, writesBefore)
+			}
+		})
+	}
+}
+
 func TestCloseClosesUSSDLocallyWithoutBYE(t *testing.T) {
 	transport := newTransport()
 	sess, reg := registeredService(t, transport)
@@ -1418,7 +1447,7 @@ func TestUSSDSessionInfoExchangeStateTransitions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			us := &Session{state: tt.start}
-			err := us.beginInfoExchange("replying USSD")
+			err := us.beginInfoExchange(sessionActionReplyUSSD)
 			if gotErr := err != nil; gotErr != tt.wantBeginErr {
 				t.Fatalf("beginInfoExchange() error = %v, wantErr %t", err, tt.wantBeginErr)
 			}

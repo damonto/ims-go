@@ -24,6 +24,8 @@ const (
 type ikeMessageKey struct {
 	initiatorSPI uint64
 	responderSPI uint64
+	exchangeType byte
+	flags        byte
 	messageID    uint32
 }
 
@@ -68,7 +70,7 @@ func (s *Session) advancePeerRequestMessageID(messageID uint32) error {
 
 func (s *Session) peerRequestMessageIDRelationForState(state informationalState, messageID uint32) ikeMessageIDRelation {
 	expected := state.nextPeerMessageID
-	if !state.retiredIKESA {
+	if !state.retiredIKESA && !state.promoteIKESA {
 		s.mu.RLock()
 		expected = s.nextPeerMessageID
 		s.mu.RUnlock()
@@ -167,45 +169,48 @@ func notifyInformationalWaiters(waiters map[ikeMessageKey]chan inboundIKE, err e
 	}
 }
 
-func (s *Session) cachedInformationalResponse(messageID uint32, request []byte) ([]byte, bool) {
+func (s *Session) cachedInformationalResponse(messageID uint32, request []byte) ([][]byte, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(s.informResponses) == 0 {
 		return nil, false
 	}
-	wire, ok := s.informResponses[messageID]
+	wires, ok := s.informResponses[messageID]
 	if !ok {
 		return nil, false
 	}
 	if cachedRequest, ok := s.informResponseReqs[messageID]; ok && !bytes.Equal(cachedRequest, request) {
 		return nil, false
 	}
-	return append([]byte(nil), wire...), true
+	return cloneIKEPackets(wires), true
 }
 
-func (s *Session) cachedInformationalResponseForState(state informationalState, messageID uint32, request []byte) ([]byte, bool) {
+func (s *Session) cachedInformationalResponseForState(state informationalState, messageID uint32, request []byte) ([][]byte, bool) {
+	if state.promoteIKESA {
+		return nil, false
+	}
 	if !state.retiredIKESA {
 		return s.cachedInformationalResponse(messageID, request)
 	}
-	wire, ok := state.responses[messageID]
+	wires, ok := state.responses[messageID]
 	if !ok {
 		return nil, false
 	}
 	if cachedRequest, ok := state.responseReqs[messageID]; ok && !bytes.Equal(cachedRequest, request) {
 		return nil, false
 	}
-	return append([]byte(nil), wire...), true
+	return cloneIKEPackets(wires), true
 }
 
-func (s *Session) cacheInformationalResponse(messageID uint32, request, wire []byte) {
-	if len(wire) == 0 {
+func (s *Session) cacheInformationalResponse(messageID uint32, request []byte, wires [][]byte) {
+	if len(wires) == 0 {
 		return
 	}
 	s.mu.Lock()
 	if s.informResponses == nil {
-		s.informResponses = make(map[uint32][]byte)
+		s.informResponses = make(map[uint32][][]byte)
 	}
-	s.informResponses[messageID] = append([]byte(nil), wire...)
+	s.informResponses[messageID] = cloneIKEPackets(wires)
 	if len(request) != 0 {
 		if s.informResponseReqs == nil {
 			s.informResponseReqs = make(map[uint32][]byte)
@@ -221,12 +226,12 @@ func (s *Session) cacheInformationalResponse(messageID uint32, request, wire []b
 	s.mu.Unlock()
 }
 
-func (s *Session) cacheInformationalResponseForState(state informationalState, messageID uint32, request, wire []byte) {
+func (s *Session) cacheInformationalResponseForState(state informationalState, messageID uint32, request []byte, wires [][]byte) {
 	if !state.retiredIKESA {
-		s.cacheInformationalResponse(messageID, request, wire)
+		s.cacheInformationalResponse(messageID, request, wires)
 		return
 	}
-	if len(wire) == 0 {
+	if len(wires) == 0 {
 		return
 	}
 	s.mu.Lock()
@@ -236,9 +241,9 @@ func (s *Session) cacheInformationalResponseForState(state informationalState, m
 			continue
 		}
 		if s.retiredIKESAs[i].responses == nil {
-			s.retiredIKESAs[i].responses = make(map[uint32][]byte)
+			s.retiredIKESAs[i].responses = make(map[uint32][][]byte)
 		}
-		s.retiredIKESAs[i].responses[messageID] = append([]byte(nil), wire...)
+		s.retiredIKESAs[i].responses[messageID] = cloneIKEPackets(wires)
 		if len(request) != 0 {
 			if s.retiredIKESAs[i].responseReqs == nil {
 				s.retiredIKESAs[i].responseReqs = make(map[uint32][]byte)

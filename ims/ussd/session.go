@@ -2,6 +2,7 @@ package ussd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
@@ -12,8 +13,8 @@ func (s *Session) Events() <-chan Message {
 }
 
 func (s *Session) Reply(ctx context.Context, text string) error {
-	if err := s.ensureActive("replying USSD"); err != nil {
-		return err
+	if err := s.ensureActive(); err != nil {
+		return fmt.Errorf("replying USSD: %w", err)
 	}
 	payload, err := s.marshalDialogPayload(Message{Text: text, Language: s.currentLanguage()})
 	if err != nil {
@@ -23,15 +24,15 @@ func (s *Session) Reply(ctx context.Context, text string) error {
 	msg.Headers.Add("Info-Package", infoPackage)
 	msg.Headers.Add("Content-Disposition", infoPackageDisposition)
 	msg.Headers.Add("Content-Type", xmlContentType)
-	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
+	if queued, err := s.queueInitialRequest(ctx, msg, sessionActionReplyUSSD, false); queued || err != nil {
 		return err
 	}
-	return s.exchange(ctx, msg, "replying USSD")
+	return s.exchange(ctx, msg, sessionActionReplyUSSD)
 }
 
 func (s *Session) ReplyError(ctx context.Context, errorCode int) error {
-	if err := s.ensureActive("replying USSD"); err != nil {
-		return err
+	if err := s.ensureActive(); err != nil {
+		return fmt.Errorf("replying USSD: %w", err)
 	}
 	payload, err := (xmlBody{Message: Message{Language: s.currentLanguage(), ErrorCode: normalizeErrorCode(errorCode)}}).MarshalText()
 	if err != nil {
@@ -41,15 +42,15 @@ func (s *Session) ReplyError(ctx context.Context, errorCode int) error {
 	msg.Headers.Add("Info-Package", infoPackage)
 	msg.Headers.Add("Content-Disposition", infoPackageDisposition)
 	msg.Headers.Add("Content-Type", xmlContentType)
-	if queued, err := s.queueInitialRequest(ctx, msg, "replying USSD", false); queued || err != nil {
+	if queued, err := s.queueInitialRequest(ctx, msg, sessionActionReplyUSSD, false); queued || err != nil {
 		return err
 	}
-	return s.exchange(ctx, msg, "replying USSD")
+	return s.exchange(ctx, msg, sessionActionReplyUSSD)
 }
 
 func (s *Session) End(ctx context.Context, text string) error {
-	if err := s.ensureActive("ending USSD"); err != nil {
-		return err
+	if err := s.ensureActive(); err != nil {
+		return fmt.Errorf("ending USSD: %w", err)
 	}
 	var payload []byte
 	if strings.TrimSpace(text) != "" {
@@ -63,10 +64,10 @@ func (s *Session) End(ctx context.Context, text string) error {
 	if len(payload) > 0 {
 		msg.Headers.Add("Content-Type", xmlContentType)
 	}
-	if queued, err := s.queueInitialRequest(ctx, msg, "ending USSD", true); queued || err != nil {
+	if queued, err := s.queueInitialRequest(ctx, msg, sessionActionEndUSSD, true); queued || err != nil {
 		return err
 	}
-	if err := s.exchange(ctx, msg, "ending USSD"); err != nil {
+	if err := s.exchange(ctx, msg, sessionActionEndUSSD); err != nil {
 		return err
 	}
 	s.finish(false)
@@ -74,8 +75,8 @@ func (s *Session) End(ctx context.Context, text string) error {
 }
 
 func (s *Session) EndError(ctx context.Context, errorCode int) error {
-	if err := s.ensureActive("ending USSD"); err != nil {
-		return err
+	if err := s.ensureActive(); err != nil {
+		return fmt.Errorf("ending USSD: %w", err)
 	}
 	payload, err := (xmlBody{Message: Message{Language: s.currentLanguage(), ErrorCode: normalizeErrorCode(errorCode), Final: true}}).MarshalText()
 	if err != nil {
@@ -83,10 +84,10 @@ func (s *Session) EndError(ctx context.Context, errorCode int) error {
 	}
 	msg := s.buildDialogRequest("BYE", payload)
 	msg.Headers.Add("Content-Type", xmlContentType)
-	if queued, err := s.queueInitialRequest(ctx, msg, "ending USSD", true); queued || err != nil {
+	if queued, err := s.queueInitialRequest(ctx, msg, sessionActionEndUSSD, true); queued || err != nil {
 		return err
 	}
-	if err := s.exchange(ctx, msg, "ending USSD"); err != nil {
+	if err := s.exchange(ctx, msg, sessionActionEndUSSD); err != nil {
 		return err
 	}
 	s.finish(false)
@@ -106,7 +107,7 @@ func (s *Session) endDirect(ctx context.Context, text string) error {
 	if len(payload) > 0 {
 		msg.Headers.Add("Content-Type", xmlContentType)
 	}
-	if err := s.exchange(ctx, msg, "ending USSD"); err != nil {
+	if err := s.exchange(ctx, msg, sessionActionEndUSSD); err != nil {
 		return err
 	}
 	return nil
@@ -145,11 +146,11 @@ func (s *Session) setLanguage(language string) {
 	s.mu.Unlock()
 }
 
-func (s *Session) ensureActive(action string) error {
+func (s *Session) ensureActive() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == sessionStateClosed {
-		return fmt.Errorf("%s: session is closed", action)
+		return errors.New("session is closed")
 	}
 	return nil
 }
@@ -160,7 +161,7 @@ func (s *Session) isClosed() bool {
 	return s.state == sessionStateClosed
 }
 
-func (s *Session) waitForACK(ctx context.Context, action string) error {
+func (s *Session) waitForACK(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.networkInitiated || s.acked || s.ackCh == nil {
 		s.mu.Unlock()
@@ -170,13 +171,13 @@ func (s *Session) waitForACK(ctx context.Context, action string) error {
 	s.mu.Unlock()
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("%s: %w", action, ctx.Err())
+		return ctx.Err()
 	case <-ackCh:
 		return nil
 	}
 }
 
-func (s *Session) exchange(ctx context.Context, msg sip.Message, action string) error {
+func (s *Session) exchange(ctx context.Context, msg sip.Message, action sessionAction) error {
 	releaseInfo := false
 	if strings.EqualFold(msg.Method(), "INFO") {
 		if err := s.beginInfoExchange(action); err != nil {
@@ -189,8 +190,8 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action string) 
 			}
 		}()
 	}
-	if err := s.waitForACK(ctx, action); err != nil {
-		return err
+	if err := s.waitForACK(ctx); err != nil {
+		return fmt.Errorf("%s: %w", action, err)
 	}
 	resp, err := s.service.sess.Exchange(ctx, msg)
 	if err != nil {
@@ -203,7 +204,7 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action string) 
 	return nil
 }
 
-func (s *Session) beginInfoExchange(action string) error {
+func (s *Session) beginInfoExchange(action sessionAction) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.state {

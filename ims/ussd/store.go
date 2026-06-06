@@ -36,9 +36,9 @@ func (s *Service) storeSession(session *Session) error {
 	return nil
 }
 
-func (s *Service) ensureNoActiveSession(action string) error {
+func (s *Service) ensureNoActiveSession() error {
 	if s.hasActiveSession() {
-		return fmt.Errorf("%s: %w", action, errSessionActive)
+		return errSessionActive
 	}
 	return nil
 }

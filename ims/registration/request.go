@@ -16,7 +16,15 @@ func (s *Service) buildRegister(auth *security.Authorization, verify *security.P
 	return s.buildRegisterForFlow(auth, verify, s.CurrentFlow())
 }
 
+func (s *Service) buildRegisterWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, authorizationHeader string) sip.Message {
+	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, s.CurrentFlow(), authorizationHeader)
+}
+
 func (s *Service) buildRegisterForFlow(auth *security.Authorization, verify *security.Param, flow Flow) sip.Message {
+	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, flow, s.currentAuthorizationHeaderName())
+}
+
+func (s *Service) buildRegisterForFlowWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, flow Flow, authorizationHeader string) sip.Message {
 	port := s.State().RegisterPort
 	if registerUsesProtectedPort(auth, verify) {
 		port = flow.SecurityClient.PortS
@@ -25,7 +33,7 @@ func (s *Service) buildRegisterForFlow(auth *security.Authorization, verify *sec
 	if auth == nil {
 		legacyAuthorization = s.initialAuthorizationValue()
 	}
-	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(port), s.registerExpiresSeconds(), port)
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(port), s.registerExpiresSeconds(), port, authorizationHeader)
 }
 
 func (s *Service) buildDeregister(auth *security.Authorization, verify *security.Param) sip.Message {
@@ -33,7 +41,7 @@ func (s *Service) buildDeregister(auth *security.Authorization, verify *security
 	if registerUsesProtectedPort(auth, verify) {
 		port = s.State().SecurityClient.PortS
 	}
-	return s.buildRegisterRequest(auth, "", verify, "*", 0, port)
+	return s.buildRegisterRequest(auth, "", verify, "*", 0, port, s.currentAuthorizationHeaderName())
 }
 
 func (s *Service) registerRealm(auth *security.Authorization) string {
@@ -92,11 +100,11 @@ func (s *Service) resetRegisterTransaction() {
 	s.mu.Unlock()
 }
 
-func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int) sip.Message {
-	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, port)
+func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, port, authorizationHeader)
 }
 
-func (s *Service) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, port int) sip.Message {
+func (s *Service) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
 	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
 	cseq, callID, sessionID, tag := s.nextRegisterTransaction()
@@ -125,7 +133,7 @@ func (s *Service) buildRegisterRequestForFlow(auth *security.Authorization, lega
 	msg.Headers.Add("Contact", contact)
 	msg.Headers.Add("Supported", "path")
 	if auth != nil {
-		msg.Headers.Add("Authorization", auth.String())
+		msg.Headers.Add(registerAuthorizationHeaderName(authorizationHeader), auth.String())
 	} else if legacyAuthorization != "" {
 		msg.Headers.Add("Authorization", legacyAuthorization)
 	}

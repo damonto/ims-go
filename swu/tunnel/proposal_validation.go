@@ -7,20 +7,20 @@ import (
 	"github.com/damonto/vowifi-go/swu/ike"
 )
 
-func validateNegotiatedProposalFromRequests(action string, response ike.Proposal, requests []ike.Proposal) error {
+func validateNegotiatedProposalFromRequests(response ike.Proposal, requests []ike.Proposal) error {
 	if len(requests) == 0 {
 		return nil
 	}
 	if response.Number == 0 || int(response.Number) > len(requests) {
-		return fmt.Errorf("%s: invalid negotiated proposal number %d", action, response.Number)
+		return fmt.Errorf("invalid negotiated proposal number %d", response.Number)
 	}
 	request := requests[int(response.Number)-1]
 	if response.ProtocolID != request.ProtocolID {
-		return fmt.Errorf("%s: negotiated protocol id %d does not match request proposal %d protocol id %d", action, response.ProtocolID, response.Number, request.ProtocolID)
+		return fmt.Errorf("negotiated protocol id %d does not match request proposal %d protocol id %d", response.ProtocolID, response.Number, request.ProtocolID)
 	}
 	for _, transform := range response.Transforms {
 		if !proposalContainsTransform(request, transform) {
-			return fmt.Errorf("%s: negotiated transform type %d id %d was not requested in proposal %d", action, transform.TransformType, transform.ID, response.Number)
+			return fmt.Errorf("negotiated transform type %d id %d was not requested in proposal %d", transform.TransformType, transform.ID, response.Number)
 		}
 	}
 	return nil

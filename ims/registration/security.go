@@ -408,17 +408,19 @@ func (s *Service) expireActiveSecureAssociation(expiry *secureAssociationExpiry)
 	s.publishRegistrationEvent(errSecureSAExpired)
 }
 
-func (s *Service) commitReauthentication(challenge security.Challenge, flow Flow, ck, ik []byte, password string) {
+func (s *Service) commitReauthentication(challenge security.Challenge, authorizationHeader string, flow Flow, ck, ik []byte, password string) {
 	realm := strings.TrimSpace(challenge.Realm)
 	if realm == "" {
 		realm = strings.TrimPrefix(s.State().RegisterURI, "sip:")
 	}
+	authorizationHeader = registerAuthorizationHeaderName(authorizationHeader)
 	s.mu.Lock()
 	s.flow = flow.clone()
 	s.authRealm = realm
 	s.authNonce = challenge.Nonce
 	s.authAlgorithm = challenge.Algorithm
 	s.authQOP = challenge.QOP
+	s.authHeader = authorizationHeader
 	s.authNonceCount = 1
 	s.authDigestNonce = challenge.Nonce
 	s.authDigestAlgorithm = challenge.Algorithm

@@ -119,12 +119,12 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
-	if err := validateSecureESPConfig("listening secure tcp transport", encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
-		return nil, err
+	if err := validateSecureESPConfig(encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
+		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
-	dataACKTimeouts, err := normalizedTCPDataACKTimeouts("listening secure tcp transport", cfg.DataACKTimeouts)
+	dataACKTimeouts, err := normalizedTCPDataACKTimeouts(cfg.DataACKTimeouts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
 	seq, err := randomUint32()
 	if err != nil {
@@ -178,9 +178,9 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	if err != nil {
 		return nil, fmt.Errorf("dialing tcp transport: %w", err)
 	}
-	dataACKTimeouts, err := normalizedTCPDataACKTimeouts("dialing tcp transport", cfg.DataACKTimeouts)
+	dataACKTimeouts, err := normalizedTCPDataACKTimeouts(cfg.DataACKTimeouts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dialing tcp transport: %w", err)
 	}
 	conn := &TCPConn{
 		session:         s,
@@ -204,8 +204,8 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
 		}
-		if err := validateSecureESPConfig("dialing secure tcp transport", encryption, secure.Integrity, secure.EncryptionKey, secure.IntegrityKey); err != nil {
-			return nil, err
+		if err := validateSecureESPConfig(encryption, secure.Integrity, secure.EncryptionKey, secure.IntegrityKey); err != nil {
+			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
 		}
 		conn.secure = true
 		conn.associations = secureAssociations(secure.Associations)
@@ -231,7 +231,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	conn.attachment = attachment
 
 	for attempt := range 3 {
-		if ready, err := conn.dialReady("dialing tcp transport"); ready || err != nil {
+		if ready, err := conn.dialReady(transportActionDialTCP); ready || err != nil {
 			if err != nil {
 				_ = conn.Close()
 				return nil, err
@@ -250,13 +250,13 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 			return nil, ctx.Err()
 		case <-conn.readyCh:
 			wait.Stop()
-			if err := conn.readyResult("dialing tcp transport"); err != nil {
+			if err := conn.readyResult(transportActionDialTCP); err != nil {
 				_ = conn.Close()
 				return nil, err
 			}
 			return conn, nil
 		case <-wait.C:
-			if ready, err := conn.dialReady("dialing tcp transport"); ready || err != nil {
+			if ready, err := conn.dialReady(transportActionDialTCP); ready || err != nil {
 				if err != nil {
 					_ = conn.Close()
 					return nil, err
@@ -706,7 +706,7 @@ func (t *TCPConn) terminalErrOr(fallback string) error {
 	return errors.New(fallback)
 }
 
-func (t *TCPConn) readyResult(action string) error {
+func (t *TCPConn) readyResult(action transportAction) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.established {
@@ -718,7 +718,7 @@ func (t *TCPConn) readyResult(action string) error {
 	return fmt.Errorf("%s: transport is not established", action)
 }
 
-func (t *TCPConn) dialReady(action string) (bool, error) {
+func (t *TCPConn) dialReady(action transportAction) (bool, error) {
 	select {
 	case <-t.readyCh:
 		if err := t.readyResult(action); err != nil {
@@ -822,14 +822,14 @@ func trimLeadingSIPCRLF(stream []byte) []byte {
 	return stream
 }
 
-func normalizedTCPDataACKTimeouts(action string, values []time.Duration) ([]time.Duration, error) {
+func normalizedTCPDataACKTimeouts(values []time.Duration) ([]time.Duration, error) {
 	if len(values) == 0 {
 		return append([]time.Duration(nil), tcpDataACKTimeouts...), nil
 	}
 	timeouts := append([]time.Duration(nil), values...)
 	for _, timeout := range timeouts {
 		if timeout <= 0 {
-			return nil, fmt.Errorf("%s: tcp data ack timeout must be > 0", action)
+			return nil, errors.New("tcp data ack timeout must be > 0")
 		}
 	}
 	return timeouts, nil

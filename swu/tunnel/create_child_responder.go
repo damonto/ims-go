@@ -13,36 +13,41 @@ import (
 )
 
 type createChildSARequestState struct {
-	ike               *ikeCrypto
-	localInitiator    bool
-	ikeRekeying       bool
-	pendingIKESA      bool
-	retiredIKESA      bool
-	childRekeying     bool
-	nextPeerMessageID uint32
-	responses         map[uint32][]byte
-	responseReqs      map[uint32][]byte
-	cfg               Config
-	info              Info
-	initiatorSPI      uint64
-	responderSPI      uint64
-	peer              *net.UDPAddr
-	inboundSPI        uint32
-	outboundSPI       uint32
-	promoteIKESA      bool
+	ike                       *ikeCrypto
+	localInitiator            bool
+	ikeRekeying               bool
+	pendingIKESA              bool
+	retiredIKESA              bool
+	ikeFragmentationSupported bool
+	useNATT                   bool
+	childRekeying             bool
+	nextPeerMessageID         uint32
+	responses                 map[uint32][][]byte
+	responseReqs              map[uint32][]byte
+	cfg                       Config
+	info                      Info
+	initiatorSPI              uint64
+	responderSPI              uint64
+	peer                      *net.UDPAddr
+	inboundSPI                uint32
+	outboundSPI               uint32
+	promoteIKESA              bool
 }
 
 func (state createChildSARequestState) informationalState() informationalState {
 	return informationalState{
-		ike:               state.ike,
-		localInitiator:    state.localInitiator,
-		initiatorSPI:      state.initiatorSPI,
-		responderSPI:      state.responderSPI,
-		peer:              cloneUDPAddr(state.peer),
-		retiredIKESA:      state.retiredIKESA,
-		nextPeerMessageID: state.nextPeerMessageID,
-		responses:         cloneIKEMessageResponses(state.responses),
-		responseReqs:      cloneIKEMessageResponses(state.responseReqs),
+		ike:                       state.ike,
+		localInitiator:            state.localInitiator,
+		initiatorSPI:              state.initiatorSPI,
+		responderSPI:              state.responderSPI,
+		peer:                      cloneUDPAddr(state.peer),
+		retiredIKESA:              state.retiredIKESA,
+		promoteIKESA:              state.promoteIKESA,
+		ikeFragmentationSupported: state.ikeFragmentationSupported,
+		useNATT:                   state.useNATT,
+		nextPeerMessageID:         state.nextPeerMessageID,
+		responses:                 cloneIKEMessageResponses(state.responses),
+		responseReqs:              cloneIKEMessageRequests(state.responseReqs),
 	}
 }
 
@@ -54,18 +59,26 @@ func (s *Session) handleCreateChildSARequest(state createChildSARequestState, pa
 	if !state.available() {
 		return true, errors.New("handling create_child_sa request: ike state is unavailable")
 	}
-	payloads, err := state.ike.OpenIKE(packet, !state.localInitiator)
+	infoState := state.informationalState()
+	relation := s.peerRequestMessageIDRelationForState(infoState, packet.Header.MessageID)
+	if relation != ikeMessageIDCurrent {
+		return s.handleNonCurrentCreateChildSARequest(state, infoState, packet, addr, relation)
+	}
+	payloads, cacheRequest, complete, stored, err := s.openIKEPacketForState(infoState, packet, !state.localInitiator)
 	if err != nil {
 		if responsePayloads, ok := ikeErrorNotifyResponse(err); ok {
-			return s.writeIKEErrorNotifyCreateChildSAResponse(state, packet, addr, responsePayloads)
+			return s.writeIKEErrorNotifyCreateChildSAResponse(state, packet, cacheRequest, addr, responsePayloads)
 		}
 		return true, fmt.Errorf("opening create_child_sa request: %w", err)
+	}
+	if !stored {
+		return true, nil
 	}
 	if state.promoteIKESA {
 		s.promotePendingIKESecurityAssociation()
 	}
 	now := time.Now()
-	accept, err := s.acceptIKEProtectedBytesForState(state.informationalState(), packet.Raw, now)
+	accept, err := s.acceptIKEProtectedBytesForState(infoState, packet.Raw, now)
 	if err != nil {
 		return true, err
 	}
@@ -75,32 +88,29 @@ func (s *Session) handleCreateChildSARequest(state createChildSARequestState, pa
 		}
 		return true, nil
 	}
-	s.markProtectedRxForState(state.informationalState(), now)
+	s.markProtectedRxForState(infoState, now)
 	expireAfterRequest := accept.expired
+	if canRetransmitCachedResponse(packet) {
+		if wires, ok := s.cachedInformationalResponseForState(infoState, packet.Header.MessageID, cacheRequest); ok {
+			err := s.writeCreateChildSAResponseWire(state, packet.Header.MessageID, 0, wires, addr)
+			if expireAfterRequest {
+				s.failSecurityAssociations(errIKESAExpired)
+			}
+			return true, err
+		}
+	}
+	if !complete {
+		return true, nil
+	}
 	defer func() {
 		if expireAfterRequest {
 			s.failSecurityAssociations(errIKESAExpired)
 		}
 	}()
-	if wire, ok := s.cachedInformationalResponseForState(state.informationalState(), packet.Header.MessageID, packet.Raw); ok {
-		return true, s.writeCreateChildSAResponseWire(state, packet.Header.MessageID, 0, wire, addr)
-	}
-	switch s.peerRequestMessageIDRelationForState(state.informationalState(), packet.Header.MessageID) {
-	case ikeMessageIDCurrent:
-	case ikeMessageIDFuture:
-		s.logger.Debug("ignoring create_child_sa request outside message id window", "message_id", packet.Header.MessageID)
-		if err := s.sendInvalidMessageIDNotification(state.informationalState(), packet.Header.MessageID); err != nil {
-			s.logger.Debug("sending invalid message id notification failed", "message_id", packet.Header.MessageID, "err", err)
-		}
-		return true, nil
-	default:
-		s.logger.Debug("ignoring old create_child_sa request without cached response", "message_id", packet.Header.MessageID)
-		return true, nil
-	}
 	if state.pendingIKESA {
-		err := s.writeCreateChildSAResponse(state, packet.Header.MessageID, packet.Raw, createChildSAErrorNotify(notifyTypeTemporaryFailure, nil), addr)
+		err := s.writeCreateChildSAResponse(state, packet.Header.MessageID, cacheRequest, createChildSAErrorNotify(notifyTypeTemporaryFailure, nil), addr)
 		if err == nil {
-			err = s.advancePeerRequestMessageIDForState(state.informationalState(), packet.Header.MessageID)
+			err = s.advancePeerRequestMessageIDForState(infoState, packet.Header.MessageID)
 			if err != nil {
 				s.failSecurityAssociations(err)
 			}
@@ -127,10 +137,10 @@ func (s *Session) handleCreateChildSARequest(state createChildSARequestState, pa
 			s.noteSimultaneousIKESARekey(action.ike)
 		}
 	}
-	if err := s.writeCreateChildSAResponse(state, packet.Header.MessageID, packet.Raw, responsePayloads, addr); err != nil {
+	if err := s.writeCreateChildSAResponse(state, packet.Header.MessageID, cacheRequest, responsePayloads, addr); err != nil {
 		return true, err
 	}
-	if err := s.advancePeerRequestMessageIDForState(state.informationalState(), packet.Header.MessageID); err != nil {
+	if err := s.advancePeerRequestMessageIDForState(infoState, packet.Header.MessageID); err != nil {
 		s.failSecurityAssociations(err)
 		return true, err
 	}
@@ -144,7 +154,28 @@ func (s *Session) handleCreateChildSARequest(state createChildSARequestState, pa
 	return true, nil
 }
 
-func (s *Session) writeIKEErrorNotifyCreateChildSAResponse(state createChildSARequestState, packet ike.IKEPacket, addr net.Addr, payloads []ike.Payload) (bool, error) {
+func (s *Session) handleNonCurrentCreateChildSARequest(state createChildSARequestState, infoState informationalState, packet ike.IKEPacket, addr net.Addr, relation ikeMessageIDRelation) (bool, error) {
+	switch relation {
+	case ikeMessageIDFuture:
+		s.logger.Debug("ignoring create_child_sa request outside message id window", "message_id", packet.Header.MessageID)
+		if err := s.sendInvalidMessageIDNotification(infoState, packet.Header.MessageID); err != nil {
+			s.logger.Debug("sending invalid message id notification failed", "message_id", packet.Header.MessageID, "err", err)
+		}
+		return true, nil
+	case ikeMessageIDOld:
+		if canRetransmitCachedResponse(packet) {
+			if wires, ok := s.cachedInformationalResponseForState(infoState, packet.Header.MessageID, packet.Raw); ok {
+				return true, s.writeCreateChildSAResponseWire(state, packet.Header.MessageID, 0, wires, addr)
+			}
+		}
+		s.logger.Debug("ignoring old create_child_sa request without cached response", "message_id", packet.Header.MessageID)
+		return true, nil
+	default:
+		return true, nil
+	}
+}
+
+func (s *Session) writeIKEErrorNotifyCreateChildSAResponse(state createChildSARequestState, packet ike.IKEPacket, request []byte, addr net.Addr, payloads []ike.Payload) (bool, error) {
 	if state.promoteIKESA {
 		s.promotePendingIKESecurityAssociation()
 	}
@@ -176,7 +207,7 @@ func (s *Session) writeIKEErrorNotifyCreateChildSAResponse(state createChildSARe
 	default:
 		return true, nil
 	}
-	if err := s.writeCreateChildSAResponse(state, packet.Header.MessageID, packet.Raw, payloads, addr); err != nil {
+	if err := s.writeCreateChildSAResponse(state, packet.Header.MessageID, responseCacheRequest(packet, request), payloads, addr); err != nil {
 		return true, err
 	}
 	if err := s.advancePeerRequestMessageIDForState(state.informationalState(), packet.Header.MessageID); err != nil {
@@ -205,7 +236,7 @@ func buildCreateChildSAResponsePayloads(state createChildSARequestState, payload
 	if rekeyNotify := ike.FindNotifyPayload(payloads, notifyTypeRekeySA); rekeyNotify != nil {
 		return buildChildSARekeyResponsePayloads(state, payloads, rekeyNotify)
 	}
-	return buildChildSACreateResponsePayloads(state, payloads)
+	return buildChildSACreateResponsePayloads(state)
 }
 
 type createChildSAAction struct {
@@ -239,7 +270,7 @@ func buildChildSARekeyResponsePayloads(state createChildSARequestState, payloads
 	return buildChildSAResponsePayloads(state, payloads, state.childRekeying)
 }
 
-func buildChildSACreateResponsePayloads(state createChildSARequestState, payloads []ike.Payload) ([]ike.Payload, createChildSAAction, error) {
+func buildChildSACreateResponsePayloads(state createChildSARequestState) ([]ike.Payload, createChildSAAction, error) {
 	if state.ikeRekeying || state.pendingIKESA || state.retiredIKESA || state.childRekeying {
 		return createChildSAErrorNotify(notifyTypeTemporaryFailure, nil), createChildSAAction{}, nil
 	}
@@ -254,10 +285,10 @@ func buildChildSAResponsePayloads(state createChildSARequestState, payloads []ik
 	if nonceI == nil || sa == nil || tsi == nil || tsr == nil || len(sa.Proposals) == 0 {
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
-	if err := validateNonceData("building create_child_sa child response", nonceI.Data); err != nil {
+	if err := validateNonceData(nonceI.Data); err != nil {
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
-	if err := validateRekeyTrafficSelectors("building create_child_sa child response", tsi.Selectors, tsr.Selectors, state.info); err != nil {
+	if err := validateRekeyTrafficSelectors(tsi.Selectors, tsr.Selectors, state.info); err != nil {
 		return createChildSAErrorNotify(notifyTypeTSUnacceptable, nil), createChildSAAction{}, nil
 	}
 	keI := ike.FindKEPayload(payloads, 0)
@@ -371,7 +402,7 @@ func buildIKESARekeyResponsePayloads(state createChildSARequestState, payloads [
 	if sa == nil || nonceI == nil || keI == nil || len(sa.Proposals) == 0 {
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
-	if err := validateNonceData("building create_child_sa ike response", nonceI.Data); err != nil {
+	if err := validateNonceData(nonceI.Data); err != nil {
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
 	proposal, peerSPI, err := acceptedIKESARekeyProposal(sa.Proposals, state.ike)
@@ -641,20 +672,20 @@ func createChildSAInvalidKEPayloadNotify(dhGroup uint16) []ike.Payload {
 }
 
 func (s *Session) writeCreateChildSAResponse(state createChildSARequestState, messageID uint32, request []byte, payloads []ike.Payload, addr net.Addr) error {
-	wire, err := state.ike.SealIKE(createChildSAResponseHeader(state, messageID), payloads, state.localInitiator)
+	wires, err := sealIKEPackets(state.ike, createChildSAResponseHeader(state, messageID), payloads, state.localInitiator, state.ikeFragmentationSupported)
 	if err != nil {
 		return fmt.Errorf("sealing create_child_sa response: %w", err)
 	}
-	wire = prependNonESPMarker(wire)
-	s.cacheInformationalResponseForState(state.informationalState(), messageID, request, wire)
-	return s.writeCreateChildSAResponseWire(state, messageID, len(payloads), wire, addr)
+	wires = buildIKEWires(wires, state.useNATT)
+	s.cacheInformationalResponseForState(state.informationalState(), messageID, request, wires)
+	return s.writeCreateChildSAResponseWire(state, messageID, len(payloads), wires, addr)
 }
 
-func (s *Session) writeCreateChildSAResponseWire(state createChildSARequestState, messageID uint32, payloadCount int, wire []byte, addr net.Addr) error {
+func (s *Session) writeCreateChildSAResponseWire(state createChildSARequestState, messageID uint32, payloadCount int, wires [][]byte, addr net.Addr) error {
 	ctx, cancel := s.timeoutContext(2 * time.Second)
 	defer cancel()
 	peer := s.informationalResponsePeer(addr, nil)
-	if err := s.writeProtectedWire(ctx, "writing create_child_sa response", state.ike, wire, peer, false); err != nil {
+	if err := s.writeProtectedWires(ctx, ikeActionWriteCreateChildSAResponse, state.ike, wires, peer, false); err != nil {
 		return err
 	}
 	s.logger.Debug("replied to create_child_sa request", "message_id", messageID, "payload_count", payloadCount)

@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 )
 
@@ -51,23 +50,23 @@ func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transpor
 	}
 }
 
-func (s *Session) ensureOpen(action string) error {
+func (s *Session) ensureOpen() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return fmt.Errorf("%s: session is closed", action)
+		return errors.New("session is closed")
 	}
 	return nil
 }
 
-func (s *Session) ensureActiveTransport(action string, transport Transport) error {
+func (s *Session) ensureActiveTransport(transport Transport) error {
 	if transport == nil {
-		return fmt.Errorf("%s: transport is nil", action)
+		return errors.New("transport is nil")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.active[transport]; !ok {
-		return fmt.Errorf("%s: transport is not active", action)
+		return errors.New("transport is not active")
 	}
 	return nil
 }

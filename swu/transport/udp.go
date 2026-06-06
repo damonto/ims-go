@@ -62,14 +62,14 @@ func DialSecureUDP(ctx context.Context, s *tunnel.Session, cfg SecureUDPConfig) 
 		return nil, ctx.Err()
 	default:
 	}
-	return newSecureUDPConn(s, cfg, "dialing secure udp transport")
+	return newSecureUDPConn(s, cfg, transportActionDialSecureUDP)
 }
 
 func ListenSecureUDP(s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
-	return newSecureUDPConn(s, cfg, "listening secure udp transport")
+	return newSecureUDPConn(s, cfg, transportActionListenSecureUDP)
 }
 
-func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action string) (*UDPConn, error) {
+func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action transportAction) (*UDPConn, error) {
 	innerLocal, innerRemote, err := connectedUDPAddrs(s)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
@@ -84,8 +84,8 @@ func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action string) (*U
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
 	}
-	if err := validateSecureESPConfig(action, encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
-		return nil, err
+	if err := validateSecureESPConfig(encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
 	conn := &UDPConn{
 		session:      s,

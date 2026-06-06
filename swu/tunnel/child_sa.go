@@ -71,19 +71,19 @@ func childSAConfig(payloads []ike.Payload, requestProposals []ike.Proposal) (*ik
 	if len(sa.Proposals) != 1 {
 		return nil, ike.Proposal{}, nil, nil, fmt.Errorf("parsing ike_auth response: negotiated proposal count %d", len(sa.Proposals))
 	}
-	if err := validateNegotiatedProposalFromRequests("parsing ike_auth response", sa.Proposals[0], requestProposals); err != nil {
-		return nil, ike.Proposal{}, nil, nil, err
+	if err := validateNegotiatedProposalFromRequests(sa.Proposals[0], requestProposals); err != nil {
+		return nil, ike.Proposal{}, nil, nil, fmt.Errorf("parsing ike_auth response: %w", err)
 	}
-	proposal, err := negotiatedChildSAProposal("parsing ike_auth response", sa.Proposals[0], 0)
+	proposal, err := negotiatedChildSAProposal(sa.Proposals[0], 0)
 	if err != nil {
-		return nil, ike.Proposal{}, nil, nil, err
+		return nil, ike.Proposal{}, nil, nil, fmt.Errorf("parsing ike_auth response: %w", err)
 	}
 	return config, proposal, tsi, tsr, nil
 }
 
-func negotiatedChildSAProposal(action string, proposal ike.Proposal, dhGroup uint16) (ike.Proposal, error) {
+func negotiatedChildSAProposal(proposal ike.Proposal, dhGroup uint16) (ike.Proposal, error) {
 	if proposal.ProtocolID != proposalProtocolESP {
-		return ike.Proposal{}, fmt.Errorf("%s: invalid negotiated protocol id %d", action, proposal.ProtocolID)
+		return ike.Proposal{}, fmt.Errorf("invalid negotiated protocol id %d", proposal.ProtocolID)
 	}
 	seenENCR := false
 	seenINTEG := false
@@ -93,42 +93,42 @@ func negotiatedChildSAProposal(action string, proposal ike.Proposal, dhGroup uin
 		switch transform.TransformType {
 		case transformTypeENCR:
 			if seenENCR {
-				return ike.Proposal{}, fmt.Errorf("%s: duplicate encryption transform", action)
+				return ike.Proposal{}, errors.New("duplicate encryption transform")
 			}
 			seenENCR = true
 		case transformTypeINTEG:
 			if seenINTEG {
-				return ike.Proposal{}, fmt.Errorf("%s: duplicate integrity transform", action)
+				return ike.Proposal{}, errors.New("duplicate integrity transform")
 			}
 			seenINTEG = true
 		case transformTypeESN:
 			if seenESN {
-				return ike.Proposal{}, fmt.Errorf("%s: duplicate esn transform", action)
+				return ike.Proposal{}, errors.New("duplicate esn transform")
 			}
 			if transform.ID != transformESNNoESN {
-				return ike.Proposal{}, fmt.Errorf("%s: unsupported esn transform %d", action, transform.ID)
+				return ike.Proposal{}, fmt.Errorf("unsupported esn transform %d", transform.ID)
 			}
 			seenESN = true
 		case transformTypeDH:
 			if seenDH {
-				return ike.Proposal{}, fmt.Errorf("%s: duplicate dh transform", action)
+				return ike.Proposal{}, errors.New("duplicate dh transform")
 			}
 			if dhGroup == 0 {
-				return ike.Proposal{}, fmt.Errorf("%s: unexpected dh group %d", action, transform.ID)
+				return ike.Proposal{}, fmt.Errorf("unexpected dh group %d", transform.ID)
 			}
 			if transform.ID != dhGroup {
-				return ike.Proposal{}, fmt.Errorf("%s: dh group = %d, want %d", action, transform.ID, dhGroup)
+				return ike.Proposal{}, fmt.Errorf("dh group = %d, want %d", transform.ID, dhGroup)
 			}
 			seenDH = true
 		default:
-			return ike.Proposal{}, fmt.Errorf("%s: unsupported negotiated transform type %d", action, transform.TransformType)
+			return ike.Proposal{}, fmt.Errorf("unsupported negotiated transform type %d", transform.TransformType)
 		}
 	}
 	if !seenENCR || !seenINTEG || !seenESN {
-		return ike.Proposal{}, fmt.Errorf("%s: negotiated esp transform is incomplete", action)
+		return ike.Proposal{}, errors.New("negotiated esp transform is incomplete")
 	}
 	if dhGroup != 0 && !seenDH {
-		return ike.Proposal{}, fmt.Errorf("%s: dh group = 0, want %d", action, dhGroup)
+		return ike.Proposal{}, fmt.Errorf("dh group = 0, want %d", dhGroup)
 	}
 	return proposal, nil
 }
@@ -166,16 +166,18 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 func applyTunnelAddresses(tunnel *Info, config ike.ConfigPayload, cfg handshake.Config) error {
 	addresses := tunnelAddresses(config.Attributes, cfg.PCSCFIPv4ConfigAttribute, cfg.PCSCFIPv6ConfigAttribute)
 	switch {
-	case addresses.internalIPv6 != nil && len(addresses.pcscfIPv6) != 0:
+	case addresses.internalIPv6 != nil:
 		tunnel.InnerIP = addresses.internalIPv6
-		tunnel.PCSCFIP = append(net.IP(nil), addresses.pcscfIPv6[0]...)
 		tunnel.PCSCFIPs = cloneIPList(addresses.pcscfIPv6)
-	case addresses.internalIPv4 != nil && len(addresses.pcscfIPv4) != 0:
+	case addresses.internalIPv4 != nil:
 		tunnel.InnerIP = addresses.internalIPv4
-		tunnel.PCSCFIP = append(net.IP(nil), addresses.pcscfIPv4[0]...)
 		tunnel.PCSCFIPs = cloneIPList(addresses.pcscfIPv4)
 	default:
-		return errors.New("parsing ike_auth response: p-cscf and internal ip families do not match")
+		return errors.New("parsing ike_auth response: internal ip is missing")
+	}
+	tunnel.PCSCFIP = nil
+	if len(tunnel.PCSCFIPs) != 0 {
+		tunnel.PCSCFIP = append(net.IP(nil), tunnel.PCSCFIPs[0]...)
 	}
 	return nil
 }

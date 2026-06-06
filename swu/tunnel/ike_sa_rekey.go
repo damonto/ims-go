@@ -17,11 +17,13 @@ var (
 )
 
 type ikeSARekeyState struct {
-	ike            *ikeCrypto
-	initiatorSPI   uint64
-	responderSPI   uint64
-	peer           *net.UDPAddr
-	localInitiator bool
+	ike                       *ikeCrypto
+	initiatorSPI              uint64
+	responderSPI              uint64
+	peer                      *net.UDPAddr
+	localInitiator            bool
+	ikeFragmentationSupported bool
+	useNATT                   bool
 }
 
 type ikeSARekeyResult struct {
@@ -75,9 +77,9 @@ func (s *Session) initiatedIKESARekeyResult(ctx context.Context, state ikeSAReke
 		if err != nil {
 			return ikeSARekeyResult{}, err
 		}
-		group, retry, err := invalidKEPayloadGroupFor("parsing create_child_sa response", payloads)
+		group, retry, err := invalidKEPayloadGroupFor(payloads)
 		if err != nil {
-			return ikeSARekeyResult{}, err
+			return ikeSARekeyResult{}, fmt.Errorf("parsing create_child_sa response: %w", err)
 		}
 		if retry {
 			dhGroup = group
@@ -88,7 +90,7 @@ func (s *Session) initiatedIKESARekeyResult(ctx context.Context, state ikeSAReke
 }
 
 func (s *Session) exchangeInitiatedIKESARekey(ctx context.Context, state ikeSARekeyState, next *ikeCrypto) ([]ike.Payload, error) {
-	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying ike sa")
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionRekeyIKESA)
 	if err != nil {
 		return nil, err
 	}
@@ -98,28 +100,29 @@ func (s *Session) exchangeInitiatedIKESARekey(ctx context.Context, state ikeSARe
 	if err != nil {
 		return nil, fmt.Errorf("rekeying ike sa: %w", err)
 	}
-	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, messageID)
+	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, exchangeTypeCreateChildSA, ikeMessageFlags(!state.localInitiator, true), messageID)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
 
-	wire, err := state.sealIKESARekeyRequest(messageID, next)
+	wires, err := state.sealIKESARekeyRequest(messageID, next)
 	if err != nil {
 		return nil, fmt.Errorf("rekeying ike sa: %w", err)
 	}
 	return s.exchangeProtected(ctx, protectedExchange{
-		action:          "rekeying ike sa",
+		action:          ikeActionRekeyIKESA,
 		peer:            state.peer,
 		crypto:          state.ike,
 		senderInitiator: !state.localInitiator,
 		messageID:       messageID,
 		exchangeType:    exchangeTypeCreateChildSA,
-		wire:            wire,
+		useNATT:         state.useNATT,
+		wires:           wires,
 		waiter:          waiter,
 	})
 }
 
 func (s *Session) installInitiatedIKESARekey(ctx context.Context, state ikeSARekeyState, result ikeSARekeyResult, decision ikeSARekeyDecision) error {
-	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying ike sa")
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionRekeyIKESA)
 	if err != nil {
 		return err
 	}
@@ -129,19 +132,22 @@ func (s *Session) installInitiatedIKESARekey(ctx context.Context, state ikeSARek
 	if err != nil {
 		return fmt.Errorf("rekeying ike sa: %w", err)
 	}
-	deleteWire, err := state.sealOldIKESADelete(deleteMessageID)
+	deleteWires, err := state.sealOldIKESADelete(deleteMessageID)
 	if err != nil {
 		return fmt.Errorf("rekeying ike sa: sealing old delete: %w", err)
 	}
 	s.installSurvivingIKESARekey(result, decision, state.peer)
-	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, deleteMessageID)
+	key := state.informationalState().responseMessageKey(deleteMessageID, exchangeTypeInformational)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
-	payloads, err := s.exchangeInformationalRequest(ctx, state.informationalState(), deleteMessageID, deleteWire, waiter, "deleting old ike sa", true)
+	payloads, err := s.exchangeInformationalRequest(ctx, state.informationalState(), deleteMessageID, deleteWires, waiter, ikeActionDeleteOldIKESA, true)
 	if err != nil {
 		return err
 	}
-	return validateIKEDeleteResponsePayloads("deleting old ike sa", payloads)
+	if err := validateIKEDeleteResponsePayloads(payloads); err != nil {
+		return fmt.Errorf("deleting old ike sa: %w", err)
+	}
+	return nil
 }
 
 func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
@@ -160,11 +166,13 @@ func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 		return ikeSARekeyState{}, nil, fmt.Errorf("rekeying ike sa: %w", errIKESAExpired)
 	}
 	state := ikeSARekeyState{
-		ike:            s.ike,
-		initiatorSPI:   s.initiatorSPI,
-		responderSPI:   s.responderSPI,
-		peer:           cloneUDPAddr(s.outerNAT),
-		localInitiator: s.ikeLocalInitiator,
+		ike:                       s.ike,
+		initiatorSPI:              s.initiatorSPI,
+		responderSPI:              s.responderSPI,
+		peer:                      outerIKEPeer(s.useNATT, s.outerRemote, s.outerNAT),
+		localInitiator:            s.ikeLocalInitiator,
+		ikeFragmentationSupported: s.ikeFragmentationSupported,
+		useNATT:                   s.useNATT,
 	}
 	if !state.available() {
 		return ikeSARekeyState{}, nil, errors.New("rekeying ike sa: ike state is unavailable")
@@ -186,12 +194,14 @@ func (state ikeSARekeyState) available() bool {
 
 func (state ikeSARekeyState) informationalState() informationalState {
 	return informationalState{
-		ike:            state.ike,
-		localInitiator: state.localInitiator,
-		retiredIKESA:   true,
-		initiatorSPI:   state.initiatorSPI,
-		responderSPI:   state.responderSPI,
-		peer:           cloneUDPAddr(state.peer),
+		ike:                       state.ike,
+		localInitiator:            state.localInitiator,
+		retiredIKESA:              true,
+		initiatorSPI:              state.initiatorSPI,
+		responderSPI:              state.responderSPI,
+		peer:                      cloneUDPAddr(state.peer),
+		ikeFragmentationSupported: state.ikeFragmentationSupported,
+		useNATT:                   state.useNATT,
 	}
 }
 
@@ -217,7 +227,7 @@ func newIKESARekeyCrypto(dhGroup uint16) (*ikeCrypto, error) {
 	return crypto, nil
 }
 
-func (state ikeSARekeyState) sealIKESARekeyRequest(messageID uint32, next *ikeCrypto) ([]byte, error) {
+func (state ikeSARekeyState) sealIKESARekeyRequest(messageID uint32, next *ikeCrypto) ([][]byte, error) {
 	header := ike.IKEHeader{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
@@ -226,11 +236,11 @@ func (state ikeSARekeyState) sealIKESARekeyRequest(messageID uint32, next *ikeCr
 		Flags:        state.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wire, err := state.ike.SealIKE(header, ikeSARekeyRequestPayloads(state.ike, next), state.localInitiator)
+	wires, err := sealIKEPackets(state.ike, header, ikeSARekeyRequestPayloads(state.ike, next), state.localInitiator, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
 	}
-	return wire, nil
+	return wires, nil
 }
 
 func (state ikeSARekeyState) initiatorFlag() byte {
@@ -331,14 +341,14 @@ func negotiatedIKESARekeyFromPayloadsWithRequests(payloads []ike.Payload, dhGrou
 	if nonce == nil || sa == nil || ke == nil {
 		return negotiatedIKESA{}, 0, nil, nil, errors.New("parsing create_child_sa response: required ike sa rekey payload is missing")
 	}
-	if err := validateNonceData("parsing create_child_sa response", nonce.Data); err != nil {
-		return negotiatedIKESA{}, 0, nil, nil, err
+	if err := validateNonceData(nonce.Data); err != nil {
+		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: %w", err)
 	}
 	if len(sa.Proposals) != 1 {
 		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: negotiated proposal count %d", len(sa.Proposals))
 	}
-	if err := validateNegotiatedProposalFromRequests("parsing create_child_sa response", sa.Proposals[0], requestProposals); err != nil {
-		return negotiatedIKESA{}, 0, nil, nil, err
+	if err := validateNegotiatedProposalFromRequests(sa.Proposals[0], requestProposals); err != nil {
+		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: %w", err)
 	}
 	if len(sa.Proposals[0].SPI) != 8 {
 		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: invalid responder ike spi length %d", len(sa.Proposals[0].SPI))
@@ -350,7 +360,7 @@ func negotiatedIKESARekeyFromPayloadsWithRequests(payloads []ike.Payload, dhGrou
 	return proposal, binary.BigEndian.Uint64(sa.Proposals[0].SPI), append([]byte(nil), nonce.Data...), append([]byte(nil), ke.Data...), nil
 }
 
-func (state ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([]byte, error) {
+func (state ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([][]byte, error) {
 	header := ike.IKEHeader{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
@@ -359,14 +369,14 @@ func (state ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([]byte, error
 		Flags:        state.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wire, err := state.ike.SealIKE(header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, state.localInitiator)
+	wires, err := sealIKEPackets(state.ike, header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, state.localInitiator, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, err
 	}
-	return wire, nil
+	return wires, nil
 }
 
-func (result ikeSARekeyResult) sealSelfDelete(messageID uint32) ([]byte, error) {
+func (result ikeSARekeyResult) sealSelfDelete(messageID uint32, fragmentationSupported bool) ([][]byte, error) {
 	header := ike.IKEHeader{
 		InitiatorSPI: result.initiatorSPI,
 		ResponderSPI: result.responderSPI,
@@ -375,11 +385,11 @@ func (result ikeSARekeyResult) sealSelfDelete(messageID uint32) ([]byte, error) 
 		Flags:        result.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wire, err := result.crypto.SealIKE(header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, result.localInitiator)
+	wires, err := sealIKEPackets(result.crypto, header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, result.localInitiator, fragmentationSupported)
 	if err != nil {
 		return nil, err
 	}
-	return wire, nil
+	return wires, nil
 }
 
 func (result ikeSARekeyResult) initiatorFlag() byte {
@@ -390,25 +400,28 @@ func (result ikeSARekeyResult) initiatorFlag() byte {
 }
 
 func (s *Session) deleteRedundantIKESA(ctx context.Context, peer *net.UDPAddr, result ikeSARekeyResult) error {
-	wire, err := result.sealSelfDelete(0)
-	if err != nil {
-		return fmt.Errorf("sealing redundant ike delete: %w", err)
-	}
-	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying ike sa")
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionRekeyIKESA)
 	if err != nil {
 		return err
 	}
 	defer releaseRequest()
 	state := s.stageRedundantIKESAForDelete(peer, result)
 	defer s.removeRetiredIKESA(state)
-	key := ikeMessageKeyForSPIs(result.initiatorSPI, result.responderSPI, 0)
+	wires, err := result.sealSelfDelete(0, state.ikeFragmentationSupported)
+	if err != nil {
+		return fmt.Errorf("sealing redundant ike delete: %w", err)
+	}
+	key := state.responseMessageKey(0, exchangeTypeInformational)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
-	payloads, err := s.exchangeInformationalRequest(ctx, state, 0, wire, waiter, "deleting redundant ike sa", true)
+	payloads, err := s.exchangeInformationalRequest(ctx, state, 0, wires, waiter, ikeActionDeleteRedundantIKESA, true)
 	if err != nil {
 		return err
 	}
-	return validateIKEDeleteResponsePayloads("deleting redundant ike sa", payloads)
+	if err := validateIKEDeleteResponsePayloads(payloads); err != nil {
+		return fmt.Errorf("deleting redundant ike sa: %w", err)
+	}
+	return nil
 }
 
 func (s *Session) installIKESecurityAssociation(result ikeSARekeyResult) {
@@ -434,8 +447,9 @@ func (s *Session) installIKESecurityAssociation(result ikeSARekeyResult) {
 	s.pendingIKESAReady = false
 	s.pruneRetiredIKESAs(now)
 	s.informWaiters = make(map[ikeMessageKey]chan inboundIKE)
-	s.informResponses = make(map[uint32][]byte)
+	s.informResponses = make(map[uint32][][]byte)
 	s.informResponseReqs = make(map[uint32][]byte)
+	s.ikeFragments = make(map[ikeMessageKey]*ikeFragmentReassembly)
 	s.mu.Unlock()
 	notifyInformationalWaiters(waiters, errIKESASuperseded)
 }
@@ -493,34 +507,40 @@ func (s *Session) retireIKESA(now time.Time) {
 		localInitiator:    s.ikeLocalInitiator,
 		initiatorSPI:      s.initiatorSPI,
 		responderSPI:      s.responderSPI,
-		peer:              cloneUDPAddr(s.outerNAT),
+		peer:              outerIKEPeer(s.useNATT, s.outerRemote, s.outerNAT),
+		useNATT:           s.useNATT,
 		nextPeerMessageID: s.nextPeerMessageID,
 		responses:         cloneIKEMessageResponses(s.informResponses),
-		responseReqs:      cloneIKEMessageResponses(s.informResponseReqs),
+		responseReqs:      cloneIKEMessageRequests(s.informResponseReqs),
 		expiresAt:         expiresAt,
 	})
 }
 
 func (s *Session) stageRedundantIKESAForDelete(peer *net.UDPAddr, result ikeSARekeyResult) informationalState {
-	state := informationalState{
-		ike:            result.crypto,
-		localInitiator: result.localInitiator,
-		retiredIKESA:   true,
-		initiatorSPI:   result.initiatorSPI,
-		responderSPI:   result.responderSPI,
-		peer:           cloneUDPAddr(peer),
-	}
 	s.mu.Lock()
+	fragmentationSupported := s.ikeFragmentationSupported
+	useNATT := s.useNATT
 	s.retiredIKESAs = append(s.retiredIKESAs, retiredIKESA{
 		ike:               result.crypto,
 		localInitiator:    result.localInitiator,
 		initiatorSPI:      result.initiatorSPI,
 		responderSPI:      result.responderSPI,
 		peer:              cloneUDPAddr(peer),
+		useNATT:           useNATT,
 		nextPeerMessageID: 0,
 		expiresAt:         time.Now().Add(ikeSADrainWindow),
 	})
 	s.mu.Unlock()
+	state := informationalState{
+		ike:                       result.crypto,
+		localInitiator:            result.localInitiator,
+		retiredIKESA:              true,
+		initiatorSPI:              result.initiatorSPI,
+		responderSPI:              result.responderSPI,
+		peer:                      cloneUDPAddr(peer),
+		ikeFragmentationSupported: fragmentationSupported,
+		useNATT:                   useNATT,
+	}
 	return state
 }
 
@@ -532,6 +552,7 @@ func (s *Session) retainPeerCreatedLosingIKESA(peer *net.UDPAddr, result ikeSARe
 		initiatorSPI:      result.initiatorSPI,
 		responderSPI:      result.responderSPI,
 		peer:              cloneUDPAddr(peer),
+		useNATT:           s.useNATT,
 		nextPeerMessageID: 0,
 		expiresAt:         time.Now().Add(ikeSADrainWindow),
 	})
@@ -559,13 +580,35 @@ func (s *Session) pruneRetiredIKESAs(now time.Time) {
 	s.retiredIKESAs = kept
 }
 
-func cloneIKEMessageResponses(responses map[uint32][]byte) map[uint32][]byte {
+func cloneIKEMessageResponses(responses map[uint32][][]byte) map[uint32][][]byte {
 	if len(responses) == 0 {
 		return nil
 	}
-	cloned := make(map[uint32][]byte, len(responses))
-	for messageID, wire := range responses {
-		cloned[messageID] = append([]byte(nil), wire...)
+	cloned := make(map[uint32][][]byte, len(responses))
+	for messageID, wires := range responses {
+		cloned[messageID] = cloneIKEPackets(wires)
+	}
+	return cloned
+}
+
+func cloneIKEMessageRequests(requests map[uint32][]byte) map[uint32][]byte {
+	if len(requests) == 0 {
+		return nil
+	}
+	cloned := make(map[uint32][]byte, len(requests))
+	for messageID, request := range requests {
+		cloned[messageID] = append([]byte(nil), request...)
+	}
+	return cloned
+}
+
+func cloneIKEPackets(packets [][]byte) [][]byte {
+	if len(packets) == 0 {
+		return nil
+	}
+	cloned := make([][]byte, len(packets))
+	for i, packet := range packets {
+		cloned[i] = append([]byte(nil), packet...)
 	}
 	return cloned
 }

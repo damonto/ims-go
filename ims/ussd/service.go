@@ -4,19 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
-	"strings"
 )
 
+var ErrIMSDomainNotAllowed = errors.New("ims ussd is not allowed by domain policy")
+
 func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service, error) {
-	cfg.Language = strings.TrimSpace(cfg.Language)
+	normalized, err := normalizeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	s := &Service{
-		cfg:           cfg,
+		cfg:           normalized,
 		sess:          sess,
 		reg:           reg,
-		logger:        cfg.Logger.With("component", "ims-ussd"),
+		logger:        normalized.Logger.With("component", "ims-ussd"),
 		sessions:      make(map[string]*Session),
 		incomingIndex: make(map[string]string),
 		done:          make(chan struct{}),
@@ -29,9 +36,30 @@ func New(cfg Config, sess *session.Session, reg *registration.Service) (*Service
 	return s, nil
 }
 
+func normalizeConfig(cfg Config) (Config, error) {
+	cfg.Language = strings.TrimSpace(cfg.Language)
+	cfg.PhoneContextDomain = strings.TrimSpace(cfg.PhoneContextDomain)
+	cfg.Domain = Domain(strings.ToLower(strings.TrimSpace(string(cfg.Domain))))
+	if cfg.Domain == "" {
+		cfg.Domain = DomainIMS
+	}
+	switch cfg.Domain {
+	case DomainIMS, DomainCS, DomainDisabled:
+	default:
+		return Config{}, fmt.Errorf("creating ussd service: unsupported domain %q", cfg.Domain)
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return cfg, nil
+}
+
 func (s *Service) Start(ctx context.Context, code string) (*Session, error) {
-	if err := s.ensureNoActiveSession("starting USSD"); err != nil {
-		return nil, err
+	if s.cfg.Domain != DomainIMS {
+		return nil, fmt.Errorf("starting USSD: %w", ErrIMSDomainNotAllowed)
+	}
+	if err := s.ensureNoActiveSession(); err != nil {
+		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
 	start, invite, err := s.newStart(code)
 	if err != nil {

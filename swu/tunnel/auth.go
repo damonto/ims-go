@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/eapaka"
@@ -11,22 +12,25 @@ import (
 )
 
 type akaAuthFlow struct {
-	session         *Session
-	card            Card
-	imei            string
-	identity        string
-	realm           string
-	eapIdentity     string
-	reauthIdentity  string
-	crypto          *ikeCrypto
-	initiatorSPI    uint64
-	responderSPI    uint64
-	ikeInitRequest  []byte
-	ikeInitResponse []byte
-	initiatorNonce  []byte
-	responderNonce  []byte
-	idrRaw          []byte
-	idiRaw          []byte
+	session                   *Session
+	card                      Card
+	imei                      string
+	identity                  string
+	realm                     string
+	eapIdentity               string
+	reauthIdentity            string
+	crypto                    *ikeCrypto
+	initiatorSPI              uint64
+	responderSPI              uint64
+	ikeInitRequest            []byte
+	ikeInitResponse           []byte
+	initiatorNonce            []byte
+	responderNonce            []byte
+	idrRaw                    []byte
+	idiRaw                    []byte
+	ikePeer                   *net.UDPAddr
+	useNATT                   bool
+	ikeFragmentationSupported bool
 
 	currentState  usim.AKAIdentityState
 	pendingState  usim.AKAIdentityState
@@ -59,7 +63,7 @@ type akaResponse struct {
 	afterSend error
 }
 
-func (f *akaAuthFlow) clientErrorResponse(identifier byte, action string, cause error) (akaResponse, error) {
+func (f *akaAuthFlow) clientErrorResponse(identifier byte, cause error) (akaResponse, error) {
 	eapType := eapTypeAKA
 	if f.currentEAPType == eapTypeAKAPrime {
 		eapType = eapTypeAKAPrime
@@ -70,11 +74,11 @@ func (f *akaAuthFlow) clientErrorResponse(identifier byte, action string, cause 
 	}
 	return akaResponse{
 		data:      data,
-		afterSend: fmt.Errorf("connecting swu session: %s: %w", action, cause),
+		afterSend: fmt.Errorf("connecting swu session: %w", cause),
 	}, nil
 }
 
-func (s *Session) authenticateEAPAKA(ctx context.Context, card Card, imei, identity, realm string, initialState usim.AKAIdentityState, crypto *ikeCrypto, initiatorSPI, responderSPI uint64, ikeInitRequest, ikeInitResponse, initiatorNonce, responderNonce []byte, idiRaw []byte, firstServerPayloads []ike.Payload) ([]ike.Payload, uint32, error) {
+func (s *Session) authenticateEAPAKA(ctx context.Context, card Card, imei, identity, realm string, initialState usim.AKAIdentityState, crypto *ikeCrypto, initiatorSPI, responderSPI uint64, ikeInitRequest, ikeInitResponse, initiatorNonce, responderNonce []byte, idiRaw []byte, ikePeer *net.UDPAddr, useNATT bool, ikeFragmentationSupported bool, firstServerPayloads []ike.Payload) ([]ike.Payload, uint32, error) {
 	idrRaw, err := responderIDRawFromPayloads(firstServerPayloads)
 	if err != nil {
 		return nil, 0, err
@@ -95,6 +99,9 @@ func (s *Session) authenticateEAPAKA(ctx context.Context, card Card, imei, ident
 		responderNonce:                   responderNonce,
 		idrRaw:                           idrRaw,
 		idiRaw:                           idiRaw,
+		ikePeer:                          cloneUDPAddr(ikePeer),
+		useNATT:                          useNATT,
+		ikeFragmentationSupported:        ikeFragmentationSupported,
 		currentState:                     cloneAKAIdentityState(initialState),
 		pendingState:                     cloneAKAIdentityState(initialState),
 		nextRequestID:                    2,
@@ -230,7 +237,7 @@ func (f *akaAuthFlow) handleRequest(ctx context.Context, serverPayloads []ike.Pa
 	f.currentEAPType = eapType
 	var message eapaka.AKAMessage
 	if err := message.UnmarshalBinary(eapData); err != nil {
-		response, buildErr := f.clientErrorResponse(identifier, "parsing aka message", err)
+		response, buildErr := f.clientErrorResponse(identifier, fmt.Errorf("parsing aka message: %w", err))
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -268,21 +275,21 @@ func (f *akaAuthFlow) buildResponse(ctx context.Context, message eapaka.AKAMessa
 	case akaSubtypeNotification:
 		return f.buildNotificationResponse(message, eapData)
 	default:
-		return f.clientErrorResponse(message.Identifier, "handling aka request", fmt.Errorf("unsupported aka subtype %d", message.Subtype))
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("handling aka request: unsupported aka subtype %d", message.Subtype))
 	}
 }
 
 func (f *akaAuthFlow) buildIdentityResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	requestType, extended, err := identityRequestType(message.Attributes)
 	if err != nil {
-		return f.clientErrorResponse(message.Identifier, "selecting aka identity", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("selecting aka identity: %w", err))
 	}
 	if err := f.validateIdentityRequest(requestType); err != nil {
-		return f.clientErrorResponse(message.Identifier, "validating aka identity request", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("validating aka identity request: %w", err))
 	}
 	identityResponse, err := selectAKAIdentity(f.card, f.realm, f.currentState, requestType, message.EAPType)
 	if err != nil {
-		return f.clientErrorResponse(message.Identifier, "selecting aka identity", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("selecting aka identity: %w", err))
 	}
 	var data []byte
 	if message.EAPType == eapTypeAKAPrime {

@@ -23,30 +23,32 @@ const (
 )
 
 type connectState struct {
-	input           handshake.ConnectInput
-	saInit          handshake.SAInitState
-	auth            handshake.AuthState
-	established     handshake.Established
-	card            Card
-	imei            string
-	identity        string
-	realm           string
-	initialAKAState usim.AKAIdentityState
-	crypto          *ikeCrypto
-	initiatorSPI    uint64
-	responderSPI    uint64
-	espInitiatorSPI uint32
-	nonceI          []byte
-	ikeInitCookie   []byte
-	ikeInitRequest  []byte
-	ikeInitResponse []byte
-	responderNonce  []byte
-	nattSupported   bool
-	natDetected     bool
-	nextMessageID   uint32
-	finalPayloads   []ike.Payload
-	tunnel          Info
-	espKeys         ESPKeys
+	input                     handshake.ConnectInput
+	saInit                    handshake.SAInitState
+	auth                      handshake.AuthState
+	established               handshake.Established
+	card                      Card
+	imei                      string
+	identity                  string
+	realm                     string
+	initialAKAState           usim.AKAIdentityState
+	crypto                    *ikeCrypto
+	initiatorSPI              uint64
+	responderSPI              uint64
+	espInitiatorSPI           uint32
+	nonceI                    []byte
+	ikeInitCookie             []byte
+	ikeInitRequest            []byte
+	ikeInitResponse           []byte
+	responderNonce            []byte
+	nattSupported             bool
+	natDetected               bool
+	useNATT                   bool
+	ikeFragmentationSupported bool
+	nextMessageID             uint32
+	finalPayloads             []ike.Payload
+	tunnel                    Info
+	espKeys                   ESPKeys
 }
 
 func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
@@ -60,7 +62,7 @@ func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
 		s.logger.Error("IKE_SA_INIT exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
-	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected)
+	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected, "ike_fragmentation_supported", state.ikeFragmentationSupported)
 	if err := s.exchangeIKEAuth(ctx, state); err != nil {
 		s.logger.Error("IKE_AUTH exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
@@ -209,6 +211,20 @@ func (state *connectState) inboundESPCodec() esp.Codec {
 	return inboundESPCodec(state.tunnel, state.espKeys)
 }
 
+func (s *Session) connectIKEPeer(state *connectState) (*net.UDPAddr, bool) {
+	if state != nil && state.useNATT {
+		return cloneUDPAddr(s.outerNAT), true
+	}
+	return cloneUDPAddr(s.outerRemote), false
+}
+
+func outerIKEPeer(useNATT bool, outerRemote, outerNAT *net.UDPAddr) *net.UDPAddr {
+	if useNATT {
+		return cloneUDPAddr(outerNAT)
+	}
+	return cloneUDPAddr(outerRemote)
+}
+
 func outboundESPCodec(info Info, keys ESPKeys) esp.Codec {
 	return esp.Codec{
 		SPI:           info.ESPResponderSPI,
@@ -234,6 +250,9 @@ func (state *connectState) innerLocalAddr(port int) *net.UDPAddr {
 }
 
 func (state *connectState) innerRemoteAddr(port int) *net.UDPAddr {
+	if len(state.tunnel.PCSCFIP) == 0 {
+		return nil
+	}
 	return &net.UDPAddr{IP: append(net.IP(nil), state.tunnel.PCSCFIP...), Port: port}
 }
 

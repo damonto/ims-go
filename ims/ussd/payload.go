@@ -13,6 +13,33 @@ import (
 var errBadInfoPackage = errors.New("bad info package")
 var errUnsupportedMediaType = errors.New("unsupported media type")
 
+type payloadContext uint8
+
+const (
+	payloadContextUSSDInfo payloadContext = iota
+	payloadContextUSSDInvite
+	payloadContextSDP
+	payloadContextUSSDPayload
+	payloadContextUSSDBye
+)
+
+func (c payloadContext) String() string {
+	switch c {
+	case payloadContextUSSDInfo:
+		return "parsing USSD INFO"
+	case payloadContextUSSDInvite:
+		return "parsing USSD INVITE"
+	case payloadContextSDP:
+		return "validating SDP"
+	case payloadContextUSSDPayload:
+		return "parsing USSD payload"
+	case payloadContextUSSDBye:
+		return "parsing USSD BYE"
+	default:
+		return "parsing USSD"
+	}
+}
+
 func validateInboundInfo(msg sip.Message, requireRequestMarker bool) (Message, error) {
 	if !sip.TokenListContains(msg.Header("Info-Package"), infoPackage) {
 		return Message{}, fmt.Errorf("%w: missing Info-Package %q", errBadInfoPackage, infoPackage)
@@ -20,7 +47,7 @@ func validateInboundInfo(msg sip.Message, requireRequestMarker bool) (Message, e
 	if !validInfoContentDisposition(msg.Header("Content-Disposition")) {
 		return Message{}, errors.New("bad Content-Disposition info-package")
 	}
-	payload, err := decodeSinglePayload("parsing USSD INFO", msg)
+	payload, err := decodeSinglePayload(payloadContextUSSDInfo, msg)
 	if err != nil {
 		return Message{}, err
 	}
@@ -30,22 +57,22 @@ func validateInboundInfo(msg sip.Message, requireRequestMarker bool) (Message, e
 	return payload, nil
 }
 
-func splitContentTypeHeader(action, rawContentType string) (string, map[string]string, error) {
+func splitContentTypeHeader(context payloadContext, rawContentType string) (string, map[string]string, error) {
 	rawContentType = strings.TrimSpace(rawContentType)
 	if rawContentType == "" {
-		return "", nil, fmt.Errorf("%s: content type is empty", action)
+		return "", nil, fmt.Errorf("%s: content type is empty", context)
 	}
 	mediaType, params, err := mime.ParseMediaType(rawContentType)
 	if err != nil {
-		return "", nil, fmt.Errorf("%s: content type: %w", action, err)
+		return "", nil, fmt.Errorf("%s: content type: %w", context, err)
 	}
 	return strings.ToLower(mediaType), params, nil
 }
 
-func readMultipartMessageBody(action string, params map[string]string, data []byte) (multipartBody, error) {
+func readMultipartMessageBody(context payloadContext, params map[string]string, data []byte) (multipartBody, error) {
 	boundary := params["boundary"]
 	if boundary == "" {
-		return multipartBody{}, fmt.Errorf("%s: multipart boundary is empty", action)
+		return multipartBody{}, fmt.Errorf("%s: multipart boundary is empty", context)
 	}
 	body := multipartBody{Boundary: boundary}
 	if err := body.UnmarshalBinary(data); err != nil {
@@ -54,13 +81,13 @@ func readMultipartMessageBody(action string, params map[string]string, data []by
 	return body, nil
 }
 
-func decodeMultipartPayload(action string, body multipartBody) (Message, error) {
+func decodeMultipartPayload(context payloadContext, body multipartBody) (Message, error) {
 	payload, ok, err := body.payload()
 	if err != nil {
 		return Message{}, err
 	}
 	if !ok {
-		return Message{}, fmt.Errorf("%s: %s part not found", action, xmlContentType)
+		return Message{}, fmt.Errorf("%s: %s part not found", context, xmlContentType)
 	}
 	return payload, nil
 }
@@ -83,16 +110,16 @@ func validateOptionalMultipartSDP(body multipartBody) (bool, error) {
 	return found, nil
 }
 
-func validateMultipartMessageSDP(action string, body multipartBody) error {
+func validateMultipartMessageSDP(context payloadContext, body multipartBody) error {
 	part, ok := body.part(sdpContentType)
 	if !ok {
-		return fmt.Errorf("%s: %s part not found", action, sdpContentType)
+		return fmt.Errorf("%s: %s part not found", context, sdpContentType)
 	}
 	return validateSDPBody(part.Body)
 }
 
 func validateMessageSDP(msg sip.Message) error {
-	mediaType, params, err := splitContentTypeHeader("validating SDP", msg.Header("Content-Type"))
+	mediaType, params, err := splitContentTypeHeader(payloadContextSDP, msg.Header("Content-Type"))
 	if err != nil {
 		return err
 	}
@@ -100,14 +127,14 @@ func validateMessageSDP(msg sip.Message) error {
 	case sdpContentType:
 		return validateSDPBody(msg.Body)
 	case mixedMultipartType:
-		body, err := readMultipartMessageBody("validating SDP", params, msg.Body)
+		body, err := readMultipartMessageBody(payloadContextSDP, params, msg.Body)
 		if err != nil {
 			return err
 		}
-		if err := body.rejectUnsupportedRequiredParts("validating SDP", sdpContentType, xmlContentType); err != nil {
+		if err := body.rejectUnsupportedRequiredParts(payloadContextSDP, sdpContentType, xmlContentType); err != nil {
 			return err
 		}
-		return validateMultipartMessageSDP("validating SDP", body)
+		return validateMultipartMessageSDP(payloadContextSDP, body)
 	default:
 		return fmt.Errorf("%w: unsupported content type %q", errUnsupportedMediaType, mediaType)
 	}
@@ -148,7 +175,7 @@ func decodePayload(msg sip.Message) (Message, error) {
 		}
 		return Message{}, errors.New("parsing USSD payload: content type is empty")
 	}
-	mediaType, params, err := splitContentTypeHeader("parsing USSD payload", rawContentType)
+	mediaType, params, err := splitContentTypeHeader(payloadContextUSSDPayload, rawContentType)
 	if err != nil {
 		return Message{}, err
 	}
@@ -156,26 +183,26 @@ func decodePayload(msg sip.Message) (Message, error) {
 	case xmlContentType:
 		return decodeXML(msg.Body)
 	case mixedMultipartType:
-		body, err := readMultipartMessageBody("parsing USSD payload", params, msg.Body)
+		body, err := readMultipartMessageBody(payloadContextUSSDPayload, params, msg.Body)
 		if err != nil {
 			return Message{}, err
 		}
-		if err := body.rejectUnsupportedRequiredParts("parsing USSD payload", xmlContentType, sdpContentType); err != nil {
+		if err := body.rejectUnsupportedRequiredParts(payloadContextUSSDPayload, xmlContentType, sdpContentType); err != nil {
 			return Message{}, err
 		}
-		return decodeMultipartPayload("parsing USSD payload", body)
+		return decodeMultipartPayload(payloadContextUSSDPayload, body)
 	default:
 		return Message{}, fmt.Errorf("%w: parsing USSD payload: unsupported content type %q", errUnsupportedMediaType, mediaType)
 	}
 }
 
-func decodeSinglePayload(action string, msg sip.Message) (Message, error) {
-	mediaType, _, err := splitContentTypeHeader(action, msg.Header("Content-Type"))
+func decodeSinglePayload(context payloadContext, msg sip.Message) (Message, error) {
+	mediaType, _, err := splitContentTypeHeader(context, msg.Header("Content-Type"))
 	if err != nil {
 		return Message{}, err
 	}
 	if mediaType != xmlContentType {
-		return Message{}, fmt.Errorf("%w: %s: unsupported content type %q", errUnsupportedMediaType, action, mediaType)
+		return Message{}, fmt.Errorf("%w: %s: unsupported content type %q", errUnsupportedMediaType, context, mediaType)
 	}
 	return decodeXML(msg.Body)
 }

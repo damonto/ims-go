@@ -11,9 +11,9 @@ import (
 )
 
 func (s *Service) Register(ctx context.Context) error {
-	release, err := s.beginRegistrationProcedure(ctx, "registering IMS")
+	release, err := s.beginRegistrationProcedure(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("registering IMS: %w", err)
 	}
 	defer release()
 
@@ -45,9 +45,9 @@ func (s *Service) Register(ctx context.Context) error {
 		if err == nil {
 			break
 		}
-		resp, err := s.exchangeAKAFailure(ctx, "registering IMS", challenge, err)
+		resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), err)
 		if err != nil {
-			return err
+			return fmt.Errorf("registering IMS: %w", err)
 		}
 		if resynchronized {
 			return errors.New("registering IMS: repeated AKA synchronization failure")
@@ -118,9 +118,9 @@ func (s *Service) Establish(ctx context.Context) error {
 }
 
 func (s *Service) Refresh(ctx context.Context) error {
-	release, err := s.beginRegistrationProcedure(ctx, "refreshing IMS registration")
+	release, err := s.beginRegistrationProcedure(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
 	defer release()
 
@@ -128,9 +128,9 @@ func (s *Service) Refresh(ctx context.Context) error {
 	for range 6 {
 		req, auth, err := s.buildRefreshRegister(ctx)
 		if err != nil {
-			resp, err := s.exchangeCurrentAKAFailure(ctx, "refreshing IMS registration", err)
+			resp, err := s.exchangeCurrentAKAFailure(ctx, err)
 			if err != nil {
-				return err
+				return fmt.Errorf("refreshing IMS registration: %w", err)
 			}
 			done, err := s.handleRefreshRegistration(ctx, resp, &state, nil)
 			if err != nil {
@@ -187,9 +187,9 @@ func (s *Service) Maintain(ctx context.Context) error {
 }
 
 func (s *Service) Deregister(ctx context.Context) error {
-	release, err := s.beginRegistrationProcedure(ctx, "deregistering IMS")
+	release, err := s.beginRegistrationProcedure(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("deregistering IMS: %w", err)
 	}
 	defer release()
 

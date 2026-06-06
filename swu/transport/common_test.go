@@ -67,7 +67,7 @@ func TestValidateSecureESPConfigRequiresIntegrity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSecureESPConfig("testing secure transport", tt.encryption, esp.IntegrityNone, tt.key, nil)
+			err := validateSecureESPConfig(tt.encryption, esp.IntegrityNone, tt.key, nil)
 			if err == nil {
 				t.Fatal("validateSecureESPConfig() error = nil, want integrity error")
 			}

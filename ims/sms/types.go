@@ -48,7 +48,6 @@ type Service struct {
 	recent    map[string]time.Time
 	concat    map[string]concatState
 	moState   moTransferState
-	moPending int
 	mtState   mtTransferState
 	closed    bool
 }
@@ -89,11 +88,12 @@ type pendingEntry struct {
 }
 
 type submittedEntry struct {
-	rpRef     byte
-	expiresAt time.Time
-	segment   outboundSegment
-	response  submitResponse
-	completed bool
+	rpRef             byte
+	expiresAt         time.Time
+	segment           outboundSegment
+	response          submitResponse
+	requiresInReplyTo bool
+	completed         bool
 }
 
 type submitResponse struct {
@@ -119,7 +119,6 @@ type moTransferState uint8
 const (
 	moTransferIdle moTransferState = iota
 	moTransferSending
-	moTransferWaitingReports
 )
 
 type mtTransferState uint8

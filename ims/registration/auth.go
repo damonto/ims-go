@@ -12,11 +12,24 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) storeAuthChallenge(challenge security.Challenge) {
+const (
+	registerAuthorizationHeader      = "Authorization"
+	registerProxyAuthorizationHeader = "Proxy-Authorization"
+)
+
+type registerAuthChallenge struct {
+	challenge           security.Challenge
+	authorizationHeader string
+	verify              *security.Param
+	rawSecurityServer   []string
+}
+
+func (s *Service) storeAuthChallenge(challenge security.Challenge, authorizationHeader string) {
 	realm := strings.TrimSpace(challenge.Realm)
 	if realm == "" {
 		realm = strings.TrimPrefix(s.State().RegisterURI, "sip:")
 	}
+	authorizationHeader = registerAuthorizationHeaderName(authorizationHeader)
 	s.mu.Lock()
 	if s.authDigestNonce != challenge.Nonce || !strings.EqualFold(s.authDigestAlgorithm, challenge.Algorithm) {
 		s.authDigestNonce = ""
@@ -27,6 +40,7 @@ func (s *Service) storeAuthChallenge(challenge security.Challenge) {
 	s.authNonce = challenge.Nonce
 	s.authAlgorithm = challenge.Algorithm
 	s.authQOP = challenge.QOP
+	s.authHeader = authorizationHeader
 	s.authNonceCount = 0
 	s.mu.Unlock()
 }
@@ -39,6 +53,12 @@ func (s *Service) currentAuthState() (string, string, string, string) {
 		realm = strings.TrimPrefix(s.state.RegisterURI, "sip:")
 	}
 	return realm, s.authNonce, s.authAlgorithm, s.authQOP
+}
+
+func (s *Service) currentAuthorizationHeaderName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return registerAuthorizationHeaderName(s.authHeader)
 }
 
 func (s *Service) nextAuthNonceCount() uint32 {
@@ -138,34 +158,64 @@ func (s *Service) storeDigestCredential(algorithm, nonce, password string, ck, i
 }
 
 func (s *Service) applyRegisterChallenge(resp sip.Message) (security.Challenge, error) {
-	challenge, verify, raw, err := parseRegisterChallenge(resp)
+	parsed, err := parseRegisterChallenge(resp)
 	if err != nil {
 		return security.Challenge{}, err
 	}
-	s.applySelectedSecurityServer(verify, raw)
-	s.storeAuthChallenge(challenge)
-	return challenge, nil
+	s.applySelectedSecurityServer(parsed.verify, parsed.rawSecurityServer)
+	s.storeAuthChallenge(parsed.challenge, parsed.authorizationHeader)
+	return parsed.challenge, nil
 }
 
-func parseRegisterChallenge(resp sip.Message) (security.Challenge, *security.Param, []string, error) {
-	challenge, err := selectRegisterChallenge(resp.HeadersByName("WWW-Authenticate"))
+func parseRegisterChallenge(resp sip.Message) (registerAuthChallenge, error) {
+	parsed, err := selectRegisterChallengeForResponse(resp)
 	if err != nil {
-		return security.Challenge{}, nil, nil, err
+		return registerAuthChallenge{}, err
 	}
+	challenge := parsed.challenge
 	if challenge.Algorithm == security.AlgorithmAKAv2SHA256 {
 		if !securityServerSupportsTLS(resp.HeadersByName("Security-Server")) {
-			return security.Challenge{}, nil, nil, errors.New("applying Security-Server: AKAv2-SHA-256 requires tls security mechanism")
+			return registerAuthChallenge{}, errors.New("applying Security-Server: AKAv2-SHA-256 requires tls security mechanism")
 		}
-		return security.Challenge{}, nil, nil, errors.New("applying Security-Server: AKAv2-SHA-256 over TLS is not supported by this SIP transport")
+		return registerAuthChallenge{}, errors.New("applying Security-Server: AKAv2-SHA-256 over TLS is not supported by this SIP transport")
 	}
 	verify, raw, err := selectSecurityServer(resp.HeadersByName("Security-Server"))
 	if err != nil {
-		return security.Challenge{}, nil, nil, fmt.Errorf("%w: %w", errSecurityAgreementInvalid, err)
+		return registerAuthChallenge{}, fmt.Errorf("%w: %w", errSecurityAgreementInvalid, err)
 	}
-	return challenge, verify, raw, nil
+	parsed.verify = verify
+	parsed.rawSecurityServer = raw
+	return parsed, nil
 }
 
-func selectRegisterChallenge(values []string) (security.Challenge, error) {
+func selectRegisterChallengeForResponse(resp sip.Message) (registerAuthChallenge, error) {
+	challengeHeader, authorizationHeader := registerChallengeHeaders(resp.StatusCode())
+	challenge, err := selectRegisterChallenge(challengeHeader, resp.HeadersByName(challengeHeader))
+	if err != nil {
+		return registerAuthChallenge{}, err
+	}
+	return registerAuthChallenge{challenge: challenge, authorizationHeader: authorizationHeader}, nil
+}
+
+func registerChallengeHeaders(status int) (string, string) {
+	if status == sipStatusProxyAuthenticationRequired {
+		return "Proxy-Authenticate", registerProxyAuthorizationHeader
+	}
+	return "WWW-Authenticate", registerAuthorizationHeader
+}
+
+func registerAuthorizationHeaderName(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), registerProxyAuthorizationHeader) {
+		return registerProxyAuthorizationHeader
+	}
+	return registerAuthorizationHeader
+}
+
+func registerAuthChallengeStatus(status int) bool {
+	return status == sipStatusUnauthorized || status == sipStatusProxyAuthenticationRequired
+}
+
+func selectRegisterChallenge(headerName string, values []string) (security.Challenge, error) {
 	var firstErr error
 	seen := false
 	for _, value := range values {
@@ -190,7 +240,7 @@ func selectRegisterChallenge(values []string) (security.Challenge, error) {
 		return challenge, nil
 	}
 	if !seen {
-		return security.Challenge{}, errors.New("selecting auth challenge: WWW-Authenticate header is empty")
+		return security.Challenge{}, fmt.Errorf("selecting auth challenge: %s header is empty", headerName)
 	}
 	return security.Challenge{}, fmt.Errorf("selecting auth challenge: %w", firstErr)
 }
@@ -230,37 +280,38 @@ func (s *Service) applyAuthenticationInfo(msg sip.Message) {
 	s.mu.Unlock()
 }
 
-func (s *Service) exchangeAKAFailure(ctx context.Context, action string, challenge security.Challenge, cause error) (sip.Message, error) {
+func (s *Service) exchangeAKAFailure(ctx context.Context, challenge security.Challenge, authorizationHeader string, cause error) (sip.Message, error) {
 	var failure *security.AKAChallengeFailure
 	if !errors.As(cause, &failure) {
-		return sip.Message{}, fmt.Errorf("%s: %w", action, cause)
+		return sip.Message{}, cause
 	}
 	auth := s.akaFailureAuthorization(challenge, failure)
-	req := s.buildRegister(&auth, s.currentSecurityVerify())
+	req := s.buildRegisterWithAuthorizationHeader(&auth, s.currentSecurityVerify(), authorizationHeader)
 	if !failure.SynchronizationFailure() {
 		if err := s.sess.Send(ctx, req); err != nil {
-			return sip.Message{}, fmt.Errorf("%s: reporting AKA failure: %w", action, err)
+			return sip.Message{}, fmt.Errorf("reporting AKA failure: %w", err)
 		}
-		return sip.Message{}, fmt.Errorf("%s: %w", action, cause)
+		return sip.Message{}, cause
 	}
 	resp, err := s.sess.Exchange(ctx, req)
 	if err != nil {
-		return sip.Message{}, fmt.Errorf("%s: reporting AKA synchronization failure: %w", action, err)
+		return sip.Message{}, fmt.Errorf("reporting AKA synchronization failure: %w", err)
 	}
-	if resp.StatusCode() != sipStatusUnauthorized {
-		return sip.Message{}, fmt.Errorf("%s: expected 401 after AKA synchronization failure, got %w", action, sip.NewResponseError(resp))
+	if !registerAuthChallengeStatus(resp.StatusCode()) {
+		return sip.Message{}, fmt.Errorf("expected authentication challenge after AKA synchronization failure, got %w", sip.NewResponseError(resp))
 	}
 	return resp, nil
 }
 
-func (s *Service) exchangeCurrentAKAFailure(ctx context.Context, action string, cause error) (sip.Message, error) {
+func (s *Service) exchangeCurrentAKAFailure(ctx context.Context, cause error) (sip.Message, error) {
 	realm, nonce, algorithm, qop := s.currentAuthState()
-	return s.exchangeAKAFailure(ctx, action, security.Challenge{
+	authorizationHeader := s.currentAuthorizationHeaderName()
+	return s.exchangeAKAFailure(ctx, security.Challenge{
 		Realm:     realm,
 		Nonce:     nonce,
 		Algorithm: algorithm,
 		QOP:       qop,
-	}, cause)
+	}, authorizationHeader, cause)
 }
 
 func (s *Service) akaFailureAuthorization(challenge security.Challenge, failure *security.AKAChallengeFailure) security.Authorization {

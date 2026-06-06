@@ -66,13 +66,13 @@ func InitialRegistrationRequired(err error) bool {
 	return errors.As(err, &initial)
 }
 
-func (s *Service) adjustRegisterExpiresFrom423(action string, resp sip.Message, adjusted *bool) error {
+func (s *Service) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *bool) error {
 	if *adjusted {
-		return fmt.Errorf("%s: repeated 423 response", action)
+		return errors.New("repeated 423 response")
 	}
 	minExpires, err := minExpiresSeconds(resp.Header("Min-Expires"))
 	if err != nil {
-		return fmt.Errorf("%s: %w", action, err)
+		return err
 	}
 	s.setRegisterExpires(max(s.currentRegisterExpires(), time.Duration(minExpires)*time.Second))
 	*adjusted = true
@@ -96,19 +96,19 @@ func (s *Service) handleRefreshRegistration(ctx context.Context, resp sip.Messag
 		}
 		s.applyRegisterSuccess(resp)
 		return true, nil
-	case sipStatusUnauthorized:
+	case sipStatusUnauthorized, sipStatusProxyAuthenticationRequired:
 		if err := s.reauthenticateRefresh(ctx, resp); err != nil {
 			return false, err
 		}
 		return true, nil
 	case sipStatusIntervalTooBrief:
-		if err := s.adjustRegisterExpiresFrom423("refreshing IMS registration", resp, &state.adjustedExpires); err != nil {
-			return false, err
+		if err := s.adjustRegisterExpiresFrom423(resp, &state.adjustedExpires); err != nil {
+			return false, fmt.Errorf("refreshing IMS registration: %w", err)
 		}
 		return false, nil
 	default:
 		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
-			return false, initialRegistrationRequiredError("refreshing IMS registration", resp)
+			return false, fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
 		}
 		return false, fmt.Errorf("refreshing IMS registration: unexpected response: %w", sip.NewResponseError(resp))
 	}
@@ -127,12 +127,12 @@ func reregistrationInitialRequiredStatus(status int) bool {
 	}
 }
 
-func initialRegistrationRequiredError(action string, resp sip.Message) error {
+func initialRegistrationRequiredError(resp sip.Message) error {
 	initial := &initialRegistrationRequired{}
 	if retryAfter, ok := retryAfterDelay(resp); ok {
 		initial.retryAfter = retryAfter
 	}
-	return fmt.Errorf("%s: %w after %w", action, initial, sip.NewResponseError(resp))
+	return fmt.Errorf("%w after %w", initial, sip.NewResponseError(resp))
 }
 
 func minExpiresSeconds(value string) (int, error) {

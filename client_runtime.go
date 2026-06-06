@@ -174,8 +174,26 @@ func (c *Client) newIMSRestoreContext(runtime *connectionRuntime) (context.Conte
 }
 
 type imsRuntimeResult struct {
-	action string
-	err    error
+	task imsRuntimeTask
+	err  error
+}
+
+type imsRuntimeTask uint8
+
+const (
+	imsRuntimeTaskRunSession imsRuntimeTask = iota
+	imsRuntimeTaskMaintainRegistration
+)
+
+func (t imsRuntimeTask) String() string {
+	switch t {
+	case imsRuntimeTaskRunSession:
+		return "running IMS session"
+	case imsRuntimeTaskMaintainRegistration:
+		return "maintaining IMS registration"
+	default:
+		return "running IMS runtime"
+	}
 }
 
 func (r *connectionRunner) runIMSRuntime() error {
@@ -184,10 +202,10 @@ func (r *connectionRunner) runIMSRuntime() error {
 
 	results := make(chan imsRuntimeResult, 2)
 	go func() {
-		results <- imsRuntimeResult{action: "running IMS session", err: r.active.ims.sip.Run(runCtx)}
+		results <- imsRuntimeResult{task: imsRuntimeTaskRunSession, err: r.active.ims.sip.Run(runCtx)}
 	}()
 	go func() {
-		results <- imsRuntimeResult{action: "maintaining IMS registration", err: r.active.ims.reg.Maintain(runCtx)}
+		results <- imsRuntimeResult{task: imsRuntimeTaskMaintainRegistration, err: r.active.ims.reg.Maintain(runCtx)}
 	}()
 
 	first := <-results
@@ -196,7 +214,7 @@ func (r *connectionRunner) runIMSRuntime() error {
 
 	for _, result := range []imsRuntimeResult{first, second} {
 		if result.err != nil && !errors.Is(result.err, context.Canceled) {
-			return fmt.Errorf("%s: %w", result.action, result.err)
+			return fmt.Errorf("%s: %w", result.task, result.err)
 		}
 	}
 	return nil

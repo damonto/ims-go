@@ -30,7 +30,7 @@ func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) er
 			return c.service.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
 		c.restartMediaInactivityWatch()
-		c.setHoldState(hold, "remote session modification")
+		c.setHoldState(hold, callActionRemoteSessionModification)
 	}
 	resp := c.buildSessionRefreshOK(req.Message)
 	if len(answer) != 0 {
@@ -83,7 +83,7 @@ func (c *Call) handleReINVITE(ctx context.Context, req session.Request) error {
 			return c.service.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
 		c.restartMediaInactivityWatch()
-		c.setHoldState(hold, "remote session modification")
+		c.setHoldState(hold, callActionRemoteSessionModification)
 	}
 	resp := c.buildSessionRefreshOK(req.Message)
 	if len(answer) != 0 {

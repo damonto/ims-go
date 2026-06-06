@@ -42,6 +42,14 @@ const (
 	ErrorCodeUnexpectedDataValue = 3
 )
 
+type Domain string
+
+const (
+	DomainIMS      Domain = "ims"
+	DomainCS       Domain = "cs"
+	DomainDisabled Domain = "disabled"
+)
+
 const (
 	sipStatusTrying                      = 100
 	sipStatusOK                          = 200
@@ -58,6 +66,7 @@ const (
 type Config struct {
 	Language                  string
 	PhoneContextDomain        string
+	Domain                    Domain
 	NetworkInitiatedSupported bool
 	OnIncoming                func(*Session, Message)
 	Logger                    *slog.Logger
@@ -157,9 +166,27 @@ type multipartBodyPart struct {
 
 type queuedRequest struct {
 	msg     sip.Message
-	action  string
+	action  sessionAction
 	final   bool
 	timeout time.Duration
+}
+
+type sessionAction uint8
+
+const (
+	sessionActionReplyUSSD sessionAction = iota
+	sessionActionEndUSSD
+)
+
+func (a sessionAction) String() string {
+	switch a {
+	case sessionActionReplyUSSD:
+		return "replying USSD"
+	case sessionActionEndUSSD:
+		return "ending USSD"
+	default:
+		return "exchanging USSD"
+	}
 }
 
 type startRequest struct {

@@ -33,7 +33,7 @@ func (s *Session) sendInvalidMessageIDNotification(state informationalState, inv
 	}
 	ctx, cancel := s.timeoutContext(invalidMessageIDNotifyTimeout)
 	defer cancel()
-	release, err := s.acquireIKERequest(ctx, "sending invalid message id notification")
+	release, err := s.acquireIKERequest(ctx, ikeActionSendInvalidMessageIDNotification)
 	if err != nil {
 		return err
 	}
@@ -42,16 +42,16 @@ func (s *Session) sendInvalidMessageIDNotification(state informationalState, inv
 	if err != nil {
 		return fmt.Errorf("sending invalid message id notification: %w", err)
 	}
-	key := state.messageKey(messageID)
+	key := state.responseMessageKey(messageID, exchangeTypeInformational)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
-	wire, err := state.sealInitiatorRequest(messageID, []ike.Payload{
+	wires, err := state.sealInitiatorRequest(messageID, []ike.Payload{
 		&ike.NotifyPayload{NotifyType: notifyTypeInvalidMessageID, Data: uint32Bytes(invalidMessageID)},
 	})
 	if err != nil {
 		return fmt.Errorf("sending invalid message id notification: sealing request: %w", err)
 	}
-	if _, err := s.exchangeInformational(ctx, state, messageID, wire, waiter); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := s.exchangeInformational(ctx, state, messageID, wires, waiter); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	return nil

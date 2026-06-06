@@ -57,7 +57,7 @@ func TestEstablishedIKEExchangesUseConfiguredRetransmitSchedule(t *testing.T) {
 				crypto := testIKECrypto()
 				state := informationalState{ike: crypto, localInitiator: true, peer: session.outerNAT}
 				wire := protectedIKEWire(t, crypto, exchangeTypeInformational, flagInitiator, 7, nil, true)
-				_, err := session.exchangeInformational(ctx, state, 7, wire, make(chan inboundIKE))
+				_, err := session.exchangeInformational(ctx, state, 7, [][]byte{wire}, make(chan inboundIKE))
 				return err
 			},
 		},
@@ -65,11 +65,11 @@ func TestEstablishedIKEExchangesUseConfiguredRetransmitSchedule(t *testing.T) {
 			name: "protected",
 			exchange: func(ctx context.Context, session *Session) error {
 				_, err := session.exchangeProtected(ctx, protectedExchange{
-					action:         "testing protected exchange",
+					action:         ikeActionTestProtectedExchange,
 					peer:           session.outerNAT,
 					skipIKESABytes: true,
 					messageID:      9,
-					wire:           []byte{0x02},
+					wires:          [][]byte{{0x02}},
 					waiter:         make(chan inboundIKE),
 				})
 				return err
@@ -145,8 +145,8 @@ func TestSendDeleteRequestWaitsForIKEDeleteResponse(t *testing.T) {
 			}()
 
 			waitForWrites(t, conn, 1)
-			response := protectedIKEWire(t, crypto, exchangeTypeInformational, flagResponse|flagInitiator, messageID, tt.responsePayloads, false)
-			key := ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, messageID)
+			response := protectedIKEWire(t, crypto, exchangeTypeInformational, flagResponse, messageID, tt.responsePayloads, false)
+			key := ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, exchangeTypeInformational, flagResponse, messageID)
 			if !session.deliverInformationalWaiter(key, inboundIKE{data: response, addr: peer}) {
 				t.Fatal("deliverInformationalWaiter() = false, want true")
 			}
@@ -181,7 +181,7 @@ func TestValidateIKEDeleteResponsePayloads(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateIKEDeleteResponsePayloads("deleting old ike sa", tt.payloads)
+			err := validateIKEDeleteResponsePayloads(tt.payloads)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validateIKEDeleteResponsePayloads() error = %v", err)
@@ -445,6 +445,7 @@ func TestInvalidMessageIDNotificationIsRateLimited(t *testing.T) {
 			state := informationalState{
 				ike:            crypto,
 				localInitiator: true,
+				useNATT:        true,
 				initiatorSPI:   0x0102030405060708,
 				responderSPI:   0x1112131415161718,
 				peer:           session.outerNAT,
@@ -688,19 +689,19 @@ func TestAcquireIKERequestSerializesOutboundWindow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
-			release, err := session.acquireIKERequest(context.Background(), "first request")
+			release, err := session.acquireIKERequest(context.Background(), ikeActionFirstRequest)
 			if err != nil {
 				t.Fatalf("first acquireIKERequest() error = %v", err)
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 			defer cancel()
-			if _, err := session.acquireIKERequest(ctx, "second request"); !errors.Is(err, context.DeadlineExceeded) {
+			if _, err := session.acquireIKERequest(ctx, ikeActionSecondRequest); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("second acquireIKERequest() error = %v, want context deadline exceeded", err)
 			}
 
 			release()
-			release, err = session.acquireIKERequest(context.Background(), "second request")
+			release, err = session.acquireIKERequest(context.Background(), ikeActionSecondRequest)
 			if err != nil {
 				t.Fatalf("second acquireIKERequest() after release error = %v", err)
 			}
@@ -764,7 +765,7 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 			}
 			session.mu.Unlock()
 
-			release, err := session.acquireIKERequest(context.Background(), "holding request window")
+			release, err := session.acquireIKERequest(context.Background(), ikeActionHoldingRequestWindow)
 			if err != nil {
 				t.Fatalf("acquireIKERequest() error = %v", err)
 			}
@@ -876,14 +877,14 @@ func TestCacheInformationalResponseEvictsOldEntries(t *testing.T) {
 
 			for i := range tt.count {
 				id := tt.startID + uint32(i)
-				session.cacheInformationalResponse(id, nil, []byte{byte(id)})
+				session.cacheInformationalResponse(id, nil, [][]byte{{byte(id)}})
 			}
 
 			if _, ok := session.cachedInformationalResponse(tt.evicted, nil); ok {
 				t.Fatalf("cachedInformationalResponse(%d) = ok, want evicted entry", tt.evicted)
 			}
-			if wire, ok := session.cachedInformationalResponse(tt.kept, nil); !ok || len(wire) != 1 || wire[0] != byte(tt.kept) {
-				t.Fatalf("cachedInformationalResponse(%d) = %v, %t", tt.kept, wire, ok)
+			if wires, ok := session.cachedInformationalResponse(tt.kept, nil); !ok || len(wires) != 1 || len(wires[0]) != 1 || wires[0][0] != byte(tt.kept) {
+				t.Fatalf("cachedInformationalResponse(%d) = %v, %t", tt.kept, wires, ok)
 			}
 		})
 	}
@@ -902,15 +903,15 @@ func TestCachedInformationalResponseRequiresMatchingRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := &Session{}
-			session.cacheInformationalResponse(4, tt.request, []byte{0xaa})
+			session.cacheInformationalResponse(4, tt.request, [][]byte{{0xaa}})
 
-			wire, ok := session.cachedInformationalResponse(4, tt.lookup)
+			wires, ok := session.cachedInformationalResponse(4, tt.lookup)
 
 			if ok != tt.wantOK {
 				t.Fatalf("cachedInformationalResponse() ok = %t, want %t", ok, tt.wantOK)
 			}
-			if tt.wantOK && !bytes.Equal(wire, []byte{0xaa}) {
-				t.Fatalf("cachedInformationalResponse() wire = %x, want aa", wire)
+			if tt.wantOK && (len(wires) != 1 || !bytes.Equal(wires[0], []byte{0xaa})) {
+				t.Fatalf("cachedInformationalResponse() wires = %x, want aa", wires)
 			}
 		})
 	}
@@ -925,8 +926,8 @@ func TestInformationalWaitersAreScopedByIKESA(t *testing.T) {
 	}{
 		{
 			name:         "same message id on old and new ike sa",
-			oldKey:       ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, 0),
-			newKey:       ikeMessageKeyForSPIs(0x2122232425262728, 0x3132333435363738, 0),
+			oldKey:       ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, exchangeTypeInformational, flagResponse, 0),
+			newKey:       ikeMessageKeyForSPIs(0x2122232425262728, 0x3132333435363738, exchangeTypeInformational, flagResponse, 0),
 			responseData: []byte{0xaa},
 		},
 	}

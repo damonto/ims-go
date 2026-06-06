@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -59,19 +60,11 @@ func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Pa
 		return nil, 0, fmt.Errorf("connecting swu session: building final auth device identity: %w", err)
 	}
 	header := ike.IKEHeader{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
-	request, err := f.crypto.SealIKE(header, finalAuthPayloads, true)
+	requests, err := sealIKEPackets(f.crypto, header, finalAuthPayloads, true, f.ikeFragmentationSupported)
 	if err != nil {
 		return nil, 0, fmt.Errorf("connecting swu session: sealing final ike_auth: %w", err)
 	}
-	responseRaw, _, err := f.session.exchangeIKE(ctx, f.session.outerNAT, request, true, f.nextRequestID)
-	if err != nil {
-		return nil, 0, err
-	}
-	var responsePacket ike.IKEPacket
-	if err := responsePacket.UnmarshalBinary(responseRaw); err != nil {
-		return nil, 0, fmt.Errorf("connecting swu session: parsing final ike_auth response: %w", err)
-	}
-	payloads, err := openIKEAuthResponse(responsePacket, f.crypto, "connecting swu session: opening final ike_auth response")
+	payloads, _, err := f.session.exchangeProtectedIKE(ctx, f.ikePeer, requests, f.useNATT, f.nextRequestID, f.crypto, false, f.ikeFragmentationSupported, ikeActionOpenFinalIKEAuthResponse)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -110,14 +103,14 @@ func findAuthPayload(payloads []ike.Payload) *ike.AuthPayload {
 }
 
 func (f *akaAuthFlow) exchangeResponse(ctx context.Context, serverPayloads []ike.Payload, responseData []byte) ([]ike.Payload, error) {
-	nextPayloads, err := f.session.exchangeAKAResponse(ctx, f.crypto, f.initiatorSPI, f.responderSPI, f.nextRequestID, serverPayloads, f.imei, f.akaAuthenticated, responseData)
+	nextPayloads, err := f.session.exchangeAKAResponse(ctx, f.crypto, f.initiatorSPI, f.responderSPI, f.nextRequestID, serverPayloads, f.imei, f.akaAuthenticated, responseData, f.ikePeer, f.useNATT, f.ikeFragmentationSupported)
 	if err != nil {
 		return nil, err
 	}
 	return nextPayloads, nil
 }
 
-func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, initiatorSPI, responderSPI uint64, messageID uint32, serverPayloads []ike.Payload, imei string, allowDeviceIdentity bool, responseData []byte) ([]ike.Payload, error) {
+func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, initiatorSPI, responderSPI uint64, messageID uint32, serverPayloads []ike.Payload, imei string, allowDeviceIdentity bool, responseData []byte, peer *net.UDPAddr, useNATT bool, fragmentationSupported bool) ([]ike.Payload, error) {
 	requestPayloads := []ike.Payload{&ike.EAPPayload{Data: responseData}}
 	requestPayloads, err := appendDeviceIdentityResponsePayload(requestPayloads, serverPayloads, imei, allowDeviceIdentity)
 	if err != nil {
@@ -125,19 +118,11 @@ func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, in
 	}
 	logEAPPacket(s.logger, "sending EAP packet", "outbound", messageID, responseData)
 	header := ike.IKEHeader{InitiatorSPI: initiatorSPI, ResponderSPI: responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: messageID}
-	request, err := crypto.SealIKE(header, requestPayloads, true)
+	requests, err := sealIKEPackets(crypto, header, requestPayloads, true, fragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("connecting swu session: sealing aka response: %w", err)
 	}
-	responseRaw, _, err := s.exchangeIKE(ctx, s.outerNAT, request, true, messageID)
-	if err != nil {
-		return nil, err
-	}
-	var responsePacket ike.IKEPacket
-	if err := responsePacket.UnmarshalBinary(responseRaw); err != nil {
-		return nil, fmt.Errorf("connecting swu session: parsing aka response message: %w", err)
-	}
-	payloads, err := openIKEAuthResponse(responsePacket, crypto, "connecting swu session: opening aka response message")
+	payloads, _, err := s.exchangeProtectedIKE(ctx, peer, requests, useNATT, messageID, crypto, false, fragmentationSupported, ikeActionConnectOpenAKAResponseMessage)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +143,7 @@ func appendDeviceIdentityResponsePayload(payloads []ike.Payload, serverPayloads 
 	return payloads, nil
 }
 
-func openIKEAuthResponse(packet ike.IKEPacket, crypto *ikeCrypto, action string) ([]ike.Payload, error) {
+func openIKEAuthResponse(packet ike.IKEPacket, crypto *ikeCrypto, action ikeAction) ([]ike.Payload, error) {
 	payloads, err := crypto.OpenIKE(packet, false)
 	if err == nil {
 		if notifyErr := protectedIKENotifyError(payloads); notifyErr != nil {
@@ -177,6 +162,9 @@ func openIKEAuthResponse(packet ike.IKEPacket, crypto *ikeCrypto, action string)
 func hasEncryptedPayload(payloads []ike.Payload) bool {
 	for _, payload := range payloads {
 		if _, ok := payload.(*ike.EncryptedPayload); ok {
+			return true
+		}
+		if _, ok := payload.(*ike.EncryptedFragmentPayload); ok {
 			return true
 		}
 	}

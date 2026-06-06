@@ -23,7 +23,7 @@ func (c *Call) expireUnrefreshedSession() {
 	_ = c.closeMedia()
 	resp, err := c.service.sess.Exchange(ctx, c.buildBYE(""))
 	if !byeReleaseCompleted(resp, err) {
-		err := byeReleaseError("expiring session timer", resp, err)
+		err := byeReleaseError(callActionExpireSessionTimer, resp, err)
 		c.finish(CallStateFailed, err.Error())
 		c.service.emitError(err)
 		return

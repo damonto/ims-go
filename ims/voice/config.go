@@ -218,10 +218,10 @@ func (cfg Config) Normalized() (Config, error) {
 		return Config{}, errors.New("normalizing voice config: ringing timeout must be >= 0")
 	}
 	var err error
-	if cfg.RTPInactivityTimeout, err = normalizeDurationSetting(cfg.RTPInactivityTimeout, defaultRTPInactivity, "rtp inactivity timeout"); err != nil {
+	if cfg.RTPInactivityTimeout, err = normalizeDurationSetting(cfg.RTPInactivityTimeout, defaultRTPInactivity, durationSettingRTPInactivityTimeout); err != nil {
 		return Config{}, err
 	}
-	if cfg.RTCPInactivityTimeout, err = normalizeDurationSetting(cfg.RTCPInactivityTimeout, defaultRTCPInactivity, "rtcp inactivity timeout"); err != nil {
+	if cfg.RTCPInactivityTimeout, err = normalizeDurationSetting(cfg.RTCPInactivityTimeout, defaultRTCPInactivity, durationSettingRTCPInactivityTimeout); err != nil {
 		return Config{}, err
 	}
 	if cfg.AudioInactivityCallEndReasons == nil {
@@ -234,7 +234,7 @@ func (cfg Config) Normalized() (Config, error) {
 			return Config{}, fmt.Errorf("normalizing voice config: unsupported audio inactivity call end reason %d", reason)
 		}
 	}
-	if cfg.RTCPSendInterval, err = normalizeDurationSetting(cfg.RTCPSendInterval, defaultRTCPSend, "rtcp send interval"); err != nil {
+	if cfg.RTCPSendInterval, err = normalizeDurationSetting(cfg.RTCPSendInterval, defaultRTCPSend, durationSettingRTCPSendInterval); err != nil {
 		return Config{}, err
 	}
 	if cfg.LocalRTPPortMin == 0 {
@@ -262,12 +262,33 @@ func Duration(value time.Duration) *time.Duration {
 	return &value
 }
 
-func normalizeDurationSetting(value *time.Duration, fallback time.Duration, label string) (*time.Duration, error) {
+type durationSetting uint8
+
+const (
+	durationSettingRTPInactivityTimeout durationSetting = iota
+	durationSettingRTCPInactivityTimeout
+	durationSettingRTCPSendInterval
+)
+
+func (s durationSetting) String() string {
+	switch s {
+	case durationSettingRTPInactivityTimeout:
+		return "rtp inactivity timeout"
+	case durationSettingRTCPInactivityTimeout:
+		return "rtcp inactivity timeout"
+	case durationSettingRTCPSendInterval:
+		return "rtcp send interval"
+	default:
+		return "duration setting"
+	}
+}
+
+func normalizeDurationSetting(value *time.Duration, fallback time.Duration, setting durationSetting) (*time.Duration, error) {
 	if value == nil {
 		value = Duration(fallback)
 	}
 	if *value < 0 {
-		return nil, fmt.Errorf("normalizing voice config: %s must be >= 0", label)
+		return nil, fmt.Errorf("normalizing voice config: %s must be >= 0", setting)
 	}
 	return Duration(*value), nil
 }

@@ -25,7 +25,7 @@ func (c *Call) handleResponse(ctx context.Context, msg sip.Message) error {
 		}
 		resp, err := c.service.sess.Exchange(ctx, bye)
 		if !byeReleaseCompleted(resp, err) {
-			return byeReleaseError("releasing forked call 2xx", resp, err)
+			return byeReleaseError(callActionReleaseForked2xx, resp, err)
 		}
 		return nil
 	}
@@ -239,7 +239,7 @@ func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) 
 	}
 	resp, err := c.service.sess.Exchange(ctx, bye)
 	if !byeReleaseCompleted(resp, err) {
-		return byeReleaseError("releasing cancelled call 2xx", resp, err)
+		return byeReleaseError(callActionReleaseCancelled2xx, resp, err)
 	}
 	return nil
 }

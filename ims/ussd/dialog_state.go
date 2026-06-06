@@ -86,7 +86,7 @@ func (s *Session) setDeliveringInvite(active bool) {
 	s.mu.Unlock()
 }
 
-func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, action string, final bool) (bool, error) {
+func (s *Session) queueInitialRequest(ctx context.Context, msg sip.Message, action sessionAction, final bool) (bool, error) {
 	timeout, err := queuedRequestTimeout(ctx)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", action, err)

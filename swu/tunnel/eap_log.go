@@ -217,6 +217,8 @@ func ikeNotifyName(notifyType uint16) string {
 		return "UNAUTHENTICATED_EMERGENCY_NOT_SUPPORTED"
 	case notifyTypeReactivationRequestedCause:
 		return "REACTIVATION_REQUESTED_CAUSE"
+	case notifyTypeIKEV2FragmentationSupported:
+		return "IKEV2_FRAGMENTATION_SUPPORTED"
 	case notifyTypeBackoffTimer:
 		return "BACKOFF_TIMER"
 	case notifyTypePCSCFReselectionSupport:

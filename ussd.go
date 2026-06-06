@@ -72,19 +72,19 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 
-	result, err := s.awaitResult(ctx, "sending USSD")
+	result, err := s.awaitResult(ctx)
 	if err != nil {
 		s.client.logger.Error("waiting for USSD result", "code", code, "err", err)
-		return USSDResult{}, err
+		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 	s.client.logger.Info("USSD result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
 	return result, nil
 }
 
 func (s *USSDSession) Reply(ctx context.Context, text string) (USSDResult, error) {
-	low, err := s.beginActive("replying USSD")
+	low, err := s.beginActive()
 	if err != nil {
-		return USSDResult{}, err
+		return USSDResult{}, fmt.Errorf("replying USSD: %w", err)
 	}
 	defer s.finishOperation()
 
@@ -93,10 +93,10 @@ func (s *USSDSession) Reply(ctx context.Context, text string) (USSDResult, error
 		return USSDResult{}, err
 	}
 
-	result, err := s.awaitResult(ctx, "replying USSD")
+	result, err := s.awaitResult(ctx)
 	if err != nil {
 		s.client.logger.Error("waiting for USSD reply result", "err", err)
-		return USSDResult{}, err
+		return USSDResult{}, fmt.Errorf("replying USSD: %w", err)
 	}
 	s.client.logger.Info("USSD reply result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
 	return result, nil
@@ -246,12 +246,12 @@ func (s *USSDSession) enqueueCloseOnly() {
 	s.enqueueResult(USSDResult{Closed: true, ReceivedAt: time.Now()})
 }
 
-func (s *USSDSession) awaitResult(ctx context.Context, action string) (USSDResult, error) {
+func (s *USSDSession) awaitResult(ctx context.Context) (USSDResult, error) {
 	select {
 	case result := <-s.results:
 		return result, nil
 	case <-ctx.Done():
-		return USSDResult{}, fmt.Errorf("%s: %w", action, ctx.Err())
+		return USSDResult{}, ctx.Err()
 	}
 }
 
@@ -273,18 +273,18 @@ func (s *USSDSession) beginSend() error {
 	return nil
 }
 
-func (s *USSDSession) beginActive(action string) (*imsussd.Session, error) {
+func (s *USSDSession) beginActive() (*imsussd.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.busy {
-		return nil, fmt.Errorf("%s: %w", action, ErrUSSDInProgress)
+		return nil, ErrUSSDInProgress
 	}
 	if s.closed {
-		return nil, fmt.Errorf("%s: %w", action, ErrUSSDClosed)
+		return nil, ErrUSSDClosed
 	}
 	if s.low == nil {
-		return nil, fmt.Errorf("%s: %w", action, ErrUSSDNotStarted)
+		return nil, ErrUSSDNotStarted
 	}
 
 	s.busy = true

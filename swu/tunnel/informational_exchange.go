@@ -11,7 +11,7 @@ import (
 
 var errIKERequestIncomplete = errors.New("ike request completed without response")
 
-func (s *Session) acquireIKERequest(ctx context.Context, action string) (func(), error) {
+func (s *Session) acquireIKERequest(ctx context.Context, action ikeAction) (func(), error) {
 	select {
 	case s.ikeRequestGate <- struct{}{}:
 		return func() { <-s.ikeRequestGate }, nil
@@ -26,8 +26,8 @@ func (s *Session) sendInformational(ctx context.Context, payloads []ike.Payload)
 	if s.isClosed() {
 		return nil, errors.New("sending informational: session is closed")
 	}
-	if err := s.expireIKESAIfNeeded("sending informational"); err != nil {
-		return nil, err
+	if err := s.expireIKESAIfNeeded(); err != nil {
+		return nil, fmt.Errorf("sending informational: %w", err)
 	}
 	if s.ikeSARekeyActive() {
 		return nil, errIKESARekeyInProgress
@@ -36,7 +36,7 @@ func (s *Session) sendInformational(ctx context.Context, payloads []ike.Payload)
 	if !state.available() {
 		return nil, errors.New("sending informational: ike state is unavailable")
 	}
-	release, err := s.acquireIKERequest(ctx, "sending informational")
+	release, err := s.acquireIKERequest(ctx, ikeActionSendInformational)
 	if err != nil {
 		return nil, err
 	}
@@ -45,23 +45,23 @@ func (s *Session) sendInformational(ctx context.Context, payloads []ike.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("sending informational: %w", err)
 	}
-	key := state.messageKey(messageID)
+	key := state.responseMessageKey(messageID, exchangeTypeInformational)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
-	wire, err := state.sealInitiatorRequest(messageID, payloads)
+	wires, err := state.sealInitiatorRequest(messageID, payloads)
 	if err != nil {
 		return nil, fmt.Errorf("sending informational: sealing request: %w", err)
 	}
-	return s.exchangeInformational(ctx, state, messageID, wire, waiter)
+	return s.exchangeInformational(ctx, state, messageID, wires, waiter)
 }
 
-func (s *Session) exchangeInformational(ctx context.Context, state informationalState, messageID uint32, wire []byte, waiter <-chan inboundIKE) ([]ike.Payload, error) {
-	return s.exchangeInformationalRequest(ctx, state, messageID, wire, waiter, "sending informational", false)
+func (s *Session) exchangeInformational(ctx context.Context, state informationalState, messageID uint32, wires [][]byte, waiter <-chan inboundIKE) ([]ike.Payload, error) {
+	return s.exchangeInformationalRequest(ctx, state, messageID, wires, waiter, ikeActionSendInformational, false)
 }
 
-func (s *Session) exchangeInformationalRequest(ctx context.Context, state informationalState, messageID uint32, wire []byte, waiter <-chan inboundIKE, action string, skipIKESAByteAccounting bool) ([]ike.Payload, error) {
+func (s *Session) exchangeInformationalRequest(ctx context.Context, state informationalState, messageID uint32, wires [][]byte, waiter <-chan inboundIKE, action ikeAction, skipIKESAByteAccounting bool) ([]ike.Payload, error) {
 	for attempt, delay := range s.ikeRetransmitDelays() {
-		if err := s.writeInformationalRequest(ctx, state, wire, action, skipIKESAByteAccounting); err != nil {
+		if err := s.writeInformationalRequest(ctx, state, wires, action, skipIKESAByteAccounting); err != nil {
 			return nil, err
 		}
 		payloads, received, err := s.awaitInformationalResponse(ctx, state, waiter, delay)
@@ -76,8 +76,8 @@ func (s *Session) exchangeInformationalRequest(ctx context.Context, state inform
 	return nil, fmt.Errorf("%s: waiting message %d: %w", action, messageID, errIKERequestIncomplete)
 }
 
-func (s *Session) writeInformationalRequest(ctx context.Context, state informationalState, wire []byte, action string, skipIKESAByteAccounting bool) error {
-	return s.writeProtectedWire(ctx, action, state.ike, prependNonESPMarker(wire), state.peer, skipIKESAByteAccounting)
+func (s *Session) writeInformationalRequest(ctx context.Context, state informationalState, wires [][]byte, action ikeAction, skipIKESAByteAccounting bool) error {
+	return s.writeProtectedWires(ctx, action, state.ike, buildIKEWires(wires, state.useNATT), state.peer, skipIKESAByteAccounting)
 }
 
 func (s *Session) awaitInformationalResponse(ctx context.Context, state informationalState, waiter <-chan inboundIKE, delay time.Duration) ([]ike.Payload, bool, error) {
@@ -91,6 +91,9 @@ func (s *Session) awaitInformationalResponse(ctx context.Context, state informat
 	case response := <-waiter:
 		if response.err != nil {
 			return nil, false, fmt.Errorf("sending informational: %w", response.err)
+		}
+		if response.payloads != nil {
+			return response.payloads, true, nil
 		}
 		payloads, err := s.openInformationalResponse(state, response.data)
 		if err != nil {

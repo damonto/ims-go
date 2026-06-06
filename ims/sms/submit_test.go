@@ -3,6 +3,7 @@ package sms
 import (
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/damonto/vowifi-go/ims/sip"
 )
@@ -68,6 +69,66 @@ func TestCompletePendingAllowsReferenceFallbackForTelURI(t *testing.T) {
 	}
 }
 
+func TestReserveReferenceSkipsRetainedSubmittedReferences(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name          string
+		rpRefs        map[byte]struct{}
+		submitted     map[string]submittedEntry
+		want          byte
+		wantSubmitted int
+	}{
+		{
+			name: "retained submitted",
+			submitted: map[string]submittedEntry{
+				"call-1": {rpRef: 7, expiresAt: now.Add(time.Minute), completed: true},
+			},
+			want:          8,
+			wantSubmitted: 1,
+		},
+		{
+			name:   "active reference",
+			rpRefs: map[byte]struct{}{7: {}},
+			want:   8,
+		},
+		{
+			name: "expired submitted",
+			submitted: map[string]submittedEntry{
+				"call-1": {rpRef: 7, expiresAt: now.Add(-time.Minute), completed: true},
+			},
+			want: 7,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &Service{
+				rpRef:     6,
+				rpRefs:    tt.rpRefs,
+				submitted: tt.submitted,
+			}
+			if svc.rpRefs == nil {
+				svc.rpRefs = make(map[byte]struct{})
+			}
+			if svc.submitted == nil {
+				svc.submitted = make(map[string]submittedEntry)
+			}
+			got, err := svc.reserveReference()
+			if err != nil {
+				t.Fatalf("reserveReference() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("reserveReference() = %d, want %d", got, tt.want)
+			}
+			if _, ok := svc.rpRefs[got]; !ok {
+				t.Fatalf("rpRefs[%d] missing after reserveReference()", got)
+			}
+			if len(svc.submitted) != tt.wantSubmitted {
+				t.Fatalf("len(submitted) = %d, want %d", len(svc.submitted), tt.wantSubmitted)
+			}
+		})
+	}
+}
+
 func TestMOTransferStateMachine(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -92,36 +153,13 @@ func TestMOTransferStateMachine(t *testing.T) {
 			},
 		},
 		{
-			name: "pending reports keep transfer active",
+			name: "send stays busy until finish",
 			steps: func(t *testing.T, svc *Service) {
 				if err := svc.beginMOTransfer(); err != nil {
 					t.Fatalf("beginMOTransfer() error = %v", err)
 				}
-				svc.moPending = 2
-				svc.finishMOSend()
-				if svc.moState != moTransferWaitingReports {
-					t.Fatalf("moState after finish = %v, want %v", svc.moState, moTransferWaitingReports)
-				}
-				svc.completeMOPending()
-				if svc.moState != moTransferWaitingReports {
-					t.Fatalf("moState after first report = %v, want %v", svc.moState, moTransferWaitingReports)
-				}
-				svc.completeMOPending()
-				if svc.moState != moTransferIdle {
-					t.Fatalf("moState after final report = %v, want %v", svc.moState, moTransferIdle)
-				}
-			},
-		},
-		{
-			name: "report during send waits for send completion",
-			steps: func(t *testing.T, svc *Service) {
-				if err := svc.beginMOTransfer(); err != nil {
-					t.Fatalf("beginMOTransfer() error = %v", err)
-				}
-				svc.moPending = 1
-				svc.completeMOPending()
-				if svc.moState != moTransferSending {
-					t.Fatalf("moState after early report = %v, want %v", svc.moState, moTransferSending)
+				if err := svc.beginMOTransfer(); err == nil {
+					t.Fatal("second beginMOTransfer() error = nil, want in-progress error")
 				}
 				svc.finishMOSend()
 				if svc.moState != moTransferIdle {

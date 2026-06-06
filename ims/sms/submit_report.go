@@ -38,7 +38,7 @@ func (s *Service) completePendingByReference(msg sip.Message, report rpMessage, 
 	callID, submitted, ok := s.submittedByReference(report.Reference, now)
 	s.mu.Unlock()
 	if ok {
-		if submitReportRequiresInReplyTo(submitted.segment) {
+		if submitted.requiresInReplyTo {
 			s.logger.Debug("submit report missing In-Reply-To", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference)
 			return false
 		}
@@ -100,16 +100,15 @@ func deliverPendingReport(entry pendingEntry, report rpMessage) {
 func (s *Service) finishAsyncPendingReport(callID string, entry pendingEntry, report rpMessage) {
 	s.completeSubmitted(callID)
 	s.releaseReference(entry.rpRef)
-	if err := s.handleAsyncSegmentReport(entry.segment, entry.response, report); err != nil {
+	if err := s.handleSegmentReport(entry.segment, entry.response, report); err != nil {
 		s.warnSubmitReport(entry.segment, err)
 	}
-	s.completeMOPending()
 }
 
 func (s *Service) finishSubmittedReport(callID string, entry submittedEntry, report rpMessage) bool {
 	s.completeSubmitted(callID)
 	s.releaseReference(entry.rpRef)
-	if err := s.handleAsyncSegmentReport(entry.segment, entry.response, report); err != nil {
+	if err := s.handleSegmentReport(entry.segment, entry.response, report); err != nil {
 		s.warnSubmitReport(entry.segment, err)
 	}
 	return true
@@ -138,6 +137,5 @@ func (s *Service) expirePendingSegment(entry pendingEntry) {
 	segment := entry.segment
 	s.completeSubmitted(segment.callID)
 	s.releaseReference(segment.rpRef)
-	s.completeMOPending()
 	s.logger.Debug("submit report not received", "segment_index", segment.index+1, "segment_count", segment.count, "to", segment.to, "smsc", segment.smscAddress, "target", segment.target, "call_id", segment.msg.Header("Call-ID"), "cseq", segment.msg.Header("CSeq"), "rp_ref", segment.rpRef, "tp_ref", segment.tpRef, "status_code", entry.response.statusCode, "reason_phrase", entry.response.reasonPhrase)
 }

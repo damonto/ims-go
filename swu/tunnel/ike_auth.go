@@ -9,22 +9,23 @@ import (
 )
 
 func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) error {
-	request, idiData, err := buildIKEAuthRequest(state)
+	requests, idiData, err := buildIKEAuthRequest(state)
 	if err != nil {
 		return err
 	}
-	challengePayloads, err := s.readIKEAuthChallenge(ctx, state, request)
+	challengePayloads, err := s.readIKEAuthChallenge(ctx, state, requests)
 	if err != nil {
 		return err
 	}
-	finalPayloads, nextMessageID, err := s.authenticateEAPAKA(ctx, state.card, state.imei, state.identity, state.realm, state.initialAKAState, state.crypto, state.initiatorSPI, state.responderSPI, state.ikeInitRequest, state.ikeInitResponse, state.nonceI, state.responderNonce, idiData, challengePayloads)
+	peer, useNATT := s.connectIKEPeer(state)
+	finalPayloads, nextMessageID, err := s.authenticateEAPAKA(ctx, state.card, state.imei, state.identity, state.realm, state.initialAKAState, state.crypto, state.initiatorSPI, state.responderSPI, state.ikeInitRequest, state.ikeInitResponse, state.nonceI, state.responderNonce, idiData, peer, useNATT, state.ikeFragmentationSupported, challengePayloads)
 	if err != nil {
 		return err
 	}
 	return finalizeIKEAuthState(state, finalPayloads, nextMessageID)
 }
 
-func buildIKEAuthRequest(state *connectState) ([]byte, []byte, error) {
+func buildIKEAuthRequest(state *connectState) ([][]byte, []byte, error) {
 	idi, err := (&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(state.identity)}).RawData()
 	if err != nil {
 		return nil, nil, fmt.Errorf("building ike_auth request idi: %w", err)
@@ -34,28 +35,32 @@ func buildIKEAuthRequest(state *connectState) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("building ike_auth request: %w", err)
 	}
 	header := ike.IKEHeader{InitiatorSPI: state.initiatorSPI, ResponderSPI: state.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: 1}
-	request, err := state.crypto.SealIKE(header, payloads, true)
+	requests, err := sealIKEPackets(state.crypto, header, payloads, true, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sealing ike_auth request: %w", err)
 	}
-	return request, idi, nil
+	return requests, idi, nil
 }
 
-func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState, request []byte) ([]ike.Payload, error) {
-	challengeRaw, _, err := s.exchangeIKE(ctx, s.outerNAT, request, true, 1)
-	if err != nil {
-		return nil, err
-	}
-	var challengePacket ike.IKEPacket
-	if err := challengePacket.UnmarshalBinary(challengeRaw); err != nil {
-		return nil, fmt.Errorf("parsing ike_auth challenge: %w", err)
-	}
-	challengePayloads, err := openIKEAuthResponse(challengePacket, state.crypto, "opening ike_auth challenge")
+func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState, requests [][]byte) ([]ike.Payload, error) {
+	peer, useNATT := s.connectIKEPeer(state)
+	challengePayloads, _, err := s.exchangeProtectedIKE(ctx, peer, requests, useNATT, 1, state.crypto, false, state.ikeFragmentationSupported, ikeActionOpenIKEAuthChallenge)
 	if err != nil {
 		return nil, err
 	}
 	state.auth.ChallengeData = marshalPayloadCopies(challengePayloads)
 	return challengePayloads, nil
+}
+
+func sealIKEPackets(crypto *ikeCrypto, header ike.IKEHeader, payloads []ike.Payload, initiator bool, fragmentationSupported bool) ([][]byte, error) {
+	if !fragmentationSupported {
+		wire, err := crypto.SealIKE(header, payloads, initiator)
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{wire}, nil
+	}
+	return crypto.SealIKEFragments(header, payloads, initiator, defaultIKEFragmentSize)
 }
 
 func finalizeIKEAuthState(state *connectState, finalPayloads []ike.Payload, nextMessageID uint32) error {

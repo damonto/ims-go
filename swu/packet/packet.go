@@ -185,11 +185,11 @@ func (s UDPSegment) MarshalBinary() ([]byte, error) {
 	if s.Src == nil || s.Dst == nil {
 		return nil, errors.New("marshalling udp segment: endpoint is nil")
 	}
-	if err := validateTransportPort("marshalling udp segment", "source", s.Src.Port); err != nil {
-		return nil, err
+	if err := validateTransportPort("source", s.Src.Port); err != nil {
+		return nil, fmt.Errorf("marshalling udp segment: %w", err)
 	}
-	if err := validateTransportPort("marshalling udp segment", "destination", s.Dst.Port); err != nil {
-		return nil, err
+	if err := validateTransportPort("destination", s.Dst.Port); err != nil {
+		return nil, fmt.Errorf("marshalling udp segment: %w", err)
 	}
 	_, src, dst, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
 	if err != nil {
@@ -228,11 +228,11 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	if s.Src == nil || s.Dst == nil {
 		return nil, errors.New("marshalling tcp segment: endpoint is nil")
 	}
-	if err := validateTransportPort("marshalling tcp segment", "source", s.Src.Port); err != nil {
-		return nil, err
+	if err := validateTransportPort("source", s.Src.Port); err != nil {
+		return nil, fmt.Errorf("marshalling tcp segment: %w", err)
 	}
-	if err := validateTransportPort("marshalling tcp segment", "destination", s.Dst.Port); err != nil {
-		return nil, err
+	if err := validateTransportPort("destination", s.Dst.Port); err != nil {
+		return nil, fmt.Errorf("marshalling tcp segment: %w", err)
 	}
 	_, src, dst, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
 	if err != nil {
@@ -262,9 +262,9 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	return tcp, nil
 }
 
-func validateTransportPort(action, name string, port int) error {
+func validateTransportPort(name string, port int) error {
 	if port <= 0 || port > maxTransportPort {
-		return fmt.Errorf("%s: %s port %d is out of range", action, name, port)
+		return fmt.Errorf("%s port %d is out of range", name, port)
 	}
 	return nil
 }

@@ -26,39 +26,39 @@ func (f *akaAuthFlow) validateEAPSuccess() error {
 func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	var notification eapaka.AKANotification
 	if err := notification.UnmarshalAttributes(message.Attributes); err != nil {
-		return f.clientErrorResponse(message.Identifier, "parsing notification", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing notification: %w", err))
 	}
 	if f.notificationReceived {
-		return f.clientErrorResponse(message.Identifier, "validating notification", errors.New("multiple aka notification rounds"))
+		return f.clientErrorResponse(message.Identifier, errors.New("validating notification: multiple aka notification rounds"))
 	}
 	f.notificationReceived = true
 	if !notification.Protected && eapaka.HasAttribute(message.Attributes, akaAttrMAC) {
-		return f.clientErrorResponse(message.Identifier, "validating notification", errors.New("pre-challenge notification must not include AT_MAC"))
+		return f.clientErrorResponse(message.Identifier, errors.New("validating notification: pre-challenge notification must not include AT_MAC"))
 	}
 	if notification.Protected {
 		if len(f.currentAuthKey) == 0 {
-			return f.clientErrorResponse(message.Identifier, "verifying notification mac", errors.New("notification mac key is unavailable"))
+			return f.clientErrorResponse(message.Identifier, errors.New("verifying notification mac: notification mac key is unavailable"))
 		}
 		if err := f.verifyMessageMAC(f.currentEAPType, eapData, f.currentAuthKey, nil); err != nil {
-			return f.clientErrorResponse(message.Identifier, "verifying notification mac", err)
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying notification mac: %w", err))
 		}
 		if err := f.validateIPMSResult(message, notification); err != nil {
-			return f.clientErrorResponse(message.Identifier, "validating ipms result", err)
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("validating ipms result: %w", err))
 		}
 		if f.fastReauth {
 			nested, err := eapaka.DecryptAttributes(message.Attributes, f.currentEncrKey)
 			if err != nil {
-				return f.clientErrorResponse(message.Identifier, "decrypting notification attrs", err)
+				return f.clientErrorResponse(message.Identifier, fmt.Errorf("decrypting notification attrs: %w", err))
 			}
 			if len(nested) != 1 || nested[0].Type != akaAttrCounter {
-				return f.clientErrorResponse(message.Identifier, "validating notification attrs", errors.New("expected encrypted AT_COUNTER only"))
+				return f.clientErrorResponse(message.Identifier, errors.New("validating notification attrs: expected encrypted AT_COUNTER only"))
 			}
 			counter, err := eapaka.Uint16Value(&nested[0])
 			if err != nil {
-				return f.clientErrorResponse(message.Identifier, "parsing notification counter", err)
+				return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing notification counter: %w", err))
 			}
 			if counter != f.currentCounter {
-				return f.clientErrorResponse(message.Identifier, "validating notification counter", fmt.Errorf("counter %d does not match %d", counter, f.currentCounter))
+				return f.clientErrorResponse(message.Identifier, fmt.Errorf("validating notification counter: counter %d does not match %d", counter, f.currentCounter))
 			}
 		}
 	}
@@ -70,13 +70,13 @@ func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapDa
 		return akaResponse{data: data, afterSend: fmt.Errorf("connecting swu session: notification code %d", notification.Code)}, nil
 	}
 	if notification.Code != akaNotificationSuccess {
-		return f.clientErrorResponse(message.Identifier, "validating success notification", fmt.Errorf("unexpected success notification code %d", notification.Code))
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("validating success notification: unexpected success notification code %d", notification.Code))
 	}
 	if !f.akaAuthenticated {
-		return f.clientErrorResponse(message.Identifier, "validating success notification", errors.New("aka authentication is incomplete"))
+		return f.clientErrorResponse(message.Identifier, errors.New("validating success notification: aka authentication is incomplete"))
 	}
 	if !f.protectedSuccessExpected {
-		return f.clientErrorResponse(message.Identifier, "validating success notification", errors.New("protected success was not negotiated"))
+		return f.clientErrorResponse(message.Identifier, errors.New("validating success notification: protected success was not negotiated"))
 	}
 	f.protectedSuccessReceived = true
 	return akaResponse{data: data}, nil

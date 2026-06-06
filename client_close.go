@@ -25,11 +25,11 @@ func (c *Client) Close() error {
 			err = errors.Join(err, context.DeadlineExceeded)
 			err = errors.Join(err, c.closeActiveRuntime(active))
 			if active != nil && active.tunnel != nil {
-				err = errors.Join(err, wrapCloseError("closing tunnel", normalizeCloseError(active.tunnel.Close())))
+				err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
 			}
 		}
 		if reader != nil {
-			err = errors.Join(err, wrapCloseError("closing reader", reader.Close()))
+			err = errors.Join(err, wrapCloseError(closeActionReader, reader.Close()))
 		}
 		if err != nil {
 			c.logger.Error("closing client", "err", err)
@@ -54,7 +54,40 @@ func normalizeCloseError(err error) error {
 	return err
 }
 
-func wrapCloseError(action string, err error) error {
+type closeAction uint8
+
+const (
+	closeActionReader closeAction = iota
+	closeActionTunnel
+	closeActionUSSDService
+	closeActionVoiceService
+	closeActionSMSService
+	closeActionRegistrationService
+	closeActionIMSSession
+)
+
+func (a closeAction) String() string {
+	switch a {
+	case closeActionReader:
+		return "closing reader"
+	case closeActionTunnel:
+		return "closing tunnel"
+	case closeActionUSSDService:
+		return "closing USSD service"
+	case closeActionVoiceService:
+		return "closing voice service"
+	case closeActionSMSService:
+		return "closing SMS service"
+	case closeActionRegistrationService:
+		return "closing registration service"
+	case closeActionIMSSession:
+		return "closing IMS session"
+	default:
+		return "closing resource"
+	}
+}
+
+func wrapCloseError(action closeAction, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -69,7 +102,7 @@ func (c *Client) closeActive(active *activeConn) error {
 
 	err := active.ims.close()
 	if active.tunnel != nil {
-		err = errors.Join(err, wrapCloseError("closing tunnel", normalizeCloseError(active.tunnel.Close())))
+		err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
 	}
 	return err
 }
@@ -80,7 +113,7 @@ func (c *Client) closeActiveRuntime(active *activeConn) error {
 	}
 	err := c.closeIMSRuntime(active)
 	if active.tunnel != nil {
-		err = errors.Join(err, wrapCloseError("closing tunnel", normalizeCloseError(active.tunnel.Close())))
+		err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
 	}
 	return err
 }
@@ -97,19 +130,19 @@ func (s *connectSetup) closeIMSRuntime() error {
 func (r *imsRuntime) close() error {
 	var err error
 	if r.ussd != nil {
-		err = errors.Join(err, wrapCloseError("closing USSD service", r.ussd.Close()))
+		err = errors.Join(err, wrapCloseError(closeActionUSSDService, r.ussd.Close()))
 	}
 	if r.voice != nil {
-		err = errors.Join(err, wrapCloseError("closing voice service", r.voice.Close()))
+		err = errors.Join(err, wrapCloseError(closeActionVoiceService, r.voice.Close()))
 	}
 	if r.sms != nil {
-		err = errors.Join(err, wrapCloseError("closing SMS service", r.sms.Close()))
+		err = errors.Join(err, wrapCloseError(closeActionSMSService, r.sms.Close()))
 	}
 	if r.reg != nil {
-		err = errors.Join(err, wrapCloseError("closing registration service", r.reg.Close()))
+		err = errors.Join(err, wrapCloseError(closeActionRegistrationService, r.reg.Close()))
 	}
 	if r.sip != nil {
-		err = errors.Join(err, wrapCloseError("closing IMS session", normalizeCloseError(r.sip.Close())))
+		err = errors.Join(err, wrapCloseError(closeActionIMSSession, normalizeCloseError(r.sip.Close())))
 	}
 	*r = imsRuntime{}
 	return err

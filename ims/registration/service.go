@@ -17,6 +17,7 @@ const (
 	sipStatusOK                          = 200
 	sipStatusBadRequest                  = 400
 	sipStatusUnauthorized                = 401
+	sipStatusProxyAuthenticationRequired = 407
 	sipStatusForbidden                   = 403
 	sipStatusRequestTimeout              = 408
 	sipStatusIntervalTooBrief            = 423
@@ -102,6 +103,7 @@ type Service struct {
 	authRealm           string
 	authAlgorithm       string
 	authQOP             string
+	authHeader          string
 	authNonceCount      uint32
 	authDigestNonce     string
 	authDigestAlgorithm string

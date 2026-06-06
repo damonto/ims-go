@@ -256,14 +256,7 @@ const (
 	nsdsMethodServiceEntitlement     = "serviceEntitlementStatus"
 	nsdsMethodGetMSISDN              = "getMSISDN"
 	nsdsMethodManageLocationAndTC    = "manageLocationAndTC"
-	nsdsMethodManageService          = "manageService"
-	nsdsMethodManageConnectivity     = "manageConnectivity"
-	nsdsMethodManagePushToken        = "managePushToken"
-	nsdsMethodRegisteredMSISDN       = "registeredMSISDN"
-	nsdsMethodRegisteredDevices      = "registeredDevices"
-	nsdsMethodGetToken               = "getToken"
 	nsdsServiceVowifi                = "vowifi"
-	nsdsServiceVowifiAndVVM          = "vowifi+vvm"
 	nsdsResponseSuccessful           = 1000
 	nsdsResponseAKAChallenge         = 1003
 	nsdsResponseInvalidRequest       = 1004
@@ -585,7 +578,7 @@ func nsdsResponseBody(resp *http.Response) (io.ReadCloser, error) {
 }
 
 func nsdsChallengeResponse(ctx context.Context, card Card, imsiEAP, challengeText string) (string, error) {
-	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP, challengeText, "nsds aka")
+	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP, challengeText, akaChallengeKindNSDS)
 }
 
 func nsdsRequireResponseCode(response nsdsResponse, want int, method string) error {
@@ -714,75 +707,6 @@ func nsdsResponseCodeName(code int) string {
 		return "ERROR_REQUEST_ONGOING"
 	case nsdsResponseUnsupportedOperation:
 		return "ERROR_UNSUPPORTED_OPERATION"
-	default:
-		return "ERROR_UNKNOWN"
-	}
-}
-
-func nsdsDefinedResponseCodeName(code int) string {
-	switch code {
-	case nsdsDefinedUnknown:
-		return "UNKNOWN"
-	case nsdsDefinedRequest3GPPAuthGenFailure:
-		return "REQUEST_3GPP_AUTH_GEN_FAILURE"
-	case nsdsDefinedRequest3GPPAuthServerError:
-		return "REQUEST_3GPP_AUTH_SERVER_ERROR"
-	case nsdsDefinedAKAAuthFailed:
-		return "AKA_AUTH_FAILED"
-	case nsdsDefinedRegisteredMSISDNGenFailure:
-		return "REGISTERED_MSISDN_GEN_FAILURE"
-	case nsdsDefinedManageConnectivityActivateFailed:
-		return "MANAGE_CONNECTIVITY_ACTIVATE_GEN_FAILURE"
-	case nsdsDefinedManageConnectivityInvalidGroup:
-		return "MANAGE_CONNECTIVITY_ACTIVATE_INVALID_DEVICE_GROUP"
-	case nsdsDefinedManageConnectivityConfigFailed:
-		return "MANAGE_CONNECTIVITY_CONFIGURE_GEN_FAILURE"
-	case nsdsDefinedManageConnectivityConfigUpdated:
-		return "MANAGE_CONNECTIVITY_NEW_CONFIG_UPDATED"
-	case nsdsDefinedManageConnectivityDeactivated:
-		return "MANAGE_CONNECTIVITY_DEACTIVATION_SUCCESS_FOR_INVALID_FINGERPRINT"
-	case nsdsDefinedManageServiceProvisionFailed:
-		return "MANAGE_SERVICE_PROVISION_GEN_FAILURE"
-	case nsdsDefinedManageServiceInvalidOwnerID:
-		return "MANAGE_SERVICE_PROVISION_INVALID_OWNER_ID"
-	case nsdsDefinedManageServiceMaxInstanceReached:
-		return "MANAGE_SERVICE_PROVISION_MAX_SVC_INST_REACHED"
-	case nsdsDefinedManageServiceNotEntitled:
-		return "MANAGE_SERVICE_PROVISION_SVC_NOT_ENTITLED"
-	case nsdsDefinedManageServiceRenewFailed:
-		return "MANAGE_SERVICE_RENEW_GEN_FAILURE"
-	case nsdsDefinedManageServiceRemoveFailed:
-		return "MANAGE_SERVICE_REMOVE_GEN_FAILURE"
-	case nsdsDefinedManageServiceInvalidDeviceStatus:
-		return "MANAGE_SERVICE_REMOVE_INVALID_DEVICE_STATUS"
-	case nsdsDefinedManageServiceInvalidInstanceID:
-		return "MANAGE_SERVICE_REMOVE_INVALID_SVC_INST_ID"
-	case nsdsDefinedManageLocationAndTCFailed:
-		return "MANAGE_LOCATION_AND_TC_GEN_FAILURE"
-	case nsdsDefinedManagePushTokenFailed:
-		return "MANAGE_PUSH_TOKEN_GEN_FAILURE"
-	case nsdsDefinedRegisteredDevicesFailed:
-		return "REGISTERED_DEVICES_GEN_FAILURE"
-	case nsdsDefinedSvcProvisionPending:
-		return "SVC_PROVISION_PENDING_ERROR_CODE"
-	case nsdsDefinedSvcNotProvisioned:
-		return "SVC_NOT_PROVISIONED_ERROR_CODE"
-	case nsdsDefinedSvcProvisionCompleted:
-		return "SVC_PROVISION_COMPLETED_SUCCESS_CODE"
-	case nsdsDefinedForceToggleOff:
-		return "FORCE_TOGGLE_OFF_ERROR_CODE"
-	case nsdsDefinedVoidWebsheetTransaction:
-		return "VOID_WEBSHEET_TRANSACTION"
-	case nsdsDefinedInvalidSIMStatus:
-		return "INVALID_SIM_STATUS"
-	case nsdsDefinedLocationTCUpdateCancel:
-		return "LOCATIONANDTC_UPDATE_CANCEL_CODE"
-	case nsdsDefinedLocationTCUpdateSuccess:
-		return "LOCATIONANDTC_UPDATE_SUCCESS_CODE"
-	case nsdsDefinedLocationTCUpdateNotRequired:
-		return "LOCATIONANDTC_UPDATE_NOT_REQUIRED"
-	case nsdsDefinedHTTPTransactionError:
-		return "HTTP_TRANSACTION_ERROR_CODE"
 	default:
 		return "ERROR_UNKNOWN"
 	}

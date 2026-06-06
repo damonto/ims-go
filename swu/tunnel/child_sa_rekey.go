@@ -21,17 +21,19 @@ var (
 )
 
 type childSARekeyState struct {
-	connected      bool
-	ike            *ikeCrypto
-	cfg            handshake.Config
-	info           Info
-	initiatorSPI   uint64
-	responderSPI   uint64
-	peer           *net.UDPAddr
-	localInitiator bool
-	inboundSPI     uint32
-	outboundSPI    uint32
-	addKE          bool
+	connected                 bool
+	ike                       *ikeCrypto
+	cfg                       handshake.Config
+	info                      Info
+	initiatorSPI              uint64
+	responderSPI              uint64
+	peer                      *net.UDPAddr
+	localInitiator            bool
+	ikeFragmentationSupported bool
+	useNATT                   bool
+	inboundSPI                uint32
+	outboundSPI               uint32
+	addKE                     bool
 }
 
 type childSARekeyResult struct {
@@ -94,9 +96,9 @@ func (s *Session) initiatedChildSARekeyResult(ctx context.Context, state childSA
 		if err != nil {
 			return childSARekeyResult{}, err
 		}
-		group, retry, err := invalidKEPayloadGroupFor("parsing create_child_sa response", payloads)
+		group, retry, err := invalidKEPayloadGroupFor(payloads)
 		if err != nil {
-			return childSARekeyResult{}, err
+			return childSARekeyResult{}, fmt.Errorf("parsing create_child_sa response: %w", err)
 		}
 		if retry {
 			if pfs == nil {
@@ -132,7 +134,7 @@ func (s *Session) childSANotFoundKnownSimultaneous() bool {
 }
 
 func (s *Session) exchangeInitiatedChildSARekey(ctx context.Context, state childSARekeyState, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) ([]ike.Payload, error) {
-	releaseRequest, err := s.acquireIKERequest(ctx, "rekeying child sa")
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionRekeyChildSA)
 	if err != nil {
 		return nil, err
 	}
@@ -142,22 +144,23 @@ func (s *Session) exchangeInitiatedChildSARekey(ctx context.Context, state child
 	if err != nil {
 		return nil, fmt.Errorf("rekeying child sa: %w", err)
 	}
-	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, messageID)
+	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, exchangeTypeCreateChildSA, ikeMessageFlags(!state.localInitiator, true), messageID)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
 
-	wire, err := state.sealChildSARekeyRequest(messageID, newInboundSPI, nonceI, pfs)
+	wires, err := state.sealChildSARekeyRequest(messageID, newInboundSPI, nonceI, pfs)
 	if err != nil {
 		return nil, fmt.Errorf("rekeying child sa: %w", err)
 	}
 	return s.exchangeProtected(ctx, protectedExchange{
-		action:          "rekeying child sa",
+		action:          ikeActionRekeyChildSA,
 		peer:            state.peer,
 		crypto:          state.ike,
 		senderInitiator: !state.localInitiator,
 		messageID:       messageID,
 		exchangeType:    exchangeTypeCreateChildSA,
-		wire:            wire,
+		useNATT:         state.useNATT,
+		wires:           wires,
 		waiter:          waiter,
 	})
 }
@@ -184,7 +187,7 @@ func (s *Session) createChildSAReplacement(ctx context.Context, state childSARek
 }
 
 func (s *Session) exchangeInitiatedChildSACreate(ctx context.Context, state childSARekeyState, newInboundSPI uint32, nonceI []byte) ([]ike.Payload, error) {
-	releaseRequest, err := s.acquireIKERequest(ctx, "creating child sa")
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionCreateChildSA)
 	if err != nil {
 		return nil, err
 	}
@@ -194,22 +197,23 @@ func (s *Session) exchangeInitiatedChildSACreate(ctx context.Context, state chil
 	if err != nil {
 		return nil, fmt.Errorf("creating child sa: %w", err)
 	}
-	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, messageID)
+	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, exchangeTypeCreateChildSA, ikeMessageFlags(!state.localInitiator, true), messageID)
 	waiter := s.registerInformationalWaiter(key)
 	defer s.unregisterInformationalWaiter(key, waiter)
 
-	wire, err := state.sealChildSACreateRequest(messageID, newInboundSPI, nonceI)
+	wires, err := state.sealChildSACreateRequest(messageID, newInboundSPI, nonceI)
 	if err != nil {
 		return nil, fmt.Errorf("creating child sa: %w", err)
 	}
 	return s.exchangeProtected(ctx, protectedExchange{
-		action:          "creating child sa",
+		action:          ikeActionCreateChildSA,
 		peer:            state.peer,
 		crypto:          state.ike,
 		senderInitiator: !state.localInitiator,
 		messageID:       messageID,
 		exchangeType:    exchangeTypeCreateChildSA,
-		wire:            wire,
+		useNATT:         state.useNATT,
+		wires:           wires,
 		waiter:          waiter,
 	})
 }
@@ -239,17 +243,19 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errChildSAExpired)
 	}
 	state := childSARekeyState{
-		connected:      s.connected,
-		ike:            s.ike,
-		cfg:            handshakeConfig(s.cfg),
-		info:           cloneInfo(s.tunnel),
-		initiatorSPI:   s.initiatorSPI,
-		responderSPI:   s.responderSPI,
-		peer:           cloneUDPAddr(s.outerNAT),
-		localInitiator: s.ikeLocalInitiator,
-		inboundSPI:     s.tunnel.ESPInitiatorSPI,
-		outboundSPI:    s.tunnel.ESPResponderSPI,
-		addKE:          s.cfg.AddKEToChildSARekey,
+		connected:                 s.connected,
+		ike:                       s.ike,
+		cfg:                       handshakeConfig(s.cfg),
+		info:                      cloneInfo(s.tunnel),
+		initiatorSPI:              s.initiatorSPI,
+		responderSPI:              s.responderSPI,
+		peer:                      outerIKEPeer(s.useNATT, s.outerRemote, s.outerNAT),
+		localInitiator:            s.ikeLocalInitiator,
+		ikeFragmentationSupported: s.ikeFragmentationSupported,
+		useNATT:                   s.useNATT,
+		inboundSPI:                s.tunnel.ESPInitiatorSPI,
+		outboundSPI:               s.tunnel.ESPResponderSPI,
+		addKE:                     s.cfg.AddKEToChildSARekey,
 	}
 	if !state.available() {
 		return childSARekeyState{}, nil, errors.New("rekeying child sa: ike or child sa state is unavailable")
@@ -269,7 +275,7 @@ func (state childSARekeyState) available() bool {
 	return state.connected && state.ike != nil && state.peer != nil && state.inboundSPI != 0 && state.outboundSPI != 0
 }
 
-func (state childSARekeyState) sealChildSARekeyRequest(messageID, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) ([]byte, error) {
+func (state childSARekeyState) sealChildSARekeyRequest(messageID, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) ([][]byte, error) {
 	header := ike.IKEHeader{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
@@ -278,14 +284,14 @@ func (state childSARekeyState) sealChildSARekeyRequest(messageID, newInboundSPI 
 		Flags:        state.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wire, err := state.ike.SealIKE(header, state.childSARekeyRequestPayloads(newInboundSPI, nonceI, pfs), state.localInitiator)
+	wires, err := sealIKEPackets(state.ike, header, state.childSARekeyRequestPayloads(newInboundSPI, nonceI, pfs), state.localInitiator, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
 	}
-	return wire, nil
+	return wires, nil
 }
 
-func (state childSARekeyState) sealChildSACreateRequest(messageID, newInboundSPI uint32, nonceI []byte) ([]byte, error) {
+func (state childSARekeyState) sealChildSACreateRequest(messageID, newInboundSPI uint32, nonceI []byte) ([][]byte, error) {
 	header := ike.IKEHeader{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
@@ -294,11 +300,11 @@ func (state childSARekeyState) sealChildSACreateRequest(messageID, newInboundSPI
 		Flags:        state.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wire, err := state.ike.SealIKE(header, childSACreateRequestPayloads(state.cfg, newInboundSPI, nonceI), state.localInitiator)
+	wires, err := sealIKEPackets(state.ike, header, childSACreateRequestPayloads(state.cfg, newInboundSPI, nonceI), state.localInitiator, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
 	}
-	return wire, nil
+	return wires, nil
 }
 
 func (state childSARekeyState) initiatorFlag() byte {
@@ -470,21 +476,21 @@ func childSAFromCreateChildResponseWithRequests(payloads []ike.Payload, previous
 	if nonce == nil || sa == nil || tsi == nil || tsr == nil {
 		return Info{}, nil, nil, errors.New("parsing create_child_sa response: required payload is missing")
 	}
-	if err := validateNonceData("parsing create_child_sa response", nonce.Data); err != nil {
-		return Info{}, nil, nil, err
+	if err := validateNonceData(nonce.Data); err != nil {
+		return Info{}, nil, nil, fmt.Errorf("parsing create_child_sa response: %w", err)
 	}
-	if err := validateRekeyTrafficSelectors("parsing create_child_sa response", tsi.Selectors, tsr.Selectors, previous); err != nil {
-		return Info{}, nil, nil, err
+	if err := validateRekeyTrafficSelectors(tsi.Selectors, tsr.Selectors, previous); err != nil {
+		return Info{}, nil, nil, fmt.Errorf("parsing create_child_sa response: %w", err)
 	}
 	if len(sa.Proposals) != 1 {
 		return Info{}, nil, nil, fmt.Errorf("parsing create_child_sa response: negotiated proposal count %d", len(sa.Proposals))
 	}
-	if err := validateNegotiatedProposalFromRequests("parsing create_child_sa response", sa.Proposals[0], requestProposals); err != nil {
-		return Info{}, nil, nil, err
+	if err := validateNegotiatedProposalFromRequests(sa.Proposals[0], requestProposals); err != nil {
+		return Info{}, nil, nil, fmt.Errorf("parsing create_child_sa response: %w", err)
 	}
-	proposal, err := negotiatedChildSAProposal("parsing create_child_sa response", sa.Proposals[0], dhGroup)
+	proposal, err := negotiatedChildSAProposal(sa.Proposals[0], dhGroup)
 	if err != nil {
-		return Info{}, nil, nil, err
+		return Info{}, nil, nil, fmt.Errorf("parsing create_child_sa response: %w", err)
 	}
 	info, err := tunnelInfoFromProposal(proposal)
 	if err != nil {
@@ -512,12 +518,12 @@ func childSAFromCreateChildResponseWithRequests(payloads []ike.Payload, previous
 	return info, append([]byte(nil), nonce.Data...), peerPublic, nil
 }
 
-func validateRekeyTrafficSelectors(action string, tsi, tsr []ike.TrafficSelector, current Info) error {
+func validateRekeyTrafficSelectors(tsi, tsr []ike.TrafficSelector, current Info) error {
 	if len(current.InitiatorTrafficSelectors) != 0 && !trafficSelectorsContainAll(tsi, current.InitiatorTrafficSelectors) {
-		return fmt.Errorf("%s: initiator traffic selectors are narrower than current child sa", action)
+		return errors.New("initiator traffic selectors are narrower than current child sa")
 	}
 	if len(current.ResponderTrafficSelectors) != 0 && !trafficSelectorsContainAll(tsr, current.ResponderTrafficSelectors) {
-		return fmt.Errorf("%s: responder traffic selectors are narrower than current child sa", action)
+		return errors.New("responder traffic selectors are narrower than current child sa")
 	}
 	return nil
 }
@@ -659,14 +665,15 @@ func (s *Session) pruneRetiredChildSAs(now time.Time) {
 }
 
 type protectedExchange struct {
-	action          string
+	action          ikeAction
 	peer            *net.UDPAddr
 	crypto          *ikeCrypto
 	skipIKESABytes  bool
 	senderInitiator bool
 	messageID       uint32
 	exchangeType    byte
-	wire            []byte
+	useNATT         bool
+	wires           [][]byte
 	waiter          <-chan inboundIKE
 }
 
@@ -688,7 +695,7 @@ func (s *Session) exchangeProtected(ctx context.Context, exchange protectedExcha
 }
 
 func (s *Session) writeProtectedRequest(ctx context.Context, exchange protectedExchange) error {
-	return s.writeProtectedWire(ctx, exchange.action, exchange.crypto, prependNonESPMarker(exchange.wire), exchange.peer, exchange.skipIKESABytes)
+	return s.writeProtectedWires(ctx, exchange.action, exchange.crypto, buildIKEWires(exchange.wires, exchange.useNATT), exchange.peer, exchange.skipIKESABytes)
 }
 
 func (s *Session) awaitProtectedResponse(ctx context.Context, exchange protectedExchange, delay time.Duration) ([]ike.Payload, bool, error) {
@@ -703,6 +710,9 @@ func (s *Session) awaitProtectedResponse(ctx context.Context, exchange protected
 		if response.err != nil {
 			return nil, false, fmt.Errorf("%s: %w", exchange.action, response.err)
 		}
+		if response.payloads != nil {
+			return response.payloads, true, nil
+		}
 		payloads, err := openProtectedResponse(exchange.crypto, response.data, exchange.exchangeType, exchange.action, exchange.senderInitiator)
 		if err != nil {
 			return nil, false, err
@@ -713,7 +723,7 @@ func (s *Session) awaitProtectedResponse(ctx context.Context, exchange protected
 	}
 }
 
-func openProtectedResponse(crypto *ikeCrypto, data []byte, exchangeType byte, action string, senderInitiator bool) ([]ike.Payload, error) {
+func openProtectedResponse(crypto *ikeCrypto, data []byte, exchangeType byte, action ikeAction, senderInitiator bool) ([]ike.Payload, error) {
 	var packet ike.IKEPacket
 	if err := packet.UnmarshalBinary(data); err != nil {
 		return nil, fmt.Errorf("%s: parsing response: %w", action, err)

@@ -3,6 +3,7 @@ package sms
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -197,6 +198,7 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 			t.Fatalf("Proxy-Require = %q, want sec-agree", got)
 		}
 		transport.queue(newResponse(req, 202, "Accepted"))
+		ackMOSubmit(t, svc, req)
 	}
 
 	got, err := svc.Send(context.Background(), "777", "BAL")
@@ -239,6 +241,7 @@ func TestSendUsesServiceCenterPSIForSIPTargetAndAddressForRP(t *testing.T) {
 			t.Fatalf("RP Destination = %q, want +15550000000", rp.Destination)
 		}
 		transport.queue(newResponse(req, 202, "Accepted"))
+		ackMOSubmit(t, svc, req)
 	}
 
 	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
@@ -288,6 +291,7 @@ func TestSendRequestsStatusReportWhenConfigured(t *testing.T) {
 					t.Fatalf("SMS-SUBMIT first octet = 0x%02X, want 0x%02X", got, tt.wantFirstOctet)
 				}
 				transport.queue(newResponse(req, 202, "Accepted"))
+				ackMOSubmit(t, svc, req)
 			}
 
 			if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
@@ -405,6 +409,7 @@ func TestSendSIPURIUsesMSISDNLessMultipart(t *testing.T) {
 					t.Fatalf("TP-DA = %q, want %q", gotTPDA, dummyMSISDN)
 				}
 				transport.queue(newResponse(req, 202, "Accepted"))
+				ackMOSubmit(t, svc, req)
 			}
 
 			if _, err := svc.Send(context.Background(), tt.to, "BAL"); err != nil {
@@ -434,6 +439,7 @@ func TestSendPrefersDefaultPublicIdentityWhenNoTelURI(t *testing.T) {
 			t.Fatalf("From = %q, want default public identity", got)
 		}
 		transport.queue(newResponse(req, 202, "Accepted"))
+		ackMOSubmit(t, svc, req)
 	}
 
 	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
@@ -1708,7 +1714,7 @@ func TestHandleMessageRejectsUnsupportedContentType(t *testing.T) {
 	}
 }
 
-func TestSendIgnoresMissingSubmitReport(t *testing.T) {
+func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	errCh := make(chan error, 1)
@@ -1736,15 +1742,39 @@ func TestSendIgnoresMissingSubmitReport(t *testing.T) {
 		transport.queue(newResponse(req, 202, "Accepted"))
 	}
 
-	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
-		t.Fatalf("Send() error = %v", err)
+	type sendResult struct {
+		submissions []SubmissionSegment
+		err         error
 	}
-	_ = nextSMSRequest(t, requests)
+	sendDone := make(chan sendResult, 1)
+	go func() {
+		submissions, err := svc.Send(context.Background(), "777", "BAL")
+		sendDone <- sendResult{submissions: submissions, err: err}
+	}()
+	first := nextSMSRequest(t, requests)
+
+	var result sendResult
+	select {
+	case result = <-sendDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Send() did not return before submit report timeout")
+	}
+	if result.err != nil {
+		t.Fatalf("Send() error = %v", result.err)
+	}
+	if len(result.submissions) != 1 {
+		t.Fatalf("len(submissions) = %d, want 1", len(result.submissions))
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if err := sendSubmitReport(svc, rpMessage{Type: rpErrorNetworkToMS, Reference: moReference(t, first), Cause: rpCauseTemporaryFailure, HasCause: true}, first.Header("Call-ID")); err != nil {
+		t.Fatalf("late sendSubmitReport() error = %v", err)
+	}
 
 	select {
 	case err := <-errCh:
 		t.Fatalf("OnError = %v, want none", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond):
 	}
 	select {
 	case retry := <-requests:
@@ -1788,9 +1818,11 @@ func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
 				transport.queue(newResponse(req, 202, "Accepted"))
 			}
 
-			if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
-				t.Fatalf("Send() error = %v", err)
-			}
+			sendErr := make(chan error, 1)
+			go func() {
+				_, err := svc.Send(context.Background(), "777", "BAL")
+				sendErr <- err
+			}()
 			first := nextSMSRequest(t, requests)
 			var firstRP rpMessage
 			if err := firstRP.UnmarshalBinary(first.Body); err != nil {
@@ -1799,6 +1831,14 @@ func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
 			ackBody, err := (rpMessage{Type: rpAckNetworkToMS, Reference: firstRP.Reference}).MarshalBinary()
 			if err != nil {
 				t.Fatalf("MarshalBinary(ack) error = %v", err)
+			}
+			select {
+			case err := <-sendErr:
+				if err != nil {
+					t.Fatalf("Send() error = %v", err)
+				}
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("Send() did not return before submit report")
 			}
 
 			inbound := newServiceTransport()
@@ -1826,6 +1866,104 @@ func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
 	}
 }
 
+func TestSendSIPURIRequiresInReplyToForSubmitReport(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{
+		Logger:              testLogger(),
+		SubmitReportTimeout: time.Second,
+	}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	requests := make(chan []byte, 1)
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		requests <- append([]byte(nil), data...)
+		transport.queue(newResponse(req, 202, "Accepted"))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sendErr := make(chan error, 1)
+	go func() {
+		_, err := svc.Send(ctx, "sip:bob@example.net", "BAL")
+		sendErr <- err
+	}()
+
+	first := nextSMSRequest(t, requests)
+	reportBody, err := (rpMessage{Type: rpAckNetworkToMS, Reference: moReference(t, first)}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(submit report) error = %v", err)
+	}
+	select {
+	case err := <-sendErr:
+		if err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Send() did not return before submit report")
+	}
+
+	missing := newInboundRequest("submit-report-missing", "2 MESSAGE", reportBody)
+	missingTransport := newServiceTransport()
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: missing, Transport: missingTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest(missing In-Reply-To) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(missing In-Reply-To) handled = false, want true")
+	}
+	if len(missingTransport.writes) != 1 {
+		t.Fatalf("missing In-Reply-To response count = %d, want 1", len(missingTransport.writes))
+	}
+	if got := mustParseMessage(t, missingTransport.writes[0]).StatusCode(); got != sipStatusNotAcceptableHere {
+		t.Fatalf("missing In-Reply-To status = %d, want %d", got, sipStatusNotAcceptableHere)
+	}
+
+	matched := newInboundRequest("submit-report-matched", "3 MESSAGE", reportBody)
+	matched.Headers.Add("In-Reply-To", first.Header("Call-ID"))
+	matchedTransport := newServiceTransport()
+	handled, err = svc.HandleRequest(context.Background(), session.Request{Message: matched, Transport: matchedTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest(matched submit report) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(matched submit report) handled = false, want true")
+	}
+	if len(matchedTransport.writes) != 1 {
+		t.Fatalf("matched submit report response count = %d, want 1", len(matchedTransport.writes))
+	}
+	if got := mustParseMessage(t, matchedTransport.writes[0]).StatusCode(); got != sipStatusOK {
+		t.Fatalf("matched submit report status = %d, want %d", got, sipStatusOK)
+	}
+
+	duplicateMissing := newInboundRequest("submit-report-duplicate-missing", "4 MESSAGE", reportBody)
+	duplicateTransport := newServiceTransport()
+	handled, err = svc.HandleRequest(context.Background(), session.Request{Message: duplicateMissing, Transport: duplicateTransport})
+	if err != nil {
+		t.Fatalf("HandleRequest(duplicate missing In-Reply-To) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(duplicate missing In-Reply-To) handled = false, want true")
+	}
+	if len(duplicateTransport.writes) != 1 {
+		t.Fatalf("duplicate missing In-Reply-To response count = %d, want 1", len(duplicateTransport.writes))
+	}
+	if got := mustParseMessage(t, duplicateTransport.writes[0]).StatusCode(); got != sipStatusNotAcceptableHere {
+		t.Fatalf("duplicate missing In-Reply-To status = %d, want %d", got, sipStatusNotAcceptableHere)
+	}
+}
+
 func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
@@ -1845,47 +1983,60 @@ func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 	}()
 
 	requests := make(chan []byte, 4)
+	reportErr := make(chan error, 1)
 	transport.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
 		if req.Method() != "MESSAGE" {
 			return
 		}
 		requests <- append([]byte(nil), data...)
+		var rp rpMessage
+		if err := rp.UnmarshalBinary(req.Body); err != nil {
+			reportErr <- fmt.Errorf("first RP unmarshal: %w", err)
+		} else {
+			report := rpMessage{Type: rpErrorNetworkToMS, Reference: rp.Reference, Cause: rpCauseTemporaryFailure, HasCause: true}
+			reportMsg := newInboundRequest("submit-report", "2 MESSAGE", nil)
+			reportMsg.Headers.Add("In-Reply-To", req.Header("Call-ID"))
+			if !svc.completePending(reportMsg, report) {
+				reportErr <- fmt.Errorf("completePending() = false")
+			} else {
+				reportErr <- nil
+			}
+		}
 		transport.queue(newResponse(req, 202, "Accepted"))
 	}
 
-	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
-		t.Fatalf("Send() error = %v", err)
+	sendErr := make(chan error, 1)
+	go func() {
+		_, err := svc.Send(context.Background(), "777", "BAL")
+		sendErr <- err
+	}()
+	_ = nextSMSRequest(t, requests)
+
+	select {
+	case err := <-reportErr:
+		if err != nil {
+			t.Fatalf("sendSubmitReport() error = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("sendSubmitReport() did not return")
 	}
-	first := nextSMSRequest(t, requests)
-	var firstRP rpMessage
-	if err := firstRP.UnmarshalBinary(first.Body); err != nil {
-		t.Fatalf("first RP unmarshal error = %v", err)
-	}
-	reportBody, err := (rpMessage{Type: rpErrorNetworkToMS, Reference: firstRP.Reference, Cause: rpCauseTemporaryFailure, HasCause: true}).MarshalBinary()
-	if err != nil {
-		t.Fatalf("MarshalBinary() error = %v", err)
-	}
-	report := newInboundRequest("submit-report", "2 MESSAGE", reportBody)
-	report.Headers.Add("In-Reply-To", first.Header("Call-ID"))
-	inbound := newServiceTransport()
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: report, Transport: inbound})
-	if err != nil {
-		t.Fatalf("HandleRequest() error = %v", err)
-	}
-	if !handled {
-		t.Fatal("HandleRequest() handled = false, want true")
+
+	select {
+	case err := <-sendErr:
+		if err == nil || !strings.Contains(err.Error(), "temporary failure") {
+			t.Fatalf("Send() error = %v, want temporary failure", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Send() did not return after RP-ERROR")
 	}
 
 	select {
 	case data := <-requests:
 		t.Fatalf("unexpected retried MESSAGE: %s", mustParseMessage(t, data).StartLine)
 	case err := <-errCh:
-		if !strings.Contains(err.Error(), "temporary failure") {
-			t.Fatalf("OnError = %v, want temporary failure", err)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("waiting for RP-ERROR")
+		t.Fatalf("OnError = %v, want none for synchronous RP-ERROR", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -2056,6 +2207,64 @@ func ackReports(t *testing.T, transport *serviceStubTransport) {
 			transport.queue(newResponse(req, 202, "Accepted"))
 		}
 	}
+}
+
+func ackMOSubmit(t *testing.T, svc *Service, req sip.Message) {
+	t.Helper()
+	report := rpMessage{Type: rpAckNetworkToMS, Reference: moReference(t, req)}
+	inReplyTo := req.Header("Call-ID")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sendSubmitReport(svc, report, inReplyTo)
+	}()
+	t.Cleanup(func() {
+		t.Helper()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("sendSubmitReport() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("sendSubmitReport() did not return")
+		}
+	})
+}
+
+func sendSubmitReport(svc *Service, report rpMessage, inReplyTo string) error {
+	body, err := report.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("marshal submit report: %w", err)
+	}
+	msg := newInboundRequest("submit-report", "2 MESSAGE", body)
+	if inReplyTo != "" {
+		msg.Headers.Add("In-Reply-To", inReplyTo)
+	}
+	inbound := newServiceTransport()
+	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inbound})
+	if err != nil {
+		return fmt.Errorf("handle submit report: %w", err)
+	}
+	if !handled {
+		return fmt.Errorf("handle submit report: handled = false, want true")
+	}
+	return nil
+}
+
+func moReference(t *testing.T, req sip.Message) byte {
+	t.Helper()
+	body := req.Body
+	mediaType, _, err := mime.ParseMediaType(req.Header("Content-Type"))
+	if err != nil {
+		t.Fatalf("ParseMediaType(Content-Type) error = %v", err)
+	}
+	if strings.EqualFold(mediaType, mixedMultipartType) {
+		_, body = multipartSMSReport(t, req)
+	}
+	var rp rpMessage
+	if err := rp.UnmarshalBinary(body); err != nil {
+		t.Fatalf("RP unmarshal error = %v", err)
+	}
+	return rp.Reference
 }
 
 func registeredService(t *testing.T, transport *serviceStubTransport) (*session.Session, *registration.Service) {

@@ -46,6 +46,7 @@ type IMSConfig struct {
 	HomeDomain               string
 	PhoneContextDomain       string
 	USSDLanguage             string
+	USSDDomain               string
 	UserAgent                string
 	AccessNetworkInfo        string
 	WLANNodeID               string
@@ -61,7 +62,6 @@ type IMSConfig struct {
 	SIPServerPort            int
 	SIPTimers                imssession.TransactionTimers
 	TCPDataACKTimeouts       []time.Duration
-	SMSSubmitReportTimeout   time.Duration
 	SMSDeliveryReportTimeout time.Duration
 	Voice                    imsvoice.Config
 
@@ -151,11 +151,11 @@ func New(reader usimcard.Reader, cfg *Config) (*Client, error) {
 	}
 	raw = raw.trimmed()
 	if err := raw.validate(); err != nil {
-		return nil, errors.Join(fmt.Errorf("creating client: %w", err), wrapCloseError("closing reader", reader.Close()))
+		return nil, errors.Join(fmt.Errorf("creating client: %w", err), wrapCloseError(closeActionReader, reader.Close()))
 	}
 	raw.Terminal = raw.Terminal.trimmed()
 	if raw.Terminal.ID == "" {
-		return nil, errors.Join(errors.New("creating client: terminal id is empty"), wrapCloseError("closing reader", reader.Close()))
+		return nil, errors.Join(errors.New("creating client: terminal id is empty"), wrapCloseError(closeActionReader, reader.Close()))
 	}
 	client := newClient(raw)
 	client.reader = reader

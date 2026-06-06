@@ -223,7 +223,7 @@ func (c *Call) endAfterMediaEvent(done <-chan struct{}, reason mediaReleaseReaso
 	resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reason.sipReason()))
 	cancel()
 	if !byeReleaseCompleted(resp, err) {
-		c.service.emitError(byeReleaseError("ending call after media event", resp, err))
+		c.service.emitError(byeReleaseError(callActionEndAfterMediaEvent, resp, err))
 	}
 	c.finish(CallStateEnded, cause)
 }

@@ -553,6 +553,39 @@ func TestApplyRegisterChallengeSelectsSupportedWWWAuthenticate(t *testing.T) {
 	}
 }
 
+func TestRegisterHandlesProxyAuthenticationChallenge(t *testing.T) {
+	transport := newTCPTransport(5062, 5060)
+	svc := newTestService(t, Config{}, transport, stubCard{})
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		switch countWrites(transport) {
+		case 1:
+			if got := req.Header("Authorization"); got == "" {
+				t.Fatal("initial Authorization = empty")
+			}
+			transport.queue(newResponse(req, sipStatusProxyAuthenticationRequired, "Proxy Authentication Required",
+				sip.Header{Name: "Proxy-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
+				sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444`},
+			))
+		case 2:
+			if got := req.Header("Authorization"); got != "" {
+				t.Fatalf("Authorization = %q, want empty after 407", got)
+			}
+			if got := req.Header("Proxy-Authorization"); !strings.Contains(got, `nonce="`+testNonce+`"`) {
+				t.Fatalf("Proxy-Authorization = %q, want nonce %q", got, testNonce)
+			}
+			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"}))
+		default:
+			t.Fatalf("unexpected REGISTER write %d", countWrites(transport))
+		}
+	}
+
+	if err := svc.Register(context.Background()); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
 func TestBuildRegisterUsesSpecDefaultExpires(t *testing.T) {
 	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
 

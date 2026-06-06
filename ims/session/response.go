@@ -12,8 +12,8 @@ import (
 )
 
 func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Message) error {
-	if err := s.ensureOpen("writing response"); err != nil {
-		return err
+	if err := s.ensureOpen(); err != nil {
+		return fmt.Errorf("writing response: %w", err)
 	}
 	s.applyResponseDecorator(&resp)
 	if err := s.writeResponse(ctx, req.Transport, req.PeerAddr, req.Message, resp); err != nil {

@@ -136,7 +136,7 @@ func (c *Call) Hangup(ctx context.Context) error {
 	_ = c.closeMedia()
 	resp, err := c.service.sess.Exchange(ctx, c.buildBYE(reasonUserTriggered))
 	if !byeReleaseCompleted(resp, err) {
-		err := byeReleaseError("hanging up call", resp, err)
+		err := byeReleaseError(callActionHangUp, resp, err)
 		c.finish(CallStateFailed, err.Error())
 		return err
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/damonto/vowifi-go/ims/pidf"
 	"github.com/damonto/vowifi-go/ims/security"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
+	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 	"github.com/damonto/vowifi-go/swu/tunnel"
 )
 
@@ -133,6 +134,7 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
 	cfg.PhoneContextDomain = strings.TrimSpace(cfg.PhoneContextDomain)
 	cfg.USSDLanguage = strings.TrimSpace(cfg.USSDLanguage)
+	cfg.USSDDomain = strings.ToLower(strings.TrimSpace(cfg.USSDDomain))
 	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
 	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
@@ -184,6 +186,14 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	if cfg.RegisterExpires == 0 {
 		cfg.RegisterExpires = 600000 * time.Second
 	}
+	if cfg.USSDDomain == "" {
+		cfg.USSDDomain = string(imsussd.DomainIMS)
+	}
+	switch imsussd.Domain(cfg.USSDDomain) {
+	case imsussd.DomainIMS, imsussd.DomainCS, imsussd.DomainDisabled:
+	default:
+		return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported ussd domain %q", cfg.USSDDomain)
+	}
 	if cfg.AuthAlgorithm == "" {
 		cfg.AuthAlgorithm = security.AlgorithmAKAv1MD5
 	} else {
@@ -214,14 +224,8 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	if cfg.SIPServerPort < 0 || cfg.SIPServerPort > 65535 {
 		return IMSConfig{}, errors.New("normalizing ims config: sip server port must be between 0 and 65535")
 	}
-	if cfg.SMSSubmitReportTimeout < 0 {
-		return IMSConfig{}, errors.New("normalizing ims config: sms submit report timeout must be >= 0")
-	}
 	if cfg.SMSDeliveryReportTimeout < 0 {
 		return IMSConfig{}, errors.New("normalizing ims config: sms delivery report timeout must be >= 0")
-	}
-	if cfg.SMSSubmitReportTimeout == 0 {
-		cfg.SMSSubmitReportTimeout = imssms.DefaultSubmitReportTimeout()
 	}
 	if cfg.SMSDeliveryReportTimeout == 0 {
 		cfg.SMSDeliveryReportTimeout = imssms.DefaultDeliveryReportTimeout()

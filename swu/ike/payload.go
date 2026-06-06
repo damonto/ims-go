@@ -17,19 +17,20 @@ const (
 	payloadTypeProposal  byte = 2
 	payloadTypeTransform byte = 3
 
-	payloadTypeSA        byte = 33
-	payloadTypeKE        byte = 34
-	payloadTypeIDi       byte = 35
-	payloadTypeIDr       byte = 36
-	payloadTypeAUTH      byte = 39
-	payloadTypeNonce     byte = 40
-	payloadTypeNotify    byte = 41
-	payloadTypeDelete    byte = 42
-	payloadTypeTSi       byte = 44
-	payloadTypeTSr       byte = 45
-	payloadTypeEncrypted byte = 46
-	payloadTypeCP        byte = 47
-	payloadTypeEAP       byte = 48
+	payloadTypeSA                byte = 33
+	payloadTypeKE                byte = 34
+	payloadTypeIDi               byte = 35
+	payloadTypeIDr               byte = 36
+	payloadTypeAUTH              byte = 39
+	payloadTypeNonce             byte = 40
+	payloadTypeNotify            byte = 41
+	payloadTypeDelete            byte = 42
+	payloadTypeTSi               byte = 44
+	payloadTypeTSr               byte = 45
+	payloadTypeEncrypted         byte = 46
+	payloadTypeCP                byte = 47
+	payloadTypeEAP               byte = 48
+	payloadTypeEncryptedFragment byte = 53
 )
 
 const (
@@ -513,8 +514,8 @@ type KeyExchangePayload struct {
 func (p *KeyExchangePayload) Type() byte { return payloadTypeKE }
 
 func (p *KeyExchangePayload) MarshalBinary() ([]byte, error) {
-	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data), "marshalling key exchange"); err != nil {
-		return nil, err
+	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data)); err != nil {
+		return nil, fmt.Errorf("marshalling key exchange: %w", err)
 	}
 	body := make([]byte, keyExchangeBodyHeaderLen)
 	binary.BigEndian.PutUint16(body[0:2], p.DHGroup)
@@ -528,8 +529,8 @@ func (p *KeyExchangePayload) UnmarshalBinary(data []byte) error {
 	}
 	p.DHGroup = binary.BigEndian.Uint16(data[0:2])
 	p.Data = append([]byte(nil), data[keyExchangeBodyHeaderLen:]...)
-	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data), "parsing key exchange"); err != nil {
-		return err
+	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data)); err != nil {
+		return fmt.Errorf("parsing key exchange: %w", err)
 	}
 	return nil
 }
@@ -553,9 +554,9 @@ func keyExchangeDataLength(group uint16) (int, bool) {
 	}
 }
 
-func validateKeyExchangeDataLength(group uint16, length int, action string) error {
+func validateKeyExchangeDataLength(group uint16, length int) error {
 	if want, ok := keyExchangeDataLength(group); ok && length != want {
-		return fmt.Errorf("%s: invalid data length %d for dh group %d", action, length, group)
+		return fmt.Errorf("invalid data length %d for dh group %d", length, group)
 	}
 	return nil
 }
@@ -1303,6 +1304,55 @@ func decodeEncryptedPayload(next byte, data []byte) (*EncryptedPayload, error) {
 	return payload, nil
 }
 
+type EncryptedFragmentPayload struct {
+	NextPayload    byte
+	FragmentNumber uint16
+	TotalFragments uint16
+	Raw            []byte
+}
+
+func (p *EncryptedFragmentPayload) Type() byte { return payloadTypeEncryptedFragment }
+
+func (p *EncryptedFragmentPayload) MarshalBinary() ([]byte, error) {
+	if p.FragmentNumber == 0 || p.TotalFragments == 0 {
+		return nil, errors.New("marshalling encrypted fragment: fragment number and total fragments must be non-zero")
+	}
+	if p.FragmentNumber > p.TotalFragments {
+		return nil, fmt.Errorf("marshalling encrypted fragment: fragment number %d exceeds total fragments %d", p.FragmentNumber, p.TotalFragments)
+	}
+	body := make([]byte, 4, 4+len(p.Raw))
+	binary.BigEndian.PutUint16(body[0:2], p.FragmentNumber)
+	binary.BigEndian.PutUint16(body[2:4], p.TotalFragments)
+	body = append(body, p.Raw...)
+	return body, nil
+}
+
+func (p *EncryptedFragmentPayload) UnmarshalBinary(data []byte) error {
+	if len(data) < 4 {
+		return errors.New("parsing encrypted fragment: truncated body")
+	}
+	fragmentNumber := binary.BigEndian.Uint16(data[0:2])
+	totalFragments := binary.BigEndian.Uint16(data[2:4])
+	if fragmentNumber == 0 || totalFragments == 0 {
+		return errors.New("parsing encrypted fragment: fragment number and total fragments must be non-zero")
+	}
+	if fragmentNumber > totalFragments {
+		return fmt.Errorf("parsing encrypted fragment: fragment number %d exceeds total fragments %d", fragmentNumber, totalFragments)
+	}
+	p.FragmentNumber = fragmentNumber
+	p.TotalFragments = totalFragments
+	p.Raw = append([]byte(nil), data[4:]...)
+	return nil
+}
+
+func decodeEncryptedFragmentPayload(next byte, data []byte) (*EncryptedFragmentPayload, error) {
+	payload := &EncryptedFragmentPayload{NextPayload: next}
+	if err := payload.UnmarshalBinary(data); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
 func MarshalPayloadChain(payloads []Payload) (byte, []byte, error) {
 	if len(payloads) == 0 {
 		return payloadTypeNone, nil, nil
@@ -1310,12 +1360,14 @@ func MarshalPayloadChain(payloads []Payload) (byte, []byte, error) {
 	first := payloads[0].Type()
 	body := make([]byte, 0)
 	for i, payload := range payloads {
-		if payload.Type() == payloadTypeEncrypted && i+1 < len(payloads) {
+		if protectedPayloadType(payload.Type()) && i+1 < len(payloads) {
 			return 0, nil, errors.New("marshalling payload chain: encrypted payload must be last")
 		}
 		next := payloadTypeNone
 		if encrypted, ok := payload.(*EncryptedPayload); ok {
 			next = encrypted.NextPayload
+		} else if fragment, ok := payload.(*EncryptedFragmentPayload); ok {
+			next = fragment.NextPayload
 		} else if i+1 < len(payloads) {
 			next = payloads[i+1].Type()
 		}
@@ -1381,7 +1433,7 @@ func DecodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 			payloads = append(payloads, payload)
 		}
 		remaining = remaining[length:]
-		if nextType == payloadTypeEncrypted {
+		if protectedPayloadType(nextType) {
 			break
 		}
 		nextType = next
@@ -1390,6 +1442,10 @@ func DecodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
 		return nil, fmt.Errorf("parsing payload chain: %d trailing bytes", len(remaining))
 	}
 	return payloads, nil
+}
+
+func protectedPayloadType(payloadType byte) bool {
+	return payloadType == payloadTypeEncrypted || payloadType == payloadTypeEncryptedFragment
 }
 
 func repeatablePayloadType(payloadType byte) bool {
@@ -1421,6 +1477,8 @@ func decodePayload(payloadType, next byte, body []byte, critical bool) (Payload,
 		return decodeTrafficSelectorPayload(payloadType, body)
 	case payloadTypeEncrypted:
 		return decodeEncryptedPayload(next, body)
+	case payloadTypeEncryptedFragment:
+		return decodeEncryptedFragmentPayload(next, body)
 	case payloadTypeCP:
 		return decodeConfigPayload(body)
 	case payloadTypeEAP:

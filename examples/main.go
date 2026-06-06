@@ -72,7 +72,6 @@ type options struct {
 	sipTimerF      time.Duration
 	sipTimerH      time.Duration
 	sipTimerJ      time.Duration
-	smsTR1         time.Duration
 	nattKeepalive  time.Duration
 	ikeRetransmit  string
 	sendTo         string
@@ -130,7 +129,6 @@ func parseFlags() options {
 	flag.DurationVar(&opt.sipTimerF, "sip-timer-f", 0, "SIP timer F override")
 	flag.DurationVar(&opt.sipTimerH, "sip-timer-h", 0, "SIP timer H override")
 	flag.DurationVar(&opt.sipTimerJ, "sip-timer-j", 0, "SIP timer J override")
-	flag.DurationVar(&opt.smsTR1, "sms-tr1", 0, "SMS submit report TR1 timeout override")
 	flag.DurationVar(&opt.nattKeepalive, "natt-keepalive", 0, "IWLAN NAT-T keepalive override, maps iwlan.natt_keep_alive_timer_sec_int")
 	flag.StringVar(&opt.ikeRetransmit, "ike-retransmit", "", "comma-separated IKE retransmit delays, for example 1s,2s,4s")
 	flag.StringVar(&opt.sendTo, "send-to", "", "destination MSISDN for one test SMS")
@@ -224,18 +222,17 @@ func run(opt options) error {
 			IKERetransmitDelays:  ikeRetransmit,
 		},
 		IMS: vowifi.IMSConfig{
-			Transport:              opt.transport,
-			PrivateIdentity:        opt.privateID,
-			PublicIdentity:         opt.publicID,
-			HomeDomain:             opt.homeDomain,
-			PhoneContextDomain:     opt.phoneContext,
-			UserAgent:              opt.userAgent,
-			AccessNetworkInfo:      opt.pani,
-			WLANNodeID:             opt.wlanNodeID,
-			RegisterExpires:        opt.expires,
-			SIPServerPort:          opt.sipPort,
-			SIPTimers:              sipTimersFromOptions(opt),
-			SMSSubmitReportTimeout: opt.smsTR1,
+			Transport:          opt.transport,
+			PrivateIdentity:    opt.privateID,
+			PublicIdentity:     opt.publicID,
+			HomeDomain:         opt.homeDomain,
+			PhoneContextDomain: opt.phoneContext,
+			UserAgent:          opt.userAgent,
+			AccessNetworkInfo:  opt.pani,
+			WLANNodeID:         opt.wlanNodeID,
+			RegisterExpires:    opt.expires,
+			SIPServerPort:      opt.sipPort,
+			SIPTimers:          sipTimersFromOptions(opt),
 		},
 	}
 

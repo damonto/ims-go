@@ -17,15 +17,15 @@ func (s *Session) ExchangeWithOptions(ctx context.Context, req sip.Message, opts
 }
 
 func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
-	if err := s.ensureOpen("exchanging request"); err != nil {
-		return sip.Message{}, err
+	if err := s.ensureOpen(); err != nil {
+		return sip.Message{}, fmt.Errorf("exchanging request: %w", err)
 	}
-	if err := s.ensureActiveTransport("exchanging request", transport); err != nil {
-		return sip.Message{}, err
+	if err := s.ensureActiveTransport(transport); err != nil {
+		return sip.Message{}, fmt.Errorf("exchanging request: %w", err)
 	}
 	for _, responseTransport := range opts.ResponseTransports {
-		if err := s.ensureActiveTransport("exchanging request", responseTransport); err != nil {
-			return sip.Message{}, err
+		if err := s.ensureActiveTransport(responseTransport); err != nil {
+			return sip.Message{}, fmt.Errorf("exchanging request: %w", err)
 		}
 	}
 	tx := newClientTransaction(s, transport, req, opts)
@@ -90,8 +90,8 @@ func (s *Session) exchangeWithBootstrapReader(ctx context.Context, tx *clientTra
 }
 
 func (s *Session) Send(ctx context.Context, req sip.Message) error {
-	if err := s.ensureOpen("sending request"); err != nil {
-		return err
+	if err := s.ensureOpen(); err != nil {
+		return fmt.Errorf("sending request: %w", err)
 	}
 	return s.writeRequest(ctx, s.primaryTransport(), req)
 }

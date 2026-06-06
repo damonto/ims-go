@@ -250,10 +250,10 @@ func isKnownAKAAttribute(attrType byte) bool {
 	}
 }
 
-func rejectUnsupportedAKAAttributes(action string, attrs []AKAAttribute) error {
+func rejectUnsupportedAKAAttributes(attrs []AKAAttribute) error {
 	for _, attr := range attrs {
 		if attr.Type < akaSkippableAttributeStart && !isKnownAKAAttribute(attr.Type) {
-			return fmt.Errorf("%s: unrecognized non-skippable attribute %d", action, attr.Type)
+			return fmt.Errorf("unrecognized non-skippable attribute %d", attr.Type)
 		}
 	}
 	return nil
@@ -415,8 +415,8 @@ func BytesValue(attr *AKAAttribute) ([]byte, error) {
 }
 
 func (n *AKANotification) UnmarshalAttributes(attrs []AKAAttribute) error {
-	if err := rejectUnsupportedAKAAttributes("parsing aka notification", attrs); err != nil {
-		return err
+	if err := rejectUnsupportedAKAAttributes(attrs); err != nil {
+		return fmt.Errorf("parsing aka notification: %w", err)
 	}
 	var attr *AKAAttribute
 	for i := range attrs {
@@ -451,8 +451,8 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 	if message.Code != eapCodeRequest || message.Subtype != akaSubtypeReauthentication {
 		return errors.New("parsing aka reauthentication: unsupported packet")
 	}
-	if err := rejectUnsupportedAKAAttributes("parsing aka reauthentication", message.Attributes); err != nil {
-		return err
+	if err := rejectUnsupportedAKAAttributes(message.Attributes); err != nil {
+		return fmt.Errorf("parsing aka reauthentication: %w", err)
 	}
 	if attr := FindAttribute(message.Attributes, akaAttrResultInd); attr != nil && len(attr.Value) != akaResultIndAttributeLen {
 		return fmt.Errorf("parsing aka reauthentication: invalid result indication length %d", len(attr.Value))
@@ -539,8 +539,8 @@ func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, er
 	if err != nil {
 		return nil, fmt.Errorf("decrypting aka attributes: %w", err)
 	}
-	if err := rejectUnsupportedAKAAttributes("decrypting aka attributes", parsed); err != nil {
-		return nil, err
+	if err := rejectUnsupportedAKAAttributes(parsed); err != nil {
+		return nil, fmt.Errorf("decrypting aka attributes: %w", err)
 	}
 	filtered := make([]AKAAttribute, 0, len(parsed))
 	for i, attr := range parsed {

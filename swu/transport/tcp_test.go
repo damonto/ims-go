@@ -137,7 +137,7 @@ func TestNormalizedTCPDataACKTimeouts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := normalizedTCPDataACKTimeouts("testing tcp transport", tt.input)
+			got, err := normalizedTCPDataACKTimeouts(tt.input)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("normalizedTCPDataACKTimeouts() error = nil, want error")
@@ -157,7 +157,7 @@ func TestNormalizedTCPDataACKTimeouts(t *testing.T) {
 			}
 			if len(got) > 0 {
 				got[0] = time.Nanosecond
-				again, err := normalizedTCPDataACKTimeouts("testing tcp transport", tt.input)
+				again, err := normalizedTCPDataACKTimeouts(tt.input)
 				if err != nil {
 					t.Fatalf("normalizedTCPDataACKTimeouts() second error = %v", err)
 				}
@@ -496,7 +496,7 @@ func TestTCPConnDialReady(t *testing.T) {
 				conn.signalReady()
 			}
 
-			ready, err := conn.dialReady("dialing tcp transport")
+			ready, err := conn.dialReady(transportActionDialTCP)
 			if ready != tt.wantReady {
 				t.Fatalf("dialReady() ready = %t, want %t", ready, tt.wantReady)
 			}

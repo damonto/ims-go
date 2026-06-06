@@ -18,10 +18,25 @@ func buildIKEWire(request []byte, nat bool) []byte {
 	return prependNonESPMarker(request)
 }
 
+func buildIKEWires(packets [][]byte, nat bool) [][]byte {
+	if !nat {
+		return packets
+	}
+	return prependNonESPMarkerPackets(packets)
+}
+
 func prependNonESPMarker(packet []byte) []byte {
 	wire := make([]byte, 0, nonESPMarkerLen+len(packet))
 	wire = append(wire, nonESPMarker[:]...)
 	return append(wire, packet...)
+}
+
+func prependNonESPMarkerPackets(packets [][]byte) [][]byte {
+	wires := make([][]byte, 0, len(packets))
+	for _, packet := range packets {
+		wires = append(wires, prependNonESPMarker(packet))
+	}
+	return wires
 }
 
 func (s *Session) writeIKERequest(ctx context.Context, addr *net.UDPAddr, request []byte, nat bool, messageID uint32) error {
@@ -61,6 +76,118 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 		}
 	}
 	return nil, nil, fmt.Errorf("connecting swu session: waiting message %d: timeout", messageID)
+}
+
+func (s *Session) exchangeProtectedIKE(ctx context.Context, addr *net.UDPAddr, requests [][]byte, nat bool, messageID uint32, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
+	if len(requests) == 0 {
+		return nil, nil, fmt.Errorf("%s: request is empty", action)
+	}
+	s.logger.Debug("sending protected IKE message", "message_id", messageID, "use_natt", nat, "remote_addr", addr, "fragment_count", len(requests))
+	expected, err := newIKEResponseMatch(requests[0], addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	for attempt, delay := range s.ikeRetransmitDelays() {
+		for _, request := range requests {
+			if err := s.writeIKERequest(ctx, addr, request, nat, messageID); err != nil {
+				return nil, nil, err
+			}
+		}
+		payloads, peer, err := s.awaitProtectedIKEAttempt(ctx, expected, delay, nat, crypto, senderInitiator, fragmentationSupported, action)
+		if err == nil {
+			return payloads, peer, nil
+		}
+		if !errors.Is(err, handshake.ErrIKETimeout) {
+			return nil, nil, err
+		}
+		s.logger.Debug("waiting for protected IKE message", "message_id", messageID, "attempt", attempt+1, "err", err)
+	}
+	return nil, nil, fmt.Errorf("%s: waiting message %d: timeout", action, messageID)
+}
+
+func (s *Session) awaitProtectedIKEAttempt(ctx context.Context, expected ikeResponseMatch, timeout time.Duration, udpEncap bool, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
+	payloads, peer, err := s.readProtectedIKEMessage(ctx, expected, timeout, udpEncap, crypto, senderInitiator, fragmentationSupported, action)
+	if err == nil {
+		s.logger.Debug("received protected IKE message", "message_id", expected.messageID, "peer_addr", peer, "payload_count", len(payloads))
+		return payloads, peer, nil
+	}
+	return nil, nil, err
+}
+
+func (s *Session) readProtectedIKEMessage(ctx context.Context, expected ikeResponseMatch, timeout time.Duration, udpEncap bool, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, maxUDPPacketSize)
+	reassembly := ikeFragmentReassembly{}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if ikeReadTimedOut(deadline) {
+			return nil, nil, handshake.ErrIKETimeout
+		}
+		data, udpAddr, err := s.readIKECandidate(deadline, buf, udpEncap)
+		if err != nil {
+			if errors.Is(err, handshake.ErrIKETimeout) {
+				continue
+			}
+			return nil, nil, err
+		}
+		if !matchesIKEMessage(data, udpAddr, expected) {
+			continue
+		}
+		var packet ike.IKEPacket
+		if err := packet.UnmarshalBinary(data); err != nil {
+			if isIKEFragmentPacket(data) {
+				continue
+			}
+			return nil, nil, fmt.Errorf("%s: parsing response: %w", action, err)
+		}
+		payloads, complete, err := openIKEPacketMaybeFragmented(crypto, packet, senderInitiator, fragmentationSupported, &reassembly)
+		if err != nil {
+			if !hasEncryptedPayload(packet.Payloads) {
+				if notifyErr := plaintextIKENotifyError(packet.Payloads); notifyErr != nil {
+					return nil, nil, fmt.Errorf("%s: %w", action, notifyErr)
+				}
+			}
+			return nil, nil, fmt.Errorf("%s: opening response: %w", action, err)
+		}
+		if complete {
+			return payloads, udpAddr, nil
+		}
+	}
+}
+
+func openIKEPacketMaybeFragmented(crypto *ikeCrypto, packet ike.IKEPacket, senderInitiator bool, fragmentationSupported bool, reassembly *ikeFragmentReassembly) ([]ike.Payload, bool, error) {
+	if len(packet.Payloads) != 1 {
+		return nil, false, errors.New("expected encrypted payload container")
+	}
+	if _, ok := packet.Payloads[0].(*ike.EncryptedFragmentPayload); ok {
+		if !fragmentationSupported {
+			return nil, false, errors.New("ike fragmentation is not negotiated")
+		}
+		fragment, err := crypto.OpenIKEFragment(packet, senderInitiator)
+		if err != nil {
+			return nil, false, nil
+		}
+		payloads, _, complete, stored, err := reassembly.add(fragment, packet.Raw)
+		if !stored {
+			return nil, false, nil
+		}
+		return payloads, complete, err
+	}
+	payloads, err := crypto.OpenIKE(packet, senderInitiator)
+	if err != nil {
+		return nil, false, err
+	}
+	return payloads, true, nil
+}
+
+func isIKEFragmentPacket(data []byte) bool {
+	var header ike.IKEHeader
+	if err := header.UnmarshalBinary(data); err != nil {
+		return false
+	}
+	return header.NextPayload == payloadTypeEncryptedFragment
 }
 
 var defaultIKERetransmitDelays = []time.Duration{
@@ -211,7 +338,7 @@ func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) er
 	return nil
 }
 
-func (s *Session) writeProtectedWire(ctx context.Context, action string, crypto *ikeCrypto, wire []byte, peer net.Addr, skipIKESAByteAccounting bool) error {
+func (s *Session) writeProtectedWire(ctx context.Context, action ikeAction, crypto *ikeCrypto, wire []byte, peer net.Addr, skipIKESAByteAccounting bool) error {
 	protectedBytes, err := currentIKEProtectedBytes(crypto, wire, skipIKESAByteAccounting)
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
@@ -233,6 +360,18 @@ func (s *Session) writeProtectedWire(ctx context.Context, action string, crypto 
 		s.failSecurityAssociations(errIKESAExpired)
 	}
 	s.markProtectedTx(now)
+	return nil
+}
+
+func (s *Session) writeProtectedWires(ctx context.Context, action ikeAction, crypto *ikeCrypto, wires [][]byte, peer net.Addr, skipIKESAByteAccounting bool) error {
+	if len(wires) == 0 {
+		return fmt.Errorf("%s: request is empty", action)
+	}
+	for _, wire := range wires {
+		if err := s.writeProtectedWire(ctx, action, crypto, wire, peer, skipIKESAByteAccounting); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

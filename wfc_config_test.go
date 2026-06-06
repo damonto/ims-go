@@ -477,7 +477,7 @@ func TestConfigNormalizedWFCProfileUsesTunnelTimers(t *testing.T) {
     "mcc": "530",
     "mnc": "24",
     "epdg": "epdg.ims.2degrees.net.nz",
-    "livenessTimeout": "900s",
+    "livenessTimeout": "90s",
     "natKeepaliveInterval": "30s",
     "ikeSARekeySoftTime": "86340s",
     "ikeSARekeyHardTime": "86400s",
@@ -499,8 +499,8 @@ func TestConfigNormalizedWFCProfileUsesTunnelTimers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizedTunnel() error = %v", err)
 	}
-	if tunnelCfg.LivenessTimeout != 900*time.Second {
-		t.Fatalf("LivenessTimeout = %v, want 900s", tunnelCfg.LivenessTimeout)
+	if tunnelCfg.LivenessTimeout != 90*time.Second {
+		t.Fatalf("LivenessTimeout = %v, want 90s", tunnelCfg.LivenessTimeout)
 	}
 	if tunnelCfg.NATKeepaliveInterval != 30*time.Second {
 		t.Fatalf("NATKeepaliveInterval = %v, want 30s", tunnelCfg.NATKeepaliveInterval)
@@ -654,6 +654,46 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			}
 			if got.EPDG != tt.wantEPDG {
 				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
+			}
+		})
+	}
+}
+
+func TestConfigNormalizedUsesEmbeddedLivenessTimeout(t *testing.T) {
+	cfg := Config{Terminal: TerminalInfo{ID: testIMEI}}
+	got, err := cfg.normalized(plmnWFCCard{mcc: "505", mnc: "03", mncLength: 2})
+	if err != nil {
+		t.Fatalf("normalized() error = %v", err)
+	}
+	if got.Tunnel.LivenessTimeout != 90*time.Second {
+		t.Fatalf("Tunnel.LivenessTimeout = %v, want Vodafone AU liveness timeout 90s", got.Tunnel.LivenessTimeout)
+	}
+}
+
+func TestEmbeddedWFCProfilesDeclareLivenessTimeout(t *testing.T) {
+	var profiles []wfcProfile
+	if err := json.Unmarshal(embeddedWFCConfig, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	tests := make([]struct {
+		name    string
+		profile wfcProfile
+	}, 0, len(profiles))
+	for _, profile := range profiles {
+		tests = append(tests, struct {
+			name    string
+			profile wfcProfile
+		}{
+			name:    profile.MCC + "-" + profile.MNC + "-" + profile.GID1,
+			profile: profile,
+		})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.profile.LivenessTimeout == nil {
+				t.Fatal("livenessTimeout is missing")
 			}
 		})
 	}

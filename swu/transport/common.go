@@ -36,15 +36,15 @@ func espIntegrityEnabled(value string) bool {
 	return !strings.EqualFold(strings.TrimSpace(value), esp.IntegrityNone)
 }
 
-func validateSecureESPConfig(action, encryption, integrity string, encryptionKey, integrityKey []byte) error {
+func validateSecureESPConfig(encryption, integrity string, encryptionKey, integrityKey []byte) error {
 	if strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityNone) {
-		return fmt.Errorf("%s: integrity must be enabled", action)
+		return errors.New("integrity must be enabled")
 	}
 	if encryption == esp.EncryptionAESCBC && len(encryptionKey) == 0 {
-		return fmt.Errorf("%s: encryption key is empty", action)
+		return errors.New("encryption key is empty")
 	}
 	if espIntegrityEnabled(integrity) && len(integrityKey) == 0 {
-		return fmt.Errorf("%s: integrity key is empty", action)
+		return errors.New("integrity key is empty")
 	}
 	return nil
 }

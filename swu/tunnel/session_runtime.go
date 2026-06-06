@@ -16,6 +16,8 @@ func (s *Session) commitConnect(state *connectState) {
 	s.connecting = false
 	s.innerLocal = state.innerLocalAddr(s.cfg.LocalSIPPort)
 	s.innerRemote = state.innerRemoteAddr(s.cfg.SIPPort)
+	s.useNATT = state.useNATT
+	s.ikeFragmentationSupported = state.ikeFragmentationSupported
 	s.tunnel = infoFromHandshake(state.established.Info)
 	s.ike = state.crypto
 	s.pendingIKESA = ikeSARekeyResult{}
@@ -50,10 +52,15 @@ func (s *Session) commitConnect(state *connectState) {
 	s.childSARekeying = false
 	s.simultaneousChildSA = simultaneousChildSARekey{}
 	s.livenessTimeout = state.established.LivenessTimeout
-	s.natKeepaliveInterval = s.cfg.NATKeepaliveInterval
+	if state.useNATT {
+		s.natKeepaliveInterval = s.cfg.NATKeepaliveInterval
+	} else {
+		s.natKeepaliveInterval = 0
+	}
 	s.informWaiters = make(map[ikeMessageKey]chan inboundIKE)
-	s.informResponses = make(map[uint32][]byte)
+	s.informResponses = make(map[uint32][][]byte)
 	s.informResponseReqs = make(map[uint32][]byte)
+	s.ikeFragments = make(map[ikeMessageKey]*ikeFragmentReassembly)
 	s.outboundESP = state.outboundESPCodec()
 	s.inboundESP = state.inboundESPCodec()
 	s.retiredChildSAs = nil

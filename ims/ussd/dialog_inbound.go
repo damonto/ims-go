@@ -114,7 +114,7 @@ func (s *Session) handleBye(ctx context.Context, req session.Request) error {
 	var payload Message
 	hasPayload := len(req.Message.Body) > 0 || strings.TrimSpace(req.Message.Header("Content-Type")) != ""
 	if hasPayload {
-		decoded, err := decodeSinglePayload("parsing USSD BYE", req.Message)
+		decoded, err := decodeSinglePayload(payloadContextUSSDBye, req.Message)
 		if err != nil {
 			return s.service.writeUnsupportedMediaType(ctx, req)
 		}

@@ -52,6 +52,77 @@ func TestNewConnectStateUsesConfiguredDHGroup(t *testing.T) {
 	}
 }
 
+func TestDefaultIKESAInitPayloadsAdvertisesFragmentation(t *testing.T) {
+	crypto := testIKECrypto()
+	crypto.initiatorSPI = 0x0102030405060708
+	local := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 40000}
+	remote := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 500}
+
+	payloads := defaultIKESAInitPayloads(handshake.Config{}, crypto, local, remote)
+
+	if !hasNotifyPayload(payloads, notifyTypeIKEV2FragmentationSupported) {
+		t.Fatalf("defaultIKESAInitPayloads() missing IKEV2_FRAGMENTATION_SUPPORTED notify")
+	}
+}
+
+func TestApplyIKESAInitResponseRecordsFragmentationSupport(t *testing.T) {
+	tests := []struct {
+		name       string
+		notify     bool
+		wantEnable bool
+	}{
+		{name: "peer supports fragmentation", notify: true, wantEnable: true},
+		{name: "peer omits fragmentation notify"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, response, request, responseRaw, local, remote := testIKESAInitResponse(t, tt.notify)
+
+			err := state.applyIKESAInitResponse(response, request, responseRaw, local, remote)
+
+			if err != nil {
+				t.Fatalf("applyIKESAInitResponse() error = %v", err)
+			}
+			if state.ikeFragmentationSupported != tt.wantEnable {
+				t.Fatalf("ikeFragmentationSupported = %t, want %t", state.ikeFragmentationSupported, tt.wantEnable)
+			}
+			if state.useNATT {
+				t.Fatal("useNATT = true, want false when NAT is not detected and peer is on port 500")
+			}
+		})
+	}
+}
+
+func TestConnectIKEPeerUsesNATTOnlyWhenSelected(t *testing.T) {
+	session := &Session{
+		outerRemote: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 500},
+		outerNAT:    &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 4500},
+	}
+	tests := []struct {
+		name     string
+		state    *connectState
+		wantPort int
+		wantNATT bool
+	}{
+		{name: "nil state uses ike port", wantPort: 500},
+		{name: "no natt uses ike port", state: &connectState{}, wantPort: 500},
+		{name: "natt uses natt port", state: &connectState{useNATT: true}, wantPort: 4500, wantNATT: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			peer, useNATT := session.connectIKEPeer(tt.state)
+			if peer.Port != tt.wantPort {
+				t.Fatalf("peer port = %d, want %d", peer.Port, tt.wantPort)
+			}
+			if useNATT != tt.wantNATT {
+				t.Fatalf("useNATT = %t, want %t", useNATT, tt.wantNATT)
+			}
+		})
+	}
+}
+
 func TestTunnelAddressesAcceptsIPv6Subnet(t *testing.T) {
 	subnetValue := append(net.ParseIP("2001:db8::").To16(), 64)
 	pcscf := net.ParseIP("2001:db8::100").To16()
@@ -141,10 +212,13 @@ func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
 	}
 }
 
-func TestTunnelAddressesRejectsInvalidAddressLengths(t *testing.T) {
+func TestApplyTunnelAddressesHandlesInvalidAddressLengths(t *testing.T) {
 	tests := []struct {
-		name  string
-		attrs []ike.Attribute
+		name         string
+		attrs        []ike.Attribute
+		wantErr      string
+		wantInner    net.IP
+		wantPCSCFNil bool
 	}{
 		{
 			name: "internal ipv4 with trailing byte",
@@ -152,6 +226,7 @@ func TestTunnelAddressesRejectsInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv4Address, []byte{10, 1, 2, 3, 4}),
 				ike.NewTLVAttribute(configAttrPCSCFIPv4Address, net.IPv4(10, 9, 8, 7).To4()),
 			},
+			wantErr: "internal ip is missing",
 		},
 		{
 			name: "internal ipv6 missing prefix length",
@@ -159,6 +234,7 @@ func TestTunnelAddressesRejectsInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv6Address, net.ParseIP("2001:db8::1").To16()),
 				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, net.ParseIP("2001:db8::100").To16()),
 			},
+			wantErr: "internal ip is missing",
 		},
 		{
 			name: "p-cscf ipv4 with trailing byte",
@@ -166,6 +242,8 @@ func TestTunnelAddressesRejectsInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 1, 2, 3).To4()),
 				ike.NewTLVAttribute(configAttrPCSCFIPv4Address, []byte{10, 9, 8, 7, 6}),
 			},
+			wantInner:    net.IPv4(10, 1, 2, 3).To4(),
+			wantPCSCFNil: true,
 		},
 		{
 			name: "p-cscf ipv6 with trailing byte",
@@ -173,6 +251,8 @@ func TestTunnelAddressesRejectsInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::1").To16(), 64)),
 				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, append(net.ParseIP("2001:db8::100").To16(), 0)),
 			},
+			wantInner:    net.ParseIP("2001:db8::1").To16(),
+			wantPCSCFNil: true,
 		},
 	}
 
@@ -180,8 +260,67 @@ func TestTunnelAddressesRejectsInvalidAddressLengths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tunnel := Info{}
 			err := applyTunnelAddresses(&tunnel, ike.ConfigPayload{Attributes: tt.attrs}, handshake.Config{})
-			if err == nil || !strings.Contains(err.Error(), "p-cscf and internal ip families do not match") {
-				t.Fatalf("applyTunnelAddresses() error = %v, want family match error", err)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("applyTunnelAddresses() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applyTunnelAddresses() error = %v", err)
+			}
+			if !ipEqual(tunnel.InnerIP, tt.wantInner) {
+				t.Fatalf("InnerIP = %s, want %s", tunnel.InnerIP, tt.wantInner)
+			}
+			if tt.wantPCSCFNil && (tunnel.PCSCFIP != nil || len(tunnel.PCSCFIPs) != 0) {
+				t.Fatalf("P-CSCF = %s/%v, want empty", tunnel.PCSCFIP, tunnel.PCSCFIPs)
+			}
+		})
+	}
+}
+
+func TestApplyTunnelAddressesAllowsMissingPCSCF(t *testing.T) {
+	tests := []struct {
+		name      string
+		attrs     []ike.Attribute
+		wantInner net.IP
+	}{
+		{
+			name: "ipv4 internal only",
+			attrs: []ike.Attribute{
+				ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 1, 2, 3).To4()),
+			},
+			wantInner: net.IPv4(10, 1, 2, 3).To4(),
+		},
+		{
+			name: "ipv6 internal only",
+			attrs: []ike.Attribute{
+				ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::1").To16(), 64)),
+			},
+			wantInner: net.ParseIP("2001:db8::1").To16(),
+		},
+		{
+			name: "ipv6 internal ignores ipv4 pcscf",
+			attrs: []ike.Attribute{
+				ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::1").To16(), 64)),
+				ike.NewTLVAttribute(configAttrPCSCFIPv4Address, net.IPv4(10, 9, 8, 7).To4()),
+			},
+			wantInner: net.ParseIP("2001:db8::1").To16(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tunnel := Info{}
+			err := applyTunnelAddresses(&tunnel, ike.ConfigPayload{Attributes: tt.attrs}, handshake.Config{})
+			if err != nil {
+				t.Fatalf("applyTunnelAddresses() error = %v", err)
+			}
+			if !ipEqual(tunnel.InnerIP, tt.wantInner) {
+				t.Fatalf("InnerIP = %s, want %s", tunnel.InnerIP, tt.wantInner)
+			}
+			if tunnel.PCSCFIP != nil || len(tunnel.PCSCFIPs) != 0 {
+				t.Fatalf("P-CSCF = %s/%v, want empty", tunnel.PCSCFIP, tunnel.PCSCFIPs)
 			}
 		})
 	}
@@ -1223,6 +1362,65 @@ func proposalKeyLength(t *testing.T, proposal ike.Proposal) uint16 {
 	}
 	t.Fatal("key length attr is missing")
 	return 0
+}
+
+func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectState, ike.IKEPacket, []byte, []byte, *net.UDPAddr, *net.UDPAddr) {
+	t.Helper()
+	local := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 40000}
+	remote := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 500}
+	state, err := newConnectState(handshake.ConnectInput{
+		IMEI:        "356789012345678",
+		Card:        sessionTestCard{},
+		OuterRemote: remote,
+		Config: handshake.Config{
+			IKEEncryptionKeyLens: []uint16{128},
+			IKEIntegrity:         []uint16{transformINTEGHMACSHA196},
+			IKEPRF:               []uint16{transformPRFHMACSHA1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("newConnectState() error = %v", err)
+	}
+	request, err := state.buildIKESAInitRequest(local, remote)
+	if err != nil {
+		t.Fatalf("buildIKESAInitRequest() error = %v", err)
+	}
+	responder, err := newIKECrypto(state.crypto.dhGroup)
+	if err != nil {
+		t.Fatalf("newIKECrypto(responder) error = %v", err)
+	}
+	responderSPI := uint64(0x1112131415161718)
+	localHash := natDetectionHash(state.initiatorSPI, responderSPI, local)
+	remoteHash := natDetectionHash(state.initiatorSPI, responderSPI, remote)
+	payloads := []ike.Payload{
+		&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{ikeSAProposals(state.input.Config, state.crypto.dhGroup)[0]}},
+		&ike.NoncePayload{Data: make([]byte, defaultIKENonceLength)},
+		&ike.KeyExchangePayload{DHGroup: state.crypto.dhGroup, Data: responder.PublicKey()},
+		&ike.NotifyPayload{NotifyType: notifyTypeNATDetectionSourceIP, Data: remoteHash[:]},
+		&ike.NotifyPayload{NotifyType: notifyTypeNATDetectionDestIP, Data: localHash[:]},
+	}
+	if fragmentationSupported {
+		payloads = append(payloads, &ike.NotifyPayload{NotifyType: notifyTypeIKEV2FragmentationSupported})
+	}
+	responseRaw, err := (ike.IKEPacket{
+		Header: ike.IKEHeader{
+			InitiatorSPI: state.initiatorSPI,
+			ResponderSPI: responderSPI,
+			Version:      ikeVersion20,
+			ExchangeType: exchangeTypeIKESAInit,
+			Flags:        flagResponse,
+			MessageID:    0,
+		},
+		Payloads: payloads,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(response) error = %v", err)
+	}
+	response, err := decodeIKESAInitPacket(responseRaw)
+	if err != nil {
+		t.Fatalf("decodeIKESAInitPacket() error = %v", err)
+	}
+	return state, response, request, responseRaw, local, remote
 }
 
 func mustIKEPacket(t *testing.T, header ike.IKEHeader, payloads []ike.Payload) []byte {

@@ -39,21 +39,21 @@ func validateIncomingInvite(msg sip.Message) (Message, error) {
 }
 
 func decodeInvitePayload(msg sip.Message) (Message, bool, error) {
-	mediaType, params, err := splitContentTypeHeader("parsing USSD INVITE", msg.Header("Content-Type"))
+	mediaType, params, err := splitContentTypeHeader(payloadContextUSSDInvite, msg.Header("Content-Type"))
 	if err != nil {
 		return Message{}, false, err
 	}
 	if mediaType != mixedMultipartType {
 		return Message{}, false, fmt.Errorf("%w: parsing USSD INVITE: unsupported content type %q", errUnsupportedMediaType, mediaType)
 	}
-	body, err := readMultipartMessageBody("parsing USSD INVITE", params, msg.Body)
+	body, err := readMultipartMessageBody(payloadContextUSSDInvite, params, msg.Body)
 	if err != nil {
 		return Message{}, false, err
 	}
-	if err := body.rejectUnsupportedRequiredParts("parsing USSD INVITE", xmlContentType, sdpContentType); err != nil {
+	if err := body.rejectUnsupportedRequiredParts(payloadContextUSSDInvite, xmlContentType, sdpContentType); err != nil {
 		return Message{}, false, err
 	}
-	payload, err := decodeMultipartPayload("parsing USSD INVITE", body)
+	payload, err := decodeMultipartPayload(payloadContextUSSDInvite, body)
 	if err != nil {
 		return Message{}, false, err
 	}

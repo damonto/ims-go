@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -1467,6 +1468,7 @@ func TestHandleCreateChildSARequestMissingSAClosesIKESA(t *testing.T) {
 			state := createChildSARequestState{
 				ike:            crypto,
 				localInitiator: true,
+				useNATT:        true,
 				initiatorSPI:   packet.Header.InitiatorSPI,
 				responderSPI:   packet.Header.ResponderSPI,
 				peer:           peer,
@@ -2379,16 +2381,16 @@ func TestRekeyChildSACreatesReplacementAfterChildSANotFound(t *testing.T) {
 			}()
 
 			waitForWrites(t, conn, 1)
-			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, 0), inboundIKE{
-				data: sealCreateChildSAResponse(t, crypto, true, 0, []ike.Payload{
+			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, exchangeTypeCreateChildSA, flagResponse, 0), inboundIKE{
+				data: sealCreateChildSAResponse(t, crypto, false, 0, []ike.Payload{
 					&ike.NotifyPayload{ProtocolID: protocolIDESP, NotifyType: notifyTypeChildSANotFound, SPI: uint32Bytes(0x01020304)},
 				}),
 				addr: cloneUDPAddr(session.outerNAT),
 			})
 
 			waitForWrites(t, conn, 2)
-			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, 1), inboundIKE{
-				data: sealCreateChildSAResponse(t, crypto, true, 1, []ike.Payload{
+			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, exchangeTypeCreateChildSA, flagResponse, 1), inboundIKE{
+				data: sealCreateChildSAResponse(t, crypto, false, 1, []ike.Payload{
 					&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{childSAResponseProposal(acceptedChildSA{Info: Info{
 						EncryptionKeyLen: 128,
 						Integrity:        transformINTEGHMACSHA196,
@@ -2472,8 +2474,8 @@ func TestRekeyChildSAIgnoresChildSANotFoundAfterSimultaneousRekey(t *testing.T) 
 				nonceI: []byte{0x20},
 				nonceR: []byte{0x30},
 			})
-			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, 0), inboundIKE{
-				data: sealCreateChildSAResponse(t, crypto, true, 0, []ike.Payload{
+			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, exchangeTypeCreateChildSA, flagResponse, 0), inboundIKE{
+				data: sealCreateChildSAResponse(t, crypto, false, 0, []ike.Payload{
 					&ike.NotifyPayload{ProtocolID: protocolIDESP, NotifyType: notifyTypeChildSANotFound, SPI: uint32Bytes(0x01020304)},
 				}),
 				addr: cloneUDPAddr(session.outerNAT),
@@ -2516,10 +2518,10 @@ func waitForWrites(t *testing.T, conn *fakePacketConn, want int) {
 	t.Fatalf("write count = %d, want at least %d", got, want)
 }
 
-func sealCreateChildSAResponse(t *testing.T, crypto *ikeCrypto, localInitiator bool, messageID uint32, payloads []ike.Payload) []byte {
+func sealCreateChildSAResponse(t *testing.T, crypto *ikeCrypto, senderInitiator bool, messageID uint32, payloads []ike.Payload) []byte {
 	t.Helper()
 	flags := flagResponse
-	if localInitiator {
+	if senderInitiator {
 		flags |= flagInitiator
 	}
 	wire, err := crypto.SealIKE(ike.IKEHeader{
@@ -2529,7 +2531,7 @@ func sealCreateChildSAResponse(t *testing.T, crypto *ikeCrypto, localInitiator b
 		ExchangeType: exchangeTypeCreateChildSA,
 		Flags:        flags,
 		MessageID:    messageID,
-	}, payloads, !localInitiator)
+	}, payloads, senderInitiator)
 	if err != nil {
 		t.Fatalf("SealIKE() error = %v", err)
 	}
@@ -3409,9 +3411,9 @@ func TestInstallIKESecurityAssociationSwitchesControlPlane(t *testing.T) {
 			session.nextPeerMessageID = 17
 			waiter := make(chan inboundIKE, 1)
 			session.informWaiters = map[ikeMessageKey]chan inboundIKE{
-				ikeMessageKeyForSPIs(1, 2, 44): waiter,
+				ikeMessageKeyForSPIs(1, 2, exchangeTypeInformational, flagResponse, 44): waiter,
 			}
-			session.informResponses = map[uint32][]byte{43: []byte("old")}
+			session.informResponses = map[uint32][][]byte{43: {[]byte("old")}}
 			session.mu.Unlock()
 
 			session.installIKESecurityAssociation(ikeSARekeyResult{crypto: next, initiatorSPI: tt.initiatorSPI, responderSPI: tt.responderSPI, localInitiator: true})
@@ -3610,7 +3612,7 @@ func TestPendingIKESecurityAssociationCreateChildUsesNewMessageWindow(t *testing
 			session.initiatorSPI = 1
 			session.responderSPI = 2
 			session.nextPeerMessageID = 9
-			session.informResponses = map[uint32][]byte{0: []byte("old")}
+			session.informResponses = map[uint32][][]byte{0: {[]byte("old")}}
 			session.pendingIKESA = ikeSARekeyResult{
 				crypto:         pending,
 				initiatorSPI:   tt.initiatorSPI,
@@ -3738,7 +3740,7 @@ func TestRetiredIKESecurityAssociationHandlesLateOldIKEMessages(t *testing.T) {
 			session.responderSPI = 0x1112131415161718
 			session.outerNAT = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
 			session.nextPeerMessageID = 0
-			session.informResponses = make(map[uint32][]byte)
+			session.informResponses = make(map[uint32][][]byte)
 			session.mu.Unlock()
 
 			session.installIKESecurityAssociation(ikeSARekeyResult{
@@ -4513,7 +4515,7 @@ func TestIKESAByteHardLifetimeRejectsOutboundBeforeOverflow(t *testing.T) {
 			session.ikeSAOutboundBytes = 1
 			session.mu.Unlock()
 
-			err = session.writeProtectedWire(context.Background(), "test ike send", crypto, nattWire, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}, false)
+			err = session.writeProtectedWire(context.Background(), ikeActionTestSend, crypto, nattWire, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}, false)
 
 			if !errors.Is(err, errIKESAExpired) {
 				t.Fatalf("writeProtectedWire() error = %v, want %v", err, errIKESAExpired)
@@ -5004,7 +5006,10 @@ func TestExpiredChildSAIsDiscardedBeforeUse(t *testing.T) {
 			name: "inbound esp",
 			act: func(session *Session) error {
 				session.handleESPPacket([]byte{0x01, 0x02, 0x03, 0x04})
-				return session.currentDisconnectedTunnelErr("reading packet")
+				if err := session.currentDisconnectedTunnelErr(); err != nil {
+					return fmt.Errorf("reading packet: %w", err)
+				}
+				return nil
 			},
 		},
 	}

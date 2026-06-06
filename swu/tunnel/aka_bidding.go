@@ -16,7 +16,7 @@ func (f *akaAuthFlow) biddingDownRejectResponse(message eapaka.AKAMessage) (akaR
 	}
 	bidding, err := eapaka.BiddingFromAttribute(attr)
 	if err != nil {
-		response, responseErr := f.clientErrorResponse(message.Identifier, "parsing aka bidding", err)
+		response, responseErr := f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing aka bidding: %w", err))
 		return response, true, responseErr
 	}
 	if !bidding.SupportsAKAPrime {

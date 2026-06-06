@@ -77,12 +77,14 @@ type Info struct {
 }
 
 type Session struct {
-	conn        net.PacketConn
-	owned       bool
-	outerRemote *net.UDPAddr
-	outerNAT    *net.UDPAddr
-	cfg         Config
-	logger      *slog.Logger
+	conn                      net.PacketConn
+	owned                     bool
+	outerRemote               *net.UDPAddr
+	outerNAT                  *net.UDPAddr
+	useNATT                   bool
+	ikeFragmentationSupported bool
+	cfg                       Config
+	logger                    *slog.Logger
 
 	mu                   sync.RWMutex
 	connected            bool
@@ -129,8 +131,9 @@ type Session struct {
 	livenessTimeout      time.Duration
 	natKeepaliveInterval time.Duration
 	informWaiters        map[ikeMessageKey]chan inboundIKE
-	informResponses      map[uint32][]byte
+	informResponses      map[uint32][][]byte
 	informResponseReqs   map[uint32][]byte
+	ikeFragments         map[ikeMessageKey]*ikeFragmentReassembly
 	ikeRequestGate       chan struct{}
 	rekeyWake            chan struct{}
 
@@ -151,9 +154,10 @@ type inboundPacket struct {
 }
 
 type inboundIKE struct {
-	data []byte
-	addr *net.UDPAddr
-	err  error
+	data     []byte
+	payloads []ike.Payload
+	addr     *net.UDPAddr
+	err      error
 }
 
 type retiredChildSA struct {
@@ -172,8 +176,9 @@ type retiredIKESA struct {
 	initiatorSPI      uint64
 	responderSPI      uint64
 	peer              *net.UDPAddr
+	useNATT           bool
 	nextPeerMessageID uint32
-	responses         map[uint32][]byte
+	responses         map[uint32][][]byte
 	responseReqs      map[uint32][]byte
 	expiresAt         time.Time
 }
@@ -353,11 +358,13 @@ func ensureDialContext(ctx context.Context, conn net.PacketConn, owned bool) err
 }
 
 func newSession(cfg Config, conn net.PacketConn, owned bool, remote *net.UDPAddr) *Session {
+	useNATT := remote.Port == cfg.NATTPort
 	return &Session{
 		conn:           conn,
 		owned:          owned,
 		outerRemote:    remote,
 		outerNAT:       &net.UDPAddr{IP: append(net.IP(nil), remote.IP...), Port: cfg.NATTPort, Zone: remote.Zone},
+		useNATT:        useNATT,
 		cfg:            cfg,
 		logger:         cfg.Logger.With("component", "swu"),
 		closeCh:        make(chan struct{}),

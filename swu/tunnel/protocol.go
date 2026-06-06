@@ -9,7 +9,14 @@ const (
 	exchangeTypeInformational byte = 37
 )
 
-const nonESPMarkerLen = 4
+const (
+	ikeHeaderLen           = 28
+	ikePayloadHeaderLen    = 4
+	ikeFragmentHeaderLen   = 4
+	defaultIKEFragmentSize = 1280
+	maxIKEFragments        = 65535
+	nonESPMarkerLen        = 4
+)
 
 var nonESPMarker = [nonESPMarkerLen]byte{}
 
@@ -32,12 +39,13 @@ const (
 )
 
 const (
-	payloadTypeNone      byte = 0
-	payloadTypeIDi       byte = 35
-	payloadTypeIDr       byte = 36
-	payloadTypeTSi       byte = 44
-	payloadTypeTSr       byte = 45
-	payloadTypeEncrypted byte = 46
+	payloadTypeNone              byte = 0
+	payloadTypeIDi               byte = 35
+	payloadTypeIDr               byte = 36
+	payloadTypeTSi               byte = 44
+	payloadTypeTSr               byte = 45
+	payloadTypeEncrypted         byte = 46
+	payloadTypeEncryptedFragment byte = 53
 )
 
 const (
@@ -102,6 +110,7 @@ const (
 	notifyTypeChildSANotFound              uint16 = 44
 	notifyTypeNATDetectionSourceIP         uint16 = 16388
 	notifyTypeNATDetectionDestIP           uint16 = 16389
+	notifyTypeIKEV2FragmentationSupported  uint16 = 16430
 	notifyTypeEAPOnlyAuthentication        uint16 = 16417
 	notifyTypeCookie2                      uint16 = 16401
 	notifyTypeReactivationRequestedCause   uint16 = 40961

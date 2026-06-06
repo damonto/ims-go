@@ -23,6 +23,8 @@ func (s *Session) discardSecurityAssociations(cause error) {
 	s.dataPlaneDone = nil
 	s.connected = false
 	s.connecting = false
+	s.useNATT = false
+	s.ikeFragmentationSupported = false
 	s.innerLocal = nil
 	s.innerRemote = nil
 	s.tunnel = Info{}
@@ -65,6 +67,7 @@ func (s *Session) discardSecurityAssociations(cause error) {
 	s.natKeepaliveInterval = 0
 	s.informResponses = nil
 	s.informResponseReqs = nil
+	s.ikeFragments = nil
 	s.mu.Unlock()
 
 	s.notifyDetachedAttachments(s.detachAllAttachments(), cause)
@@ -79,6 +82,8 @@ func (s *Session) discardChildSecurityAssociations(cause error) {
 	s.dataPlaneDone = nil
 	s.connected = false
 	s.connecting = false
+	s.useNATT = false
+	s.ikeFragmentationSupported = false
 	s.innerLocal = nil
 	s.innerRemote = nil
 	s.tunnel = Info{}
@@ -99,6 +104,7 @@ func (s *Session) discardChildSecurityAssociations(cause error) {
 	s.childSARekeying = false
 	s.simultaneousChildSA = simultaneousChildSARekey{}
 	s.tunnelErr = cause
+	s.ikeFragments = nil
 	s.mu.Unlock()
 
 	s.tryDeliverError(fmt.Errorf("reading packet: %w", cause))
@@ -132,13 +138,10 @@ func (s *Session) disconnectedTunnelErr() error {
 	return errChildSAUnavailable
 }
 
-func (s *Session) currentDisconnectedTunnelErr(action string) error {
+func (s *Session) currentDisconnectedTunnelErr() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.disconnectedTunnelErr(); err != nil {
-		return fmt.Errorf("%s: %w", action, err)
-	}
-	return nil
+	return s.disconnectedTunnelErr()
 }
 
 func (s *Session) ikeSAState() ikeSAState {

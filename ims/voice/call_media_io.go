@@ -8,7 +8,7 @@ import (
 )
 
 func (c *Call) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	transport, err := c.mediaTransport("reading call media")
+	transport, err := c.mediaTransport(callActionReadMedia)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -96,7 +96,7 @@ func (c *Call) saveRTPSendState(packet RTPPacket, media NegotiatedMedia) {
 }
 
 func (c *Call) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {
-	transport, err := c.mediaTransport("reading call rtcp")
+	transport, err := c.mediaTransport(callActionReadRTCP)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -107,7 +107,7 @@ func (c *Call) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {
 }
 
 func (c *Call) WriteRTCP(ctx context.Context, data []byte) error {
-	transport, err := c.mediaTransport("writing call rtcp")
+	transport, err := c.mediaTransport(callActionWriteRTCP)
 	if err != nil {
 		return err
 	}

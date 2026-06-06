@@ -11,13 +11,31 @@ import (
 )
 
 func eapAKAChallengeResponse(ctx context.Context, card Card, challengeText string) (string, error) {
-	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP(card), challengeText, "eap-aka")
+	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP(card), challengeText, akaChallengeKindEAPAKA)
 }
 
-func eapAKAChallengeResponseForIdentity(ctx context.Context, card Card, identity, challengeText, label string) (string, error) {
+type akaChallengeKind uint8
+
+const (
+	akaChallengeKindEAPAKA akaChallengeKind = iota
+	akaChallengeKindNSDS
+)
+
+func (k akaChallengeKind) String() string {
+	switch k {
+	case akaChallengeKindEAPAKA:
+		return "eap-aka"
+	case akaChallengeKindNSDS:
+		return "nsds aka"
+	default:
+		return "aka"
+	}
+}
+
+func eapAKAChallengeResponseForIdentity(ctx context.Context, card Card, identity, challengeText string, kind akaChallengeKind) (string, error) {
 	challenge, err := decodeEAPAKAChallenge(challengeText)
 	if err != nil {
-		return "", fmt.Errorf("decoding %s challenge: %w", label, err)
+		return "", fmt.Errorf("decoding %s challenge: %w", kind, err)
 	}
 	authenticate := card.AKA
 	if eapCard, ok := card.(eapAKACard); ok {
@@ -25,14 +43,14 @@ func eapAKAChallengeResponseForIdentity(ctx context.Context, card Card, identity
 	}
 	aka, err := authenticate(ctx, challenge.RAND, challenge.AUTN)
 	if err != nil {
-		return "", fmt.Errorf("authenticating %s challenge: %w", label, err)
+		return "", fmt.Errorf("authenticating %s challenge: %w", kind, err)
 	}
 	if aka.Reject {
-		return "", fmt.Errorf("USIM rejected %s challenge", label)
+		return "", fmt.Errorf("USIM rejected %s challenge", kind)
 	}
 	text, err := buildEAPAKAChallengeResponseText(challenge, aka.RES, aka.CK, aka.IK, aka.AUTS, identity)
 	if err != nil {
-		return "", fmt.Errorf("building %s challenge response: %w", label, err)
+		return "", fmt.Errorf("building %s challenge response: %w", kind, err)
 	}
 	return text, nil
 }

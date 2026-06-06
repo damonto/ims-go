@@ -9,24 +9,24 @@ import (
 
 func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	if !validAKAReauthState(f.currentState) {
-		return f.clientErrorResponse(message.Identifier, "validating reauth state", errors.New("reauth state is unavailable"))
+		return f.clientErrorResponse(message.Identifier, errors.New("validating reauth state: reauth state is unavailable"))
 	}
 	if f.reauthIdentity == "" {
-		return f.clientErrorResponse(message.Identifier, "validating reauth state", errors.New("reauth identity is unavailable"))
+		return f.clientErrorResponse(message.Identifier, errors.New("validating reauth state: reauth identity is unavailable"))
 	}
 	discardStoredAKAReauthState(f.card, f.currentState)
 	if err := f.verifyMessageMAC(message.EAPType, eapData, f.currentState.KAut, nil); err != nil {
-		return f.clientErrorResponse(message.Identifier, "verifying reauth mac", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying reauth mac: %w", err))
 	}
 	if err := f.verifyCheckcode(message.Attributes, message.EAPType); err != nil {
-		return f.clientErrorResponse(message.Identifier, "verifying reauth checkcode", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying reauth checkcode: %w", err))
 	}
 	if response, ok, err := f.biddingDownRejectResponse(message); ok || err != nil {
 		return response, err
 	}
 	var reauth eapaka.AKAReauthentication
 	if err := reauth.UnmarshalMessage(message, f.currentState.KEncr); err != nil {
-		return f.clientErrorResponse(message.Identifier, "parsing reauth request", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing reauth request: %w", err))
 	}
 	if reauth.Counter <= f.currentState.Counter {
 		data, err := eapaka.BuildReauthenticationResponsePacketForType(message.Identifier, message.EAPType, reauth.Counter, true, reauth.UseResultInd, f.currentState.KAut, f.currentState.KEncr, reauth.NonceS)
@@ -48,7 +48,7 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 		msk, emsk, err = eapaka.DeriveFastReauthKeys([]byte(f.reauthIdentity), reauth.Counter, reauth.NonceS, f.currentState.MK)
 	}
 	if err != nil {
-		return f.clientErrorResponse(message.Identifier, "deriving fast reauth keys", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving fast reauth keys: %w", err))
 	}
 	f.crypto.eap.MK = append([]byte(nil), f.currentState.MK...)
 	f.crypto.eap.AUT = append([]byte(nil), f.currentState.KAut...)

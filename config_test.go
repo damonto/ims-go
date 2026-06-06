@@ -6,7 +6,7 @@ import (
 	"time"
 
 	imssession "github.com/damonto/vowifi-go/ims/session"
-	imssms "github.com/damonto/vowifi-go/ims/sms"
+	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 )
 
 func TestConfigNormalized(t *testing.T) {
@@ -29,7 +29,6 @@ func TestConfigNormalized(t *testing.T) {
 		wantSIPPort      int
 		wantSIPT1        time.Duration
 		wantSIPTF        time.Duration
-		wantSMSTR1       time.Duration
 		wantSMSTR2       time.Duration
 	}{
 		{
@@ -52,7 +51,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantSIPPort:      5060,
 			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
 			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
-			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
 			wantSMSTR2:       15 * time.Second,
 		},
 		{
@@ -74,7 +72,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantSIPPort:      5060,
 			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
 			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
-			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
 			wantSMSTR2:       15 * time.Second,
 		},
 		{
@@ -97,7 +94,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantSIPPort:      5060,
 			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
 			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
-			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
 			wantSMSTR2:       15 * time.Second,
 		},
 		{
@@ -121,7 +117,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantSIPPort:      5060,
 			wantSIPT1:        imssession.DefaultTransactionTimers().T1,
 			wantSIPTF:        imssession.DefaultTransactionTimers().TF,
-			wantSMSTR1:       imssms.DefaultSubmitReportTimeout(),
 			wantSMSTR2:       15 * time.Second,
 		},
 		{
@@ -135,7 +130,6 @@ func TestConfigNormalized(t *testing.T) {
 					RegistrationRetryBase:    10 * time.Second,
 					RegistrationRetryMax:     20 * time.Second,
 					SIPTimers:                imssession.TransactionTimers{T1: time.Second, TF: 45 * time.Second},
-					SMSSubmitReportTimeout:   45 * time.Second,
 					SMSDeliveryReportTimeout: 17 * time.Second,
 				},
 			},
@@ -153,7 +147,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantSIPPort:      5070,
 			wantSIPT1:        time.Second,
 			wantSIPTF:        45 * time.Second,
-			wantSMSTR1:       45 * time.Second,
 			wantSMSTR2:       17 * time.Second,
 		},
 		{
@@ -240,16 +233,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "negative sms submit report timeout fails",
-			cfg: Config{
-				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
-					SMSSubmitReportTimeout: -time.Second,
-				},
-			},
-			wantErr: true,
-		},
-		{
 			name: "negative sms delivery report timeout fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
@@ -331,11 +314,41 @@ func TestConfigNormalized(t *testing.T) {
 			if got.IMS.SIPTimers.TF != tt.wantSIPTF {
 				t.Fatalf("IMS.SIPTimers.TF = %v, want %v", got.IMS.SIPTimers.TF, tt.wantSIPTF)
 			}
-			if got.IMS.SMSSubmitReportTimeout != tt.wantSMSTR1 {
-				t.Fatalf("IMS.SMSSubmitReportTimeout = %v, want %v", got.IMS.SMSSubmitReportTimeout, tt.wantSMSTR1)
-			}
 			if got.IMS.SMSDeliveryReportTimeout != tt.wantSMSTR2 {
 				t.Fatalf("IMS.SMSDeliveryReportTimeout = %v, want %v", got.IMS.SMSDeliveryReportTimeout, tt.wantSMSTR2)
+			}
+		})
+	}
+}
+
+func TestIMSConfigNormalizedUSSDDomain(t *testing.T) {
+	tests := []struct {
+		name    string
+		domain  string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", want: string(imsussd.DomainIMS)},
+		{name: "ims", domain: " IMS ", want: string(imsussd.DomainIMS)},
+		{name: "cs", domain: " CS ", want: string(imsussd.DomainCS)},
+		{name: "disabled", domain: " disabled ", want: string(imsussd.DomainDisabled)},
+		{name: "invalid", domain: "ussd-over-sip", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (IMSConfig{USSDDomain: tt.domain}).Normalized()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Normalized() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if got.USSDDomain != tt.want {
+				t.Fatalf("USSDDomain = %q, want %q", got.USSDDomain, tt.want)
 			}
 		})
 	}

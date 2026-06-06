@@ -16,7 +16,7 @@ func byeReleaseCompleted(resp sip.Message, err error) bool {
 	return (code >= sipStatusOK && code < sipStatusMultipleChoices) || code == sipStatusRequestTimeout || code == sipStatusCallTransactionDoesNotExist
 }
 
-func byeReleaseError(action string, resp sip.Message, err error) error {
+func byeReleaseError(action callAction, resp sip.Message, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
@@ -30,7 +30,7 @@ func (c *Call) releaseAcknowledgedInviteFailure(err error, reason string) {
 
 	resp, releaseErr := c.service.sess.Exchange(releaseCtx, c.buildBYE(reason))
 	if !byeReleaseCompleted(resp, releaseErr) {
-		c.service.emitError(byeReleaseError("releasing acknowledged failed call", resp, releaseErr))
+		c.service.emitError(byeReleaseError(callActionReleaseAcknowledgedFailure, resp, releaseErr))
 	}
 	c.finish(CallStateFailed, err.Error())
 }

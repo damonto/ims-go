@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	crand "crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 )
@@ -70,7 +69,7 @@ func (s *Session) ikeSAByteExpired(add uint64) bool {
 	return s.ike != nil && byteLifetimeWouldExpire(s.ikeSAOutboundBytes, add, s.ikeSAByteExpiresAt)
 }
 
-func (s *Session) expireIKESAIfNeeded(action string) error {
+func (s *Session) expireIKESAIfNeeded() error {
 	s.mu.RLock()
 	expired := s.ikeSAExpired(time.Now()) || s.ikeSAByteExpired(0)
 	s.mu.RUnlock()
@@ -78,7 +77,7 @@ func (s *Session) expireIKESAIfNeeded(action string) error {
 		return nil
 	}
 	s.failSecurityAssociations(errIKESAExpired)
-	return fmt.Errorf("%s: %w", action, errIKESAExpired)
+	return errIKESAExpired
 }
 
 func (s *Session) addIKESAOutboundBytes(protectedBytes uint64, now time.Time) bool {
@@ -147,7 +146,7 @@ func (s *Session) childSAByteExpired(add uint64) bool {
 	return s.connected && byteLifetimeWouldExpire(s.childSAOutboundBytes, add, s.childSAByteExpiresAt)
 }
 
-func (s *Session) expireChildSAIfNeeded(action string) error {
+func (s *Session) expireChildSAIfNeeded() error {
 	s.mu.RLock()
 	expired := s.childSAExpired(time.Now())
 	s.mu.RUnlock()
@@ -155,7 +154,7 @@ func (s *Session) expireChildSAIfNeeded(action string) error {
 		return nil
 	}
 	s.discardChildSecurityAssociations(errChildSAExpired)
-	return fmt.Errorf("%s: %w", action, errChildSAExpired)
+	return errChildSAExpired
 }
 
 func (s *Session) addCurrentChildSAOutboundBytes(protectedBytes uint64, now time.Time) bool {

@@ -173,7 +173,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 			}
 			return akaResponse{data: data}, nil
 		}
-		return f.clientErrorResponse(message.Identifier, "parsing aka challenge", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing aka challenge: %w", err))
 	}
 	if message.EAPType == eapTypeAKAPrime && !f.validateAKAPrimeNetworkName(challenge.NetworkName) {
 		data, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
@@ -198,7 +198,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		if message.EAPType == eapTypeAKAPrime {
 			kdfs, parseErr := akaPrimeKDFValues(message.Attributes)
 			if parseErr != nil {
-				return f.clientErrorResponse(message.Identifier, "parsing aka prime kdf attributes", parseErr)
+				return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing aka prime kdf attributes: %w", parseErr))
 			}
 			data, err = eapaka.BuildAKAPrimeSynchronizationFailure(message.Identifier, aka.AUTS, kdfs)
 		} else {
@@ -222,7 +222,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		return akaResponse{data: data}, nil
 	}
 	if !aka.IsSuccess() {
-		return f.clientErrorResponse(message.Identifier, "processing aka result", errors.New("aka result is incomplete"))
+		return f.clientErrorResponse(message.Identifier, errors.New("processing aka result: aka result is incomplete"))
 	}
 	f.logger().Debug(
 		"calculated AKA response",
@@ -235,35 +235,35 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if message.EAPType == eapTypeAKAPrime {
 		sqnXorAK := challenge.AUTN[:akaPrimeSQNXorAKLen]
 		if err := f.crypto.DeriveAKAPrimeEAPKeys([]byte(f.eapIdentity), aka.RES, aka.CK, aka.IK, challenge.NetworkName, sqnXorAK); err != nil {
-			return f.clientErrorResponse(message.Identifier, "deriving aka prime eap keys", err)
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving aka prime eap keys: %w", err))
 		}
 	} else if err := f.crypto.DeriveEAPKeys([]byte(f.eapIdentity), aka.RES, aka.IK, aka.CK); err != nil {
-		return f.clientErrorResponse(message.Identifier, "deriving eap keys", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving eap keys: %w", err))
 	}
 	if err := f.verifyMessageMAC(message.EAPType, eapData, f.crypto.eap.AUT, nil); err != nil {
-		return f.clientErrorResponse(message.Identifier, "verifying aka challenge mac", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying aka challenge mac: %w", err))
 	}
 	if err := f.verifyCheckcode(message.Attributes, message.EAPType); err != nil {
-		return f.clientErrorResponse(message.Identifier, "verifying aka checkcode", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying aka checkcode: %w", err))
 	}
 	if response, ok, err := f.biddingDownRejectResponse(message); ok || err != nil {
 		return response, err
 	}
 	nested, err := f.challengeAttributes(message)
 	if err != nil {
-		return f.clientErrorResponse(message.Identifier, "decrypting aka challenge attrs", err)
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("decrypting aka challenge attrs: %w", err))
 	}
 	f.pendingState = usim.AKAIdentityState{}
 	if attr := eapaka.FindAttribute(nested, akaAttrNextPseudonym); attr != nil {
 		f.pendingState.Pseudonym, err = eapaka.StringValue(attr)
 		if err != nil {
-			return f.clientErrorResponse(message.Identifier, "parsing next pseudonym", err)
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing next pseudonym: %w", err))
 		}
 	}
 	if attr := eapaka.FindAttribute(nested, akaAttrNextReauthID); attr != nil {
 		f.pendingState.ReauthIdentity, err = eapaka.StringValue(attr)
 		if err != nil {
-			return f.clientErrorResponse(message.Identifier, "parsing next reauth id", err)
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing next reauth id: %w", err))
 		}
 		f.pendingState.Counter = 0
 		f.pendingState.MK = append([]byte(nil), f.crypto.eap.MK...)

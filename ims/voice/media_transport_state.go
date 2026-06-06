@@ -13,7 +13,7 @@ func (c *Call) closeMedia() error {
 	return transport.Close()
 }
 
-func (c *Call) mediaTransport(action string) (MediaTransport, error) {
+func (c *Call) mediaTransport(action callAction) (MediaTransport, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {

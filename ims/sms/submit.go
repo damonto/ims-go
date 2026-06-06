@@ -6,20 +6,12 @@ import (
 	"time"
 )
 
-func (s *Service) trackSegmentReport(ctx context.Context, segment outboundSegment, response submitResponse) error {
+func (s *Service) trackSegmentReport(_ context.Context, segment outboundSegment, response submitResponse) error {
 	s.markSubmitted(segment, response, time.Now())
-	select {
-	case report := <-segment.reportCh:
-		s.removePending(segment.callID)
-		s.releaseReference(segment.rpRef)
-		s.completeSubmitted(segment.callID)
-		return s.finishSegmentReportWithContext(ctx, segment, response, report)
-	default:
-	}
 	if report, ok := s.activatePendingAsync(segment, response, time.Now()); ok {
 		s.completeSubmitted(segment.callID)
 		s.releaseReference(segment.rpRef)
-		return s.finishSegmentReportWithContext(ctx, segment, response, report)
+		return s.handleSegmentReport(segment, response, report)
 	}
 	return nil
 }
@@ -37,12 +29,4 @@ func (s *Service) handleSegmentReport(segment outboundSegment, response submitRe
 	default:
 		return fmt.Errorf("sending SMS segment %d/%d: unexpected rp type 0x%02X", segment.index+1, segment.count, report.Type)
 	}
-}
-
-func (s *Service) finishSegmentReportWithContext(_ context.Context, segment outboundSegment, response submitResponse, report rpMessage) error {
-	return s.handleSegmentReport(segment, response, report)
-}
-
-func (s *Service) handleAsyncSegmentReport(segment outboundSegment, response submitResponse, report rpMessage) error {
-	return s.handleSegmentReport(segment, response, report)
 }

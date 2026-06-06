@@ -15,8 +15,12 @@ func (s *Session) handleInformationalResponse(state informationalState, packet i
 		s.logger.Debug("ignoring informational response without matching request", "message_id", packet.Header.MessageID)
 		return true, nil
 	}
-	if _, err := state.ike.OpenIKE(packet, state.peerInitiator()); err != nil {
+	payloads, _, complete, stored, err := s.openIKEPacketForState(state, packet, state.peerInitiator())
+	if err != nil {
 		return true, fmt.Errorf("opening informational response: %w", err)
+	}
+	if !stored {
+		return true, nil
 	}
 	now := time.Now()
 	accept, err := s.acceptIKEProtectedBytesForState(state, data, now)
@@ -30,8 +34,11 @@ func (s *Session) handleInformationalResponse(state informationalState, packet i
 		return true, nil
 	}
 	s.markProtectedRxForState(state, now)
+	if !complete {
+		return true, nil
+	}
 	udpAddr, _ := addr.(*net.UDPAddr)
-	if s.deliverInformationalWaiter(key, inboundIKE{data: append([]byte(nil), data...), addr: cloneUDPAddr(udpAddr)}) {
+	if s.deliverInformationalWaiter(key, inboundIKE{data: append([]byte(nil), data...), payloads: payloads, addr: cloneUDPAddr(udpAddr)}) {
 		s.logger.Debug("matched informational response", "message_id", packet.Header.MessageID)
 	}
 	if accept.expired {
@@ -46,8 +53,15 @@ func (s *Session) handleCreateChildSAResponse(state informationalState, packet i
 		s.logger.Debug("ignoring create_child_sa response without matching request", "message_id", packet.Header.MessageID)
 		return true, nil
 	}
-	if _, err := openProtectedResponse(state.ike, data, exchangeTypeCreateChildSA, "handling create_child_sa response", state.peerInitiator()); err != nil {
+	payloads, _, complete, stored, err := s.openIKEPacketForState(state, packet, state.peerInitiator())
+	if err != nil {
 		return true, err
+	}
+	if !stored {
+		return true, nil
+	}
+	if packet.Header.ExchangeType != exchangeTypeCreateChildSA {
+		return true, fmt.Errorf("handling create_child_sa response: unexpected exchange type %d", packet.Header.ExchangeType)
 	}
 	now := time.Now()
 	accept, err := s.acceptIKEProtectedBytesForState(state, data, now)
@@ -61,8 +75,11 @@ func (s *Session) handleCreateChildSAResponse(state informationalState, packet i
 		return true, nil
 	}
 	s.markProtectedRxForState(state, now)
+	if !complete {
+		return true, nil
+	}
 	udpAddr, _ := addr.(*net.UDPAddr)
-	if s.deliverInformationalWaiter(key, inboundIKE{data: append([]byte(nil), data...), addr: cloneUDPAddr(udpAddr)}) {
+	if s.deliverInformationalWaiter(key, inboundIKE{data: append([]byte(nil), data...), payloads: payloads, addr: cloneUDPAddr(udpAddr)}) {
 		s.logger.Debug("matched create_child_sa response", "message_id", packet.Header.MessageID)
 	}
 	if accept.expired {
@@ -86,28 +103,28 @@ func informationalResponseHeader(state informationalState, messageID uint32) ike
 	}
 }
 
-func (s *Session) sealInformationalResponse(state informationalState, messageID uint32, payloads []ike.Payload) ([]byte, error) {
-	wire, err := state.ike.SealIKE(informationalResponseHeader(state, messageID), payloads, state.localInitiator)
+func (s *Session) sealInformationalResponse(state informationalState, messageID uint32, payloads []ike.Payload) ([][]byte, error) {
+	wires, err := sealIKEPackets(state.ike, informationalResponseHeader(state, messageID), payloads, state.localInitiator, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing informational response: %w", err)
 	}
-	return prependNonESPMarker(wire), nil
+	return buildIKEWires(wires, state.useNATT), nil
 }
 
 func (s *Session) writeInformationalResponse(state informationalState, messageID uint32, request []byte, payloads []ike.Payload, addr net.Addr) error {
-	wire, err := s.sealInformationalResponse(state, messageID, payloads)
+	wires, err := s.sealInformationalResponse(state, messageID, payloads)
 	if err != nil {
 		return err
 	}
-	s.cacheInformationalResponseForState(state, messageID, request, wire)
-	return s.writeInformationalResponseWire(state, messageID, len(payloads), wire, addr)
+	s.cacheInformationalResponseForState(state, messageID, request, wires)
+	return s.writeInformationalResponseWire(state, messageID, len(payloads), wires, addr)
 }
 
-func (s *Session) writeInformationalResponseWire(state informationalState, messageID uint32, payloadCount int, wire []byte, addr net.Addr) error {
+func (s *Session) writeInformationalResponseWire(state informationalState, messageID uint32, payloadCount int, wires [][]byte, addr net.Addr) error {
 	ctx, cancel := s.timeoutContext(2 * time.Second)
 	defer cancel()
 	peer := s.informationalResponsePeer(addr, state.peer)
-	if err := s.writeProtectedWire(ctx, "writing informational response", state.ike, wire, peer, false); err != nil {
+	if err := s.writeProtectedWires(ctx, ikeActionWriteInformationalResponse, state.ike, wires, peer, false); err != nil {
 		return err
 	}
 	s.logger.Debug("replied to informational request", "message_id", messageID, "payload_count", payloadCount)
@@ -115,12 +132,19 @@ func (s *Session) writeInformationalResponseWire(state informationalState, messa
 }
 
 func (s *Session) handleInformationalRequest(state informationalState, packet ike.IKEPacket, addr net.Addr) (bool, error) {
-	payloads, err := state.ike.OpenIKE(packet, state.peerInitiator())
+	relation := s.peerRequestMessageIDRelationForState(state, packet.Header.MessageID)
+	if relation != ikeMessageIDCurrent {
+		return s.handleNonCurrentInformationalRequest(state, packet, addr, relation)
+	}
+	payloads, cacheRequest, complete, stored, err := s.openIKEPacketForState(state, packet, state.peerInitiator())
 	if err != nil {
 		if responsePayloads, ok := ikeErrorNotifyResponse(err); ok {
-			return s.writeIKEErrorNotifyInformationalResponse(state, packet, addr, responsePayloads)
+			return s.writeIKEErrorNotifyInformationalResponse(state, packet, cacheRequest, addr, responsePayloads)
 		}
 		return true, fmt.Errorf("opening informational request: %w", err)
+	}
+	if !stored {
+		return true, nil
 	}
 	if state.promoteIKESA {
 		s.promotePendingIKESecurityAssociation()
@@ -138,31 +162,28 @@ func (s *Session) handleInformationalRequest(state informationalState, packet ik
 	}
 	s.markProtectedRxForState(state, now)
 	expireAfterRequest := accept.expired
+	if canRetransmitCachedResponse(packet) {
+		if wires, ok := s.cachedInformationalResponseForState(state, packet.Header.MessageID, cacheRequest); ok {
+			err := s.writeInformationalResponseWire(state, packet.Header.MessageID, 0, wires, addr)
+			if expireAfterRequest {
+				s.failSecurityAssociations(errIKESAExpired)
+			}
+			return true, err
+		}
+	}
+	if !complete {
+		return true, nil
+	}
 	defer func() {
 		if expireAfterRequest {
 			s.failSecurityAssociations(errIKESAExpired)
 		}
 	}()
-	if wire, ok := s.cachedInformationalResponseForState(state, packet.Header.MessageID, packet.Raw); ok {
-		return true, s.writeInformationalResponseWire(state, packet.Header.MessageID, 0, wire, addr)
-	}
-	switch s.peerRequestMessageIDRelationForState(state, packet.Header.MessageID) {
-	case ikeMessageIDCurrent:
-	case ikeMessageIDFuture:
-		s.logger.Debug("ignoring informational request outside message id window", "message_id", packet.Header.MessageID)
-		if err := s.sendInvalidMessageIDNotification(state, packet.Header.MessageID); err != nil {
-			s.logger.Debug("sending invalid message id notification failed", "message_id", packet.Header.MessageID, "err", err)
-		}
-		return true, nil
-	default:
-		s.logger.Debug("ignoring old informational request without cached response", "message_id", packet.Header.MessageID)
-		return true, nil
-	}
 	responsePayloads, action, err := buildInformationalResponsePayloads(state, payloads, state.identity)
 	if err != nil {
 		return true, err
 	}
-	if err := s.writeInformationalResponse(state, packet.Header.MessageID, packet.Raw, responsePayloads, addr); err != nil {
+	if err := s.writeInformationalResponse(state, packet.Header.MessageID, cacheRequest, responsePayloads, addr); err != nil {
 		return true, err
 	}
 	advanceErr := s.advancePeerRequestMessageIDForState(state, packet.Header.MessageID)
@@ -217,6 +238,27 @@ func (s *Session) handleInformationalRequest(state informationalState, packet ik
 	return true, nil
 }
 
+func (s *Session) handleNonCurrentInformationalRequest(state informationalState, packet ike.IKEPacket, addr net.Addr, relation ikeMessageIDRelation) (bool, error) {
+	switch relation {
+	case ikeMessageIDFuture:
+		s.logger.Debug("ignoring informational request outside message id window", "message_id", packet.Header.MessageID)
+		if err := s.sendInvalidMessageIDNotification(state, packet.Header.MessageID); err != nil {
+			s.logger.Debug("sending invalid message id notification failed", "message_id", packet.Header.MessageID, "err", err)
+		}
+		return true, nil
+	case ikeMessageIDOld:
+		if canRetransmitCachedResponse(packet) {
+			if wires, ok := s.cachedInformationalResponseForState(state, packet.Header.MessageID, packet.Raw); ok {
+				return true, s.writeInformationalResponseWire(state, packet.Header.MessageID, 0, wires, addr)
+			}
+		}
+		s.logger.Debug("ignoring old informational request without cached response", "message_id", packet.Header.MessageID)
+		return true, nil
+	default:
+		return true, nil
+	}
+}
+
 func (s *Session) applyPCSCFReselection(info Info) {
 	if len(info.PCSCFIPs) == 0 {
 		return
@@ -246,7 +288,7 @@ func ikeErrorNotifyResponse(err error) ([]ike.Payload, bool) {
 	return nil, false
 }
 
-func (s *Session) writeIKEErrorNotifyInformationalResponse(state informationalState, packet ike.IKEPacket, addr net.Addr, payloads []ike.Payload) (bool, error) {
+func (s *Session) writeIKEErrorNotifyInformationalResponse(state informationalState, packet ike.IKEPacket, request []byte, addr net.Addr, payloads []ike.Payload) (bool, error) {
 	if state.promoteIKESA {
 		s.promotePendingIKESecurityAssociation()
 	}
@@ -278,7 +320,7 @@ func (s *Session) writeIKEErrorNotifyInformationalResponse(state informationalSt
 	default:
 		return true, nil
 	}
-	if err := s.writeInformationalResponse(state, packet.Header.MessageID, packet.Raw, payloads, addr); err != nil {
+	if err := s.writeInformationalResponse(state, packet.Header.MessageID, responseCacheRequest(packet, request), payloads, addr); err != nil {
 		return true, err
 	}
 	if err := s.advancePeerRequestMessageIDForState(state, packet.Header.MessageID); err != nil {

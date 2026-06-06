@@ -300,6 +300,78 @@ func (c *ikeCrypto) SealIKE(header ike.IKEHeader, payloads []ike.Payload, initia
 	if err != nil {
 		return nil, fmt.Errorf("sealing ike packet: %w", err)
 	}
+	raw, err := c.sealIKEPayloadBody(body, initiator)
+	if err != nil {
+		return nil, err
+	}
+	container := &ike.EncryptedPayload{NextPayload: first, Raw: raw}
+	return c.sealIKEContainer(header, container, initiator)
+}
+
+func (c *ikeCrypto) SealIKEFragments(header ike.IKEHeader, payloads []ike.Payload, initiator bool, maxSize int) ([][]byte, error) {
+	single, err := c.SealIKE(header, payloads, initiator)
+	if err != nil {
+		return nil, err
+	}
+	if maxSize <= 0 || len(single) <= maxSize {
+		return [][]byte{single}, nil
+	}
+	first, body, err := ike.MarshalPayloadChain(payloads)
+	if err != nil {
+		return nil, fmt.Errorf("sealing ike fragments: %w", err)
+	}
+	chunkSize, err := c.ikeFragmentPlaintextSize(maxSize)
+	if err != nil {
+		return nil, err
+	}
+	total := (len(body) + chunkSize - 1) / chunkSize
+	if total <= 1 {
+		return [][]byte{single}, nil
+	}
+	if total > maxIKEFragments {
+		return nil, fmt.Errorf("sealing ike fragments: fragment count %d exceeds %d", total, maxIKEFragments)
+	}
+	packets := make([][]byte, 0, total)
+	for i := range total {
+		start := i * chunkSize
+		end := min(start+chunkSize, len(body))
+		nextPayload := byte(payloadTypeNone)
+		if i == 0 {
+			nextPayload = first
+		}
+		raw, err := c.sealIKEPayloadBody(body[start:end], initiator)
+		if err != nil {
+			return nil, err
+		}
+		container := &ike.EncryptedFragmentPayload{
+			NextPayload:    nextPayload,
+			FragmentNumber: uint16(i + 1),
+			TotalFragments: uint16(total),
+			Raw:            raw,
+		}
+		packet, err := c.sealIKEContainer(header, container, initiator)
+		if err != nil {
+			return nil, err
+		}
+		packets = append(packets, packet)
+	}
+	return packets, nil
+}
+
+func (c *ikeCrypto) ikeFragmentPlaintextSize(maxSize int) (int, error) {
+	icvLen, err := integLength(c.integ)
+	if err != nil {
+		return 0, err
+	}
+	overhead := ikeHeaderLen + ikePayloadHeaderLen + ikeFragmentHeaderLen + aes.BlockSize + icvLen + aes.BlockSize
+	chunkSize := maxSize - overhead
+	if chunkSize <= 0 {
+		return 0, fmt.Errorf("sealing ike fragments: max size %d is too small", maxSize)
+	}
+	return chunkSize, nil
+}
+
+func (c *ikeCrypto) sealIKEPayloadBody(body []byte, initiator bool) ([]byte, error) {
 	padLen := aes.BlockSize - ((len(body) + 1) % aes.BlockSize)
 	if padLen == aes.BlockSize {
 		padLen = 0
@@ -319,9 +391,20 @@ func (c *ikeCrypto) SealIKE(header ike.IKEHeader, payloads []ike.Payload, initia
 	if err != nil {
 		return nil, err
 	}
-	container := &ike.EncryptedPayload{NextPayload: first, Raw: append(append(iv, ciphertext...), make([]byte, icvLen)...)}
+	raw := make([]byte, 0, len(iv)+len(ciphertext)+icvLen)
+	raw = append(raw, iv...)
+	raw = append(raw, ciphertext...)
+	raw = append(raw, make([]byte, icvLen)...)
+	return raw, nil
+}
+
+func (c *ikeCrypto) sealIKEContainer(header ike.IKEHeader, container ike.Payload, initiator bool) ([]byte, error) {
 	packet := ike.IKEPacket{Header: header, Payloads: []ike.Payload{container}}
 	raw, err := packet.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	icvLen, err := integLength(c.integ)
 	if err != nil {
 		return nil, err
 	}
@@ -338,17 +421,68 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 	if !ok {
 		return nil, errMissingEncryptedPayload
 	}
+	plain, err := c.openIKEPayloadBody(packet.Raw, container.Raw, senderInitiator)
+	if err != nil {
+		return nil, err
+	}
+	payloads, err := ike.DecodePayloadChain(container.NextPayload, plain)
+	if err != nil {
+		var critical ike.UnsupportedCriticalPayloadError
+		if errors.As(err, &critical) {
+			return nil, err
+		}
+		return nil, ike.InvalidSyntaxError{Err: err}
+	}
+	if hasEncryptedPayload(payloads) {
+		return nil, ike.InvalidSyntaxError{Err: errors.New("nested encrypted payload")}
+	}
+	return payloads, nil
+}
+
+type ikeFragment struct {
+	firstPayload byte
+	number       uint16
+	total        uint16
+	data         []byte
+}
+
+func (c *ikeCrypto) OpenIKEFragment(packet ike.IKEPacket, senderInitiator bool) (ikeFragment, error) {
+	if len(packet.Payloads) != 1 {
+		return ikeFragment{}, errors.New("opening ike fragment: expected encrypted fragment payload container")
+	}
+	container, ok := packet.Payloads[0].(*ike.EncryptedFragmentPayload)
+	if !ok {
+		return ikeFragment{}, errors.New("opening ike fragment: missing encrypted fragment payload")
+	}
+	if container.FragmentNumber > 1 && container.NextPayload != payloadTypeNone {
+		return ikeFragment{}, fmt.Errorf("opening ike fragment: fragment %d next payload = %d, want 0", container.FragmentNumber, container.NextPayload)
+	}
+	plain, err := c.openIKEPayloadBody(packet.Raw, container.Raw, senderInitiator)
+	if err != nil {
+		return ikeFragment{}, err
+	}
+	return ikeFragment{
+		firstPayload: container.NextPayload,
+		number:       container.FragmentNumber,
+		total:        container.TotalFragments,
+		data:         plain,
+	}, nil
+}
+
+func (c *ikeCrypto) openIKEPayloadBody(packetRaw, body []byte, senderInitiator bool) ([]byte, error) {
 	ivLen := aes.BlockSize
 	icvLen, err := integLength(c.integ)
 	if err != nil {
 		return nil, err
 	}
-	if len(container.Raw) < ivLen+icvLen {
+	if len(body) < ivLen+icvLen {
 		return nil, errors.New("opening ike packet: encrypted body too short")
 	}
-	body := container.Raw
 	wantICV := body[len(body)-icvLen:]
-	gotICV := c.integHMAC(c.integrityKey(senderInitiator), packet.Raw[:len(packet.Raw)-icvLen])
+	if len(packetRaw) < icvLen {
+		return nil, errors.New("opening ike packet: packet is shorter than integrity check value")
+	}
+	gotICV := c.integHMAC(c.integrityKey(senderInitiator), packetRaw[:len(packetRaw)-icvLen])
 	if !hmac.Equal(gotICV, wantICV) {
 		return nil, errors.New("opening ike packet: integrity check failed")
 	}
@@ -366,30 +500,24 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 		return nil, errors.New("opening ike packet: invalid padding")
 	}
 	plain = plain[:len(plain)-1-padLen]
-	payloads, err := ike.DecodePayloadChain(container.NextPayload, plain)
-	if err != nil {
-		var critical ike.UnsupportedCriticalPayloadError
-		if errors.As(err, &critical) {
-			return nil, err
-		}
-		return nil, ike.InvalidSyntaxError{Err: err}
-	}
-	if hasEncryptedPayload(payloads) {
-		return nil, ike.InvalidSyntaxError{Err: errors.New("nested encrypted payload")}
-	}
-	return payloads, nil
+	return plain, nil
 }
 
 func (c *ikeCrypto) ProtectedBytes(wire []byte) (uint64, error) {
-	packet := normalizeIKEPacket(wire, true)
 	var ikePacket ike.IKEPacket
-	if err := ikePacket.UnmarshalBinary(packet); err != nil {
-		return 0, fmt.Errorf("counting ike protected bytes: %w", err)
+	if err := ikePacket.UnmarshalBinary(wire); err != nil {
+		packet := normalizeIKEPacket(wire, true)
+		if len(packet) == len(wire) {
+			return 0, fmt.Errorf("counting ike protected bytes: %w", err)
+		}
+		if err := ikePacket.UnmarshalBinary(packet); err != nil {
+			return 0, fmt.Errorf("counting ike protected bytes: %w", err)
+		}
 	}
 	if len(ikePacket.Payloads) != 1 {
 		return 0, errors.New("counting ike protected bytes: expected encrypted payload container")
 	}
-	container, ok := ikePacket.Payloads[0].(*ike.EncryptedPayload)
+	body, ok := protectedPayloadRaw(ikePacket.Payloads[0])
 	if !ok {
 		return 0, errMissingEncryptedPayload
 	}
@@ -397,10 +525,21 @@ func (c *ikeCrypto) ProtectedBytes(wire []byte) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(container.Raw) < aes.BlockSize+icvLen {
+	if len(body) < aes.BlockSize+icvLen {
 		return 0, errors.New("counting ike protected bytes: encrypted body too short")
 	}
-	return uint64(len(container.Raw) - aes.BlockSize - icvLen), nil
+	return uint64(len(body) - aes.BlockSize - icvLen), nil
+}
+
+func protectedPayloadRaw(payload ike.Payload) ([]byte, bool) {
+	switch p := payload.(type) {
+	case *ike.EncryptedPayload:
+		return p.Raw, true
+	case *ike.EncryptedFragmentPayload:
+		return p.Raw, true
+	default:
+		return nil, false
+	}
 }
 
 func (c *ikeCrypto) EAPAuthKey() []byte {

@@ -2380,7 +2380,7 @@ func TestOpenIKEAuthResponsePlaintextNotify(t *testing.T) {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 			if err == nil {
 				t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 			}
@@ -2448,7 +2448,7 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			payloads, err := openIKEAuthResponse(packet, crypto, "opening aka response message")
+			payloads, err := openIKEAuthResponse(packet, crypto, ikeActionOpenAKAResponseMessage)
 
 			if tt.wantErr == "" {
 				if err != nil {
@@ -2510,7 +2510,7 @@ func TestOpenIKEAuthResponseCarriesBackoffTimer(t *testing.T) {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 	if err == nil {
 		t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 	}
@@ -2596,7 +2596,7 @@ func TestOpenIKEAuthResponseCarriesDeactivatedBackoffTimer(t *testing.T) {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 	if err == nil {
 		t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 	}
@@ -2639,7 +2639,7 @@ func TestOpenIKEAuthResponseCarriesZeroBackoffTimer(t *testing.T) {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 	if err == nil {
 		t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 	}
@@ -2691,7 +2691,7 @@ func TestOpenIKEAuthResponseIgnoresBackoffTimerWithoutErrorNotify(t *testing.T) 
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 			if err == nil {
 				t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 			}
@@ -2732,7 +2732,7 @@ func TestOpenIKEAuthResponseRejectsMalformedBackoffTimerWithErrorNotify(t *testi
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 	if err == nil {
 		t.Fatal("openIKEAuthResponse() error = nil, want malformed BACKOFF_TIMER error")
 	}
@@ -2771,7 +2771,7 @@ func TestOpenIKEAuthResponseCarriesAccessRejectionWithBackoffTimer(t *testing.T)
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+	_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 	if err == nil {
 		t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 	}
@@ -2822,7 +2822,7 @@ func TestOpenIKEAuthResponseBackoffPolicyScope(t *testing.T) {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, "opening aka response message")
+			_, err = openIKEAuthResponse(packet, &ikeCrypto{}, ikeActionOpenAKAResponseMessage)
 			if err == nil {
 				t.Fatal("openIKEAuthResponse() error = nil, want unencrypted notify error")
 			}

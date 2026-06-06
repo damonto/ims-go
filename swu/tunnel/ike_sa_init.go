@@ -58,9 +58,6 @@ func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, reques
 	if err != nil {
 		return err
 	}
-	if !nattSupported {
-		return errors.New("parsing ike_sa_init response: peer does not support nat traversal")
-	}
 	state.crypto.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
 	state.crypto.SetSPIs(state.initiatorSPI, response.Header.ResponderSPI)
 	state.crypto.SetNonces(state.nonceI, responderNonce)
@@ -73,6 +70,8 @@ func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, reques
 	state.responderNonce = append([]byte(nil), responderNonce...)
 	state.nattSupported = nattSupported
 	state.natDetected = natDetected
+	state.useNATT = natDetected || outerRemote.Port == state.input.Config.NATTPort
+	state.ikeFragmentationSupported = hasNotifyPayload(response.Payloads, notifyTypeIKEV2FragmentationSupported)
 	state.saInit.InitiatorSPI = state.initiatorSPI
 	state.saInit.ResponderSPI = state.responderSPI
 	state.saInit.NonceI = append([]byte(nil), state.nonceI...)
@@ -154,8 +153,8 @@ func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16, request
 	if nonce == nil || sa == nil || ke == nil {
 		return negotiatedIKESA{}, nil, nil, errors.New("parsing ike_sa_init response: required payload is missing")
 	}
-	if err := validateNonceData("parsing ike_sa_init response", nonce.Data); err != nil {
-		return negotiatedIKESA{}, nil, nil, err
+	if err := validateNonceData(nonce.Data); err != nil {
+		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: %w", err)
 	}
 	if len(sa.Proposals) != 1 {
 		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: negotiated proposal count %d", len(sa.Proposals))
@@ -163,8 +162,8 @@ func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16, request
 	if len(sa.Proposals[0].SPI) != 0 {
 		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: invalid negotiated ike spi length %d", len(sa.Proposals[0].SPI))
 	}
-	if err := validateNegotiatedProposalFromRequests("parsing ike_sa_init response", sa.Proposals[0], requestProposals); err != nil {
-		return negotiatedIKESA{}, nil, nil, err
+	if err := validateNegotiatedProposalFromRequests(sa.Proposals[0], requestProposals); err != nil {
+		return negotiatedIKESA{}, nil, nil, fmt.Errorf("parsing ike_sa_init response: %w", err)
 	}
 	proposal, err := negotiatedIKESAFromProposal(sa.Proposals[0], dhGroup)
 	if err != nil {
@@ -174,16 +173,20 @@ func negotiatedIKESAFromPayloads(payloads []ike.Payload, dhGroup uint16, request
 }
 
 func invalidKEPayloadGroup(payloads []ike.Payload) (uint16, bool, error) {
-	return invalidKEPayloadGroupFor("parsing ike_sa_init response", payloads)
+	group, retry, err := invalidKEPayloadGroupFor(payloads)
+	if err != nil {
+		return 0, false, fmt.Errorf("parsing ike_sa_init response: %w", err)
+	}
+	return group, retry, nil
 }
 
-func invalidKEPayloadGroupFor(action string, payloads []ike.Payload) (uint16, bool, error) {
+func invalidKEPayloadGroupFor(payloads []ike.Payload) (uint16, bool, error) {
 	notify := ike.FindNotifyPayload(payloads, notifyTypeInvalidKEPayload)
 	if notify == nil {
 		return 0, false, nil
 	}
 	if len(notify.Data) != 2 {
-		return 0, false, fmt.Errorf("%s: invalid INVALID_KE_PAYLOAD length %d", action, len(notify.Data))
+		return 0, false, fmt.Errorf("invalid INVALID_KE_PAYLOAD length %d", len(notify.Data))
 	}
 	return binary.BigEndian.Uint16(notify.Data), true, nil
 }
@@ -348,6 +351,7 @@ func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, re
 		&ike.NoncePayload{Data: append([]byte(nil), crypto.nonceI...)},
 		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeNATDetectionSourceIP, Data: natSourceHash[:]},
 		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeNATDetectionDestIP, Data: natDestHash[:]},
+		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeIKEV2FragmentationSupported},
 	}
 }
 

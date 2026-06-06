@@ -113,9 +113,13 @@ func (s *Service) waitMemoryAvailableReport(ctx context.Context, rpRef byte, rep
 func (s *Service) reserveReference() (byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
 	for range 256 {
 		ref := byte(atomic.AddUint32(&s.rpRef, 1))
 		if _, exists := s.rpRefs[ref]; exists {
+			continue
+		}
+		if _, _, exists := s.submittedByReference(ref, now); exists {
 			continue
 		}
 		s.rpRefs[ref] = struct{}{}
@@ -140,28 +144,12 @@ func (s *Service) beginMOTransfer() error {
 		return errors.New("sending SMS: mobile originated transfer in progress")
 	}
 	s.moState = moTransferSending
-	s.moPending = 0
 	return nil
 }
 
 func (s *Service) finishMOSend() {
 	s.mu.Lock()
-	if s.moPending == 0 {
-		s.moState = moTransferIdle
-	} else {
-		s.moState = moTransferWaitingReports
-	}
-	s.mu.Unlock()
-}
-
-func (s *Service) completeMOPending() {
-	s.mu.Lock()
-	if s.moPending > 0 {
-		s.moPending--
-	}
-	if s.moState == moTransferWaitingReports && s.moPending == 0 {
-		s.moState = moTransferIdle
-	}
+	s.moState = moTransferIdle
 	s.mu.Unlock()
 }
 
@@ -225,12 +213,7 @@ func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDat
 		msg.Headers.Del("Content-Transfer-Encoding")
 	}
 	callID := msg.Header("Call-ID")
-	reportCh, err := s.registerPending(callID, rpRef)
-	if err != nil {
-		s.releaseReference(rpRef)
-		return outboundSegment{}, err
-	}
-	return outboundSegment{
+	segment := outboundSegment{
 		index:       index,
 		count:       count,
 		to:          to,
@@ -242,8 +225,14 @@ func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDat
 		tpRef:       tpRef,
 		callID:      callID,
 		msg:         msg,
-		reportCh:    reportCh,
-	}, nil
+	}
+	reportCh, err := s.registerPendingSegment(segment)
+	if err != nil {
+		s.releaseReference(rpRef)
+		return outboundSegment{}, err
+	}
+	segment.reportCh = reportCh
+	return segment, nil
 }
 
 func isSIPURI(uri string) bool {
@@ -255,16 +244,24 @@ func isSIPURI(uri string) bool {
 }
 
 func (s *Service) sendSegment(ctx context.Context, segment outboundSegment) error {
+	response, err := s.exchangeSegment(ctx, segment)
+	if err != nil {
+		return err
+	}
+	return s.trackSegmentReport(ctx, segment, response)
+}
+
+func (s *Service) exchangeSegment(ctx context.Context, segment outboundSegment) (submitResponse, error) {
 	resp, err := s.sess.Exchange(ctx, segment.msg)
 	if err != nil {
 		s.removePending(segment.callID)
 		s.releaseReference(segment.rpRef)
-		return err
+		return submitResponse{}, err
 	}
 	if status := resp.StatusCode(); status != sipStatusOK && status != sipStatusAccepted {
 		s.removePending(segment.callID)
 		s.releaseReference(segment.rpRef)
-		return fmt.Errorf("sending SMS: unexpected response: %w", sip.NewResponseError(resp))
+		return submitResponse{}, fmt.Errorf("sending SMS: unexpected response: %w", sip.NewResponseError(resp))
 	}
-	return s.trackSegmentReport(ctx, segment, submitResponseFromMessage(resp))
+	return submitResponseFromMessage(resp), nil
 }
