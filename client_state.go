@@ -42,20 +42,6 @@ func (s *clientState) snapshotLocked(terminalID string) ClientState {
 	}
 }
 
-func (c *Client) currentStatus() ClientStatus {
-	return c.state.currentStatus()
-}
-
-func (s *clientState) currentStatus() ClientStatus {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	status := s.status
-	if status == "" {
-		return StatusIdle
-	}
-	return status
-}
-
 func (c *Client) transitionStatus(status ClientStatus, err error) ClientState {
 	return c.state.transitionStatus(c.cfg.Terminal.ID, status, err)
 }
