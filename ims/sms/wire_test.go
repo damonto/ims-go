@@ -33,7 +33,7 @@ func TestEncodeDecodeSMS(t *testing.T) {
 				t.Fatalf("encodeUserData() error = %v", err)
 			}
 			deliver := []byte{0x00}
-			deliver = append(deliver, encodeTPAddress("+12345")...)
+			deliver = append(deliver, mustEncodeTPAddress(t, "+12345")...)
 			deliver = append(deliver, 0x00, tt.dcs)
 			deliver = append(deliver, bytes.Repeat([]byte{0x00}, 7)...)
 			deliver = append(deliver, udl)
@@ -190,7 +190,7 @@ func TestEncodeRPAddressEmptyUsesZeroLengthOnly(t *testing.T) {
 }
 
 func TestDecodeTPAddressAddsInternationalPrefix(t *testing.T) {
-	got, _, err := decodeTPAddress(encodeTPAddress("+15551234567"))
+	got, _, err := decodeTPAddress(mustEncodeTPAddress(t, "+15551234567"))
 	if err != nil {
 		t.Fatalf("decodeTPAddress() error = %v", err)
 	}
@@ -222,7 +222,7 @@ func TestDecodeTPAddressAlphanumeric(t *testing.T) {
 }
 
 func TestDecodeTPAddressSemiOctetSpecialDigits(t *testing.T) {
-	got, _, err := decodeTPAddress(encodeTPAddress("123#45*"))
+	got, _, err := decodeTPAddress(mustEncodeTPAddress(t, "123#45*"))
 	if err != nil {
 		t.Fatalf("decodeTPAddress() error = %v", err)
 	}
@@ -231,14 +231,59 @@ func TestDecodeTPAddressSemiOctetSpecialDigits(t *testing.T) {
 	}
 }
 
+func TestDecodeTPAddressRejectsInvalidLength(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "full address over twelve octets",
+			raw:  append([]byte{22, tpTOAInternationalISDN}, bytes.Repeat([]byte{0x21}, 11)...),
+		},
+		{
+			name: "alphanumeric full address over twelve octets",
+			raw:  append([]byte{22, 0xD0}, bytes.Repeat([]byte{0x00}, 11)...),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := decodeTPAddress(tt.raw); err == nil {
+				t.Fatal("decodeTPAddress() error = nil, want invalid length error")
+			}
+		})
+	}
+}
+
 func TestEncodeTPAddressShortCodeUsesUnknownTypeOfNumber(t *testing.T) {
-	got := encodeTPAddress("777")
+	got := mustEncodeTPAddress(t, "777")
 
 	if len(got) < 2 {
 		t.Fatalf("len(encodeTPAddress()) = %d, want at least 2", len(got))
 	}
 	if got[1] != 0x81 {
 		t.Fatalf("ToA = 0x%02X, want 0x81", got[1])
+	}
+}
+
+func TestEncodeTPAddressRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+	}{
+		{name: "empty", address: ""},
+		{name: "plus only", address: "+"},
+		{name: "letter outside called BCD", address: "123d"},
+		{name: "fill digit from input", address: "123f"},
+		{name: "too long", address: "+123456789012345678901"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := encodeTPAddress(tt.address); err == nil {
+				t.Fatal("encodeTPAddress() error = nil, want non-nil")
+			}
+		})
 	}
 }
 
@@ -482,6 +527,36 @@ func TestSMSDeliverTPDUPreservesReservedMTIRawTPDU(t *testing.T) {
 	}
 }
 
+func TestSMSDeliverTPDURejectsTrailingData(t *testing.T) {
+	parts, err := buildUserDataParts("hello")
+	if err != nil {
+		t.Fatalf("buildUserDataParts() error = %v", err)
+	}
+	data, err := newDeliverTPDU("+12345", parts[0]).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	data = append(data, 0xFF)
+
+	var deliver deliverTPDU
+	if err := deliver.UnmarshalBinary(data); err == nil {
+		t.Fatal("UnmarshalBinary() error = nil, want trailing data error")
+	}
+}
+
+func TestSMSDeliverTPDURejectsOverlongOriginatorAddress(t *testing.T) {
+	overlongAddress := append([]byte{22, tpTOAInternationalISDN}, bytes.Repeat([]byte{0x21}, 11)...)
+	raw := append([]byte{byte(tpduMTIDeliver)}, overlongAddress...)
+	raw = append(raw, 0x00, 0x00)
+	raw = append(raw, tpduZeroTimestamp[:]...)
+	raw = append(raw, 0x00)
+
+	var deliver deliverTPDU
+	if err := deliver.UnmarshalBinary(raw); err == nil {
+		t.Fatal("UnmarshalBinary() error = nil, want overlong TP-OA error")
+	}
+}
+
 func TestSMSStatusReportTPDURoundTrip(t *testing.T) {
 	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
 	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
@@ -519,12 +594,27 @@ func TestSMSStatusReportTPDURoundTrip(t *testing.T) {
 	}
 }
 
+func TestSMSStatusReportTPDURejectsOverlongRecipientAddress(t *testing.T) {
+	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
+	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
+	overlongAddress := append([]byte{22, tpTOAInternationalISDN}, bytes.Repeat([]byte{0x21}, 11)...)
+	raw := []byte{byte(tpduMTIStatusReport), 0x07}
+	raw = append(raw, overlongAddress...)
+	raw = append(raw, encodeTimestamp(serviceCenterTime)...)
+	raw = append(raw, encodeTimestamp(dischargeTime)...)
+	raw = append(raw, 0x00)
+
+	if _, err := decodeStatusReport(raw); err == nil {
+		t.Fatal("decodeStatusReport() error = nil, want overlong TP-RA error")
+	}
+}
+
 func TestSMSStatusReportTPDUParsesExtendedFields(t *testing.T) {
 	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
 	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
 
 	raw := []byte{0x6E, 0x07}
-	raw = append(raw, encodeTPAddress("+12345")...)
+	raw = append(raw, mustEncodeTPAddress(t, "+12345")...)
 	raw = append(raw, encodeTimestamp(serviceCenterTime)...)
 	raw = append(raw, encodeTimestamp(dischargeTime)...)
 	raw = append(raw, 0x20)
@@ -566,17 +656,36 @@ func TestSMSStatusReportTPDUParsesExtendedFields(t *testing.T) {
 	}
 }
 
+func TestSMSStatusReportTPDURejectsTrailingData(t *testing.T) {
+	report := StatusReport{
+		Recipient:         "+12345",
+		MessageReference:  7,
+		Status:            0x00,
+		ServiceCenterTime: time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60)),
+		DischargeTime:     time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60)),
+	}
+	data, err := (statusReportTPDU{Message: report}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	data = append(data, 0xFF)
+
+	if _, err := decodeStatusReport(data); err == nil {
+		t.Fatal("decodeStatusReport() error = nil, want trailing data error")
+	}
+}
+
 func TestDecodeSMSStatusReportNormalizesNonIntegerTimestampDigits(t *testing.T) {
 	serviceCenterTime := time.Date(2026, time.March, 13, 10, 20, 30, 0, time.FixedZone("", 8*60*60))
 	dischargeTime := time.Date(2026, time.March, 13, 10, 21, 5, 0, time.FixedZone("", 8*60*60))
 
 	raw := []byte{byte(tpduMTIStatusReport), 0x07}
-	raw = append(raw, encodeTPAddress("+12345")...)
+	raw = append(raw, mustEncodeTPAddress(t, "+12345")...)
 	raw = append(raw, encodeTimestamp(serviceCenterTime)...)
 	raw = append(raw, encodeTimestamp(dischargeTime)...)
 	raw = append(raw, 0x00)
 
-	addrLen := len(encodeTPAddress("+12345"))
+	addrLen := len(mustEncodeTPAddress(t, "+12345"))
 	sctsOffset := 2 + addrLen
 	raw[sctsOffset+1] = 0x3A
 
@@ -597,4 +706,13 @@ func encodeAlphanumericTPAddress(t *testing.T, value string) []byte {
 	}
 	lengthSemiOctets := (len(septets)*7 + 3) / 4
 	return append([]byte{byte(lengthSemiOctets), 0xD0}, packSeptets(septets)...)
+}
+
+func mustEncodeTPAddress(t *testing.T, value string) []byte {
+	t.Helper()
+	data, err := encodeTPAddress(value)
+	if err != nil {
+		t.Fatalf("encodeTPAddress(%q) error = %v", value, err)
+	}
+	return data
 }

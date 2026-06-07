@@ -55,6 +55,7 @@ const (
 	sipStatusOK                          = 200
 	sipStatusBadRequest                  = 400
 	sipStatusNotFound                    = 404
+	sipStatusRequestTimeout              = 408
 	sipStatusUnsupportedMediaType        = 415
 	sipStatusBadInfoPackage              = 469
 	sipStatusCallTransactionDoesNotExist = 481

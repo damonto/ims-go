@@ -49,6 +49,13 @@ func validateSecureESPConfig(encryption, integrity string, encryptionKey, integr
 	return nil
 }
 
+func validateSecureSPIs(outbound, inbound uint32) error {
+	if !esp.ValidSPI(outbound) || !esp.ValidSPI(inbound) {
+		return errors.New("spi is reserved")
+	}
+	return nil
+}
+
 func secureAssociations(associations *SecurityAssociations) *SecurityAssociations {
 	if associations != nil {
 		return associations

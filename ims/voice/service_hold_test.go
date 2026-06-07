@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
@@ -97,6 +98,201 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 			}
 			if got := transport.countMethod("ACK"); got != 3 {
 				t.Fatalf("ACK count = %d, want initial plus hold plus resume", got)
+			}
+		})
+	}
+}
+
+func TestCallHoldResponseWithoutSessionExpiresStopsTimer(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "mid-dialog re-INVITE 2xx can turn off session timer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			media := &voiceMediaTransport{}
+			svc, err := New(Config{Logger: testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			invites := 0
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "INVITE" {
+					return
+				}
+				invites++
+				resp := callOK(msg)
+				if invites == 1 {
+					resp.Headers.Add("Require", "timer")
+					resp.Headers.Add("Session-Expires", "180;refresher=uac")
+				}
+				transport.queue(resp)
+			}
+
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			call.mu.Lock()
+			activeBefore := call.sessionTimer.active
+			call.mu.Unlock()
+			if !activeBefore {
+				t.Fatal("session timer active before hold = false, want true")
+			}
+
+			if err := call.Hold(context.Background()); err != nil {
+				t.Fatalf("Hold() error = %v", err)
+			}
+			call.mu.Lock()
+			timer := call.sessionTimer
+			call.mu.Unlock()
+			if timer.active {
+				t.Fatalf("session timer active = true after hold 2xx without Session-Expires: %+v", timer)
+			}
+		})
+	}
+}
+
+func TestCallHoldRetriesIncreasingMinSE(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "hold re-INVITE retries with received Min-SE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			media := &voiceMediaTransport{}
+			svc, err := New(Config{Logger: testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			invites := 0
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "INVITE" {
+					return
+				}
+				invites++
+				switch invites {
+				case 1:
+					resp := callOK(msg)
+					resp.Headers.Add("Require", "timer")
+					resp.Headers.Add("Session-Expires", "180;refresher=uac")
+					transport.queue(resp)
+				case 2:
+					resp := callStatus(msg, sipStatusSessionIntervalTooSmall, "Session Interval Too Small")
+					resp.Headers.Add("Min-SE", "600")
+					transport.queue(resp)
+				case 3:
+					if got := msg.Header("Min-SE"); got != "600" {
+						t.Fatalf("hold retry Min-SE = %q, want 600", got)
+					}
+					if got := msg.Header("Session-Expires"); got != "600;refresher=uac" {
+						t.Fatalf("hold retry Session-Expires = %q, want 600;refresher=uac", got)
+					}
+					resp := callOK(msg)
+					resp.Headers.Add("Require", "timer")
+					resp.Headers.Add("Session-Expires", "600;refresher=uac")
+					transport.queue(resp)
+				default:
+					t.Fatalf("INVITE count = %d, want initial plus hold plus retry", invites)
+				}
+			}
+
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if err := call.Hold(context.Background()); err != nil {
+				t.Fatalf("Hold() error = %v", err)
+			}
+			if invites != 3 {
+				t.Fatalf("INVITE count = %d, want 3", invites)
+			}
+			if got := call.HoldState(); got != CallHoldLocal {
+				t.Fatalf("hold state = %s, want %s", got, CallHoldLocal)
+			}
+			call.mu.Lock()
+			timer := call.sessionTimer
+			call.mu.Unlock()
+			if !timer.active || !timer.localRefresher || timer.minSE != 600 || timer.interval != 600*time.Second {
+				t.Fatalf("session timer = %+v, want active local refresher 600s/min-se 600", timer)
 			}
 		})
 	}

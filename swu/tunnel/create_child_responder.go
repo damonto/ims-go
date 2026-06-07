@@ -309,7 +309,7 @@ func buildChildSAResponsePayloads(state createChildSARequestState, payloads []ik
 		}
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
-	localInboundSPI, err := randomUint32()
+	localInboundSPI, err := randomESPSPI()
 	if err != nil {
 		return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa child response: generating child spi: %w", err)
 	}
@@ -416,9 +416,15 @@ func buildIKESARekeyResponsePayloads(state createChildSARequestState, payloads [
 	if err != nil {
 		return nil, createChildSAAction{}, err
 	}
-	responderSPI, err := randomUint64()
-	if err != nil {
-		return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa ike response: generating responder spi: %w", err)
+	var responderSPI uint64
+	for {
+		responderSPI, err = randomIKESPI()
+		if err != nil {
+			return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa ike response: generating responder spi: %w", err)
+		}
+		if !ikeSPIInUse(responderSPI, peerSPI, state.initiatorSPI, state.responderSPI) {
+			break
+		}
 	}
 	nonceR, err := randomBytes(defaultIKENonceLength)
 	if err != nil {
@@ -473,7 +479,11 @@ func acceptedIKESARekeyProposal(proposals []ike.Proposal, current *ikeCrypto) (a
 			negotiated.PRF != current.prf {
 			continue
 		}
-		return acceptedIKESAProposal{negotiatedIKESA: negotiated, DHGroup: current.dhGroup, ProposalNumber: proposal.Number}, binary.BigEndian.Uint64(proposal.SPI), nil
+		spi := binary.BigEndian.Uint64(proposal.SPI)
+		if ikeSPIInUse(spi, current.initiatorSPI, current.responderSPI) {
+			continue
+		}
+		return acceptedIKESAProposal{negotiatedIKESA: negotiated, DHGroup: current.dhGroup, ProposalNumber: proposal.Number}, spi, nil
 	}
 	return acceptedIKESAProposal{}, 0, errors.New("no acceptable ike sa rekey proposal")
 }
@@ -558,6 +568,9 @@ func acceptedChildSARequestProposal(proposal ike.Proposal, current Info, dhGroup
 		return acceptedChildSA{}, fmt.Errorf("building create_child_sa child response: invalid peer esp spi length %d", len(proposal.SPI))
 	}
 	info := Info{ESPResponderSPI: binary.BigEndian.Uint32(proposal.SPI)}
+	if !esp.ValidSPI(info.ESPResponderSPI) {
+		return acceptedChildSA{}, fmt.Errorf("building create_child_sa child response: invalid peer esp spi %d", info.ESPResponderSPI)
+	}
 	accepted := acceptedChildSA{Info: info, ProposalNumber: proposal.Number}
 	seenESN := false
 	seenDH := false

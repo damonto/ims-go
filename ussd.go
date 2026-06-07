@@ -11,6 +11,7 @@ import (
 )
 
 const ussdResultBufferSize = 16
+const ussdCleanupTimeout = 3 * time.Second
 
 type USSDMessage = imsussd.Message
 
@@ -74,11 +75,22 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 
 	result, err := s.awaitResult(ctx)
 	if err != nil {
+		s.cleanupLowSession(low)
 		s.client.logger.Error("waiting for USSD result", "code", code, "err", err)
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 	s.client.logger.Info("USSD result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
 	return result, nil
+}
+
+func (s *USSDSession) cleanupLowSession(low *imsussd.Session) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), ussdCleanupTimeout)
+	defer cancel()
+	if err := low.End(cleanupCtx, ""); err != nil {
+		s.client.logger.Debug("cleaning up USSD session", "err", err)
+	}
+	low.CloseLocal()
+	s.markClosed(low)
 }
 
 func (s *USSDSession) Reply(ctx context.Context, text string) (USSDResult, error) {

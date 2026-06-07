@@ -15,6 +15,7 @@ import (
 
 const (
 	sipStatusOK                          = 200
+	sipStatusUseProxy                    = 305
 	sipStatusBadRequest                  = 400
 	sipStatusUnauthorized                = 401
 	sipStatusProxyAuthenticationRequired = 407

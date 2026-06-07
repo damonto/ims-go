@@ -56,6 +56,23 @@ type transactionResult struct {
 	err error
 }
 
+type TransactionTimeoutError struct {
+	Method string
+	Timer  string
+}
+
+func (e *TransactionTimeoutError) Error() string {
+	return fmt.Sprintf("waiting for %s response: transaction timeout", e.Method)
+}
+
+func TransactionTimerExpired(err error, timer string) bool {
+	var timeout *TransactionTimeoutError
+	if !errors.As(err, &timeout) {
+		return false
+	}
+	return strings.EqualFold(timeout.Timer, timer)
+}
+
 type transactionSendError struct {
 	err      error
 	reliable bool
@@ -267,7 +284,7 @@ func (tx *clientTransaction) runNonInvite() {
 		case <-tx.cancelCh:
 			return
 		case <-timerF.C:
-			tx.abort(fmt.Errorf("waiting for %s response: transaction timeout", tx.method))
+			tx.abort(&TransactionTimeoutError{Method: tx.method, Timer: "F"})
 			return
 		case <-timerEC:
 			if !tx.resend() {
@@ -330,7 +347,7 @@ func (tx *clientTransaction) runInvite() {
 			if state != clientTransactionCalling {
 				continue
 			}
-			tx.abort(fmt.Errorf("waiting for %s response: transaction timeout", tx.method))
+			tx.abort(&TransactionTimeoutError{Method: tx.method, Timer: "B"})
 			return
 		case <-timerAC:
 			if !tx.resend() {

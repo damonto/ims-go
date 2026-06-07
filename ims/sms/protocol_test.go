@@ -7,7 +7,7 @@ import (
 
 func TestDecodeSMSDeliverFieldsRejectsTruncatedMandatoryTail(t *testing.T) {
 	raw := []byte{0x00}
-	raw = append(raw, encodeTPAddress("+12345")...)
+	raw = append(raw, mustEncodeTPAddress(t, "+12345")...)
 	raw = append(raw, 0x00, 0x00)
 	raw = append(raw, bytes.Repeat([]byte{0x00}, 7)...)
 

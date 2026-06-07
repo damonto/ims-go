@@ -143,6 +143,9 @@ func (s *Service) Refresh(ctx context.Context) error {
 		}
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
+			if registrationTimeoutRequiresInitial(err) {
+				return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredAfterError(err))
+			}
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
 		done, err := s.handleRefreshRegistration(ctx, resp, &state, auth)

@@ -24,6 +24,9 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 	for {
 		resp, err := s.sess.Exchange(ctx, s.buildRegister(nil, nil))
 		if err != nil {
+			if registrationTimeoutRequiresInitial(err) {
+				return sip.Message{}, fmt.Errorf("registering IMS: %w", initialRegistrationRequiredAfterError(err))
+			}
 			return sip.Message{}, fmt.Errorf("registering IMS: %w", err)
 		}
 		if resp.StatusCode() == sipStatusIntervalTooBrief {
@@ -33,6 +36,9 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 			continue
 		}
 		if !registerAuthChallengeStatus(resp.StatusCode()) {
+			if resp.StatusCode() == sipStatusUseProxy {
+				return sip.Message{}, fmt.Errorf("registering IMS: %w", pcscfReselectionRequiredError(resp))
+			}
 			if initialRegistrationRetryResponse(resp) {
 				return sip.Message{}, fmt.Errorf("registering IMS: %w", initialRegistrationRequiredError(resp))
 			}
@@ -89,6 +95,9 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 		}
 		resp, err := s.exchangeProtectedRegister(ctx, pendingSecurity, auth)
 		if err != nil {
+			if registrationTimeoutRequiresInitial(err) {
+				return fmt.Errorf("registering IMS: %w", initialRegistrationRequiredAfterError(err))
+			}
 			return fmt.Errorf("registering IMS: %w", err)
 		}
 		if resp.StatusCode() == sipStatusIntervalTooBrief {
@@ -114,6 +123,9 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			continue
 		}
 		if resp.StatusCode() != sipStatusOK {
+			if resp.StatusCode() == sipStatusUseProxy {
+				return fmt.Errorf("registering IMS: %w", pcscfReselectionRequiredError(resp))
+			}
 			if initialRegistrationRetryResponse(resp) {
 				return fmt.Errorf("registering IMS: %w", initialRegistrationRequiredError(resp))
 			}
@@ -175,9 +187,15 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 		req := s.buildRegisterForFlowWithAuthorizationHeader(auth, nil, nextFlow, authorizationHeader)
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
+			if registrationTimeoutRequiresInitial(err) {
+				return fmt.Errorf("refreshing IMS registration: completing AKAv2 re-authentication: %w", initialRegistrationRequiredAfterError(err))
+			}
 			return fmt.Errorf("refreshing IMS registration: completing AKAv2 re-authentication: %w", err)
 		}
 		if resp.StatusCode() != sipStatusOK {
+			if resp.StatusCode() == sipStatusUseProxy {
+				return fmt.Errorf("refreshing IMS registration: %w", pcscfReselectionRequiredError(resp))
+			}
 			if reregistrationInitialRequiredStatus(resp.StatusCode()) {
 				return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
 			}
@@ -230,9 +248,15 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 		ResponseTransports:      responseTransports,
 	})
 	if err != nil {
+		if registrationTimeoutRequiresInitial(err) {
+			return fmt.Errorf("refreshing IMS registration: completing re-authentication: %w", initialRegistrationRequiredAfterError(err))
+		}
 		return fmt.Errorf("refreshing IMS registration: completing re-authentication: %w", err)
 	}
 	if resp.StatusCode() != sipStatusOK {
+		if resp.StatusCode() == sipStatusUseProxy {
+			return fmt.Errorf("refreshing IMS registration: %w", pcscfReselectionRequiredError(resp))
+		}
 		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
 			return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
 		}

@@ -9,11 +9,24 @@ import (
 	"time"
 
 	"github.com/damonto/vowifi-go/ims/security"
+	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type refreshRegisterState struct {
 	adjustedExpires bool
+}
+
+type pcscfReselectionRequired struct {
+	retryAfter time.Duration
+}
+
+func (e *pcscfReselectionRequired) Error() string {
+	return "p-cscf reselection required"
+}
+
+func (e *pcscfReselectionRequired) retryAfterDelay() time.Duration {
+	return e.retryAfter
 }
 
 func parsePositiveSeconds(value string) (time.Duration, bool) {
@@ -66,6 +79,11 @@ func InitialRegistrationRequired(err error) bool {
 	return errors.As(err, &initial)
 }
 
+func PCSCFReselectionRequired(err error) bool {
+	var reselection *pcscfReselectionRequired
+	return errors.As(err, &reselection)
+}
+
 func (s *Service) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *bool) error {
 	if *adjusted {
 		return errors.New("repeated 423 response")
@@ -107,6 +125,9 @@ func (s *Service) handleRefreshRegistration(ctx context.Context, resp sip.Messag
 		}
 		return false, nil
 	default:
+		if resp.StatusCode() == sipStatusUseProxy {
+			return false, fmt.Errorf("refreshing IMS registration: %w", pcscfReselectionRequiredError(resp))
+		}
 		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
 			return false, fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
 		}
@@ -127,12 +148,28 @@ func reregistrationInitialRequiredStatus(status int) bool {
 	}
 }
 
+func registrationTimeoutRequiresInitial(err error) bool {
+	return session.TransactionTimerExpired(err, "F")
+}
+
 func initialRegistrationRequiredError(resp sip.Message) error {
 	initial := &initialRegistrationRequired{}
 	if retryAfter, ok := retryAfterDelay(resp); ok {
 		initial.retryAfter = retryAfter
 	}
 	return fmt.Errorf("%w after %w", initial, sip.NewResponseError(resp))
+}
+
+func initialRegistrationRequiredAfterError(err error) error {
+	return fmt.Errorf("%w after %w", &initialRegistrationRequired{}, err)
+}
+
+func pcscfReselectionRequiredError(resp sip.Message) error {
+	reselection := &pcscfReselectionRequired{}
+	if retryAfter, ok := retryAfterDelay(resp); ok {
+		reselection.retryAfter = retryAfter
+	}
+	return fmt.Errorf("%w after %w", reselection, sip.NewResponseError(resp))
 }
 
 func minExpiresSeconds(value string) (int, error) {

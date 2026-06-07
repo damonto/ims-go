@@ -1056,6 +1056,75 @@ func TestAKAAuthFlowBuildChallengeResponseSupportsAKAPrime(t *testing.T) {
 	}
 }
 
+func TestAKAAuthFlowBuildChallengeResponseUsesAKAPrimePermanentIdentity(t *testing.T) {
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := []byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+		0xcd, 0xef,
+		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+	}
+	networkName := []byte("foo:bar")
+	akaResult := usim.AKAResult{
+		RES: []byte{0x11, 0x22, 0x33, 0x44, 0x55},
+		IK:  []byte{0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00},
+		CK:  []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+	}
+	tests := []struct {
+		name          string
+		startIdentity string
+		wantIdentity  string
+	}{
+		{
+			name:          "direct challenge upgrades aka permanent identity",
+			startIdentity: "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
+			wantIdentity:  "6001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
+		},
+		{
+			name:          "aka prime permanent identity stays unchanged",
+			startIdentity: "6001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
+			wantIdentity:  "6001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wantKeys, err := eapaka.DeriveAKAPrimeKeys([]byte(tt.wantIdentity), akaResult.CK, akaResult.IK, networkName, autn[:akaPrimeSQNXorAKLen])
+			if err != nil {
+				t.Fatalf("DeriveAKAPrimeKeys() error = %v", err)
+			}
+			flow := akaAuthFlow{
+				session:     &Session{logger: slog.Default()},
+				card:        akaChallengeTestCard{result: akaResult},
+				identity:    tt.startIdentity,
+				eapIdentity: tt.startIdentity,
+				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:      &ikeCrypto{},
+			}
+			wire := buildSignedAKAPrimeChallenge(t, 8, tt.wantIdentity, rand, autn, networkName, akaResult)
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if response.afterSend != nil {
+				t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
+			}
+			if flow.eapIdentity != tt.wantIdentity {
+				t.Fatalf("eapIdentity = %q, want %q", flow.eapIdentity, tt.wantIdentity)
+			}
+			if !bytes.Equal(flow.crypto.eap.MSK, wantKeys.MSK) {
+				t.Fatalf("MSK = % X, want % X", flow.crypto.eap.MSK, wantKeys.MSK)
+			}
+			if err := eapaka.VerifyMessageMACSHA256(response.data, flow.crypto.eap.AUT, nil); err != nil {
+				t.Fatalf("response VerifyMessageMACSHA256() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestAKAPrimeNetworkNamesMatch(t *testing.T) {
 	tests := []struct {
 		name   string

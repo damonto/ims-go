@@ -156,11 +156,11 @@ func newConnectCryptoState(dhGroup uint16) (*ikeCrypto, uint64, uint32, []byte, 
 	if err != nil {
 		return nil, 0, 0, nil, err
 	}
-	initiatorSPI, err := randomUint64()
+	initiatorSPI, err := randomIKESPI()
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("generating initiator spi: %w", err)
 	}
-	espInitiatorSPI, err := randomUint32()
+	espInitiatorSPI, err := randomESPSPI()
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("generating child spi: %w", err)
 	}
@@ -307,28 +307,48 @@ func integrityName(transform uint16) string {
 	}
 }
 
-func randomUint64() (uint64, error) {
-	buf := make([]byte, 8)
-	if _, err := crand.Read(buf); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint64(buf), nil
-}
-
-func randomUint32() (uint32, error) {
-	buf := make([]byte, 4)
-	if _, err := crand.Read(buf); err != nil {
-		return 0, err
-	}
-	value := binary.BigEndian.Uint32(buf)
-	if value == 0 {
-		value = 1
-	}
-	return value, nil
-}
-
 func randomBytes(n int) ([]byte, error) {
 	buf := make([]byte, n)
 	_, err := crand.Read(buf)
 	return buf, err
+}
+
+func randomIKESPI() (uint64, error) {
+	for {
+		buf := make([]byte, 8)
+		if _, err := crand.Read(buf); err != nil {
+			return 0, err
+		}
+		if spi := binary.BigEndian.Uint64(buf); spi != 0 {
+			return spi, nil
+		}
+	}
+}
+
+func randomESPSPI() (uint32, error) {
+	for {
+		buf := make([]byte, 4)
+		if _, err := crand.Read(buf); err != nil {
+			return 0, err
+		}
+		if spi := binary.BigEndian.Uint32(buf); esp.ValidSPI(spi) {
+			return spi, nil
+		}
+	}
+}
+
+func validIKESPI(spi uint64) bool {
+	return spi != 0
+}
+
+func ikeSPIInUse(spi uint64, existing ...uint64) bool {
+	if spi == 0 {
+		return true
+	}
+	for _, candidate := range existing {
+		if spi == candidate {
+			return true
+		}
+	}
+	return false
 }

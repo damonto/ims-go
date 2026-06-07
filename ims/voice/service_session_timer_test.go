@@ -8,6 +8,7 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 	"net"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -36,14 +37,14 @@ func TestAddInviteSessionTimer(t *testing.T) {
 			wantNoSessionHeader: true,
 		},
 		{
-			name: "configured interval included in initial invite",
+			name: "configured interval is capped to IR92 initial invite value",
 			cfg: Config{
 				SessionTimer:      true,
 				SessionExpires:    3600 * time.Second,
 				MinSessionExpires: 600 * time.Second,
 			},
 			wantSupported:      sip.DefaultClientSupported + ",timer",
-			wantSessionExpires: "3600",
+			wantSessionExpires: "1800",
 			wantMinSE:          "600",
 		},
 		{
@@ -54,17 +55,28 @@ func TestAddInviteSessionTimer(t *testing.T) {
 				SessionRefresher: sessionRefresherUAC,
 			},
 			wantSupported:      sip.DefaultClientSupported + ",timer",
-			wantSessionExpires: "3600;refresher=uac",
+			wantSessionExpires: "1800;refresher=uac",
 		},
 		{
-			name: "configured uas refresher included in initial invite",
+			name: "configured uas refresher is omitted in initial invite",
 			cfg: Config{
 				SessionTimer:     true,
 				SessionExpires:   3600 * time.Second,
 				SessionRefresher: sessionRefresherUAS,
 			},
 			wantSupported:      sip.DefaultClientSupported + ",timer",
-			wantSessionExpires: "3600;refresher=uas",
+			wantSessionExpires: "1800",
+		},
+		{
+			name: "min se above IR92 initial invite value omits session expires",
+			cfg: Config{
+				SessionTimer:      true,
+				SessionExpires:    3600 * time.Second,
+				MinSessionExpires: 3600 * time.Second,
+			},
+			wantSupported:       sip.DefaultClientSupported + ",timer",
+			wantMinSE:           "3600",
+			wantNoSessionHeader: true,
 		},
 	}
 	for _, tt := range tests {
@@ -269,16 +281,23 @@ func TestAddInviteOKSessionTimerUsesIR92Default(t *testing.T) {
 		supported   bool
 	}{
 		{
-			name:        "configured interval used",
+			name:        "supported invite without session expires uses IR92 default",
 			cfg:         Config{SessionTimer: true, SessionExpires: 600 * time.Second},
-			want:        "600;refresher=uac",
+			want:        "1800;refresher=uac",
 			wantRequire: "timer",
 			supported:   true,
 		},
 		{
-			name:        "configured uas refresher used when UAS selects",
+			name:        "configured uas refresher ignored when UE fills missing timer",
 			cfg:         Config{SessionTimer: true, SessionExpires: 600 * time.Second, SessionRefresher: sessionRefresherUAS},
-			want:        "600;refresher=uas",
+			want:        "1800;refresher=uac",
+			wantRequire: "timer",
+			supported:   true,
+		},
+		{
+			name:        "local min se does not change IR92 default",
+			cfg:         Config{SessionTimer: true, MinSessionExpires: 3600 * time.Second},
+			want:        "1800;refresher=uac",
 			wantRequire: "timer",
 			supported:   true,
 		},
@@ -307,10 +326,10 @@ func TestAddInviteOKSessionTimerUsesIR92Default(t *testing.T) {
 			supported:   true,
 		},
 		{
-			name:        "configured uas refresher fills missing request refresher",
+			name:        "missing request refresher filled with uac",
 			cfg:         Config{SessionTimer: true, SessionRefresher: sessionRefresherUAS},
 			session:     "120",
-			want:        "120;refresher=uas",
+			want:        "120;refresher=uac",
 			wantRequire: "timer",
 			supported:   true,
 		},
@@ -412,6 +431,7 @@ func TestApplySessionTimerResponseKeepsUACRequestedTimerWithoutResponseHeader(t 
 					minSE: tt.currentMinSE,
 				},
 			}
+			call.inviteRequest.Headers.Set("Session-Expires", strconv.Itoa(durationSeconds(tt.cfg.SessionExpires)))
 			defer call.stopSessionTimer()
 
 			if err := call.applySessionTimerUACResponse(sip.NewResponse(sipStatusOK, "OK"), true); err != nil {
@@ -549,6 +569,122 @@ func TestDialSessionTimerRefreshesWithUPDATE(t *testing.T) {
 			}
 			if got := updates[0].Header("Supported"); !sip.TokenListContains(got, "timer") {
 				t.Fatalf("UPDATE Supported = %q, want timer", got)
+			}
+		})
+	}
+}
+
+func TestDialSessionTimerRefreshRetriesIncreasingMinSE(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "UPDATE refresh retries with largest Min-SE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			media := &voiceMediaTransport{}
+			svc, err := New(Config{Logger: testLogger(),
+				SessionTimer: true,
+				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
+					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
+					media.onPacket = cfg.OnPacket
+					return media, nil
+				},
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			updates := 0
+			transport.onWrite = func(msg sip.Message) {
+				switch msg.Method() {
+				case "INVITE":
+					resp := callOK(msg)
+					resp.Headers.Add("Allow", sip.DefaultClientAllow)
+					resp.Headers.Add("Require", "timer")
+					resp.Headers.Add("Session-Expires", "180;refresher=uac")
+					transport.queue(resp)
+				case "UPDATE":
+					updates++
+					switch updates {
+					case 1:
+						resp := callStatus(msg, sipStatusSessionIntervalTooSmall, "Session Interval Too Small")
+						resp.Headers.Add("Min-SE", "600")
+						transport.queue(resp)
+					case 2:
+						if got := msg.Header("Min-SE"); got != "600" {
+							t.Fatalf("retry UPDATE Min-SE = %q, want 600", got)
+						}
+						if got := msg.Header("Session-Expires"); got != "600;refresher=uac" {
+							t.Fatalf("retry UPDATE Session-Expires = %q, want 600;refresher=uac", got)
+						}
+						resp := callStatus(msg, sipStatusSessionIntervalTooSmall, "Session Interval Too Small")
+						resp.Headers.Add("Min-SE", "900")
+						transport.queue(resp)
+					case 3:
+						if got := msg.Header("Min-SE"); got != "900" {
+							t.Fatalf("second retry UPDATE Min-SE = %q, want 900", got)
+						}
+						if got := msg.Header("Session-Expires"); got != "900;refresher=uac" {
+							t.Fatalf("second retry UPDATE Session-Expires = %q, want 900;refresher=uac", got)
+						}
+						resp := okForRequest(msg)
+						resp.Headers.Add("Require", "timer")
+						resp.Headers.Add("Session-Expires", "900;refresher=uac")
+						transport.queue(resp)
+					default:
+						t.Fatalf("UPDATE count = %d, want 3", updates)
+					}
+				}
+			}
+
+			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			call.refreshSession()
+
+			if updates != 3 {
+				t.Fatalf("UPDATE count = %d, want 3", updates)
+			}
+			call.mu.Lock()
+			timer := call.sessionTimer
+			call.mu.Unlock()
+			if !timer.active || !timer.localRefresher || timer.minSE != 900 || timer.interval != 900*time.Second {
+				t.Fatalf("session timer = %+v, want active local refresher 900s/min-se 900", timer)
+			}
+			if got := transport.countMethod("BYE"); got != 0 {
+				t.Fatalf("BYE count = %d, want 0 after successful retry", got)
 			}
 		})
 	}

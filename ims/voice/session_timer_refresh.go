@@ -28,7 +28,7 @@ func (c *Call) refreshSession() {
 
 	resp, err := c.exchangeSessionRefresh(ctx, req)
 	if err == nil && resp.StatusCode() == sipStatusSessionIntervalTooSmall {
-		resp, err = c.retrySessionRefreshWithMinSE(ctx, req, resp)
+		resp, err = c.retrySessionRefreshesWithMinSE(ctx, req, resp)
 	}
 	if err != nil {
 		c.service.emitError(fmt.Errorf("refreshing session timer: %w", err))
@@ -77,29 +77,62 @@ func (c *Call) exchangeSessionRefresh(ctx context.Context, req sip.Message) (sip
 	return resp, nil
 }
 
-func (c *Call) retrySessionRefreshWithMinSE(ctx context.Context, req sip.Message, resp sip.Message) (sip.Message, error) {
-	minSE, ok := parseMinSessionSeconds(resp.Header("Min-SE"))
-	if !ok {
-		return sip.Message{}, fmt.Errorf("session timer retry: invalid Min-SE %q", resp.Header("Min-SE"))
+func (c *Call) retrySessionRefreshesWithMinSE(ctx context.Context, req sip.Message, resp sip.Message) (sip.Message, error) {
+	for resp.StatusCode() == sipStatusSessionIntervalTooSmall {
+		minSE, ok := parseMinSessionSeconds(resp.Header("Min-SE"))
+		if !ok {
+			return sip.Message{}, fmt.Errorf("session timer retry: invalid Min-SE %q", resp.Header("Min-SE"))
+		}
+		c.mu.Lock()
+		if c.sessionTimer.minSE < minSE {
+			c.sessionTimer.minSE = minSE
+		}
+		retryMinSE := max(minSE, c.sessionTimer.minSE)
+		c.mu.Unlock()
+		if retryMinSE <= requestMinSessionExpiresSeconds(req) {
+			return resp, nil
+		}
+		retry := c.sessionRefreshRetryRequest(req, retryMinSE)
+		next, err := c.exchangeSessionRefresh(ctx, retry)
+		if err != nil {
+			return sip.Message{}, err
+		}
+		req = retry
+		resp = next
 	}
+	return resp, nil
+}
+
+func requestMinSessionExpiresSeconds(req sip.Message) int {
+	if minSE, ok := parseMinSessionSeconds(req.Header("Min-SE")); ok {
+		return minSE
+	}
+	return durationSeconds(defaultMinSessionExpires)
+}
+
+func (c *Call) sessionRefreshRetryRequest(req sip.Message, minSE int) sip.Message {
 	retry := req
 	retry.Headers = req.Headers.Clone()
 	retry.Body = append([]byte(nil), req.Body...)
-	retry.Headers.Set("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), c.service.reg.State().ContactHost, c.service.reg.State().MessagePort, sip.RandomAlphaNum(15)))
+	state := c.service.reg.State()
+	retry.Headers.Set("Via", sip.BuildVia(sip.TransportToken(c.service.sess.LocalAddr()), state.ContactHost, state.MessagePort, sip.RandomAlphaNum(15)))
 	retry.Headers.Set("CSeq", fmt.Sprintf("%d %s", c.nextCSeq(), req.Method()))
 	retry.Headers.Set("Min-SE", strconv.Itoa(minSE))
-	if sessionExpires, ok := parseSessionExpiresHeader(retry.Header("Session-Expires")); ok {
-		if sessionExpires.seconds < minSE {
-			sessionExpires.seconds = minSE
-			retry.Headers.Set("Session-Expires", sessionExpires.String())
+	sessionExpires, ok := parseSessionExpiresHeader(retry.Header("Session-Expires"))
+	if !ok {
+		sessionExpires = sessionExpiresHeader{
+			seconds:   max(durationSeconds(defaultSessionExpires), minSE),
+			refresher: sessionRefresherUAC,
 		}
 	}
-	c.mu.Lock()
-	if c.sessionTimer.minSE < minSE {
-		c.sessionTimer.minSE = minSE
+	if sessionExpires.seconds < minSE {
+		sessionExpires.seconds = minSE
 	}
-	c.mu.Unlock()
-	return c.exchangeSessionRefresh(ctx, retry)
+	if sessionExpires.refresher == "" {
+		sessionExpires.refresher = sessionRefresherUAC
+	}
+	retry.Headers.Set("Session-Expires", sessionExpires.String())
+	return retry
 }
 
 func (c *Call) acknowledgeSessionRefreshINVITE(ctx context.Context, resp sip.Message) error {

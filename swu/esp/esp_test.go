@@ -34,6 +34,27 @@ func TestESPPacketRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidSPI(t *testing.T) {
+	tests := []struct {
+		name string
+		spi  uint32
+		want bool
+	}{
+		{name: "zero", spi: 0},
+		{name: "reserved one", spi: 1},
+		{name: "reserved max", spi: ReservedSPIMax},
+		{name: "first valid", spi: ReservedSPIMax + 1, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidSPI(tt.spi); got != tt.want {
+				t.Fatalf("ValidSPI(%d) = %t, want %t", tt.spi, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestESPPacketMarshalBinaryAddsSequentialPadding(t *testing.T) {
 	wire, err := (ESPPacket{
 		SPI:        0x11223344,

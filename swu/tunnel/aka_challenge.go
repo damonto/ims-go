@@ -154,6 +154,14 @@ func (f *akaAuthFlow) buildAKAPrimeAuthenticationReject(identifier byte) (akaRes
 	return akaResponse{data: data}, true, nil
 }
 
+func (f *akaAuthFlow) akaPrimeChallengeIdentity() string {
+	identity := normalizeAKAIdentity(f.eapIdentity, f.realm)
+	if identity != akaPermanentIdentity(f.card, f.realm, eapTypeAKA) {
+		return identity
+	}
+	return akaPermanentIdentity(f.card, f.realm, eapTypeAKAPrime)
+}
+
 func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	if response, ok, err := f.akaPrimeKDFNegotiationResponse(message); ok || err != nil {
 		return response, err
@@ -233,6 +241,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		"challenge_has_checkcode", eapaka.HasAttribute(message.Attributes, akaAttrCheckcode),
 	)
 	if message.EAPType == eapTypeAKAPrime {
+		f.eapIdentity = f.akaPrimeChallengeIdentity()
 		sqnXorAK := challenge.AUTN[:akaPrimeSQNXorAKLen]
 		if err := f.crypto.DeriveAKAPrimeEAPKeys([]byte(f.eapIdentity), aka.RES, aka.CK, aka.IK, challenge.NetworkName, sqnXorAK); err != nil {
 			return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving aka prime eap keys: %w", err))

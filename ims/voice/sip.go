@@ -56,8 +56,8 @@ func addInviteOKSessionTimer(resp *sip.Message, invite sip.Message, cfg Config) 
 		if !uacSupportsTimer {
 			return
 		}
-		seconds := sessionExpiresSeconds(cfg, invite)
-		resp.Headers.Set("Session-Expires", sessionExpiresHeader{seconds: seconds, refresher: configuredSessionRefresher(cfg)}.String())
+		seconds := inviteOKMissingSessionExpiresSeconds(invite)
+		resp.Headers.Set("Session-Expires", sessionExpiresHeader{seconds: seconds, refresher: sessionRefresherUAC}.String())
 		addTokenHeader(resp, "Require", sessionTimerOption)
 		return
 	}
@@ -69,7 +69,7 @@ func addInviteOKSessionTimer(resp *sip.Message, invite sip.Message, cfg Config) 
 	switch {
 	case sessionExpires.refresher == "":
 		if uacSupportsTimer {
-			sessionExpires.refresher = configuredSessionRefresher(cfg)
+			sessionExpires.refresher = sessionRefresherUAC
 		} else {
 			sessionExpires.refresher = sessionRefresherUAS
 		}
@@ -126,6 +126,13 @@ func minSessionExpiresSeconds(cfg Config, msg sip.Message) int {
 	return minSE
 }
 
+func receivedMinSessionExpiresSeconds(msg sip.Message) int {
+	if requested, ok := parseMinSessionSeconds(msg.Header("Min-SE")); ok {
+		return requested
+	}
+	return durationSeconds(defaultMinSessionExpires)
+}
+
 func addInviteSessionTimer(invite *sip.Message, cfg Config) {
 	if !cfg.SessionTimer {
 		return
@@ -135,7 +142,9 @@ func addInviteSessionTimer(invite *sip.Message, cfg Config) {
 		invite.Headers.Set("Min-SE", strconv.Itoa(minSE))
 	}
 	if cfg.SessionExpires > 0 {
-		invite.Headers.Set("Session-Expires", sessionExpiresRequestHeader(cfg, *invite).String())
+		if h, ok := initialInviteSessionExpiresHeader(cfg, *invite); ok {
+			invite.Headers.Set("Session-Expires", h.String())
+		}
 	}
 }
 
@@ -161,6 +170,9 @@ func addTokenHeader(msg *sip.Message, name string, token string) {
 }
 
 func sessionExpiresSeconds(cfg Config, msg sip.Message) int {
+	if h, ok := parseSessionExpiresHeader(msg.Header("Session-Expires")); ok {
+		return max(h.seconds, minSessionExpiresSeconds(cfg, msg))
+	}
 	seconds := durationSeconds(defaultSessionExpires)
 	if cfg.SessionExpires > 0 {
 		seconds = durationSeconds(cfg.SessionExpires)
@@ -170,27 +182,35 @@ func sessionExpiresSeconds(cfg Config, msg sip.Message) int {
 
 func sessionExpiresRequestHeader(cfg Config, msg sip.Message) sessionExpiresHeader {
 	return sessionExpiresHeader{
-		seconds:   sessionExpiresSeconds(cfg, msg),
+		seconds:   requestSessionExpiresSeconds(cfg, msg),
 		refresher: configuredRequestSessionRefresher(cfg),
 	}
 }
 
-func configuredRequestSessionRefresher(cfg Config) string {
-	refresher := strings.ToLower(strings.TrimSpace(cfg.SessionRefresher))
-	switch refresher {
-	case sessionRefresherUAC, sessionRefresherUAS:
-		return refresher
-	default:
-		return ""
+func initialInviteSessionExpiresHeader(cfg Config, msg sip.Message) (sessionExpiresHeader, bool) {
+	if minSE := minSessionExpiresSeconds(cfg, msg); minSE > durationSeconds(defaultSessionExpires) {
+		return sessionExpiresHeader{}, false
 	}
+	return sessionExpiresHeader{
+		seconds:   durationSeconds(defaultSessionExpires),
+		refresher: configuredRequestSessionRefresher(cfg),
+	}, true
 }
 
-func configuredSessionRefresher(cfg Config) string {
+func requestSessionExpiresSeconds(cfg Config, msg sip.Message) int {
+	return max(durationSeconds(defaultSessionExpires), minSessionExpiresSeconds(cfg, msg))
+}
+
+func inviteOKMissingSessionExpiresSeconds(msg sip.Message) int {
+	return max(durationSeconds(defaultSessionExpires), receivedMinSessionExpiresSeconds(msg))
+}
+
+func configuredRequestSessionRefresher(cfg Config) string {
 	refresher := strings.ToLower(strings.TrimSpace(cfg.SessionRefresher))
-	if refresher == sessionRefresherUAS {
-		return sessionRefresherUAS
+	if refresher == sessionRefresherUAC {
+		return sessionRefresherUAC
 	}
-	return sessionRefresherUAC
+	return ""
 }
 
 func durationSeconds(d time.Duration) int {

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/damonto/vowifi-go/swu/esp"
 	"github.com/damonto/vowifi-go/swu/handshake"
 	"github.com/damonto/vowifi-go/swu/ike"
 )
@@ -139,6 +140,9 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 		return Info{}, fmt.Errorf("parsing ike_auth response: invalid responder esp spi length %d", len(proposal.SPI))
 	}
 	tunnel.ESPResponderSPI = binary.BigEndian.Uint32(proposal.SPI)
+	if !esp.ValidSPI(tunnel.ESPResponderSPI) {
+		return Info{}, fmt.Errorf("parsing ike_auth response: invalid responder esp spi %d", tunnel.ESPResponderSPI)
+	}
 	for _, transform := range proposal.Transforms {
 		switch transform.TransformType {
 		case transformTypeENCR:

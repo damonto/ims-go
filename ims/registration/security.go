@@ -382,7 +382,6 @@ func (s *Service) extendActiveSecureAssociationLifetime(expiresAt time.Time) {
 	if oldExpiry != nil {
 		oldExpiry.stop()
 	}
-	go s.runSecureAssociationExpiry(done, expiry, delay)
 }
 
 func (s *Service) runSecureAssociationExpiry(done <-chan struct{}, expiry *secureAssociationExpiry, delay time.Duration) {

@@ -2065,6 +2065,9 @@ func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
 	if !strings.Contains(err.Error(), "transaction timeout") {
 		t.Fatalf("Exchange() error = %v, want transaction timeout", err)
 	}
+	if !TransactionTimerExpired(err, "F") {
+		t.Fatalf("TransactionTimerExpired(F) = false for %v", err)
+	}
 
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {

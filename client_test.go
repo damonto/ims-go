@@ -801,7 +801,7 @@ func TestHandleSMSStatusReportEvent(t *testing.T) {
 			{Index: 0, Recipient: "+15550000006", ServiceCenter: "+15550000000", TPReference: 6},
 			{Index: 1, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 7},
 		},
-	})
+	}, nil)
 
 	report := imssms.StatusReport{
 		ServiceCenter:    "+15550000000",
@@ -842,10 +842,293 @@ func TestHandleSMSStatusReportEvent(t *testing.T) {
 	}
 }
 
+func TestSMSStatusReportRoutesToSubmissionUpdates(t *testing.T) {
+	client := newStandaloneClient(t)
+	sink := newSMSSubmissionSink(1, true)
+	t.Cleanup(sink.cancel)
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-7",
+		SegmentCount: 1,
+		Segments: []SMSSubmissionSegment{
+			{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", CallID: "call-7", RPReference: 3, TPReference: 7},
+		},
+	}, sink)
+	sink.completeSubmit()
+
+	report := imssms.StatusReport{
+		ServiceCenter:    "+15550000000",
+		Recipient:        "+15551234567",
+		MessageReference: 7,
+		Status:           imssms.ReportStatusReceivedBySME,
+	}
+	client.handleSMSStatusReport(report)
+
+	select {
+	case update := <-sink.updates:
+		if update.SubmissionID != "sms-7" {
+			t.Fatalf("update.SubmissionID = %q, want sms-7", update.SubmissionID)
+		}
+		if update.State != SMSDelivered {
+			t.Fatalf("update.State = %q, want %q", update.State, SMSDelivered)
+		}
+		if !update.HasStatus || update.Status != report.Status {
+			t.Fatalf("update status = has %t status %v, want %v", update.HasStatus, update.Status, report.Status)
+		}
+		if update.CallID != "call-7" || update.RPReference != 3 || update.TPReference != 7 {
+			t.Fatalf("update route = call %q rp %d tp %d", update.CallID, update.RPReference, update.TPReference)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for submission update")
+	}
+
+	select {
+	case _, ok := <-sink.updates:
+		if ok {
+			t.Fatal("updates channel open after final status report")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for updates channel close")
+	}
+}
+
+func TestSMSStatusReportLinkIgnoresServiceCenterMismatch(t *testing.T) {
+	client := newStandaloneClient(t)
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-7",
+		SegmentCount: 1,
+		Segments: []SMSSubmissionSegment{
+			{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 7},
+		},
+	}, nil)
+
+	link, ok := client.smsReportLink(imssms.StatusReport{
+		ServiceCenter:    "+15559999999",
+		Recipient:        "+15551234567",
+		MessageReference: 7,
+	})
+	if !ok {
+		t.Fatal("smsReportLink() ok = false")
+	}
+	if link.submissionID != "sms-7" {
+		t.Fatalf("submissionID = %q, want sms-7", link.submissionID)
+	}
+}
+
+func TestSMSSubmissionSinkDrainsQueuedUpdates(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+	}{
+		{name: "more than channel buffer", count: 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := newSMSSubmissionSink(1, false)
+
+			for i := range tt.count {
+				sink.publish(SMSSubmissionUpdate{SegmentIndex: i})
+			}
+			sink.finish()
+
+			got := make([]int, 0, tt.count)
+			for update := range sink.updates {
+				got = append(got, update.SegmentIndex)
+			}
+			want := make([]int, 0, tt.count)
+			for i := range tt.count {
+				want = append(want, i)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("update indexes = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestSMSSubmissionSinkWaitsForSubmitUpdatesBeforeFinish(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "delivery finishes before submit stream closes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStandaloneClient(t)
+			sink := newSMSSubmissionSink(1, true)
+			t.Cleanup(sink.cancel)
+			lowUpdates := make(chan imssms.SubmissionUpdate, 1)
+			forwardDone := make(chan struct{})
+			go func() {
+				client.forwardSMSSubmitUpdates("sms-1", lowUpdates, sink)
+				close(forwardDone)
+			}()
+
+			sink.publish(SMSSubmissionUpdate{State: SMSDelivered})
+			sink.completeDeliverySegment(0)
+			lowUpdates <- imssms.SubmissionUpdate{State: imssms.SubmissionSubmittedToIMS}
+			close(lowUpdates)
+
+			var states []SMSSubmissionState
+			for update := range sink.updates {
+				states = append(states, update.State)
+			}
+			if !slices.Contains(states, SMSDelivered) {
+				t.Fatalf("states = %v, want %s", states, SMSDelivered)
+			}
+			if !slices.Contains(states, SMSSubmittedToIMS) {
+				t.Fatalf("states = %v, want %s", states, SMSSubmittedToIMS)
+			}
+			select {
+			case <-forwardDone:
+			case <-time.After(time.Second):
+				t.Fatal("waiting for submit forwarder")
+			}
+		})
+	}
+}
+
+func TestSMSSubmissionDeliveryTimeoutPublishesUnknownAndCleansTracking(t *testing.T) {
+	client := newStandaloneClient(t)
+	sink := newSMSSubmissionSink(1, true)
+	t.Cleanup(sink.cancel)
+	sink.setDeliveryTimeout(20 * time.Millisecond)
+	submission := SMSSubmission{
+		ID:           "sms-1",
+		SegmentCount: 1,
+		Segments: []SMSSubmissionSegment{
+			{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", CallID: "call-1", RPReference: 3, TPReference: 8},
+		},
+		Updates: sink.updates,
+	}
+	sink.onClose = func() {
+		client.untrackSMSSubmission(submission.ID, sink)
+	}
+	client.trackSMSSubmission(submission, sink)
+	sink.completeSubmit()
+
+	select {
+	case update := <-submission.Updates:
+		if update.State != SMSDeliveryUnknown {
+			t.Fatalf("update.State = %q, want %q", update.State, SMSDeliveryUnknown)
+		}
+		if update.SubmissionID != "sms-1" || update.SegmentIndex != 0 || update.CallID != "call-1" {
+			t.Fatalf("update route = %+v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for delivery timeout update")
+	}
+	select {
+	case _, ok := <-submission.Updates:
+		if ok {
+			t.Fatal("submission.Updates open after delivery timeout")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting for submission updates close")
+	}
+
+	_, ok := client.smsReportLink(imssms.StatusReport{
+		Recipient:        "+15551234567",
+		MessageReference: 8,
+	})
+	if ok {
+		t.Fatal("smsReportLink() ok = true after delivery timeout")
+	}
+}
+
+func TestSMSSubmissionStateString(t *testing.T) {
+	tests := []struct {
+		name  string
+		state SMSSubmissionState
+		want  string
+	}{
+		{name: "submitted to IMS", state: SMSSubmittedToIMS, want: "submitted_to_ims"},
+		{name: "accepted by SMSC", state: SMSAcceptedBySMSC, want: "accepted_by_smsc"},
+		{name: "rejected by SMSC", state: SMSRejectedBySMSC, want: "rejected_by_smsc"},
+		{name: "submit unknown", state: SMSSubmitUnknown, want: "submit_unknown"},
+		{name: "delivered", state: SMSDelivered, want: "delivered"},
+		{name: "delivery completed", state: SMSDeliveryCompleted, want: "delivery_completed"},
+		{name: "delivery retrying", state: SMSDeliveryRetrying, want: "delivery_retrying"},
+		{name: "delivery failed", state: SMSDeliveryFailed, want: "delivery_failed"},
+		{name: "delivery unknown", state: SMSDeliveryUnknown, want: "delivery_unknown"},
+		{name: "unknown", state: SMSSubmissionState(255), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.state.String(); got != tt.want {
+				t.Fatalf("String() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSMSSubmissionTrackingCleanup(t *testing.T) {
+	tests := []struct {
+		name   string
+		action func(SMSSubmission, *smsSubmissionSink)
+	}{
+		{
+			name: "final state",
+			action: func(_ SMSSubmission, sink *smsSubmissionSink) {
+				sink.finish()
+			},
+		},
+		{
+			name: "caller close",
+			action: func(submission SMSSubmission, _ *smsSubmissionSink) {
+				submission.Close()
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStandaloneClient(t)
+			sink := newSMSSubmissionSink(1, true)
+			submission := SMSSubmission{
+				ID:           "sms-1",
+				SegmentCount: 1,
+				Segments: []SMSSubmissionSegment{
+					{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 8},
+				},
+				Updates: sink.updates,
+			}
+			sink.onClose = func() {
+				client.untrackSMSSubmission(submission.ID, sink)
+			}
+			submission.closeFn = func() {
+				sink.cancel()
+			}
+			client.trackSMSSubmission(submission, sink)
+
+			report := imssms.StatusReport{
+				ServiceCenter:    "+15550000000",
+				Recipient:        "+15551234567",
+				MessageReference: 8,
+			}
+			if _, ok := client.smsReportLink(report); !ok {
+				t.Fatal("smsReportLink() ok = false before cleanup")
+			}
+
+			tt.action(submission, sink)
+
+			if _, ok := client.smsReportLink(report); ok {
+				t.Fatal("smsReportLink() ok = true after cleanup")
+			}
+			select {
+			case _, ok := <-submission.Updates:
+				if ok {
+					t.Fatal("submission.Updates open after cleanup")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for submission updates close")
+			}
+		})
+	}
+}
+
 func TestSMSStatusReportLinkKeepsRetryingReports(t *testing.T) {
 	tests := []struct {
 		name       string
-		status     SMSReportStatus
+		status     imssms.ReportStatus
 		wantLinked bool
 	}{
 		{
@@ -866,7 +1149,7 @@ func TestSMSStatusReportLinkKeepsRetryingReports(t *testing.T) {
 				ID:           "sms-1",
 				SegmentCount: 1,
 				Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 8}},
-			})
+			}, nil)
 			report := imssms.StatusReport{
 				ServiceCenter:    "+15550000000",
 				Recipient:        "+15551234567",
@@ -882,18 +1165,51 @@ func TestSMSStatusReportLinkKeepsRetryingReports(t *testing.T) {
 	}
 }
 
+func TestSMSStatusReportSkipsAmbiguousSubmissionUpdates(t *testing.T) {
+	client := newStandaloneClient(t)
+	first := newSMSSubmissionSink(1, true)
+	second := newSMSSubmissionSink(1, true)
+	t.Cleanup(first.cancel)
+	t.Cleanup(second.cancel)
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-1",
+		SegmentCount: 1,
+		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 9}},
+	}, first)
+	client.trackSMSSubmission(SMSSubmission{
+		ID:           "sms-2",
+		SegmentCount: 1,
+		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15551234567", ServiceCenter: "+15550000000", TPReference: 9}},
+	}, second)
+
+	client.handleSMSStatusReport(imssms.StatusReport{
+		ServiceCenter:    "+15550000000",
+		Recipient:        "+15551234567",
+		MessageReference: 9,
+		Status:           imssms.ReportStatusReceivedBySME,
+	})
+
+	select {
+	case update := <-first.updates:
+		t.Fatalf("first update = %+v, want none for ambiguous report", update)
+	case update := <-second.updates:
+		t.Fatalf("second update = %+v, want none for ambiguous report", update)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestSMSStatusReportLinkMatchesReferenceCollisionsByRoute(t *testing.T) {
 	client := newStandaloneClient(t)
 	client.trackSMSSubmission(SMSSubmission{
 		ID:           "sms-1",
 		SegmentCount: 1,
 		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000001", ServiceCenter: "+15550000000", TPReference: 9}},
-	})
+	}, nil)
 	client.trackSMSSubmission(SMSSubmission{
 		ID:           "sms-2",
 		SegmentCount: 1,
 		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000002", ServiceCenter: "+15550000000", TPReference: 9}},
-	})
+	}, nil)
 
 	link, ok := client.smsReportLink(imssms.StatusReport{
 		ServiceCenter:    "+15550000000",
@@ -914,12 +1230,12 @@ func TestSMSStatusReportLinkSkipsAmbiguousReferenceCollision(t *testing.T) {
 		ID:           "sms-1",
 		SegmentCount: 1,
 		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000001", ServiceCenter: "+15550000000", TPReference: 9}},
-	})
+	}, nil)
 	client.trackSMSSubmission(SMSSubmission{
 		ID:           "sms-2",
 		SegmentCount: 1,
 		Segments:     []SMSSubmissionSegment{{Index: 0, Recipient: "+15550000002", ServiceCenter: "+15550000000", TPReference: 9}},
-	})
+	}, nil)
 
 	_, ok := client.smsReportLink(imssms.StatusReport{
 		ServiceCenter:    "+15550000000",
@@ -2124,6 +2440,34 @@ func TestPCSCFCandidateIPs(t *testing.T) {
 				t.Fatal("candidate IP aliases input")
 			}
 		})
+	}
+}
+
+func TestNextPCSCFInfoRotatesAwayFromCurrent(t *testing.T) {
+	info := swutunnel.Info{
+		PCSCFIP: net.IPv4(10, 0, 0, 2),
+		PCSCFIPs: []net.IP{
+			net.IPv4(10, 0, 0, 1),
+			net.IPv4(10, 0, 0, 2),
+			net.IPv4(10, 0, 0, 3),
+		},
+	}
+
+	got, ok := nextPCSCFInfo(info)
+	if !ok {
+		t.Fatal("nextPCSCFInfo() ok = false, want true")
+	}
+	if !got.PCSCFIP.Equal(net.IPv4(10, 0, 0, 3)) {
+		t.Fatalf("PCSCFIP = %s, want 10.0.0.3", got.PCSCFIP)
+	}
+	want := []net.IP{net.IPv4(10, 0, 0, 3), net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)}
+	if len(got.PCSCFIPs) != len(want) {
+		t.Fatalf("PCSCFIPs length = %d, want %d", len(got.PCSCFIPs), len(want))
+	}
+	for i := range want {
+		if !got.PCSCFIPs[i].Equal(want[i]) {
+			t.Fatalf("PCSCFIPs[%d] = %s, want %s", i, got.PCSCFIPs[i], want[i])
+		}
 	}
 }
 

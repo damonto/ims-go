@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/damonto/vowifi-go/ims/registration"
 	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 )
 
@@ -61,6 +62,15 @@ func (r *connectionRunner) recover(cause error) bool {
 		}
 		cause = fmt.Errorf("restoring IMS after P-CSCF reselection: %w", err)
 	}
+	if registration.PCSCFReselectionRequired(cause) {
+		next, err := r.client.restoreIMSAfterRegistrationPCSCFReselection(r.active)
+		if err == nil {
+			r.client.logger.Info("IMS restored after registration P-CSCF reselection")
+			r.active = next
+			return true
+		}
+		cause = fmt.Errorf("restoring IMS after registration P-CSCF reselection: %w", err)
+	}
 	if !r.reconnectAfterIMSFailure(cause) {
 		return false
 	}
@@ -113,7 +123,21 @@ func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error
 	if !ok {
 		tunnelInfo = active.tunnel.Info()
 	}
+	return c.restoreIMSWithTunnelInfo(active, tunnelInfo)
+}
 
+func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn) (*activeConn, error) {
+	if active.tunnel == nil {
+		return nil, errors.New("restoring IMS after registration P-CSCF reselection: tunnel is missing")
+	}
+	tunnelInfo, ok := nextPCSCFInfo(active.tunnel.Info())
+	if !ok {
+		return nil, errors.New("restoring IMS after registration P-CSCF reselection: no alternate P-CSCF")
+	}
+	return c.restoreIMSWithTunnelInfo(active, tunnelInfo)
+}
+
+func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunnel.Info) (*activeConn, error) {
 	closeErr := c.closeIMSRuntime(active)
 	if closeErr != nil {
 		return nil, closeErr
@@ -150,6 +174,28 @@ func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error
 	}
 	c.emitStatus(StatusRegistered)
 	return active, nil
+}
+
+func nextPCSCFInfo(info swutunnel.Info) (swutunnel.Info, bool) {
+	ips := pcscfCandidateIPs(info)
+	if len(ips) < 2 {
+		return info, false
+	}
+	current := info.PCSCFIP
+	if len(current) == 0 {
+		current = ips[0]
+	}
+	next := 0
+	for i, ip := range ips {
+		if ip.Equal(current) {
+			next = (i + 1) % len(ips)
+			break
+		}
+	}
+	rotated := append(append(ips[:0:0], ips[next:]...), ips[:next]...)
+	info.PCSCFIPs = rotated
+	info.PCSCFIP = append(info.PCSCFIP[:0:0], rotated[0]...)
+	return info, true
 }
 
 func (c *Client) commitIMSRestore(active *activeConn, setup *connectSetup) error {

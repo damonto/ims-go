@@ -43,6 +43,9 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 
 	req := snap.buildMediaReINVITE(c.nextCSeq(), timer, body)
 	resp, err := c.exchangeSessionRefresh(ctx, req)
+	if err == nil && resp.StatusCode() == sipStatusSessionIntervalTooSmall {
+		resp, err = c.retrySessionRefreshesWithMinSE(ctx, req, resp)
+	}
 	if err != nil {
 		c.restoreHoldModification(previousHold, previousSDP)
 		return fmt.Errorf("%s: %w", action, err)
@@ -60,7 +63,7 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 		c.restoreHoldModification(previousHold, previousSDP)
 		return fmt.Errorf("%s: %w", action, err)
 	}
-	if err := c.applySessionTimerUACResponse(resp, true); err != nil {
+	if err := c.applySessionTimerUACResponse(resp, false); err != nil {
 		c.restoreHoldModification(previousHold, previousSDP)
 		return fmt.Errorf("%s: %w", action, err)
 	}

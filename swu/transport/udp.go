@@ -77,8 +77,8 @@ func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action transportAc
 	if cfg.LocalPort == 0 || cfg.RemotePort == 0 {
 		return nil, fmt.Errorf("%s: ports are required", action)
 	}
-	if cfg.OutboundSPI == 0 || cfg.InboundSPI == 0 {
-		return nil, fmt.Errorf("%s: spi is zero", action)
+	if err := validateSecureSPIs(cfg.OutboundSPI, cfg.InboundSPI); err != nil {
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
 	encryption, err := secureEncryption(cfg.Encryption)
 	if err != nil {

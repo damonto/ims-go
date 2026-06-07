@@ -761,6 +761,78 @@ func TestContactValueFormatsIPHosts(t *testing.T) {
 	}
 }
 
+func TestHandleDialogRequestRejectsCSeqMethodMismatch(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	us := &Session{
+		service:     svc,
+		callID:      "cseq-call",
+		localTag:    "local",
+		remoteTag:   "remote",
+		remoteTo:    "<sip:network@example.com>;tag=remote",
+		targetURI:   "sip:network@example.com",
+		events:      make(chan Message, 1),
+		remoteCSeqs: make(map[string]struct{}),
+	}
+	info := newDialogRequest("INFO", "sip:user@example.com", "<sip:network@example.com>;tag=remote", "<sip:user@example.com>;tag=local", "cseq-call", "2 BYE")
+	info.Headers.Add("Info-Package", infoPackage)
+	info.Headers.Add("Content-Disposition", "info-package")
+	info.Headers.Add("Content-Type", xmlContentType)
+	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string></ussd-data>`)
+
+	if err := us.handleRequest(context.Background(), session.Request{Message: info, Transport: transport}); err != nil {
+		t.Fatalf("handleRequest() error = %v", err)
+	}
+	resp := mustParseUSSDMessage(t, transport.lastWrite())
+	if got := resp.StatusCode(); got != sipStatusBadRequest {
+		t.Fatalf("StatusCode() = %d, want %d", got, sipStatusBadRequest)
+	}
+}
+
+func TestUSSDExchange481ClosesSession(t *testing.T) {
+	transport := newTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseUSSDMessage(t, data)
+		switch req.Method() {
+		case "INVITE":
+			transport.queue(newUSSDResponse(req, 200, "OK",
+				[]byte("v=0\r\nm=audio 0 RTP/AVP 97\r\n"),
+				sip.Header{Name: "To", Value: req.Header("To") + ";tag=remote-1"},
+				sip.Header{Name: "Contact", Value: "<sip:ussias@example.com;lr>"},
+				sip.Header{Name: "Recv-Info", Value: infoPackage},
+				sip.Header{Name: "Accept", Value: "application/vnd.3gpp.ussd+xml, application/sdp, multipart/mixed"},
+				sip.Header{Name: "Content-Type", Value: "application/sdp"},
+			))
+		case "INFO":
+			transport.queue(newUSSDResponse(req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist", nil))
+		}
+	}
+
+	us, err := svc.Start(context.Background(), "*100#")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := us.Reply(context.Background(), "1"); err == nil {
+		t.Fatal("Reply() error = nil, want 481")
+	}
+	if !us.isClosed() {
+		t.Fatal("USSD session is open, want closed")
+	}
+	if svc.hasActiveSession() {
+		t.Fatal("hasActiveSession() = true, want false")
+	}
+}
+
 func TestStartUSSDSessionFlow(t *testing.T) {
 	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222"
 

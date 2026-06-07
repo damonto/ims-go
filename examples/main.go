@@ -269,6 +269,8 @@ func run(opt options) error {
 		if err != nil {
 			return fmt.Errorf("sending SMS: %w", err)
 		}
+		defer submission.Close()
+		go logSMSSubmissionUpdates(submission)
 		slog.Info("submitted SMS", "id", submission.ID, "to", submission.To, "segments", submission.SegmentCount)
 	}
 	if opt.ussdCode != "" {
@@ -964,6 +966,29 @@ func logSMSEvents(events *vowifi.SMSEvents) {
 			}
 			slog.Info("sms status report", "recipient", report.Recipient, "service_center", report.ServiceCenter, "message_reference", report.MessageReference, "status", report.Status, "service_center_time", report.ServiceCenterTime.Format(time.RFC3339), "discharge_time", report.DischargeTime.Format(time.RFC3339), "received_at", report.ReceivedAt.Format(time.RFC3339))
 		}
+	}
+}
+
+func logSMSSubmissionUpdates(submission vowifi.SMSSubmission) {
+	for update := range submission.Updates {
+		attrs := []any{
+			"id", update.SubmissionID,
+			"segment", update.SegmentIndex + 1,
+			"segments", update.SegmentCount,
+			"state", update.State,
+			"recipient", update.Recipient,
+			"service_center", update.ServiceCenter,
+			"rp_ref", update.RPReference,
+			"tp_ref", update.TPReference,
+			"received_at", update.ReceivedAt.Format(time.RFC3339),
+		}
+		if update.HasRPCause {
+			attrs = append(attrs, "rp_cause", update.RPCause)
+		}
+		if update.HasStatus {
+			attrs = append(attrs, "tp_status", update.Status)
+		}
+		slog.Info("sms submission update", attrs...)
 	}
 }
 

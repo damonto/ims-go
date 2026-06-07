@@ -11,28 +11,44 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegment, error) {
+func (s *Service) Send(ctx context.Context, to, text string) (Submission, error) {
 	if err := s.beginMOTransfer(); err != nil {
-		return nil, err
+		return Submission{}, err
 	}
 	defer s.finishMOSend()
 
 	sc, err := s.resolveServiceCenter()
 	if err != nil {
-		return nil, err
+		return Submission{}, err
 	}
 	parts, err := buildUserDataParts(text)
 	if err != nil {
-		return nil, err
+		return Submission{}, err
 	}
+	tracker := newSubmissionTracker(len(parts))
+	submission, err := s.sendParts(ctx, to, sc, parts, tracker)
+	if err != nil {
+		if len(submission.Segments) > 0 {
+			return submission, &PartialSubmissionError{Submission: submission, Err: err}
+		}
+		tracker.close()
+		return Submission{}, err
+	}
+	return submission, nil
+}
+
+func (s *Service) sendParts(ctx context.Context, to string, sc serviceCenter, parts []userDataPart, tracker *submissionTracker) (Submission, error) {
 	submissions := make([]SubmissionSegment, 0, len(parts))
 	for i, part := range parts {
-		segment, err := s.newOutboundSegment(to, sc, part, i, len(parts))
+		segment, err := s.newOutboundSegment(to, sc, part, i, len(parts), tracker)
 		if err != nil {
-			return nil, err
+			tracker.completeSegments(len(parts) - i)
+			return newSubmission(submissions, tracker), err
 		}
-		if err := s.sendSegment(ctx, segment); err != nil {
-			return nil, err
+		response, err := s.exchangeSegment(ctx, segment)
+		if err != nil {
+			tracker.completeSegments(len(parts) - i)
+			return newSubmission(submissions, tracker), err
 		}
 		submissions = append(submissions, SubmissionSegment{
 			Index:         segment.index,
@@ -44,8 +60,20 @@ func (s *Service) Send(ctx context.Context, to, text string) ([]SubmissionSegmen
 			TPReference:   segment.tpRef,
 			SubmittedAt:   time.Now(),
 		})
+		if err := s.trackSegmentReport(ctx, segment, response); err != nil {
+			tracker.completeSegments(len(parts) - i - 1)
+			return newSubmission(submissions, tracker), err
+		}
 	}
-	return submissions, nil
+	return newSubmission(submissions, tracker), nil
+}
+
+func newSubmission(segments []SubmissionSegment, tracker *submissionTracker) Submission {
+	var updates <-chan SubmissionUpdate
+	if tracker != nil {
+		updates = tracker.updates
+	}
+	return Submission{Segments: segments, Updates: updates}
 }
 
 func (s *Service) NotifyMemoryAvailable(ctx context.Context, target string) error {
@@ -134,6 +162,10 @@ func (s *Service) releaseReference(ref byte) {
 	s.mu.Unlock()
 }
 
+func (s *Service) reserveTPReference() byte {
+	return byte(atomic.AddUint32(&s.tpRef, 1))
+}
+
 func (s *Service) beginMOTransfer() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,15 +201,15 @@ func (s *Service) endMTTransfer() {
 	s.mu.Unlock()
 }
 
-func (s *Service) newOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int) (outboundSegment, error) {
+func (s *Service) newOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, tracker *submissionTracker) (outboundSegment, error) {
 	rpRef, err := s.reserveReference()
 	if err != nil {
 		return outboundSegment{}, err
 	}
-	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, rpRef)
+	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, s.reserveTPReference(), tracker)
 }
 
-func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, rpRef, tpRef byte) (outboundSegment, error) {
+func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, rpRef, tpRef byte, tracker *submissionTracker) (outboundSegment, error) {
 	tpDestination := to
 	if isSIPURI(to) {
 		tpDestination = dummyMSISDN
@@ -225,6 +257,7 @@ func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDat
 		tpRef:       tpRef,
 		callID:      callID,
 		msg:         msg,
+		tracker:     tracker,
 	}
 	reportCh, err := s.registerPendingSegment(segment)
 	if err != nil {
@@ -241,14 +274,6 @@ func isSIPURI(uri string) bool {
 		return false
 	}
 	return strings.EqualFold(scheme, "sip") || strings.EqualFold(scheme, "sips")
-}
-
-func (s *Service) sendSegment(ctx context.Context, segment outboundSegment) error {
-	response, err := s.exchangeSegment(ctx, segment)
-	if err != nil {
-		return err
-	}
-	return s.trackSegmentReport(ctx, segment, response)
 }
 
 func (s *Service) exchangeSegment(ctx context.Context, segment outboundSegment) (submitResponse, error) {

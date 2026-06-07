@@ -78,6 +78,34 @@ func TestValidateSecureESPConfigRequiresIntegrity(t *testing.T) {
 	}
 }
 
+func TestValidateSecureSPIsRejectsReservedValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		outbound uint32
+		inbound  uint32
+		wantErr  bool
+	}{
+		{name: "valid", outbound: 256, inbound: 257},
+		{name: "zero outbound", outbound: 0, inbound: 257, wantErr: true},
+		{name: "reserved inbound", outbound: 256, inbound: 255, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSecureSPIs(tt.outbound, tt.inbound)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "spi is reserved") {
+					t.Fatalf("validateSecureSPIs() error = %v, want reserved spi", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateSecureSPIs() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestUDPFlowMatches(t *testing.T) {
 	local := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000}
 	remote := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060}

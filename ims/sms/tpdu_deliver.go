@@ -28,13 +28,17 @@ func newDeliverTPDU(from string, part userDataPart) deliverTPDU {
 }
 
 func (tp deliverTPDU) MarshalBinary() ([]byte, error) {
+	from, err := encodeTPAddress(tp.From)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling SMS-DELIVER originator address: %w", err)
+	}
 	firstOctet := byte(tpduMTIDeliver)
 	if tp.Part.udhi {
 		firstOctet |= tpduUserDataHeaderFlag
 	}
 	payload := make([]byte, 0, 32+len(tp.Part.userData))
 	payload = append(payload, firstOctet)
-	payload = append(payload, encodeTPAddress(tp.From)...)
+	payload = append(payload, from...)
 	payload = append(payload, tp.Part.pid, tp.Part.dcs)
 	payload = append(payload, tpduZeroTimestamp[:]...)
 	payload = append(payload, byte(tp.Part.udl))
@@ -67,8 +71,29 @@ func decodeDeliverFields(data []byte) (deliverFields, error) {
 	idx += 7
 	part.udl = int(data[idx])
 	idx++
-	part.userData = append([]byte(nil), data[idx:]...)
+	octets, err := userDataOctets(part.udl, part.dcs)
+	if err != nil {
+		return deliverFields{}, fmt.Errorf("decoding SMS-DELIVER: %w", err)
+	}
+	if len(data[idx:]) < octets {
+		return deliverFields{}, errors.New("decoding SMS-DELIVER: truncated user data")
+	}
+	if len(data[idx:]) > octets {
+		return deliverFields{}, errors.New("decoding SMS-DELIVER: trailing data")
+	}
+	part.userData = append([]byte(nil), data[idx:idx+octets]...)
 	return deliverFields{from: from, part: part}, nil
+}
+
+func userDataOctets(udl int, dcs byte) (int, error) {
+	encoding, err := userDataEncodingFromDCS(dcs)
+	if err != nil {
+		return 0, err
+	}
+	if encoding == userDataEncodingGSM7 {
+		return gsm7OctetCount(udl), nil
+	}
+	return udl, nil
 }
 
 func decodeDeliverGSM7(part userDataPart) (string, *concatInfo, error) {

@@ -218,6 +218,53 @@ func TestRegisterRejectsInvalidAuthenticationInfoRspauth(t *testing.T) {
 	}
 }
 
+func TestRegisterRequiresPCSCFReselectionOnUseProxy(t *testing.T) {
+	tests := []struct {
+		name      string
+		protected bool
+	}{
+		{name: "initial register", protected: false},
+		{name: "protected register", protected: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newUDPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if !tt.protected {
+					transport.queue(newResponse(req, sipStatusUseProxy, "Use Proxy"))
+					return
+				}
+				switch countWrites(transport) {
+				case 1:
+					transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
+				case 2:
+					transport.queue(newResponse(req, sipStatusUseProxy, "Use Proxy"))
+				default:
+					t.Fatalf("unexpected write count %d", countWrites(transport))
+				}
+			}
+
+			err := svc.Register(context.Background())
+			if err == nil {
+				t.Fatal("Register() error = nil, want P-CSCF reselection")
+			}
+			if !PCSCFReselectionRequired(err) {
+				t.Fatalf("PCSCFReselectionRequired() = false for %v", err)
+			}
+			wantWrites := 1
+			if tt.protected {
+				wantWrites = 2
+			}
+			if got := countWrites(transport); got != wantWrites {
+				t.Fatalf("write count = %d, want %d", got, wantWrites)
+			}
+		})
+	}
+}
+
 func TestRegisterInitialRegistrationRequiredStatusClasses(t *testing.T) {
 	tests := []struct {
 		name   string

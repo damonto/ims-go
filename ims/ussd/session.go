@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	imssession "github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
 	"strings"
 )
 
 func (s *Session) Events() <-chan Message {
 	return s.events
+}
+
+func (s *Session) CloseLocal() {
+	s.finish(false)
 }
 
 func (s *Session) Reply(ctx context.Context, text string) error {
@@ -195,13 +200,23 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action sessionA
 	}
 	resp, err := s.service.sess.Exchange(ctx, msg)
 	if err != nil {
+		if imssession.TransactionTimerExpired(err, "B") || imssession.TransactionTimerExpired(err, "F") {
+			s.finish(false)
+		}
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	if resp.StatusCode() != sipStatusOK {
+		if ussdDialogTerminatedByResponse(resp.StatusCode()) {
+			s.finish(false)
+		}
 		return fmt.Errorf("%s: unexpected response: %w", action, sip.NewResponseError(resp))
 	}
 	releaseInfo = false
 	return nil
+}
+
+func ussdDialogTerminatedByResponse(status int) bool {
+	return status == sipStatusCallTransactionDoesNotExist || status == sipStatusRequestTimeout
 }
 
 func (s *Session) beginInfoExchange(action sessionAction) error {

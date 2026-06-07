@@ -69,7 +69,7 @@ func (s *Session) initiatedIKESARekeyResult(ctx context.Context, state ikeSAReke
 			return ikeSARekeyResult{}, fmt.Errorf("repeated INVALID_KE_PAYLOAD group %d", dhGroup)
 		}
 		triedGroups[dhGroup] = struct{}{}
-		next, err := newIKESARekeyCrypto(dhGroup)
+		next, err := newIKESARekeyCrypto(dhGroup, state.initiatorSPI, state.responderSPI)
 		if err != nil {
 			return ikeSARekeyResult{}, err
 		}
@@ -209,14 +209,20 @@ func initialIKESARekeyDHGroup(current *ikeCrypto) uint16 {
 	return current.dhGroup
 }
 
-func newIKESARekeyCrypto(dhGroup uint16) (*ikeCrypto, error) {
+func newIKESARekeyCrypto(dhGroup uint16, existingSPIs ...uint64) (*ikeCrypto, error) {
 	crypto, err := newIKECrypto(dhGroup)
 	if err != nil {
 		return nil, err
 	}
-	initiatorSPI, err := randomUint64()
-	if err != nil {
-		return nil, fmt.Errorf("generating initiator spi: %w", err)
+	var initiatorSPI uint64
+	for {
+		initiatorSPI, err = randomIKESPI()
+		if err != nil {
+			return nil, fmt.Errorf("generating initiator spi: %w", err)
+		}
+		if !ikeSPIInUse(initiatorSPI, existingSPIs...) {
+			break
+		}
 	}
 	nonceI, err := randomBytes(defaultIKENonceLength)
 	if err != nil {
@@ -283,6 +289,9 @@ func (state ikeSARekeyState) ikeSARekeyResult(payloads []ike.Payload, next *ikeC
 	proposal, responderSPI, nonceR, responderKE, err := negotiatedIKESARekeyFromPayloadsWithRequests(payloads, next.dhGroup, requestProposals)
 	if err != nil {
 		return ikeSARekeyResult{}, err
+	}
+	if ikeSPIInUse(responderSPI, state.initiatorSPI, state.responderSPI, next.initiatorSPI) {
+		return ikeSARekeyResult{}, errors.New("parsing create_child_sa response: responder ike spi conflicts with an existing ike spi")
 	}
 	next.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
 	next.SetSPIs(next.initiatorSPI, responderSPI)
@@ -353,11 +362,15 @@ func negotiatedIKESARekeyFromPayloadsWithRequests(payloads []ike.Payload, dhGrou
 	if len(sa.Proposals[0].SPI) != 8 {
 		return negotiatedIKESA{}, 0, nil, nil, fmt.Errorf("parsing create_child_sa response: invalid responder ike spi length %d", len(sa.Proposals[0].SPI))
 	}
+	responderSPI := binary.BigEndian.Uint64(sa.Proposals[0].SPI)
+	if !validIKESPI(responderSPI) {
+		return negotiatedIKESA{}, 0, nil, nil, errors.New("parsing create_child_sa response: responder ike spi is zero")
+	}
 	proposal, err := negotiatedIKESAFromProposal(sa.Proposals[0], dhGroup)
 	if err != nil {
 		return negotiatedIKESA{}, 0, nil, nil, err
 	}
-	return proposal, binary.BigEndian.Uint64(sa.Proposals[0].SPI), append([]byte(nil), nonce.Data...), append([]byte(nil), ke.Data...), nil
+	return proposal, responderSPI, append([]byte(nil), nonce.Data...), append([]byte(nil), ke.Data...), nil
 }
 
 func (state ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([][]byte, error) {

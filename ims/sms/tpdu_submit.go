@@ -1,6 +1,9 @@
 package sms
 
-import "encoding"
+import (
+	"encoding"
+	"fmt"
+)
 
 var _ encoding.BinaryMarshaler = submitTPDU{}
 
@@ -31,6 +34,10 @@ func newSubmitTPDU(cfg submitTPDUConfig) submitTPDU {
 }
 
 func (tp submitTPDU) MarshalBinary() ([]byte, error) {
+	destination, err := encodeTPAddress(tp.Destination)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling SMS-SUBMIT destination address: %w", err)
+	}
 	firstOctet := byte(tpduMTISubmit)
 	if tp.RejectDuplicates {
 		firstOctet |= tpduRejectDuplicatesFlag
@@ -44,7 +51,7 @@ func (tp submitTPDU) MarshalBinary() ([]byte, error) {
 	payload := make([]byte, 0, 32+len(tp.Part.userData))
 	payload = append(payload, firstOctet)
 	payload = append(payload, tp.Reference)
-	payload = append(payload, encodeTPAddress(tp.Destination)...)
+	payload = append(payload, destination...)
 	payload = append(payload, tp.Part.pid)
 	payload = append(payload, tp.Part.dcs)
 	payload = append(payload, byte(tp.Part.udl))

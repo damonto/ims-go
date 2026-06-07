@@ -37,6 +37,7 @@ const (
 	espTrailerLen   = 2
 	espMinPacketLen = espHeaderLen + espTrailerLen
 	espDefaultAlign = 4
+	ReservedSPIMax  = 255
 
 	// NextHeaderNoNext marks RFC 4303 dummy ESP packets.
 	NextHeaderNoNext = 59
@@ -52,6 +53,10 @@ type ESPPacket struct {
 	Sequence   uint32
 	NextHeader byte
 	Payload    []byte
+}
+
+func ValidSPI(spi uint32) bool {
+	return spi > ReservedSPIMax
 }
 
 func (p ESPPacket) MarshalBinary() ([]byte, error) {

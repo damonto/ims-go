@@ -112,8 +112,8 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	if cfg.LocalPort == 0 || cfg.RemotePort == 0 {
 		return nil, errors.New("listening secure tcp transport: ports are required")
 	}
-	if cfg.OutboundSPI == 0 || cfg.InboundSPI == 0 {
-		return nil, errors.New("listening secure tcp transport: spi is zero")
+	if err := validateSecureSPIs(cfg.OutboundSPI, cfg.InboundSPI); err != nil {
+		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
 	encryption, err := secureEncryption(cfg.Encryption)
 	if err != nil {
@@ -197,8 +197,8 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 		dataACKTimeouts: dataACKTimeouts,
 	}
 	if secure != nil {
-		if secure.OutboundSPI == 0 || secure.InboundSPI == 0 {
-			return nil, errors.New("dialing secure tcp transport: spi is zero")
+		if err := validateSecureSPIs(secure.OutboundSPI, secure.InboundSPI); err != nil {
+			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
 		}
 		encryption, err := secureEncryption(secure.Encryption)
 		if err != nil {

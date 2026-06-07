@@ -3,6 +3,7 @@ package voice
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/damonto/vowifi-go/ims/sip"
@@ -68,7 +69,10 @@ func (c *Call) localSessionTimerFallback(localWasUAC bool) (sessionTimerState, b
 	c.mu.Lock()
 	current := c.sessionTimer
 	c.mu.Unlock()
-	if !current.active && c.service.cfg.SessionExpires == 0 {
+	if current.active {
+		return sessionTimerState{}, false
+	}
+	if strings.TrimSpace(c.inviteRequest.Header("Session-Expires")) == "" {
 		return sessionTimerState{}, false
 	}
 	seconds := sessionExpiresSeconds(c.service.cfg, c.inviteRequest)

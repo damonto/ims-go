@@ -44,11 +44,15 @@ func (s *Session) ackMatchesInvite(msg sip.Message) bool {
 }
 
 func (s *Session) recordRemoteCSeq(msg sip.Message) (bool, int, string) {
+	method := strings.ToUpper(msg.Method())
+	if !strings.EqualFold(sip.CSeqMethod(msg.Header("CSeq")), method) {
+		return false, sipStatusBadRequest, "Bad Request"
+	}
 	cseq := sip.CSeqNumber(msg.Header("CSeq"))
 	if cseq <= 0 {
 		return false, sipStatusBadRequest, "Bad Request"
 	}
-	key := msg.Method() + "|" + msg.Header("CSeq")
+	key := method + "|" + msg.Header("CSeq")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.remoteCSeqs[key]; ok {

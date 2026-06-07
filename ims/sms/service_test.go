@@ -3,6 +3,7 @@ package sms
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,7 +11,9 @@ import (
 	"mime/multipart"
 	"net"
 	"net/textproto"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,11 +208,52 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("len(Send()) = %d, want 1", len(got))
+	if len(got.Segments) != 1 {
+		t.Fatalf("len(Send().Segments) = %d, want 1", len(got.Segments))
 	}
-	if got[0].CallID == "" {
-		t.Fatal("Send()[0].CallID = empty")
+	if got.Segments[0].CallID == "" {
+		t.Fatal("Send().Segments[0].CallID = empty")
+	}
+}
+
+func TestSendUsesIndependentRPAndTPReferences(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	svc, err := New(Config{Logger: testLogger()}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	svc.tpRef = 41
+
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		var rp rpMessage
+		if err := rp.UnmarshalBinary(req.Body); err != nil {
+			t.Fatalf("RP unmarshal error = %v", err)
+		}
+		if len(rp.TPDU) < 2 {
+			t.Fatalf("len(TPDU) = %d, want >= 2", len(rp.TPDU))
+		}
+		tpRef := rp.TPDU[1]
+		if rp.Reference == tpRef {
+			t.Fatalf("RP reference = TP-MR = %d, want independent references", rp.Reference)
+		}
+		transport.queue(newResponse(req, 202, "Accepted"))
+		ackMOSubmit(t, svc, req)
+	}
+
+	submission, err := svc.Send(context.Background(), "777", "BAL")
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if len(submission.Segments) != 1 {
+		t.Fatalf("len(submission.Segments) = %d, want 1", len(submission.Segments))
+	}
+	if submission.Segments[0].RPReference == submission.Segments[0].TPReference {
+		t.Fatalf("Submission references both = %d, want independent references", submission.Segments[0].RPReference)
 	}
 }
 
@@ -893,7 +937,7 @@ func TestHandleInboundSMSPPDataDownloadUsesUICCResponseInRPACK(t *testing.T) {
 	}
 
 	tpdu := []byte{0x00}
-	tpdu = append(tpdu, encodeTPAddress("+15551234567")...)
+	tpdu = append(tpdu, mustEncodeTPAddress(t, "+15551234567")...)
 	tpdu = append(tpdu, 0x7F, 0xF6)
 	tpdu = append(tpdu, bytes.Repeat([]byte{0x00}, 7)...)
 	tpdu = append(tpdu, 0x03, 0x01, 0x02, 0x03)
@@ -1743,13 +1787,13 @@ func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 	}
 
 	type sendResult struct {
-		submissions []SubmissionSegment
-		err         error
+		submission Submission
+		err        error
 	}
 	sendDone := make(chan sendResult, 1)
 	go func() {
-		submissions, err := svc.Send(context.Background(), "777", "BAL")
-		sendDone <- sendResult{submissions: submissions, err: err}
+		submission, err := svc.Send(context.Background(), "777", "BAL")
+		sendDone <- sendResult{submission: submission, err: err}
 	}()
 	first := nextSMSRequest(t, requests)
 
@@ -1762,11 +1806,22 @@ func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("Send() error = %v", result.err)
 	}
-	if len(result.submissions) != 1 {
-		t.Fatalf("len(submissions) = %d, want 1", len(result.submissions))
+	if len(result.submission.Segments) != 1 {
+		t.Fatalf("len(submission.Segments) = %d, want 1", len(result.submission.Segments))
 	}
 
 	time.Sleep(100 * time.Millisecond)
+	var states []SubmissionState
+	for update := range result.submission.Updates {
+		states = append(states, update.State)
+	}
+	if !slices.Contains(states, SubmissionSubmittedToIMS) {
+		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmittedToIMS)
+	}
+	if !slices.Contains(states, SubmissionSubmitUnknown) {
+		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmitUnknown)
+	}
+
 	if err := sendSubmitReport(svc, rpMessage{Type: rpErrorNetworkToMS, Reference: moReference(t, first), Cause: rpCauseTemporaryFailure, HasCause: true}, first.Header("Call-ID")); err != nil {
 		t.Fatalf("late sendSubmitReport() error = %v", err)
 	}
@@ -1779,6 +1834,79 @@ func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 	select {
 	case retry := <-requests:
 		t.Fatalf("unexpected retry MESSAGE after submit report timeout:\n%s", retry)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSendReturnsPartialSubmissionAfterMultipartFailure(t *testing.T) {
+	transport := newServiceTransport()
+	sess, reg := registeredService(t, transport)
+	errCh := make(chan error, 1)
+	svc, err := New(Config{
+		Logger:              testLogger(),
+		SubmitReportTimeout: 20 * time.Millisecond,
+		OnError:             func(err error) { errCh <- err },
+	}, sess, reg, serviceStubCard{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	requests := make(chan []byte, 4)
+	var messageCount atomic.Int32
+	transport.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "MESSAGE" {
+			return
+		}
+		requests <- append([]byte(nil), data...)
+		switch messageCount.Add(1) {
+		case 1:
+			transport.queue(newResponse(req, 202, "Accepted"))
+		default:
+			transport.queue(newResponse(req, 500, "Server Internal Error"))
+		}
+	}
+
+	submission, err := svc.Send(context.Background(), "777", strings.Repeat("A", 200))
+	if err == nil {
+		t.Fatal("Send() error = nil, want second segment failure")
+	}
+	var partial *PartialSubmissionError
+	if !errors.As(err, &partial) {
+		t.Fatalf("Send() error = %T %[1]v, want PartialSubmissionError", err)
+	}
+	if len(submission.Segments) != 1 {
+		t.Fatalf("len(submission.Segments) = %d, want 1", len(submission.Segments))
+	}
+	if len(partial.Submission.Segments) != 1 {
+		t.Fatalf("len(partial.Submission.Segments) = %d, want 1", len(partial.Submission.Segments))
+	}
+	first := nextSMSRequest(t, requests)
+
+	time.Sleep(100 * time.Millisecond)
+	var states []SubmissionState
+	for update := range submission.Updates {
+		states = append(states, update.State)
+	}
+	if !slices.Contains(states, SubmissionSubmittedToIMS) {
+		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmittedToIMS)
+	}
+	if !slices.Contains(states, SubmissionSubmitUnknown) {
+		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmitUnknown)
+	}
+
+	if err := sendSubmitReport(svc, rpMessage{Type: rpAckNetworkToMS, Reference: moReference(t, first)}, first.Header("Call-ID")); err != nil {
+		t.Fatalf("late sendSubmitReport() error = %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("OnError = %v, want none", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 }
@@ -2006,10 +2134,14 @@ func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 		transport.queue(newResponse(req, 202, "Accepted"))
 	}
 
-	sendErr := make(chan error, 1)
+	type sendResult struct {
+		submission Submission
+		err        error
+	}
+	sendDone := make(chan sendResult, 1)
 	go func() {
-		_, err := svc.Send(context.Background(), "777", "BAL")
-		sendErr <- err
+		submission, err := svc.Send(context.Background(), "777", "BAL")
+		sendDone <- sendResult{submission: submission, err: err}
 	}()
 	_ = nextSMSRequest(t, requests)
 
@@ -2022,13 +2154,32 @@ func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 		t.Fatal("sendSubmitReport() did not return")
 	}
 
+	var result sendResult
 	select {
-	case err := <-sendErr:
-		if err == nil || !strings.Contains(err.Error(), "temporary failure") {
-			t.Fatalf("Send() error = %v, want temporary failure", err)
+	case result = <-sendDone:
+		if result.err != nil {
+			t.Fatalf("Send() error = %v", result.err)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Send() did not return after RP-ERROR")
+	}
+
+	var states []SubmissionState
+	var rejected SubmissionUpdate
+	for update := range result.submission.Updates {
+		states = append(states, update.State)
+		if update.State == SubmissionRejectedBySMSC {
+			rejected = update
+		}
+	}
+	if !slices.Contains(states, SubmissionSubmittedToIMS) {
+		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmittedToIMS)
+	}
+	if !slices.Contains(states, SubmissionRejectedBySMSC) {
+		t.Fatalf("submission update states = %v, want %s", states, SubmissionRejectedBySMSC)
+	}
+	if !rejected.HasRPCause || rejected.RPCause != rpCauseTemporaryFailure {
+		t.Fatalf("rejected update cause = has %t cause %d, want temporary failure", rejected.HasRPCause, rejected.RPCause)
 	}
 
 	select {

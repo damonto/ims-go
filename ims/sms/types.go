@@ -42,6 +42,7 @@ type Service struct {
 	mu        sync.Mutex
 	cseq      int64
 	rpRef     uint32
+	tpRef     uint32
 	rpRefs    map[byte]struct{}
 	pending   map[string]pendingEntry
 	submitted map[string]submittedEntry
@@ -63,6 +64,55 @@ type SubmissionSegment struct {
 	SubmittedAt   time.Time
 }
 
+type Submission struct {
+	Segments []SubmissionSegment
+	Updates  <-chan SubmissionUpdate
+}
+
+// PartialSubmissionError reports a multipart SMS failure after at least one
+// segment was accepted by the IMS transaction layer.
+type PartialSubmissionError struct {
+	Submission Submission
+	Err        error
+}
+
+func (e *PartialSubmissionError) Error() string {
+	if e == nil || e.Err == nil {
+		return "partial SMS submission"
+	}
+	return e.Err.Error()
+}
+
+func (e *PartialSubmissionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type SubmissionState string
+
+const (
+	SubmissionSubmittedToIMS SubmissionState = "submitted_to_ims"
+	SubmissionAcceptedBySMSC SubmissionState = "accepted_by_smsc"
+	SubmissionRejectedBySMSC SubmissionState = "rejected_by_smsc"
+	SubmissionSubmitUnknown  SubmissionState = "submit_unknown"
+)
+
+type SubmissionUpdate struct {
+	Index         int
+	Count         int
+	Recipient     string
+	ServiceCenter string
+	CallID        string
+	RPReference   byte
+	TPReference   byte
+	State         SubmissionState
+	RPCause       byte
+	HasRPCause    bool
+	At            time.Time
+}
+
 type outboundSegment struct {
 	index       int
 	count       int
@@ -76,6 +126,15 @@ type outboundSegment struct {
 	callID      string
 	msg         sip.Message
 	reportCh    <-chan rpMessage
+	tracker     *submissionTracker
+}
+
+type submissionTracker struct {
+	updates   chan SubmissionUpdate
+	remaining atomic.Int32
+	mu        sync.Mutex
+	closed    bool
+	closeOnce sync.Once
 }
 
 type pendingEntry struct {

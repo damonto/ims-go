@@ -137,5 +137,7 @@ func (s *Service) expirePendingSegment(entry pendingEntry) {
 	segment := entry.segment
 	s.completeSubmitted(segment.callID)
 	s.releaseReference(segment.rpRef)
+	s.publishSubmissionUpdate(segment, entry.response, rpMessage{}, SubmissionSubmitUnknown)
+	segment.tracker.completeSegment()
 	s.logger.Debug("submit report not received", "segment_index", segment.index+1, "segment_count", segment.count, "to", segment.to, "smsc", segment.smscAddress, "target", segment.target, "call_id", segment.msg.Header("Call-ID"), "cseq", segment.msg.Header("CSeq"), "rp_ref", segment.rpRef, "tp_ref", segment.tpRef, "status_code", entry.response.statusCode, "reason_phrase", entry.response.reasonPhrase)
 }

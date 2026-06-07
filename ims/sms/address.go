@@ -28,20 +28,47 @@ const (
 const (
 	minRPAddressValueOctets = 2
 	maxRPAddressValueOctets = 11
+	minTPAddressOctets      = 2
+	maxTPAddressOctets      = 12
 )
 
-func encodeTPAddress(number string) []byte {
+func encodeTPAddress(number string) ([]byte, error) {
+	number = strings.TrimSpace(number)
 	toa := byte(tpTOAUnknownISDN)
 	if strings.HasPrefix(number, "+") {
 		toa = tpTOAInternationalISDN
 		number = strings.TrimPrefix(number, "+")
 	}
+	if number == "" {
+		return nil, errors.New("encoding TP address: address is empty")
+	}
+	if err := validateTPAddressDigits(number); err != nil {
+		return nil, err
+	}
 	packed := swapDigits(number)
-	return append([]byte{byte(len(number)), toa}, packed...)
+	data := append([]byte{byte(len(number)), toa}, packed...)
+	if len(data) < minTPAddressOctets || len(data) > maxTPAddressOctets {
+		return nil, fmt.Errorf("encoding TP address: invalid length %d", len(data))
+	}
+	return data, nil
 }
 
 func digitOctetCount(digits int) int {
 	return (digits + 1) / 2
+}
+
+func validateTPAddressDigits(number string) error {
+	for i := range len(number) {
+		b := number[i]
+		switch {
+		case b >= '0' && b <= '9':
+		case b == '*', b == '#':
+		case b == 'a' || b == 'A' || b == 'b' || b == 'B' || b == 'c' || b == 'C':
+		default:
+			return fmt.Errorf("encoding TP address: invalid digit %q", b)
+		}
+	}
+	return nil
 }
 
 func decodeAlphanumericAddress(data []byte, lengthSemiOctets int) (string, error) {
@@ -59,16 +86,20 @@ func decodeTPAddress(data []byte) (string, int, error) {
 	lengthSemiOctets := int(data[0])
 	ton := (data[1] >> tpTONShift) & tpTONMask
 	numberBytes := digitOctetCount(lengthSemiOctets)
-	if len(data) < 2+numberBytes {
+	fullLen := 2 + numberBytes
+	if fullLen < minTPAddressOctets || fullLen > maxTPAddressOctets {
+		return "", 0, fmt.Errorf("decoding TP address: invalid length %d", fullLen)
+	}
+	if len(data) < fullLen {
 		return "", 0, errors.New("decoding TP address: truncated address")
 	}
-	raw := data[2 : 2+numberBytes]
+	raw := data[2:fullLen]
 	if ton == tpTONAlphanumeric {
 		number, err := decodeAlphanumericAddress(raw, lengthSemiOctets)
 		if err != nil {
 			return "", 0, fmt.Errorf("decoding TP address: %w", err)
 		}
-		return number, 2 + numberBytes, nil
+		return number, fullLen, nil
 	}
 	number := unswapDigits(raw)
 	if len(number) > lengthSemiOctets {
@@ -77,7 +108,7 @@ func decodeTPAddress(data []byte) (string, int, error) {
 	if ton == tpTONInternational {
 		number = "+" + number
 	}
-	return number, 2 + numberBytes, nil
+	return number, fullLen, nil
 }
 
 func encodeRPAddress(number string) []byte {

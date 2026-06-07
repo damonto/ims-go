@@ -320,10 +320,16 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 			wantSecond: "4000",
 		},
 		{
-			name:       "422 preserves configured UAS refresher",
+			name:       "422 omits configured UAS refresher",
 			cfg:        Config{Logger: testLogger(), SessionTimer: true, SessionRefresher: sessionRefresherUAS},
-			wantFirst:  "3600;refresher=uas",
-			wantSecond: "4000;refresher=uas",
+			wantFirst:  "3600",
+			wantSecond: "4000",
+		},
+		{
+			name:       "422 preserves configured UAC refresher",
+			cfg:        Config{Logger: testLogger(), SessionTimer: true, SessionRefresher: sessionRefresherUAC},
+			wantFirst:  "3600;refresher=uac",
+			wantSecond: "4000;refresher=uac",
 		},
 	}
 	for _, tt := range tests {

@@ -23,6 +23,10 @@ func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	if len(msg.UserData) > 0 && msg.DataCodingScheme == tpDCSGSM7 {
 		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD with GSM7 DCS is unsupported")
 	}
+	recipient, err := encodeTPAddress(msg.Recipient)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling SMS-STATUS-REPORT recipient address: %w", err)
+	}
 	payload := make([]byte, 0, 32)
 	firstOctet := byte(tpduMTIStatusReport)
 	if !msg.MoreMessagesWaiting {
@@ -39,7 +43,7 @@ func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	}
 	payload = append(payload, firstOctet)
 	payload = append(payload, msg.MessageReference)
-	payload = append(payload, encodeTPAddress(msg.Recipient)...)
+	payload = append(payload, recipient...)
 	payload = append(payload, encodeTimestamp(msg.ServiceCenterTime)...)
 	payload = append(payload, encodeTimestamp(msg.DischargeTime)...)
 	payload = append(payload, msg.Status.Code())
@@ -162,6 +166,9 @@ func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {
 			report.UserData = append([]byte(nil), data[idx:idx+octets]...)
 			idx += octets
 		}
+	}
+	if idx != len(data) {
+		return errors.New("decoding SMS-STATUS-REPORT: trailing data")
 	}
 
 	tp.Message = report

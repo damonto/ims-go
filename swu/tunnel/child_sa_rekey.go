@@ -84,7 +84,7 @@ type childSARekeyExchange func(context.Context, childSARekeyState, uint32, []byt
 func (s *Session) initiatedChildSARekeyResult(ctx context.Context, state childSARekeyState, pfs *ikeCrypto, exchange childSARekeyExchange) (childSARekeyResult, error) {
 	triedGroups := childSARekeyTriedGroups(pfs)
 	for {
-		newInboundSPI, err := randomUint32()
+		newInboundSPI, err := randomESPSPI()
 		if err != nil {
 			return childSARekeyResult{}, fmt.Errorf("generating child spi: %w", err)
 		}
@@ -166,7 +166,7 @@ func (s *Session) exchangeInitiatedChildSARekey(ctx context.Context, state child
 }
 
 func (s *Session) createChildSAReplacement(ctx context.Context, state childSARekeyState) error {
-	newInboundSPI, err := randomUint32()
+	newInboundSPI, err := randomESPSPI()
 	if err != nil {
 		return fmt.Errorf("creating child sa: generating child spi: %w", err)
 	}

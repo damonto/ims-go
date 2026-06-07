@@ -53,6 +53,14 @@ func normalizedAKAReauthIdentity(state usim.AKAIdentityState, realm string) (str
 	return normalizeAKAIdentity(state.ReauthIdentity, realm), true
 }
 
+func akaPermanentIdentity(card Card, realm string, eapType byte) string {
+	prefix := "0"
+	if eapType == eapTypeAKAPrime {
+		prefix = "6"
+	}
+	return normalizeAKAIdentity(prefix+card.IMSI(), realm)
+}
+
 func storeAKAIdentityState(card Card, state usim.AKAIdentityState) {
 	storer, ok := card.(akaIdentityStateStore)
 	if !ok {
@@ -186,19 +194,14 @@ func isKnownAKAAttribute(attrType byte) bool {
 }
 
 func selectAKAIdentity(card Card, realm string, state usim.AKAIdentityState, requestType, eapType byte) (string, error) {
-	prefix := "0"
-	if eapType == eapTypeAKAPrime {
-		prefix = "6"
-	}
-	permanentIdentity := fmt.Sprintf("%s%s", prefix, card.IMSI())
 	if requestType == akaAttrPermanentIDReq {
-		return normalizeAKAIdentity(permanentIdentity, realm), nil
+		return akaPermanentIdentity(card, realm, eapType), nil
 	}
 	if requestType == akaAttrFullAuthIDReq {
 		if state.Pseudonym != "" {
 			return normalizeAKAIdentity(state.Pseudonym, realm), nil
 		}
-		return normalizeAKAIdentity(permanentIdentity, realm), nil
+		return akaPermanentIdentity(card, realm, eapType), nil
 	}
 	if requestType != akaAttrAnyIDReq {
 		return "", fmt.Errorf("selecting aka identity: unsupported request type %d", requestType)
@@ -209,7 +212,7 @@ func selectAKAIdentity(card Card, realm string, state usim.AKAIdentityState, req
 	if state.Pseudonym != "" {
 		return normalizeAKAIdentity(state.Pseudonym, realm), nil
 	}
-	return normalizeAKAIdentity(permanentIdentity, realm), nil
+	return akaPermanentIdentity(card, realm, eapType), nil
 }
 
 func (f *akaAuthFlow) validateIdentityRequest(requestType byte) error {

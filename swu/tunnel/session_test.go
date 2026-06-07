@@ -1983,6 +1983,15 @@ func TestAcceptedChildSARequestProposalValidation(t *testing.T) {
 			wantErr: "invalid proposal protocol id",
 		},
 		{
+			name: "reserved peer esp spi",
+			proposal: func() ike.Proposal {
+				proposal := validProposal(0)
+				proposal.SPI = uint32Bytes(255)
+				return proposal
+			}(),
+			wantErr: "invalid peer esp spi 255",
+		},
+		{
 			name: "missing esn",
 			proposal: func() ike.Proposal {
 				proposal := validProposal(0)
@@ -2189,6 +2198,17 @@ func TestChildSAFromCreateChildResponseValidatesNegotiatedProposal(t *testing.T)
 				}(),
 			},
 			wantErr: "invalid negotiated protocol id",
+		},
+		{
+			name: "reserved responder esp spi",
+			proposals: []ike.Proposal{
+				func() ike.Proposal {
+					proposal := validProposal(0)
+					proposal.SPI = uint32Bytes(255)
+					return proposal
+				}(),
+			},
+			wantErr: "invalid responder esp spi 255",
 		},
 		{
 			name: "dh transform without pfs",
@@ -2985,6 +3005,54 @@ func TestNegotiatedIKESARekeyFromPayloadsValidatesProposalNumberAgainstRequest(t
 
 	if err == nil || !strings.Contains(err.Error(), "invalid negotiated proposal number 2") {
 		t.Fatalf("negotiatedIKESARekeyFromPayloadsWithRequests() error = %v, want invalid proposal number", err)
+	}
+}
+
+func TestNegotiatedIKESARekeyFromPayloadsRejectsZeroResponderSPI(t *testing.T) {
+	responseProposal := ikeSARekeyResponseProposal(acceptedIKESAProposal{
+		negotiatedIKESA: negotiatedIKESA{
+			EncryptionKeyLen: 128,
+			Integrity:        transformINTEGHMACSHA196,
+			PRF:              transformPRFHMACSHA1,
+		},
+		DHGroup:        transformDH2048MODP,
+		ProposalNumber: 1,
+	}, 0)
+	payloads := []ike.Payload{
+		&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{responseProposal}},
+		&ike.NoncePayload{Data: testNonce("responder nonce")},
+		&ike.KeyExchangePayload{DHGroup: transformDH2048MODP, Data: []byte{0x01}},
+	}
+
+	_, _, _, _, err := negotiatedIKESARekeyFromPayloads(payloads, transformDH2048MODP)
+
+	if err == nil || !strings.Contains(err.Error(), "responder ike spi is zero") {
+		t.Fatalf("negotiatedIKESARekeyFromPayloads() error = %v, want zero responder spi", err)
+	}
+}
+
+func TestAcceptedIKESARekeyProposalRejectsInvalidSPI(t *testing.T) {
+	current := testIKESARekeyCrypto(transformDH2048MODP, transformPRFHMACSHA1)
+	current.SetSPIs(0x0102030405060708, 0x1112131415161718)
+	tests := []struct {
+		name string
+		spi  uint64
+	}{
+		{name: "zero", spi: 0},
+		{name: "current initiator", spi: current.initiatorSPI},
+		{name: "current responder", spi: current.responderSPI},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proposals := currentIKESARekeyProposals(current, transformDH2048MODP, tt.spi)
+
+			_, _, err := acceptedIKESARekeyProposal(proposals, current)
+
+			if err == nil || !strings.Contains(err.Error(), "no acceptable ike sa rekey proposal") {
+				t.Fatalf("acceptedIKESARekeyProposal() error = %v, want no proposal", err)
+			}
+		})
 	}
 }
 
