@@ -15,10 +15,10 @@ func (f *akaAuthFlow) markAKAAuthenticated(useProtectedSuccess bool) {
 
 func (f *akaAuthFlow) validateEAPSuccess() error {
 	if !f.akaAuthenticated {
-		return errors.New("connecting swu session: eap success before aka authentication")
+		return errors.New("eap success before aka authentication")
 	}
 	if f.protectedSuccessExpected && !f.protectedSuccessReceived {
-		return errors.New("connecting swu session: eap success before protected success notification")
+		return errors.New("eap success before protected success notification")
 	}
 	return nil
 }
@@ -64,10 +64,10 @@ func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapDa
 	}
 	data, err := eapaka.BuildNotificationResponsePacketForType(message.Identifier, f.currentEAPType, notification, f.fastReauth, f.currentCounter, f.currentAuthKey, f.currentEncrKey)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building notification response: %w", err)
+		return akaResponse{}, fmt.Errorf("building notification response: %w", err)
 	}
 	if !notification.Success {
-		return akaResponse{data: data, afterSend: fmt.Errorf("connecting swu session: notification code %d", notification.Code)}, nil
+		return akaResponse{data: data, afterSend: fmt.Errorf("notification code %d", notification.Code)}, nil
 	}
 	if notification.Code != akaNotificationSuccess {
 		return f.clientErrorResponse(message.Identifier, fmt.Errorf("validating success notification: unexpected success notification code %d", notification.Code))

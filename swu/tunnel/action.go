@@ -52,7 +52,7 @@ func (a ikeAction) String() string {
 	case ikeActionOpenFinalIKEAuthResponse:
 		return "opening final ike_auth response"
 	case ikeActionConnectOpenAKAResponseMessage:
-		return "connecting swu session: opening aka response message"
+		return "opening aka response message"
 	case ikeActionOpenAKAResponseMessage:
 		return "opening aka response message"
 	case ikeActionOpenIKEAuthChallenge:

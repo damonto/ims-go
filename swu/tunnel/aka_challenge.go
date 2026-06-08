@@ -140,7 +140,7 @@ func (f *akaAuthFlow) akaPrimeKDFNegotiationResponse(message eapaka.AKAMessage) 
 	}
 	data, err := eapaka.BuildAKAPrimeKDFSelection(message.Identifier, akaPrimeKDFDefault)
 	if err != nil {
-		return akaResponse{}, false, fmt.Errorf("connecting swu session: building aka prime kdf selection: %w", err)
+		return akaResponse{}, false, fmt.Errorf("building aka prime kdf selection: %w", err)
 	}
 	f.akaPrimeKDFOffer = append([]uint16(nil), kdfs...)
 	return akaResponse{data: data}, true, nil
@@ -149,7 +149,7 @@ func (f *akaAuthFlow) akaPrimeKDFNegotiationResponse(message eapaka.AKAMessage) 
 func (f *akaAuthFlow) buildAKAPrimeAuthenticationReject(identifier byte) (akaResponse, bool, error) {
 	data, err := eapaka.BuildAKAPrimeAuthenticationReject(identifier)
 	if err != nil {
-		return akaResponse{}, false, fmt.Errorf("connecting swu session: building aka prime authentication reject: %w", err)
+		return akaResponse{}, false, fmt.Errorf("building aka prime authentication reject: %w", err)
 	}
 	return akaResponse{data: data}, true, nil
 }
@@ -168,7 +168,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	}
 	challengeData := eapData
 	if data, ok, err := sanitizedAKAPrimeChallengeData(message); err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: sanitizing aka prime challenge: %w", err)
+		return akaResponse{}, fmt.Errorf("sanitizing aka prime challenge: %w", err)
 	} else if ok {
 		challengeData = data
 	}
@@ -177,7 +177,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		if errors.Is(err, eapaka.ErrAKAPrimeAuthenticationFailure) {
 			data, buildErr := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
 			if buildErr != nil {
-				return akaResponse{}, fmt.Errorf("connecting swu session: building aka prime authentication reject: %w", buildErr)
+				return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", buildErr)
 			}
 			return akaResponse{data: data}, nil
 		}
@@ -186,20 +186,20 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if message.EAPType == eapTypeAKAPrime && !f.validateAKAPrimeNetworkName(challenge.NetworkName) {
 		data, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
 		if err != nil {
-			return akaResponse{}, fmt.Errorf("connecting swu session: building aka prime authentication reject: %w", err)
+			return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", err)
 		}
 		return akaResponse{data: data}, nil
 	}
 	if message.EAPType == eapTypeAKAPrime && !challenge.AMFSeparationBitSet() {
 		data, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
 		if err != nil {
-			return akaResponse{}, fmt.Errorf("connecting swu session: building aka prime authentication reject: %w", err)
+			return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", err)
 		}
 		return akaResponse{data: data}, nil
 	}
 	aka, err := f.card.AKA(ctx, challenge.RAND, challenge.AUTN)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: calculating aka response: %w", err)
+		return akaResponse{}, fmt.Errorf("calculating aka response: %w", err)
 	}
 	if aka.IsSynchronizationFailure() {
 		var data []byte
@@ -213,7 +213,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 			data, err = eapaka.BuildAKASynchronizationFailure(message.Identifier, aka.AUTS)
 		}
 		if err != nil {
-			return akaResponse{}, fmt.Errorf("connecting swu session: building aka synchronization failure: %w", err)
+			return akaResponse{}, fmt.Errorf("building aka synchronization failure: %w", err)
 		}
 		return akaResponse{data: data}, nil
 	}
@@ -225,7 +225,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 			data, err = eapaka.BuildAKAAuthenticationReject(message.Identifier)
 		}
 		if err != nil {
-			return akaResponse{}, fmt.Errorf("connecting swu session: building aka authentication reject: %w", err)
+			return akaResponse{}, fmt.Errorf("building aka authentication reject: %w", err)
 		}
 		return akaResponse{data: data}, nil
 	}
@@ -295,7 +295,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		IPMSSupport:  ipmsSupport,
 	})
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building aka response: %w", err)
+		return akaResponse{}, fmt.Errorf("building aka response: %w", err)
 	}
 	f.currentAuthKey = append([]byte(nil), f.crypto.eap.AUT...)
 	f.currentEncrKey = append([]byte(nil), f.crypto.eap.ENCR...)

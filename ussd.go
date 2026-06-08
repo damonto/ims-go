@@ -66,8 +66,7 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 	s.client.logger.Info("sending USSD", "code", code)
 	low, err := service.Start(ctx, code)
 	if err != nil {
-		s.client.logger.Error("sending USSD", "code", code, "err", err)
-		return USSDResult{}, err
+		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 	if err := s.attachLowSession(low, false); err != nil {
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
@@ -76,7 +75,6 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 	result, err := s.awaitResult(ctx)
 	if err != nil {
 		s.cleanupLowSession(low)
-		s.client.logger.Error("waiting for USSD result", "code", code, "err", err)
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 	s.client.logger.Info("USSD result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
@@ -101,13 +99,11 @@ func (s *USSDSession) Reply(ctx context.Context, text string) (USSDResult, error
 	defer s.finishOperation()
 
 	if err := low.Reply(ctx, text); err != nil {
-		s.client.logger.Error("replying USSD", "err", err)
-		return USSDResult{}, err
+		return USSDResult{}, fmt.Errorf("replying USSD: %w", err)
 	}
 
 	result, err := s.awaitResult(ctx)
 	if err != nil {
-		s.client.logger.Error("waiting for USSD reply result", "err", err)
 		return USSDResult{}, fmt.Errorf("replying USSD: %w", err)
 	}
 	s.client.logger.Info("USSD reply result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
@@ -129,8 +125,7 @@ func (s *USSDSession) Close(ctx context.Context) (USSDResult, error) {
 	}
 
 	if err := low.End(ctx, ""); err != nil {
-		s.client.logger.Error("closing USSD", "err", err)
-		return USSDResult{}, err
+		return USSDResult{}, fmt.Errorf("closing USSD: %w", err)
 	}
 
 	s.markClosed(low)

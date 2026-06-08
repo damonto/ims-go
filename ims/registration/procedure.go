@@ -25,24 +25,24 @@ func (s *Service) awaitRegisterChallenge(ctx context.Context) (sip.Message, erro
 		resp, err := s.sess.Exchange(ctx, s.buildRegister(nil, nil))
 		if err != nil {
 			if registrationTimeoutRequiresInitial(err) {
-				return sip.Message{}, fmt.Errorf("registering IMS: %w", initialRegistrationRequiredAfterError(err))
+				return sip.Message{}, initialRegistrationRequiredAfterError(err)
 			}
-			return sip.Message{}, fmt.Errorf("registering IMS: %w", err)
+			return sip.Message{}, err
 		}
 		if resp.StatusCode() == sipStatusIntervalTooBrief {
 			if err := s.adjustRegisterExpiresFrom423(resp, &adjustedExpires); err != nil {
-				return sip.Message{}, fmt.Errorf("registering IMS: %w", err)
+				return sip.Message{}, err
 			}
 			continue
 		}
 		if !registerAuthChallengeStatus(resp.StatusCode()) {
 			if resp.StatusCode() == sipStatusUseProxy {
-				return sip.Message{}, fmt.Errorf("registering IMS: %w", pcscfReselectionRequiredError(resp))
+				return sip.Message{}, pcscfReselectionRequiredError(resp)
 			}
 			if initialRegistrationRetryResponse(resp) {
-				return sip.Message{}, fmt.Errorf("registering IMS: %w", initialRegistrationRequiredError(resp))
+				return sip.Message{}, initialRegistrationRequiredError(resp)
 			}
-			return sip.Message{}, fmt.Errorf("registering IMS: expected authentication challenge, got %d", resp.StatusCode())
+			return sip.Message{}, fmt.Errorf("expected authentication challenge, got %d", resp.StatusCode())
 		}
 		return resp, nil
 	}
@@ -68,14 +68,14 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			if err != nil {
 				resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), err)
 				if err != nil {
-					return fmt.Errorf("registering IMS: %w", err)
+					return err
 				}
 				if resynchronized {
-					return errors.New("registering IMS: repeated AKA synchronization failure")
+					return errors.New("repeated AKA synchronization failure")
 				}
 				nextChallenge, err := s.applyRegisterChallenge(resp)
 				if err != nil {
-					return fmt.Errorf("registering IMS: %w", err)
+					return err
 				}
 				challenge = nextChallenge
 				resynchronized = true
@@ -88,7 +88,7 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 			pendingSecurity.close()
 			nextSecurity, err := s.openRegisterSecurity(ctx)
 			if err != nil {
-				return fmt.Errorf("registering IMS: %w", err)
+				return err
 			}
 			pendingSecurity = nextSecurity
 			secureTransportStale = false
@@ -96,13 +96,13 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 		resp, err := s.exchangeProtectedRegister(ctx, pendingSecurity, auth)
 		if err != nil {
 			if registrationTimeoutRequiresInitial(err) {
-				return fmt.Errorf("registering IMS: %w", initialRegistrationRequiredAfterError(err))
+				return initialRegistrationRequiredAfterError(err)
 			}
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 		if resp.StatusCode() == sipStatusIntervalTooBrief {
 			if err := s.adjustRegisterExpiresFrom423(resp, &adjustedExpires); err != nil {
-				return fmt.Errorf("registering IMS: %w", err)
+				return err
 			}
 			rechallenged = false
 			auth = nil
@@ -110,11 +110,11 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 		}
 		if registerAuthChallengeStatus(resp.StatusCode()) {
 			if rechallenged {
-				return errors.New("registering IMS: repeated authentication challenge")
+				return errors.New("repeated authentication challenge")
 			}
 			nextChallenge, err := s.applyRegisterChallenge(resp)
 			if err != nil {
-				return fmt.Errorf("registering IMS: %w", err)
+				return err
 			}
 			challenge = nextChallenge
 			rechallenged = true
@@ -124,18 +124,18 @@ func (s *Service) completeRegistration(ctx context.Context, challenge security.C
 		}
 		if resp.StatusCode() != sipStatusOK {
 			if resp.StatusCode() == sipStatusUseProxy {
-				return fmt.Errorf("registering IMS: %w", pcscfReselectionRequiredError(resp))
+				return pcscfReselectionRequiredError(resp)
 			}
 			if initialRegistrationRetryResponse(resp) {
-				return fmt.Errorf("registering IMS: %w", initialRegistrationRequiredError(resp))
+				return initialRegistrationRequiredError(resp)
 			}
-			return fmt.Errorf("registering IMS: expected 200, got %w", sip.NewResponseError(resp))
+			return fmt.Errorf("expected 200, got %w", sip.NewResponseError(resp))
 		}
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 		if err := s.commitRegisterSecurity(pendingSecurity); err != nil {
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 		s.applyRegisterSuccess(resp)
 		committedSecurity = true
@@ -279,7 +279,7 @@ func (s *Service) reauthenticateRefresh(ctx context.Context, challengeResp sip.M
 func (s *Service) buildDeregisterMessage(ctx context.Context, verify *security.Param, realm, nonce, algorithm, qop string) (sip.Message, error) {
 	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, algorithm, qop)
 	if err != nil {
-		return sip.Message{}, fmt.Errorf("deregistering IMS: %w", err)
+		return sip.Message{}, err
 	}
 	return s.buildDeregister(auth, verify), nil
 }
@@ -290,11 +290,11 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 		return true, nil
 	case sipStatusUnauthorized, sipStatusProxyAuthenticationRequired:
 		if *challenged {
-			return false, errors.New("deregistering IMS: repeated authentication challenge")
+			return false, errors.New("repeated authentication challenge")
 		}
 		parsed, err := selectRegisterChallengeForResponse(resp)
 		if err != nil {
-			return false, fmt.Errorf("deregistering IMS: %w", err)
+			return false, err
 		}
 		s.storeAuthChallenge(parsed.challenge, parsed.authorizationHeader)
 		*realm = parsed.challenge.Realm
@@ -304,6 +304,6 @@ func (s *Service) handleDeregisterResponse(resp sip.Message, challenged *bool, r
 		*challenged = true
 		return false, nil
 	default:
-		return false, fmt.Errorf("deregistering IMS: unexpected response: %w", sip.NewResponseError(resp))
+		return false, fmt.Errorf("unexpected response: %w", sip.NewResponseError(resp))
 	}
 }

@@ -70,11 +70,11 @@ func (f *akaAuthFlow) clientErrorResponse(identifier byte, cause error) (akaResp
 	}
 	data, err := eapaka.BuildClientErrorPacketForType(identifier, eapType, akaClientErrorUnableToProcessPacket)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building client error response: %w", err)
+		return akaResponse{}, fmt.Errorf("building client error response: %w", err)
 	}
 	return akaResponse{
 		data:      data,
-		afterSend: fmt.Errorf("connecting swu session: %w", cause),
+		afterSend: cause,
 	}, nil
 }
 
@@ -118,18 +118,18 @@ func (f *akaAuthFlow) run(ctx context.Context, serverPayloads []ike.Payload) ([]
 	for {
 		eapPayload := ike.FindEAPPayload(serverPayloads)
 		if eapPayload == nil {
-			return nil, 0, errors.New("connecting swu session: eap payload is missing")
+			return nil, 0, errors.New("eap payload is missing")
 		}
 		var eapPacket eapaka.EAPPacket
 		if err := eapPacket.UnmarshalBinary(eapPayload.Data); err != nil {
-			return nil, 0, fmt.Errorf("connecting swu session: parsing eap packet: %w", err)
+			return nil, 0, fmt.Errorf("parsing eap packet: %w", err)
 		}
 		logEAPPacket(f.logger(), "received EAP packet", "inbound", f.nextRequestID-1, eapPayload.Data)
 		switch eapPacket.Code {
 		case eapCodeSuccess:
 			return f.finishSuccess(ctx, serverPayloads)
 		case eapCodeFailure:
-			return nil, 0, fmt.Errorf("connecting swu session: %w", eapaka.ErrEAPFailure)
+			return nil, 0, eapaka.ErrEAPFailure
 		case eapCodeRequest:
 			if eapPacket.IsIdentityRequest() {
 				nextPayloads, err := f.handleEAPIdentityRequest(ctx, serverPayloads, eapPacket.Identifier)
@@ -140,7 +140,7 @@ func (f *akaAuthFlow) run(ctx context.Context, serverPayloads []ike.Payload) ([]
 				continue
 			}
 			if eapPacket.Type == eapTypeNak {
-				return nil, 0, errors.New("connecting swu session: received invalid eap request nak")
+				return nil, 0, errors.New("received invalid eap request nak")
 			}
 			if eapPacket.Type == eapTypeNotification {
 				nextPayloads, err := f.handleEAPNotificationRequest(ctx, serverPayloads, eapPacket.Identifier)
@@ -164,7 +164,7 @@ func (f *akaAuthFlow) run(ctx context.Context, serverPayloads []ike.Payload) ([]
 			}
 			serverPayloads = nextPayloads
 		default:
-			return nil, 0, fmt.Errorf("connecting swu session: unexpected eap code %d", eapPacket.Code)
+			return nil, 0, fmt.Errorf("unexpected eap code %d", eapPacket.Code)
 		}
 	}
 }
@@ -172,7 +172,7 @@ func (f *akaAuthFlow) run(ctx context.Context, serverPayloads []ike.Payload) ([]
 func (f *akaAuthFlow) buildEAPNakResponse(identifier byte) (akaResponse, error) {
 	data, err := eapaka.BuildEAPNakResponse(identifier, eapTypeAKAPrime, eapTypeAKA)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building eap nak response: %w", err)
+		return akaResponse{}, fmt.Errorf("building eap nak response: %w", err)
 	}
 	return akaResponse{data: data}, nil
 }
@@ -180,7 +180,7 @@ func (f *akaAuthFlow) buildEAPNakResponse(identifier byte) (akaResponse, error) 
 func (f *akaAuthFlow) buildEAPNotificationResponse(identifier byte) (akaResponse, error) {
 	data, err := eapaka.BuildEAPNotificationResponse(identifier)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building eap notification response: %w", err)
+		return akaResponse{}, fmt.Errorf("building eap notification response: %w", err)
 	}
 	return akaResponse{data: data}, nil
 }
@@ -215,7 +215,7 @@ func (f *akaAuthFlow) handleUnsupportedEAPRequest(ctx context.Context, serverPay
 func (f *akaAuthFlow) buildEAPIdentityResponse(identifier byte) (akaResponse, error) {
 	data, err := eapaka.BuildEAPIdentityResponse(identifier, f.eapIdentity)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building eap identity response: %w", err)
+		return akaResponse{}, fmt.Errorf("building eap identity response: %w", err)
 	}
 	return akaResponse{data: data}, nil
 }
@@ -298,7 +298,7 @@ func (f *akaAuthFlow) buildIdentityResponse(message eapaka.AKAMessage, eapData [
 		data, err = eapaka.BuildAKAIdentityResponse(message.Identifier, identityResponse)
 	}
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building aka identity response: %w", err)
+		return akaResponse{}, fmt.Errorf("building aka identity response: %w", err)
 	}
 	f.eapIdentity = identityResponse
 	if reauthIdentity, ok := normalizedAKAReauthIdentity(f.currentState, f.realm); ok && requestType == akaAttrAnyIDReq && identityResponse == reauthIdentity {

@@ -185,14 +185,12 @@ func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, 
 	if err != nil {
 		var partial *imssms.PartialSubmissionError
 		if !errors.As(err, &partial) || len(partial.Submission.Segments) == 0 {
-			s.client.logger.Error("sending SMS", "to", to, "err", err)
 			return SMSSubmission{}, err
 		}
 		lowSubmission = partial.Submission
 	}
 	submission := s.newSMSSubmission(to, text, submittedAt, lowSubmission)
 	if err != nil {
-		s.client.logger.Error("sending SMS", "id", submission.ID, "to", to, "segments", submission.SegmentCount, "err", err)
 		return submission, err
 	}
 	s.client.logger.Info("SMS submitted", "id", submission.ID, "to", submission.To, "segments", submission.SegmentCount)

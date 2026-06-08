@@ -31,7 +31,7 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 	if reauth.Counter <= f.currentState.Counter {
 		data, err := eapaka.BuildReauthenticationResponsePacketForType(message.Identifier, message.EAPType, reauth.Counter, true, reauth.UseResultInd, f.currentState.KAut, f.currentState.KEncr, reauth.NonceS)
 		if err != nil {
-			return akaResponse{}, fmt.Errorf("connecting swu session: building reauth counter-too-small response: %w", err)
+			return akaResponse{}, fmt.Errorf("building reauth counter-too-small response: %w", err)
 		}
 		return akaResponse{data: data}, nil
 	}
@@ -68,7 +68,7 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 	}
 	data, err := eapaka.BuildReauthenticationResponsePacketForType(message.Identifier, message.EAPType, reauth.Counter, false, reauth.UseResultInd, f.currentState.KAut, f.currentState.KEncr, reauth.NonceS)
 	if err != nil {
-		return akaResponse{}, fmt.Errorf("connecting swu session: building reauth response: %w", err)
+		return akaResponse{}, fmt.Errorf("building reauth response: %w", err)
 	}
 	f.markAKAAuthenticated(reauth.UseResultInd)
 	return akaResponse{data: data}, nil

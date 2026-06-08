@@ -20,7 +20,7 @@ func (s *Service) Register(ctx context.Context) error {
 	s.logger.Info("registering IMS", "public_identity", s.State().PublicIdentity)
 	challengeMsg, err := s.awaitRegisterChallenge(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("registering IMS: %w", err)
 	}
 	challenge, err := s.applyRegisterChallenge(challengeMsg)
 	if err != nil {
@@ -59,7 +59,7 @@ func (s *Service) Register(ctx context.Context) error {
 		resynchronized = true
 	}
 	if err := s.completeRegistration(ctx, challenge, initialAuth); err != nil {
-		return err
+		return fmt.Errorf("registering IMS: %w", err)
 	}
 	state := s.State()
 	s.logger.Info("IMS registration established", "public_identity", state.PublicIdentity, "register_expires", state.RegisterExpires, "service_routes", len(state.ServiceRoutes))
@@ -205,7 +205,7 @@ func (s *Service) Deregister(ctx context.Context) error {
 	for range 2 {
 		req, err := s.buildDeregisterMessage(ctx, verify, realm, nonce, algorithm, qop)
 		if err != nil {
-			return err
+			return fmt.Errorf("deregistering IMS: %w", err)
 		}
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
@@ -213,7 +213,7 @@ func (s *Service) Deregister(ctx context.Context) error {
 		}
 		done, err := s.handleDeregisterResponse(resp, &challenged, &realm, &nonce, &algorithm, &qop)
 		if err != nil {
-			return err
+			return fmt.Errorf("deregistering IMS: %w", err)
 		}
 		if done {
 			s.setRegistered(false)

@@ -38,7 +38,6 @@ func (s *VoiceService) Dial(ctx context.Context, req imsvoice.DialRequest) (*ims
 	s.client.logger.Info("dialing call", "to", req.To)
 	call, err := low.Dial(ctx, req)
 	if err != nil {
-		s.client.logger.Error("dialing call", "to", req.To, "err", err)
 		return nil, err
 	}
 	s.client.logger.Info("call confirmed", "call_id", call.ID(), "to", req.To)

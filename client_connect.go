@@ -138,23 +138,31 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	}
 	defer setup.rollback()
 
-	c.emitStatus(StatusConnecting)
+	if !internal {
+		c.emitStatus(StatusConnecting)
+	}
 	tunnelInfo, err := c.openTunnel(setupCtx, setup)
 	if err != nil {
 		c.recordSWUBackoff(err, time.Now())
-		c.emitConnectFailure(ctx, err)
+		if !internal {
+			c.emitConnectFailure(ctx, err)
+		}
 		return nil, err
 	}
 	c.clearCurrentSWUBackoff()
 
 	if err := c.openIMSRuntime(setupCtx, setup, tunnelInfo); err != nil {
-		c.emitConnectFailure(ctx, err)
+		if !internal {
+			c.emitConnectFailure(ctx, err)
+		}
 		return nil, err
 	}
 
 	active, err := c.commitConnect(setup)
 	if err != nil {
-		c.emitConnectFailure(ctx, err)
+		if !internal {
+			c.emitConnectFailure(ctx, err)
+		}
 		return nil, err
 	}
 

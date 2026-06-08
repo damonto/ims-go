@@ -110,9 +110,6 @@ func (c *Client) handleReconnectError(err error) {
 	if terminalReconnectError(err) {
 		c.emitStatusError(StatusFailed, err)
 	}
-	if !errors.Is(err, context.Canceled) {
-		c.logger.Error("reconnecting client", "err", err)
-	}
 }
 
 func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error) (*activeConn, error) {

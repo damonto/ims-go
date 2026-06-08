@@ -59,12 +59,10 @@ func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
 	defer finish()
 	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote)
 	if err := s.exchangeIKESAInit(ctx, state); err != nil {
-		s.logger.Error("IKE_SA_INIT exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected, "ike_fragmentation_supported", state.ikeFragmentationSupported)
 	if err := s.exchangeIKEAuth(ctx, state); err != nil {
-		s.logger.Error("IKE_AUTH exchange", "err", err)
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	s.commitConnect(state)

@@ -24,7 +24,7 @@ func (f *akaAuthFlow) biddingDownRejectResponse(message eapaka.AKAMessage) (akaR
 	}
 	data, err := eapaka.BuildAKAAuthenticationReject(message.Identifier)
 	if err != nil {
-		return akaResponse{}, true, fmt.Errorf("connecting swu session: building aka authentication reject: %w", err)
+		return akaResponse{}, true, fmt.Errorf("building aka authentication reject: %w", err)
 	}
 	return akaResponse{data: data}, true, nil
 }

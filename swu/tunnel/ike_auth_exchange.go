@@ -15,14 +15,14 @@ import (
 func responderIDRawFromPayloads(payloads []ike.Payload) ([]byte, error) {
 	idr := ike.FindIDPayload(payloads, payloadTypeIDr)
 	if idr == nil {
-		return nil, errors.New("connecting swu session: ike_auth response idr is missing")
+		return nil, errors.New("ike_auth response idr is missing")
 	}
 	if err := validateResponderID(idr); err != nil {
-		return nil, fmt.Errorf("connecting swu session: ike_auth response idr: %w", err)
+		return nil, fmt.Errorf("ike_auth response idr: %w", err)
 	}
 	idrRaw, err := idr.RawData()
 	if err != nil {
-		return nil, fmt.Errorf("connecting swu session: ike_auth response idr: %w", err)
+		return nil, fmt.Errorf("ike_auth response idr: %w", err)
 	}
 	return idrRaw, nil
 }
@@ -52,17 +52,17 @@ func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Pa
 	storeAKAIdentityState(f.card, f.pendingState)
 	authValue, err := f.crypto.ComputeInitiatorAuth(f.ikeInitRequest, f.responderNonce, f.idiRaw)
 	if err != nil {
-		return nil, 0, fmt.Errorf("connecting swu session: computing initiator auth: %w", err)
+		return nil, 0, fmt.Errorf("computing initiator auth: %w", err)
 	}
 	finalAuthPayloads := []ike.Payload{&ike.AuthPayload{Method: authMethodSharedKeyMIC, Data: authValue}}
 	finalAuthPayloads, err = appendDeviceIdentityResponsePayload(finalAuthPayloads, serverPayloads, f.imei, true)
 	if err != nil {
-		return nil, 0, fmt.Errorf("connecting swu session: building final auth device identity: %w", err)
+		return nil, 0, fmt.Errorf("building final auth device identity: %w", err)
 	}
 	header := ike.IKEHeader{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
 	requests, err := sealIKEPackets(f.crypto, header, finalAuthPayloads, true, f.ikeFragmentationSupported)
 	if err != nil {
-		return nil, 0, fmt.Errorf("connecting swu session: sealing final ike_auth: %w", err)
+		return nil, 0, fmt.Errorf("sealing final ike_auth: %w", err)
 	}
 	payloads, _, err := f.session.exchangeProtectedIKE(ctx, f.ikePeer, requests, f.useNATT, f.nextRequestID, f.crypto, false, f.ikeFragmentationSupported, ikeActionOpenFinalIKEAuthResponse)
 	if err != nil {
@@ -77,17 +77,17 @@ func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Pa
 func (f *akaAuthFlow) verifyResponderPostEAPAuth(payloads []ike.Payload) error {
 	auth := findAuthPayload(payloads)
 	if auth == nil {
-		return errors.New("connecting swu session: final ike_auth response auth is missing")
+		return errors.New("final ike_auth response auth is missing")
 	}
 	if auth.Method != authMethodSharedKeyMIC {
-		return fmt.Errorf("connecting swu session: final ike_auth response auth method %d", auth.Method)
+		return fmt.Errorf("final ike_auth response auth method %d", auth.Method)
 	}
 	want, err := f.crypto.ComputeResponderAuth(f.ikeInitResponse, f.initiatorNonce, f.idrRaw)
 	if err != nil {
-		return fmt.Errorf("connecting swu session: verifying responder auth: %w", err)
+		return fmt.Errorf("verifying responder auth: %w", err)
 	}
 	if !hmac.Equal(auth.Data, want) {
-		return errors.New("connecting swu session: responder auth verification failed")
+		return errors.New("responder auth verification failed")
 	}
 	return nil
 }
@@ -114,13 +114,13 @@ func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, in
 	requestPayloads := []ike.Payload{&ike.EAPPayload{Data: responseData}}
 	requestPayloads, err := appendDeviceIdentityResponsePayload(requestPayloads, serverPayloads, imei, allowDeviceIdentity)
 	if err != nil {
-		return nil, fmt.Errorf("connecting swu session: building device identity response: %w", err)
+		return nil, fmt.Errorf("building device identity response: %w", err)
 	}
 	logEAPPacket(s.logger, "sending EAP packet", "outbound", messageID, responseData)
 	header := ike.IKEHeader{InitiatorSPI: initiatorSPI, ResponderSPI: responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: messageID}
 	requests, err := sealIKEPackets(crypto, header, requestPayloads, true, fragmentationSupported)
 	if err != nil {
-		return nil, fmt.Errorf("connecting swu session: sealing aka response: %w", err)
+		return nil, fmt.Errorf("sealing aka response: %w", err)
 	}
 	payloads, _, err := s.exchangeProtectedIKE(ctx, peer, requests, useNATT, messageID, crypto, false, fragmentationSupported, ikeActionConnectOpenAKAResponseMessage)
 	if err != nil {

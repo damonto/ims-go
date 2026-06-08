@@ -31,9 +31,6 @@ func (c *Client) Close() error {
 		if reader != nil {
 			err = errors.Join(err, wrapCloseError(closeActionReader, reader.Close()))
 		}
-		if err != nil {
-			c.logger.Error("closing client", "err", err)
-		}
 		c.emitStatus(StatusClosed)
 		c.events.close()
 	})

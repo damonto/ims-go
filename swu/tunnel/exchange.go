@@ -42,7 +42,7 @@ func prependNonESPMarkerPackets(packets [][]byte) [][]byte {
 func (s *Session) writeIKERequest(ctx context.Context, addr *net.UDPAddr, request []byte, nat bool, messageID uint32) error {
 	wire := buildIKEWire(request, nat)
 	if err := s.writeOuter(ctx, wire, addr); err != nil {
-		return fmt.Errorf("connecting swu session: sending message %d: %w", messageID, err)
+		return fmt.Errorf("sending message %d: %w", messageID, err)
 	}
 	return nil
 }
@@ -75,7 +75,7 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 			return nil, nil, err
 		}
 	}
-	return nil, nil, fmt.Errorf("connecting swu session: waiting message %d: timeout", messageID)
+	return nil, nil, fmt.Errorf("waiting message %d: timeout", messageID)
 }
 
 func (s *Session) exchangeProtectedIKE(ctx context.Context, addr *net.UDPAddr, requests [][]byte, nat bool, messageID uint32, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
@@ -247,14 +247,14 @@ func nextIKEReadDeadline(deadline time.Time) time.Time {
 
 func (s *Session) readIKECandidate(deadline time.Time, buf []byte, udpEncap bool) ([]byte, *net.UDPAddr, error) {
 	if err := s.conn.SetReadDeadline(nextIKEReadDeadline(deadline)); err != nil {
-		return nil, nil, fmt.Errorf("connecting swu session: setting read deadline: %w", err)
+		return nil, nil, fmt.Errorf("setting read deadline: %w", err)
 	}
 	n, addr, err := s.conn.ReadFrom(buf)
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return nil, nil, handshake.ErrIKETimeout
 		}
-		return nil, nil, fmt.Errorf("connecting swu session: reading ike response: %w", err)
+		return nil, nil, fmt.Errorf("reading ike response: %w", err)
 	}
 	packet := normalizeIKEPacket(buf[:n], udpEncap)
 	udpAddr, _ := addr.(*net.UDPAddr)
@@ -280,7 +280,7 @@ type ikeResponseMatch struct {
 func newIKEResponseMatch(request []byte, peer *net.UDPAddr) (ikeResponseMatch, error) {
 	var header ike.IKEHeader
 	if err := header.UnmarshalBinary(request); err != nil {
-		return ikeResponseMatch{}, fmt.Errorf("connecting swu session: parsing outbound ike header: %w", err)
+		return ikeResponseMatch{}, fmt.Errorf("parsing outbound ike header: %w", err)
 	}
 	return ikeResponseMatch{
 		peer:         cloneUDPAddr(peer),
