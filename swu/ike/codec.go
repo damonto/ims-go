@@ -9,29 +9,17 @@ import (
 
 const (
 	ikeVersion20     byte = 0x20
-	ikeMajorVersion2      = 2
+	ikeMajorVersion2 byte = 2
 
-	exchangeTypeIKESAInit     byte = 34
-	exchangeTypeIKEAuth       byte = 35
-	exchangeTypeCreateChildSA byte = 36
-	exchangeTypeInformational byte = 37
+	exchangeTypeIKESAInit     = 34
+	exchangeTypeIKEAuth       = 35
+	exchangeTypeCreateChildSA = 36
+	exchangeTypeInformational = 37
 )
 
 const (
 	flagInitiator = 0x08
 	flagResponse  = 0x20
-)
-
-const (
-	transformENCRAESCBC      uint16 = 12
-	transformPRFHMACMD5      uint16 = 1
-	transformPRFHMACSHA1     uint16 = 2
-	transformPRFHMACSHA256   uint16 = 5
-	transformINTEGHMACMD596  uint16 = 1
-	transformINTEGHMACSHA196 uint16 = 2
-	transformINTEGHMACSHA256 uint16 = 12
-	transformDH1024MODP      uint16 = 2
-	transformDH2048MODP      uint16 = 14
 )
 
 const ikeHeaderSize = 28

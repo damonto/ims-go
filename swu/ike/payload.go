@@ -50,8 +50,6 @@ const (
 
 	trafficSelectorHeaderLen = 4
 	trafficSelectorPortsLen  = 4
-	trafficSelectorIPv4Len   = trafficSelectorHeaderLen + trafficSelectorPortsLen + net.IPv4len*2
-	trafficSelectorIPv6Len   = trafficSelectorHeaderLen + trafficSelectorPortsLen + net.IPv6len*2
 )
 
 const (
