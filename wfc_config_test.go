@@ -89,14 +89,16 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "childIntegrity": [2],
     "pcscfIPv4ConfigAttribute": 16384,
     "pcscfIPv6ConfigAttribute": 16386,
-	    "natKeepaliveInterval": "60s",
-	    "ikeRetransmitDelays": ["1s", "2s", "4s"],
-	    "ikeSARekeySoftTime": "3600s",
-	    "ikeSARekeyHardTime": "3900s",
-	    "childSARekeySoftTime": "1800s",
-	    "childSARekeyHardTime": "1980s",
-	    "addKEToChildSARekey": true,
-	    "imsTransport": "tcp",
+    "natKeepaliveInterval": "60s",
+    "ikeRetransmitDelays": ["1s", "2s", "4s"],
+    "ikeSALifetime": "7200s",
+    "ikeSARekeySoftTime": "3600s",
+    "ikeSARekeyHardTime": "3900s",
+    "childSALifetime": "3600s",
+    "childSARekeySoftTime": "1800s",
+    "childSARekeyHardTime": "1980s",
+    "addKEToChildSARekey": true,
+    "imsTransport": "tcp",
     "imsHomeDomain": "ims.mnc024.mcc530.3gppnetwork.org",
     "imsPrivateIdentity": "#IMSI#@private.example",
     "imsPublicIdentity": "sip:#IMSI#@#HOME_DOMAIN#",
@@ -198,11 +200,11 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if len(got.Tunnel.IKERetransmitDelays) != 3 || got.Tunnel.IKERetransmitDelays[2] != 4*time.Second {
 					t.Fatalf("Tunnel.IKERetransmitDelays = %v, want [1s 2s 4s]", got.Tunnel.IKERetransmitDelays)
 				}
-				if got.Tunnel.IKESALifetime != 3900*time.Second || got.Tunnel.IKESARekeyMargin != 300*time.Second {
-					t.Fatalf("Tunnel IKE SA lifetime = %v/%v, want 3900s/300s", got.Tunnel.IKESALifetime, got.Tunnel.IKESARekeyMargin)
+				if got.Tunnel.IKESALifetime != 7200*time.Second || got.Tunnel.IKESARekeyMargin != 300*time.Second {
+					t.Fatalf("Tunnel IKE SA lifetime = %v/%v, want 7200s/300s", got.Tunnel.IKESALifetime, got.Tunnel.IKESARekeyMargin)
 				}
-				if got.Tunnel.ChildSALifetime != 1980*time.Second || got.Tunnel.ChildSARekeyMargin != 180*time.Second {
-					t.Fatalf("Tunnel Child SA lifetime = %v/%v, want 1980s/180s", got.Tunnel.ChildSALifetime, got.Tunnel.ChildSARekeyMargin)
+				if got.Tunnel.ChildSALifetime != 3600*time.Second || got.Tunnel.ChildSARekeyMargin != 300*time.Second {
+					t.Fatalf("Tunnel Child SA lifetime = %v/%v, want 3600s/300s", got.Tunnel.ChildSALifetime, got.Tunnel.ChildSARekeyMargin)
 				}
 				if !got.Tunnel.AddKEToChildSARekey {
 					t.Fatal("Tunnel AddKEToChildSARekey = false, want profile value")
@@ -513,6 +515,91 @@ func TestConfigNormalizedWFCProfileUsesTunnelTimers(t *testing.T) {
 	}
 	if !tunnelCfg.AddKEToChildSARekey {
 		t.Fatal("AddKEToChildSARekey = false, want true")
+	}
+}
+
+func TestSALifetimeFromWFCProfile(t *testing.T) {
+	duration := func(value string) *wfcDuration {
+		t.Helper()
+		got, err := time.ParseDuration(value)
+		if err != nil {
+			t.Fatalf("time.ParseDuration(%q) error = %v", value, err)
+		}
+		return &wfcDuration{Duration: got}
+	}
+
+	tests := []struct {
+		name       string
+		lifetime   *wfcDuration
+		soft       *wfcDuration
+		hard       *wfcDuration
+		legacySoft *wfcDuration
+		wantLife   time.Duration
+		wantMargin time.Duration
+	}{
+		{
+			name:       "configured lifetime ignores modern default soft rekey",
+			lifetime:   duration("86400s"),
+			soft:       duration("3000s"),
+			hard:       duration("86500s"),
+			wantLife:   86400 * time.Second,
+			wantMargin: 300 * time.Second,
+		},
+		{
+			name:       "legacy rekey time wins when valid",
+			lifetime:   duration("43200s"),
+			soft:       duration("86400s"),
+			hard:       duration("86500s"),
+			legacySoft: duration("14400s"),
+			wantLife:   43200 * time.Second,
+			wantMargin: 28800 * time.Second,
+		},
+		{
+			name:       "invalid soft rekey uses default margin",
+			lifetime:   duration("64800s"),
+			soft:       duration("86400s"),
+			legacySoft: duration("64800s"),
+			wantLife:   64800 * time.Second,
+			wantMargin: 300 * time.Second,
+		},
+		{
+			name:       "hard rekey timer is fallback lifetime",
+			soft:       duration("86340s"),
+			hard:       duration("86400s"),
+			wantLife:   86400 * time.Second,
+			wantMargin: 60 * time.Second,
+		},
+		{
+			name:       "legacy soft derives hard before modern timer pair",
+			soft:       duration("86400s"),
+			hard:       duration("86500s"),
+			legacySoft: duration("64800s"),
+			wantLife:   65100 * time.Second,
+			wantMargin: 300 * time.Second,
+		},
+		{
+			name:       "legacy soft can exceed modern hard timer",
+			soft:       duration("3000s"),
+			hard:       duration("3600s"),
+			legacySoft: duration("64800s"),
+			wantLife:   65100 * time.Second,
+			wantMargin: 300 * time.Second,
+		},
+		{
+			name:       "legacy soft only derives hard lifetime",
+			legacySoft: duration("3600s"),
+			wantLife:   3900 * time.Second,
+			wantMargin: 300 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotLife, gotMargin := saLifetimeFromWFCProfile(tt.lifetime, tt.soft, tt.hard, tt.legacySoft)
+			if gotLife != tt.wantLife || gotMargin != tt.wantMargin {
+				t.Fatalf("saLifetimeFromWFCProfile() = %v/%v, want %v/%v", gotLife, gotMargin, tt.wantLife, tt.wantMargin)
+			}
+		})
 	}
 }
 

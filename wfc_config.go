@@ -33,10 +33,12 @@ type wfcProfile struct {
 	PCSCFIPv6ConfigAttribute   uint16           `json:"pcscfIPv6ConfigAttribute"`
 	NATKeepaliveInterval       *wfcDuration     `json:"natKeepaliveInterval"`
 	LivenessTimeout            *wfcDuration     `json:"livenessTimeout"`
+	IKESALifetime              *wfcDuration     `json:"ikeSALifetime"`
 	IKERetransmitDelays        []wfcDuration    `json:"ikeRetransmitDelays"`
 	IKESARekeySoftTime         *wfcDuration     `json:"ikeSARekeySoftTime"`
 	IKESARekeyHardTime         *wfcDuration     `json:"ikeSARekeyHardTime"`
 	IKESARekeyTime             *wfcDuration     `json:"ikeSARekeyTime"`
+	ChildSALifetime            *wfcDuration     `json:"childSALifetime"`
 	ChildSARekeySoftTime       *wfcDuration     `json:"childSARekeySoftTime"`
 	ChildSARekeyHardTime       *wfcDuration     `json:"childSARekeyHardTime"`
 	ChildSARekeyTime           *wfcDuration     `json:"childSARekeyTime"`
@@ -279,14 +281,16 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 		cfg.Tunnel.IKERetransmitDelays = wfcIKEReTransmitDelays(profile)
 	}
 	if cfg.Tunnel.IKESALifetime == 0 {
-		cfg.Tunnel.IKESALifetime, cfg.Tunnel.IKESARekeyMargin = saLifetimeFromWFCRekeyTimers(
+		cfg.Tunnel.IKESALifetime, cfg.Tunnel.IKESARekeyMargin = saLifetimeFromWFCProfile(
+			profile.IKESALifetime,
 			profile.IKESARekeySoftTime,
 			profile.IKESARekeyHardTime,
 			profile.IKESARekeyTime,
 		)
 	}
 	if cfg.Tunnel.ChildSALifetime == 0 {
-		cfg.Tunnel.ChildSALifetime, cfg.Tunnel.ChildSARekeyMargin = saLifetimeFromWFCRekeyTimers(
+		cfg.Tunnel.ChildSALifetime, cfg.Tunnel.ChildSARekeyMargin = saLifetimeFromWFCProfile(
+			profile.ChildSALifetime,
 			profile.ChildSARekeySoftTime,
 			profile.ChildSARekeyHardTime,
 			profile.ChildSARekeyTime,
@@ -573,19 +577,48 @@ func wfcIKEReTransmitDelays(profile wfcProfile) []time.Duration {
 	return nil
 }
 
-func saLifetimeFromWFCRekeyTimers(soft, hard, legacySoft *wfcDuration) (time.Duration, time.Duration) {
-	softTime := firstPositiveDuration(
-		wfcDurationValue(soft),
-		wfcDurationValue(legacySoft),
-	)
-	if softTime <= 0 {
-		return 0, 0
+func saLifetimeFromWFCProfile(lifetime, soft, hard, legacySoft *wfcDuration) (time.Duration, time.Duration) {
+	hardTime := wfcDurationValue(lifetime)
+	if hardTime > 0 {
+		softTime := wfcRekeySoftTime(hardTime, legacySoft)
+		if softTime <= 0 {
+			return hardTime, swuSARekeyMargin(hardTime)
+		}
+		return hardTime, hardTime - softTime
 	}
-	hardTime := firstPositiveDuration(wfcDurationValue(hard))
-	if hardTime <= softTime {
+
+	legacyTime := wfcDurationValue(legacySoft)
+	if legacyTime > 0 {
+		hardTime = legacyTime + swuSARekeyMargin(legacyTime)
+		return hardTime, hardTime - legacyTime
+	}
+
+	hardTime = wfcDurationValue(hard)
+	softTime := wfcRekeySoftTime(hardTime, soft)
+	if hardTime <= 0 {
+		if softTime <= 0 {
+			return 0, 0
+		}
 		hardTime = softTime + swuSARekeyMargin(softTime)
 	}
+	if softTime <= 0 {
+		return hardTime, swuSARekeyMargin(hardTime)
+	}
 	return hardTime, hardTime - softTime
+}
+
+func wfcRekeySoftTime(hardTime time.Duration, values ...*wfcDuration) time.Duration {
+	for _, value := range values {
+		rekeyTime := wfcDurationValue(value)
+		if rekeyTime <= 0 {
+			continue
+		}
+		if hardTime > 0 && rekeyTime >= hardTime {
+			continue
+		}
+		return rekeyTime
+	}
+	return 0
 }
 
 func wfcDurationValue(value *wfcDuration) time.Duration {
@@ -593,15 +626,6 @@ func wfcDurationValue(value *wfcDuration) time.Duration {
 		return 0
 	}
 	return value.Duration
-}
-
-func firstPositiveDuration(values ...time.Duration) time.Duration {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }
 
 func wfcAddKEToChildSARekey(profile wfcProfile) (bool, bool) {
