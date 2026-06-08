@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
@@ -43,8 +44,8 @@ type serviceCenterStubCard struct {
 }
 type smsppDownloadStubCard struct {
 	serviceStubCard
-	req  usim.SMSPPDownloadRequest
-	resp usim.SMSPPDownloadResponse
+	req  usimcard.SMSPPDownloadRequest
+	resp usimcard.SMSPPDownloadResponse
 }
 
 func TestNormalizeConfigSubmitReportTimeout(t *testing.T) {
@@ -149,12 +150,12 @@ func (c serviceCenterStubCard) ServiceCenter() usim.ServiceCenter {
 	return c.center
 }
 
-func (c *smsppDownloadStubCard) SMSPPDownload(ctx context.Context, req usim.SMSPPDownloadRequest) (usim.SMSPPDownloadResponse, error) {
-	c.req = usim.SMSPPDownloadRequest{
+func (c *smsppDownloadStubCard) SMSPPDownload(ctx context.Context, req usimcard.SMSPPDownloadRequest) (usimcard.SMSPPDownloadResponse, error) {
+	c.req = usimcard.SMSPPDownloadRequest{
 		ServiceCenterAddress: req.ServiceCenterAddress,
 		TPDU:                 append([]byte(nil), req.TPDU...),
 	}
-	return usim.SMSPPDownloadResponse{
+	return usimcard.SMSPPDownloadResponse{
 		SW1:  c.resp.SW1,
 		SW2:  c.resp.SW2,
 		Data: append([]byte(nil), c.resp.Data...),
@@ -920,7 +921,7 @@ func TestHandleInboundMSISDNLessStatusReportUsesPlainDeliveryReport(t *testing.T
 func TestHandleInboundSMSPPDataDownloadUsesUICCResponseInRPACK(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
-	card := &smsppDownloadStubCard{resp: usim.SMSPPDownloadResponse{SW1: 0x90, SW2: 0x00, Data: []byte{0xAA, 0xBB}}}
+	card := &smsppDownloadStubCard{resp: usimcard.SMSPPDownloadResponse{SW1: 0x90, SW2: 0x00, Data: []byte{0xAA, 0xBB}}}
 	svc, err := New(Config{Logger: testLogger()}, sess, reg, card)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

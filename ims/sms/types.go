@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go/ims/registration"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
@@ -192,7 +193,7 @@ type serviceCenterProvider interface {
 }
 
 type ppDownloader interface {
-	SMSPPDownload(context.Context, usim.SMSPPDownloadRequest) (usim.SMSPPDownloadResponse, error)
+	SMSPPDownload(context.Context, usimcard.SMSPPDownloadRequest) (usimcard.SMSPPDownloadResponse, error)
 }
 
 const (

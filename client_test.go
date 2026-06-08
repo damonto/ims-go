@@ -17,6 +17,7 @@ import (
 
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
+	"github.com/damonto/uicc-go/usim/simfile"
 	"github.com/damonto/vowifi-go/ims/registration"
 	imssession "github.com/damonto/vowifi-go/ims/session"
 	imssip "github.com/damonto/vowifi-go/ims/sip"
@@ -2664,11 +2665,6 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 }
 
 func newReaderStubForUSIMLoad() *readerStub {
-	const (
-		fileStructureTransparent byte = 0x01
-		fileStructureLinearFixed byte = 0x02
-	)
-
 	usimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 
 	return &readerStub{
@@ -2681,13 +2677,13 @@ func newReaderStubForUSIMLoad() *readerStub {
 		getFileAttributes: func(_ context.Context, file usimcard.FileRef) (usimcard.FileAttributes, error) {
 			switch {
 			case len(file.AID) == 0 && slices.Equal(file.Path, []byte{0x2F, 0xE2}):
-				return usimcard.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 10}, nil
+				return usimcard.FileAttributes{FileStructure: simfile.StructureTransparent, FileSize: 10}, nil
 			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0x07}):
-				return usimcard.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 9}, nil
+				return usimcard.FileAttributes{FileStructure: simfile.StructureTransparent, FileSize: 9}, nil
 			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0xAD}):
-				return usimcard.FileAttributes{FileStructure: fileStructureTransparent, FileSize: 4}, nil
+				return usimcard.FileAttributes{FileStructure: simfile.StructureTransparent, FileSize: 4}, nil
 			case slices.Equal(file.AID, usimAID) && slices.Equal(file.Path, []byte{0x6F, 0x42}):
-				return usimcard.FileAttributes{FileStructure: fileStructureLinearFixed, RecordSize: 32, RecordCount: 0}, nil
+				return usimcard.FileAttributes{FileStructure: simfile.StructureLinearFixed, RecordSize: 32, RecordCount: 0}, nil
 			default:
 				return usimcard.FileAttributes{}, errors.New("file not found")
 			}

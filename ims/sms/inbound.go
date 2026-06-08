@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/uicc-go/usim"
+	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go/ims/identity"
 	"github.com/damonto/vowifi-go/ims/session"
 	"github.com/damonto/vowifi-go/ims/sip"
@@ -165,7 +165,7 @@ func (s *Service) handlePPDataDownload(ctx context.Context, msg sip.Message, rp 
 		return
 	}
 
-	resp, err := downloader.SMSPPDownload(ctx, usim.SMSPPDownloadRequest{
+	resp, err := downloader.SMSPPDownload(ctx, usimcard.SMSPPDownloadRequest{
 		ServiceCenterAddress: rp.Originator,
 		TPDU:                 rp.TPDU,
 	})
