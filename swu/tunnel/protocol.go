@@ -40,11 +40,19 @@ const (
 
 const (
 	payloadTypeNone              byte = 0
+	payloadTypeSA                byte = 33
+	payloadTypeKE                byte = 34
 	payloadTypeIDi               byte = 35
 	payloadTypeIDr               byte = 36
+	payloadTypeAUTH              byte = 39
+	payloadTypeNonce             byte = 40
+	payloadTypeNotify            byte = 41
+	payloadTypeDelete            byte = 42
 	payloadTypeTSi               byte = 44
 	payloadTypeTSr               byte = 45
 	payloadTypeEncrypted         byte = 46
+	payloadTypeCP                byte = 47
+	payloadTypeEAP               byte = 48
 	payloadTypeEncryptedFragment byte = 53
 )
 
@@ -110,9 +118,10 @@ const (
 	notifyTypeChildSANotFound              uint16 = 44
 	notifyTypeNATDetectionSourceIP         uint16 = 16388
 	notifyTypeNATDetectionDestIP           uint16 = 16389
-	notifyTypeIKEV2FragmentationSupported  uint16 = 16430
-	notifyTypeEAPOnlyAuthentication        uint16 = 16417
+	notifyTypeMOBIKESupported              uint16 = 16396
 	notifyTypeCookie2                      uint16 = 16401
+	notifyTypeEAPOnlyAuthentication        uint16 = 16417
+	notifyTypeIKEV2FragmentationSupported  uint16 = 16430
 	notifyTypeReactivationRequestedCause   uint16 = 40961
 	notifyTypeBackoffTimer                 uint16 = 41041
 	notifyTypeDeviceIdentity               uint16 = 41101

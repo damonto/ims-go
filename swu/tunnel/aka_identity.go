@@ -83,6 +83,20 @@ func discardStoredAKAReauthState(card Card, state usim.AKAIdentityState) {
 	storeAKAIdentityState(card, withoutAKAReauthState(state))
 }
 
+func hasAKATemporaryIdentity(state usim.AKAIdentityState) bool {
+	return validAKAReauthState(state) || state.Pseudonym != ""
+}
+
+func withoutAKATemporaryIdentity(state usim.AKAIdentityState) usim.AKAIdentityState {
+	state = withoutAKAReauthState(state)
+	state.Pseudonym = ""
+	return state
+}
+
+func discardStoredAKATemporaryIdentity(card Card, state usim.AKAIdentityState) {
+	storeAKAIdentityState(card, withoutAKATemporaryIdentity(state))
+}
+
 func normalizeAKAIdentity(identity, realm string) string {
 	identity = strings.TrimSpace(identity)
 	if identity == "" || strings.Contains(identity, "@") {

@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                       J. Rosenberg
 Request for Comments: 3263                                   dynamicsoft
 Obsoletes: 2543                                           H. Schulzrinne

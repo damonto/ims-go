@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                          D. Willis
 Request for Comments: 3327                              dynamicsoft Inc.
 Category: Standards Track                                   B. Hoeneisen

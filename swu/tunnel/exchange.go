@@ -107,8 +107,10 @@ func (s *Session) exchangeProtectedIKE(ctx context.Context, addr *net.UDPAddr, r
 
 func (s *Session) awaitProtectedIKEAttempt(ctx context.Context, expected ikeResponseMatch, timeout time.Duration, udpEncap bool, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
 	payloads, peer, err := s.readProtectedIKEMessage(ctx, expected, timeout, udpEncap, crypto, senderInitiator, fragmentationSupported, action)
-	if err == nil {
+	if peer != nil && (err == nil || payloads != nil) {
 		s.logger.Debug("received protected IKE message", "message_id", expected.messageID, "peer_addr", peer, "payload_count", len(payloads))
+	}
+	if err == nil {
 		return payloads, peer, nil
 	}
 	return nil, nil, err
@@ -152,6 +154,9 @@ func (s *Session) readProtectedIKEMessage(ctx context.Context, expected ikeRespo
 			return nil, nil, fmt.Errorf("%s: opening response: %w", action, err)
 		}
 		if complete {
+			if err := protectedIKEAuthNotifyError(action, payloads); err != nil {
+				return payloads, udpAddr, err
+			}
 			return payloads, udpAddr, nil
 		}
 	}

@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                            S. Kent
 Request for Comments: 4303                              BBN Technologies
 Obsoletes: 2406                                            December 2005

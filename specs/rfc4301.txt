@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                            S. Kent
 Request for Comments: 4301                                        K. Seo
 Obsoletes: 2401                                         BBN Technologies

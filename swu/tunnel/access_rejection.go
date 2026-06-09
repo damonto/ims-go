@@ -9,6 +9,7 @@ var (
 
 	ErrPDNConnectionRejected                = errors.New("pdn connection rejected")
 	ErrMaxConnectionReached                 = errors.New("max connection reached")
+	ErrUserUnknown                          = errors.New("user unknown")
 	ErrNoAPNSubscription                    = errors.New("no apn subscription")
 	ErrIMEINotAccepted                      = errors.New("imei not accepted")
 	ErrUnauthenticatedEmergencyNotSupported = errors.New("unauthenticated emergency not supported")
@@ -71,6 +72,8 @@ func accessRejectionSentinel(notifyType uint16) error {
 		return ErrPDNConnectionRejected
 	case notifyTypeMaxConnectionReached:
 		return ErrMaxConnectionReached
+	case notifyTypeUserUnknown:
+		return ErrUserUnknown
 	case notifyTypeNoAPNSubscription:
 		return ErrNoAPNSubscription
 	case notifyTypeIMEINotAccepted:

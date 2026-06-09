@@ -57,18 +57,50 @@ func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	defer finish()
-	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote)
-	if err := s.exchangeIKESAInit(ctx, state); err != nil {
-		return fmt.Errorf("connecting swu session: %w", err)
-	}
-	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected, "ike_fragmentation_supported", state.ikeFragmentationSupported)
-	if err := s.exchangeIKEAuth(ctx, state); err != nil {
-		return fmt.Errorf("connecting swu session: %w", err)
+	if err := s.connectAttempt(ctx, state); err != nil {
+		retryState, retryErr := s.retryConnectWithPermanentAKA(ctx, state, err)
+		switch {
+		case retryErr != nil:
+			return fmt.Errorf("connecting swu session: retrying permanent aka identity: %w", retryErr)
+		case retryState != nil:
+			state = retryState
+		default:
+			return fmt.Errorf("connecting swu session: %w", err)
+		}
 	}
 	s.commitConnect(state)
 	s.startBackgroundLoops()
 	s.logger.Info("SWu security associations established", "inner_ip", state.tunnel.InnerIP, "pcscf_ip", state.tunnel.PCSCFIP, "pcscf_ips", state.tunnel.PCSCFIPs, "esp_initiator_spi", state.tunnel.ESPInitiatorSPI, "esp_responder_spi", state.tunnel.ESPResponderSPI)
 	return nil
+}
+
+func (s *Session) connectAttempt(ctx context.Context, state *connectState) error {
+	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote, "temporary_aka_identity", state.usesTemporaryAKAIdentity())
+	if err := s.exchangeIKESAInit(ctx, state); err != nil {
+		return err
+	}
+	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected, "ike_fragmentation_supported", state.ikeFragmentationSupported)
+	if err := s.exchangeIKEAuth(ctx, state); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Session) retryConnectWithPermanentAKA(ctx context.Context, state *connectState, err error) (*connectState, error) {
+	if !state.shouldRetryPermanentAKA(err) {
+		return nil, nil
+	}
+	s.logger.Info("temporary AKA identity rejected; retrying with permanent identity", "cause", ErrUserUnknown)
+	discardStoredAKATemporaryIdentity(state.card, state.initialAKAState)
+	retryState, retryErr := newConnectState(state.input)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	retryState.usePermanentAKAIdentity()
+	if err := s.connectAttempt(ctx, retryState); err != nil {
+		return nil, err
+	}
+	return retryState, nil
 }
 
 func (s *Session) prepareConnect(imei string, card Card) (*connectState, func(), error) {
@@ -92,6 +124,20 @@ func (s *Session) prepareConnect(imei string, card Card) (*connectState, func(),
 		return nil, nil, err
 	}
 	return state, finish, nil
+}
+
+func (state *connectState) usesTemporaryAKAIdentity() bool {
+	return state != nil && hasAKATemporaryIdentity(state.initialAKAState)
+}
+
+func (state *connectState) shouldRetryPermanentAKA(err error) bool {
+	return state.usesTemporaryAKAIdentity() && errors.Is(err, ErrUserUnknown)
+}
+
+func (state *connectState) usePermanentAKAIdentity() {
+	state.initialAKAState = withoutAKATemporaryIdentity(state.initialAKAState)
+	state.identity = akaPermanentIdentity(state.card, state.realm, eapTypeAKA)
+	state.auth.Identity = state.identity
 }
 
 func (s *Session) beginConnect() (func(), error) {

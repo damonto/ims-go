@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                           J. Arkko
 Request for Comments: 4187                                      Ericsson
 Category: Informational                                     H. Haverinen

@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                   M. Garcia-Martin
 Request for Comments: 3455                                      Ericsson
 Category: Informational                                     E. Henrikson

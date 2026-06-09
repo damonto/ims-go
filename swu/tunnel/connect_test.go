@@ -2,12 +2,14 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/damonto/uicc-go/usim"
 	"github.com/damonto/vowifi-go/swu/handshake"
 	"github.com/damonto/vowifi-go/swu/ike"
 )
@@ -49,6 +51,83 @@ func TestNewConnectStateUsesConfiguredDHGroup(t *testing.T) {
 				t.Fatalf("DHGroup = %d, want %d", state.saInit.DHGroup, tt.want)
 			}
 		})
+	}
+}
+
+func TestConnectStateShouldRetryPermanentAKA(t *testing.T) {
+	userUnknownErr := accessRejectionErrorFor(notifyTypeUserUnknown, errors.New("reject"))
+	noAPNErr := accessRejectionErrorFor(notifyTypeNoAPNSubscription, errors.New("reject"))
+	tests := []struct {
+		name  string
+		state *connectState
+		err   error
+		want  bool
+	}{
+		{
+			name:  "temporary identity user unknown",
+			state: &connectState{initialAKAState: usim.AKAIdentityState{Pseudonym: "pseudonym123"}},
+			err:   userUnknownErr,
+			want:  true,
+		},
+		{
+			name:  "permanent identity user unknown",
+			state: &connectState{},
+			err:   userUnknownErr,
+		},
+		{
+			name:  "temporary identity no apn",
+			state: &connectState{initialAKAState: usim.AKAIdentityState{Pseudonym: "pseudonym123"}},
+			err:   noAPNErr,
+		},
+		{
+			name: "invalid reauth user unknown",
+			state: &connectState{initialAKAState: usim.AKAIdentityState{
+				ReauthIdentity: "reauth123",
+			}},
+			err: userUnknownErr,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.state.shouldRetryPermanentAKA(tt.err); got != tt.want {
+				t.Fatalf("shouldRetryPermanentAKA() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConnectStateUsePermanentAKAIdentity(t *testing.T) {
+	card := &akaStateTestCard{
+		state: usim.AKAIdentityState{
+			Pseudonym:      "pseudonym123",
+			ReauthIdentity: "reauth123",
+			MK:             []byte{0x01},
+			KEncr:          []byte{0x02},
+			KAut:           []byte{0x03},
+		},
+	}
+	state, err := newConnectState(handshake.ConnectInput{
+		IMEI:        "356789012345678",
+		Card:        card,
+		OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 500},
+	})
+	if err != nil {
+		t.Fatalf("newConnectState() error = %v", err)
+	}
+	if !state.usesTemporaryAKAIdentity() {
+		t.Fatal("usesTemporaryAKAIdentity() = false, want true")
+	}
+
+	state.usePermanentAKAIdentity()
+
+	if state.usesTemporaryAKAIdentity() {
+		t.Fatal("usesTemporaryAKAIdentity() = true after permanent identity selection")
+	}
+	if state.identity != "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org" {
+		t.Fatalf("identity = %q, want permanent identity", state.identity)
+	}
+	if state.auth.Identity != state.identity {
+		t.Fatalf("auth identity = %q, want %q", state.auth.Identity, state.identity)
 	}
 }
 

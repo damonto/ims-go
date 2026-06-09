@@ -293,6 +293,88 @@ func TestInitialAKAIdentityPadsTwoDigitMNC(t *testing.T) {
 	}
 }
 
+func TestAKATemporaryIdentityState(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   usim.AKAIdentityState
+		wantHas bool
+	}{
+		{
+			name: "valid reauth",
+			state: usim.AKAIdentityState{
+				ReauthIdentity: "reauth123",
+				MK:             []byte{0x01},
+				KEncr:          []byte{0x02},
+				KAut:           []byte{0x03},
+			},
+			wantHas: true,
+		},
+		{
+			name:    "pseudonym",
+			state:   usim.AKAIdentityState{Pseudonym: "pseudonym123"},
+			wantHas: true,
+		},
+		{
+			name:  "invalid reauth only",
+			state: usim.AKAIdentityState{ReauthIdentity: "reauth123"},
+		},
+		{
+			name: "empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasAKATemporaryIdentity(tt.state); got != tt.wantHas {
+				t.Fatalf("hasAKATemporaryIdentity() = %t, want %t", got, tt.wantHas)
+			}
+
+			cleared := withoutAKATemporaryIdentity(tt.state)
+			if cleared.Pseudonym != "" || cleared.ReauthIdentity != "" || cleared.Counter != 0 || len(cleared.MK) != 0 || len(cleared.KEncr) != 0 || len(cleared.KAut) != 0 {
+				t.Fatalf("withoutAKATemporaryIdentity() = %+v, want no temporary identity", cleared)
+			}
+		})
+	}
+}
+
+func TestInitialAKAIdentityUsesPermanentAfterTemporaryStateDiscard(t *testing.T) {
+	card := &akaStateTestCard{
+		state: usim.AKAIdentityState{
+			Pseudonym:      "pseudonym123",
+			ReauthIdentity: "reauth123",
+			Counter:        7,
+			MK:             []byte{0x01},
+			KEncr:          []byte{0x02},
+			KAut:           []byte{0x03},
+		},
+	}
+	identity, realm, state, err := initialAKAIdentity(card)
+	if err != nil {
+		t.Fatalf("initialAKAIdentity() error = %v", err)
+	}
+	if identity != "reauth123@nai.epc.mnc001.mcc001.3gppnetwork.org" {
+		t.Fatalf("identity = %q, want reauth identity", identity)
+	}
+	if !hasAKATemporaryIdentity(state) {
+		t.Fatal("hasAKATemporaryIdentity() = false, want true")
+	}
+
+	discardStoredAKATemporaryIdentity(card, state)
+	identity, realm, state, err = initialAKAIdentity(card)
+	if err != nil {
+		t.Fatalf("initialAKAIdentity() after discard error = %v", err)
+	}
+	if realm != "nai.epc.mnc001.mcc001.3gppnetwork.org" {
+		t.Fatalf("realm = %q, want home realm", realm)
+	}
+	if identity != "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org" {
+		t.Fatalf("identity = %q, want permanent identity", identity)
+	}
+	if hasAKATemporaryIdentity(state) {
+		t.Fatalf("hasAKATemporaryIdentity() = true after discard: %+v", state)
+	}
+}
+
 func TestAKAAuthFlowBuildEAPIdentityResponse(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2397,6 +2479,13 @@ func TestOpenIKEAuthResponsePlaintextNotify(t *testing.T) {
 			wantAccess: true,
 		},
 		{
+			name:         "user unknown",
+			notifyType:   notifyTypeUserUnknown,
+			want:         "USER_UNKNOWN (9001)",
+			wantAccess:   true,
+			wantSentinel: ErrUserUnknown,
+		},
+		{
 			name:         "no apn subscription",
 			notifyType:   notifyTypeNoAPNSubscription,
 			want:         "NO_APN_SUBSCRIPTION (9002)",
@@ -2502,6 +2591,15 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 			wantBackoff:  2 * time.Minute,
 		},
 		{
+			name: "user unknown preserves precise rejection",
+			payloads: []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeUserUnknown},
+			},
+			wantErr:      "USER_UNKNOWN (9001)",
+			wantAccess:   true,
+			wantSentinel: ErrUserUnknown,
+		},
+		{
 			name: "status notify is not an auth failure",
 			payloads: []ike.Payload{
 				&ike.NotifyPayload{NotifyType: notifyTypeN1ModeInformation, Data: []byte{0x00}},
@@ -2550,6 +2648,85 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 				if delay, ok := BackoffDelay(err); !ok || delay != tt.wantBackoff {
 					t.Fatalf("BackoffDelay() = %v, %v; want %v, true", delay, ok, tt.wantBackoff)
 				}
+			}
+		})
+	}
+}
+
+func TestExchangeProtectedIKEAuthNotify(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     ikeAction
+		payloads   []ike.Payload
+		wantErr    string
+		wantAccess bool
+	}{
+		{
+			name:   "user unknown stops ike auth challenge",
+			action: ikeActionOpenIKEAuthChallenge,
+			payloads: []ike.Payload{
+				&ike.EAPPayload{Data: []byte{eapCodeRequest, 1, 0, 4}},
+				&ike.NotifyPayload{NotifyType: notifyTypeUserUnknown},
+			},
+			wantErr:    "protected ike_auth notify USER_UNKNOWN (9001)",
+			wantAccess: true,
+		},
+		{
+			name:   "status notify passes during ike auth",
+			action: ikeActionOpenFinalIKEAuthResponse,
+			payloads: []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeMOBIKESupported},
+			},
+		},
+		{
+			name:   "non auth exchange keeps protected notify payload",
+			action: ikeActionTestProtectedExchange,
+			payloads: []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeUserUnknown},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			crypto := testIKECrypto()
+			peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 500}
+			request := protectedIKEWire(t, crypto, exchangeTypeIKEAuth, flagInitiator, 1, []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeCookie2, Data: []byte{1, 2, 3, 4}},
+			}, true)
+			response := protectedIKEWire(t, crypto, exchangeTypeIKEAuth, flagResponse, 1, tt.payloads, false)
+			conn := &fakePacketConn{
+				local:       &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				readResults: []readResult{{data: response, addr: peer}},
+			}
+			session := mustDialSession(t, conn)
+			session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
+
+			gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), peer, [][]byte{request}, false, 1, crypto, false, true, tt.action)
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("exchangeProtectedIKE() error = %v, want nil", err)
+				}
+				if !sameUDPAddr(gotPeer, peer) {
+					t.Fatalf("peer = %s, want %s", gotPeer, peer)
+				}
+				if len(gotPayloads) != len(tt.payloads) {
+					t.Fatalf("payload count = %d, want %d", len(gotPayloads), len(tt.payloads))
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("exchangeProtectedIKE() error = nil, want protected notify error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("exchangeProtectedIKE() error = %v, want %q", err, tt.wantErr)
+			}
+			if got := AccessRejected(err); got != tt.wantAccess {
+				t.Fatalf("AccessRejected() = %t, want %t", got, tt.wantAccess)
+			}
+			if tt.wantAccess && !errors.Is(err, ErrAccessRejected) {
+				t.Fatalf("errors.Is(ErrAccessRejected) = false for %v", err)
 			}
 		})
 	}

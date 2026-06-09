@@ -179,6 +179,19 @@ func protectedIKENotifyError(payloads []ike.Payload) error {
 	return ikeAuthNotifyError(payloads, "protected", true)
 }
 
+func protectedIKEAuthNotifyError(action ikeAction, payloads []ike.Payload) error {
+	switch action {
+	case ikeActionOpenFinalIKEAuthResponse,
+		ikeActionConnectOpenAKAResponseMessage,
+		ikeActionOpenAKAResponseMessage,
+		ikeActionOpenIKEAuthChallenge:
+		if err := protectedIKENotifyError(payloads); err != nil {
+			return fmt.Errorf("%s: %w", action, err)
+		}
+	}
+	return nil
+}
+
 func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorNotify bool) error {
 	if len(payloads) == 0 {
 		if requireErrorNotify {

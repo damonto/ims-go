@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                       J. Rosenberg
 Request for Comments: 5389                                         Cisco
 Obsoletes: 3489                                                  R. Mahy

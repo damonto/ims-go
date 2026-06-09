@@ -1,9 +1,3 @@
-
-
-
-
-
-
 Network Working Group                                           J. Arkko
 Request for Comments: 5448                                 V. Lehtovirta
 Updates: 4187                                                   Ericsson
