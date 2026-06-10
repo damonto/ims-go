@@ -31,3 +31,9 @@ go.work.sum
 # Other
 refs/
 scripts/
+
+# AI
+AGENTS.md
+.codex
+.agents
+.cluade
