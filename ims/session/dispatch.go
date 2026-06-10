@@ -45,10 +45,11 @@ func (s *Session) handleRequest(ctx context.Context, req Request) error {
 
 func (s *Session) dispatchRequest(ctx context.Context, req Request) (bool, error) {
 	for _, entry := range s.handlerSnapshot() {
-		if entry.closed {
+		handler, ok := entry.handlerIfOpen()
+		if !ok {
 			continue
 		}
-		handled, err := entry.handler.HandleRequest(ctx, req)
+		handled, err := handler.HandleRequest(ctx, req)
 		if err != nil {
 			return false, err
 		}
@@ -61,14 +62,15 @@ func (s *Session) dispatchRequest(ctx context.Context, req Request) (bool, error
 
 func (s *Session) handleInboundResponse(ctx context.Context, msg sip.Message) error {
 	for _, entry := range s.handlerSnapshot() {
-		if entry.closed {
-			continue
-		}
-		handler, ok := entry.handler.(ResponseHandler)
+		handler, ok := entry.handlerIfOpen()
 		if !ok {
 			continue
 		}
-		handled, err := handler.HandleResponse(ctx, msg)
+		responseHandler, ok := handler.(ResponseHandler)
+		if !ok {
+			continue
+		}
+		handled, err := responseHandler.HandleResponse(ctx, msg)
 		if err != nil {
 			return err
 		}

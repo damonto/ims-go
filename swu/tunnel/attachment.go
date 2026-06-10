@@ -83,27 +83,29 @@ func (s *Session) detachAllAttachments() []*sessionAttachment {
 }
 
 func (a *sessionAttachment) Close() error {
-	a.once.Do(func() {
-		a.mu.Lock()
-		a.closed = true
-		a.mu.Unlock()
-		if a.session != nil {
-			a.session.removeAttachment(a)
-		}
-	})
+	a.close()
 	return nil
 }
 
 func (a *sessionAttachment) fail(err error) {
+	if !a.close() {
+		return
+	}
+	a.handler.HandleError(err)
+}
+
+func (a *sessionAttachment) close() bool {
+	closed := false
 	a.once.Do(func() {
+		closed = true
 		a.mu.Lock()
 		a.closed = true
 		a.mu.Unlock()
 		if a.session != nil {
 			a.session.removeAttachment(a)
 		}
-		a.handler.HandleError(err)
 	})
+	return closed
 }
 
 func (a *sessionAttachment) isClosed() bool {

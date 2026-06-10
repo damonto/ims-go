@@ -39,10 +39,7 @@ func (s *Session) LookupDialogKey(msg sip.Message) (string, bool) {
 	entries := append([]*dialogEntry(nil), s.dialogs[callID]...)
 	s.mu.Unlock()
 	for _, entry := range entries {
-		if entry.closed {
-			continue
-		}
-		if entry.id.Matches(msg) {
+		if entry.matchesMessageIfOpen(msg) {
 			return entry.key, true
 		}
 	}
@@ -70,4 +67,14 @@ func (d *dialogEntry) Close() error {
 	}
 	d.session.dialogs[d.id.CallID] = filtered
 	return nil
+}
+
+func (d *dialogEntry) matchesMessageIfOpen(msg sip.Message) bool {
+	d.session.mu.Lock()
+	closed := d.closed
+	d.session.mu.Unlock()
+	if closed {
+		return false
+	}
+	return d.id.Matches(msg)
 }

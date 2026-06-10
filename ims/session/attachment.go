@@ -138,14 +138,20 @@ func (s *Session) handlerSnapshotCopy() []*handlerEntry {
 }
 
 func (s *Session) notifyHandlersOnce(handlers []*handlerEntry, err error) {
+	notify := false
 	s.notifyOnce.Do(func() {
-		for _, entry := range handlers {
-			if entry.closed {
-				continue
-			}
-			entry.handler.HandleError(err)
-		}
+		notify = true
 	})
+	if !notify {
+		return
+	}
+	for _, entry := range handlers {
+		handler, ok := entry.handlerIfOpen()
+		if !ok {
+			continue
+		}
+		handler.HandleError(err)
+	}
 }
 
 func (a *handlerEntry) Close() error {
@@ -153,6 +159,15 @@ func (a *handlerEntry) Close() error {
 	defer a.session.mu.Unlock()
 	a.closed = true
 	return nil
+}
+
+func (a *handlerEntry) handlerIfOpen() (Handler, bool) {
+	a.session.mu.Lock()
+	defer a.session.mu.Unlock()
+	if a.closed {
+		return nil, false
+	}
+	return a.handler, true
 }
 
 func (a *transportAttachment) Close() error {
