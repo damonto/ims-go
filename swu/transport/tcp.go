@@ -23,18 +23,49 @@ const (
 	tcpEphemeralPortBase  = 40000
 	tcpEphemeralPortRange = 20000
 	tcpDefaultWindow      = 65535
+	tcpCloseTimeout       = 500 * time.Millisecond
+	tcpSendLockPoll       = 5 * time.Millisecond
+	tcpInitialRTO         = 1 * time.Second
+	tcpRTOBackoffCeiling  = 60 * time.Second
+	tcpSYNMinTimeout      = 3 * time.Minute
+	tcpDataMinTimeout     = 100 * time.Second
 	tcpMaxSIPHeaderBytes  = 32 * 1024
 	tcpMaxSIPMessageBytes = 1024 * 1024
 )
 
-var tcpDataACKTimeouts = []time.Duration{
-	500 * time.Millisecond,
-	1 * time.Second,
+var tcpSYNTimeouts = []time.Duration{
+	tcpInitialRTO,
 	2 * time.Second,
 	4 * time.Second,
 	8 * time.Second,
 	16 * time.Second,
+	32 * time.Second,
+	64 * time.Second,
+	64 * time.Second,
 }
+
+var tcpDataACKTimeouts = []time.Duration{
+	tcpInitialRTO,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	16 * time.Second,
+	32 * time.Second,
+	64 * time.Second,
+}
+
+var tcpDataACKTimeoutsAfterSYNTimeout = []time.Duration{
+	3 * time.Second,
+	6 * time.Second,
+	12 * time.Second,
+	24 * time.Second,
+	48 * time.Second,
+	64 * time.Second,
+}
+
+var tcpRandomISS = randomUint32
+
+var errPendingSegmentCanceled = errors.New("tcp pending segment canceled")
 
 var _ imssession.Transport = (*TCPConn)(nil)
 
@@ -72,6 +103,7 @@ type TCPConn struct {
 
 	mu          sync.Mutex
 	writeMu     sync.Mutex
+	sendMu      sync.Mutex
 	established bool
 	closed      bool
 	terminalErr error
@@ -79,6 +111,8 @@ type TCPConn struct {
 	recvSeq     uint32
 	stream      []byte
 	ackedSeq    uint32
+	peerMSS     uint16
+	pending     *tcpPendingSegment
 	msgCh       chan []byte
 	errCh       chan error
 	readyCh     chan struct{}
@@ -90,10 +124,19 @@ type TCPConn struct {
 	dataACKTimeouts []time.Duration
 }
 
+type tcpPendingSegment struct {
+	seq     uint32
+	nextSeq uint32
+	ack     uint32
+	flags   byte
+	payload []byte
+}
+
 type tcpSegmentResponse struct {
-	seq   uint32
-	ack   uint32
-	flags byte
+	seq        uint32
+	ack        uint32
+	flags      byte
+	retransmit bool
 }
 
 func DialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig) (*TCPConn, error) {
@@ -182,6 +225,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	if err != nil {
 		return nil, fmt.Errorf("dialing tcp transport: %w", err)
 	}
+	customDataACKTimeouts := len(cfg.DataACKTimeouts) > 0
 	conn := &TCPConn{
 		session:         s,
 		local:           &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: localPort, Zone: innerLocal.Zone},
@@ -230,19 +274,21 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	}
 	conn.attachment = attachment
 
-	for attempt := range 3 {
+	synTimedOut := false
+	for attempt, timeout := range tcpSYNTimeouts {
 		if ready, err := conn.dialReady(transportActionDialTCP); ready || err != nil {
 			if err != nil {
 				_ = conn.Close()
 				return nil, err
 			}
+			conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
 			return conn, nil
 		}
 		if err := conn.sendSegmentWithSeq(ctx, seq, 0, packet.TCPFlagSYN, nil); err != nil {
 			_ = conn.Close()
 			return nil, err
 		}
-		wait := time.NewTimer(2 * time.Second)
+		wait := time.NewTimer(timeout)
 		select {
 		case <-ctx.Done():
 			wait.Stop()
@@ -254,16 +300,19 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 				_ = conn.Close()
 				return nil, err
 			}
+			conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
 			return conn, nil
 		case <-wait.C:
+			synTimedOut = true
 			if ready, err := conn.dialReady(transportActionDialTCP); ready || err != nil {
 				if err != nil {
 					_ = conn.Close()
 					return nil, err
 				}
+				conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
 				return conn, nil
 			}
-			s.Logger().Debug("TCP SYN timed out", "attempt", attempt+1)
+			s.Logger().Debug("TCP SYN timed out", "attempt", attempt+1, "timeout", timeout)
 		}
 	}
 	_ = conn.Close()
@@ -313,41 +362,20 @@ func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
 	timeouts := t.tcpDataACKTimeouts()
 	remaining := data
 	for len(remaining) > 0 {
+		maxPayload := t.maxPayloadSize()
 		chunk := remaining
 		flags := byte(packet.TCPFlagACK)
-		if len(chunk) > tcpDefaultSegmentSize {
-			chunk = chunk[:tcpDefaultSegmentSize]
+		if len(chunk) > maxPayload {
+			chunk = chunk[:maxPayload]
 		} else {
 			flags |= packet.TCPFlagPSH
 		}
 
-		seq, wantAck, err := t.reserveSendSeq(len(chunk))
+		pending, err := t.reserveAndSendSegment(ctx, flags, chunk)
 		if err != nil {
 			return err
 		}
-		acked := false
-		for attempt, timeout := range timeouts {
-			if err := t.sendSegmentWithSeq(ctx, seq, t.currentAck(), flags, chunk); err != nil {
-				t.closeWithError(err)
-				return err
-			}
-			waitCtx, cancel := context.WithTimeout(ctx, timeout)
-			err := t.waitForAck(waitCtx, wantAck)
-			cancel()
-			if err == nil {
-				acked = true
-				break
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			ackedSeq, sendSeq := t.sendState()
-			t.session.Logger().Debug("TCP data ACK timed out", "seq", seq, "want_ack", wantAck, "acked_seq", ackedSeq, "send_seq", sendSeq, "attempt", attempt+1)
-		}
-		if !acked {
-			ackedSeq, sendSeq := t.sendState()
-			err := fmt.Errorf("writing tcp packet: waiting for ack %d (acked %d, seq %d, send_seq %d, attempts %d)", wantAck, ackedSeq, seq, sendSeq, len(timeouts))
-			t.closeWithError(err)
+		if err := t.waitPendingSegmentAck(ctx, pending, timeouts, "writing tcp packet"); err != nil {
 			return err
 		}
 		remaining = remaining[len(chunk):]
@@ -400,8 +428,58 @@ func (t *TCPConn) nextMessage() ([]byte, bool) {
 }
 
 func (t *TCPConn) Close() error {
-	t.closeWithError(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), tcpCloseTimeout)
+	defer cancel()
+
+	if err := t.closeWithFIN(ctx); err != nil && t.session != nil {
+		t.session.Logger().Debug("closing tcp transport after FIN failed", "err", err)
+	}
 	return nil
+}
+
+func (t *TCPConn) closeWithFIN(ctx context.Context) error {
+	fin, ok := t.beginLocalClose()
+	if !ok {
+		return nil
+	}
+	if err := t.lockSend(ctx); err != nil {
+		return err
+	}
+	defer t.sendMu.Unlock()
+	if err := t.sendSegmentWithSeq(ctx, fin.seq, fin.ack, fin.flags, fin.payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *TCPConn) beginLocalClose() (tcpPendingSegment, bool) {
+	var fin tcpPendingSegment
+	closed := false
+	t.closeOnce.Do(func() {
+		t.mu.Lock()
+		if t.established {
+			seq := t.sendSeq
+			end := seq + tcpControlSequenceLen(packet.TCPFlagACK|packet.TCPFlagFIN)
+			t.sendSeq = end
+			fin = tcpPendingSegment{
+				seq:     seq,
+				nextSeq: end,
+				ack:     t.recvSeq,
+				flags:   packet.TCPFlagACK | packet.TCPFlagFIN,
+			}
+		}
+		t.closed = true
+		attachment := t.attachment
+		t.mu.Unlock()
+		if attachment != nil {
+			_ = attachment.Close()
+		}
+		t.signalReady()
+		close(t.done)
+		close(t.msgCh)
+		closed = true
+	})
+	return fin, closed && fin.flags != 0
 }
 
 func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
@@ -421,6 +499,10 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	}
 	spi := packetSPI(pkt.IP.Payload)
 	if spi != t.inboundESP.SPI {
+		return false
+	}
+	if sequence, ok := packetESPSequence(pkt.IP.Payload); ok && !t.mayAcceptInboundESP(sequence) {
+		t.session.Logger().Debug("dropping replayed secure TCP packet before decode", "spi", spi, "esp_sequence", sequence)
 		return false
 	}
 	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
@@ -487,10 +569,16 @@ func (t *TCPConn) acceptInboundESP(sequence uint32) bool {
 	return associations.acceptInboundESP(codec, sequence)
 }
 
-func (t *TCPConn) currentAck() uint32 {
+func (t *TCPConn) mayAcceptInboundESP(sequence uint32) bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.recvSeq
+	if t.closed {
+		t.mu.Unlock()
+		return false
+	}
+	codec := t.inboundESP
+	associations := t.associations
+	t.mu.Unlock()
+	return associations.mayAcceptInboundESP(codec, sequence)
 }
 
 func (t *TCPConn) tcpDataACKTimeouts() []time.Duration {
@@ -500,6 +588,15 @@ func (t *TCPConn) tcpDataACKTimeouts() []time.Duration {
 		return append([]time.Duration(nil), tcpDataACKTimeouts...)
 	}
 	return append([]time.Duration(nil), t.dataACKTimeouts...)
+}
+
+func (t *TCPConn) applySYNTimeoutDataRTO(customDataACKTimeouts bool, synTimedOut bool) {
+	if customDataACKTimeouts || !synTimedOut {
+		return
+	}
+	t.mu.Lock()
+	t.dataACKTimeouts = append([]time.Duration(nil), tcpDataACKTimeoutsAfterSYNTimeout...)
+	t.mu.Unlock()
 }
 
 func (t *TCPConn) sendState() (uint32, uint32) {
@@ -513,12 +610,16 @@ func (t *TCPConn) waitForAck(ctx context.Context, want uint32) error {
 		t.mu.Lock()
 		acked := t.ackedSeq
 		closed := t.closed
+		pending := t.pending
 		t.mu.Unlock()
 		if !tcpSeqAfter(want, acked) {
 			return nil
 		}
 		if closed {
 			return t.closedErr("waiting for ack: transport is closed")
+		}
+		if pending == nil || pending.nextSeq != want {
+			return errPendingSegmentCanceled
 		}
 		select {
 		case <-ctx.Done():
@@ -537,26 +638,156 @@ func (t *TCPConn) noteAck(ack uint32) {
 		return
 	}
 	t.ackedSeq = ack
+	if t.pending != nil && !tcpSeqAfter(t.pending.nextSeq, ack) {
+		t.pending = nil
+	}
 	select {
 	case t.ackCh <- struct{}{}:
 	default:
 	}
 }
 
-func (t *TCPConn) reserveSendSeq(payloadLen int) (uint32, uint32, error) {
+func (t *TCPConn) reserveSendSegment(flags byte, payload []byte) (tcpPendingSegment, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
-		return 0, 0, t.terminalErrOr("writing tcp packet: transport is closed")
+		return tcpPendingSegment{}, t.terminalErrOr("writing tcp packet: transport is closed")
 	}
 	seq := t.sendSeq
-	nextSeq := seq + uint32(payloadLen)
+	nextSeq := seq + uint32(len(payload)) + tcpControlSequenceLen(flags)
 	t.sendSeq = nextSeq
-	return seq, nextSeq, nil
+	pending := tcpPendingSegment{
+		seq:     seq,
+		nextSeq: nextSeq,
+		ack:     t.recvSeq,
+		flags:   flags,
+		payload: append([]byte(nil), payload...),
+	}
+	t.pending = &pending
+	return pending, nil
+}
+
+func (t *TCPConn) reserveAndSendSegment(ctx context.Context, flags byte, payload []byte) (tcpPendingSegment, error) {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
+
+	pending, err := t.reserveSendSegment(flags, payload)
+	if err != nil {
+		return tcpPendingSegment{}, err
+	}
+	if err := t.sendSegmentWithSeq(ctx, pending.seq, pending.ack, pending.flags, pending.payload); err != nil {
+		t.closeWithError(err)
+		return tcpPendingSegment{}, err
+	}
+	return pending, nil
+}
+
+func (t *TCPConn) sendPendingSegment(ctx context.Context, pending tcpPendingSegment) error {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
+
+	return t.sendSegmentWithSeq(ctx, pending.seq, pending.ack, pending.flags, pending.payload)
+}
+
+func (t *TCPConn) lockSend(ctx context.Context) error {
+	ticker := time.NewTicker(tcpSendLockPoll)
+	defer ticker.Stop()
+	for {
+		if t.sendMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (t *TCPConn) waitPendingSegmentAck(ctx context.Context, pending tcpPendingSegment, timeouts []time.Duration, action string) error {
+	for attempt, timeout := range timeouts {
+		if attempt > 0 {
+			if err := t.sendPendingSegment(ctx, pending); err != nil {
+				t.closeWithError(err)
+				return err
+			}
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := t.waitForAck(waitCtx, pending.nextSeq)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			err := fmt.Errorf("%s: %w", action, ctx.Err())
+			t.closeWithError(err)
+			return err
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		ackedSeq, sendSeq := t.sendState()
+		t.session.Logger().Debug("TCP ACK timed out", "action", action, "seq", pending.seq, "want_ack", pending.nextSeq, "acked_seq", ackedSeq, "send_seq", sendSeq, "attempt", attempt+1)
+	}
+	ackedSeq, sendSeq := t.sendState()
+	err := fmt.Errorf("%s: waiting for ack %d (acked %d, seq %d, send_seq %d, attempts %d)", action, pending.nextSeq, ackedSeq, pending.seq, sendSeq, len(timeouts))
+	t.closeWithError(err)
+	return err
+}
+
+func (t *TCPConn) startPendingRetransmission(pending tcpPendingSegment, timeouts []time.Duration, action string) {
+	timeouts = append([]time.Duration(nil), timeouts...)
+	go func() {
+		_ = t.waitPendingSegmentAck(context.Background(), pending, timeouts, action)
+	}()
+}
+
+func tcpControlSequenceLen(flags byte) uint32 {
+	if flags&(packet.TCPFlagSYN|packet.TCPFlagFIN) == 0 {
+		return 0
+	}
+	return 1
+}
+
+func (t *TCPConn) maxPayloadSize() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	size := tcpDefaultSegmentSize
+	if t.peerMSS != 0 && int(t.peerMSS) < size {
+		size = int(t.peerMSS)
+	}
+	return max(size, 1)
+}
+
+func (t *TCPConn) notePeerMSSLocked(mss uint16) {
+	if mss == 0 {
+		return
+	}
+	if t.peerMSS == 0 || mss < t.peerMSS {
+		t.peerMSS = mss
+	}
 }
 
 func tcpSeqAfter(a, b uint32) bool {
 	return int32(a-b) > 0
+}
+
+func tcpSeqInWindow(value, start uint32, window uint32) bool {
+	if window == 0 {
+		return value == start
+	}
+	return !tcpSeqAfter(start, value) && tcpSeqAfter(start+window, value)
+}
+
+func tcpSegmentAcceptable(seq uint32, length uint32, recvSeq uint32, window uint32) bool {
+	if length == 0 {
+		return tcpSeqInWindow(seq, recvSeq, window)
+	}
+	if window == 0 {
+		return false
+	}
+	last := seq + length - 1
+	return tcpSeqInWindow(seq, recvSeq, window) || tcpSeqInWindow(last, recvSeq, window)
 }
 
 func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -590,6 +821,15 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 		if err != nil {
 			t.session.Logger().Debug("sending TCP response failed", "tcp_flags", response.flags, "seq", response.seq, "ack", response.ack, "err", err)
 		}
+		if response.retransmit && err == nil {
+			pending := tcpPendingSegment{
+				seq:     response.seq,
+				nextSeq: response.seq + tcpControlSequenceLen(response.flags),
+				ack:     response.ack,
+				flags:   response.flags,
+			}
+			t.startPendingRetransmission(pending, tcpSYNTimeouts, "passive tcp handshake")
+		}
 	}
 	if terminalErr != nil {
 		t.closeWithError(terminalErr)
@@ -603,18 +843,44 @@ func (t *TCPConn) processSegment(segment packet.TCPSegment) (tcpSegmentResponse,
 	t.session.Logger().Debug("received TCP segment", "src_addr", segment.Src, "dst_addr", segment.Dst, "tcp_flags", segment.Flags, "seq", segment.Seq, "ack", segment.Ack, "payload_len", len(segment.Payload))
 
 	if segment.Flags&packet.TCPFlagRST != 0 {
-		return tcpSegmentResponse{}, errors.New("reading tcp packet: peer reset connection")
+		return t.processResetSegment(segment)
 	}
 
 	if !t.established {
 		if t.passive {
 			if segment.Flags&packet.TCPFlagSYN != 0 && segment.Flags&packet.TCPFlagACK == 0 {
+				if t.recvSeq != 0 {
+					if segment.Seq+1 == t.recvSeq {
+						return tcpSegmentResponse{seq: t.initialSeq, ack: t.recvSeq, flags: packet.TCPFlagSYN | packet.TCPFlagACK}, nil
+					}
+					t.returnToPassiveListenLocked()
+					return tcpSegmentResponse{}, nil
+				}
+				if err := t.selectPassiveISSLocked(); err != nil {
+					return tcpSegmentResponse{}, err
+				}
+				t.notePeerMSSLocked(segment.MSS)
 				t.recvSeq = segment.Seq + 1
 				ack := t.recvSeq
 				synSeq := t.initialSeq
-				return tcpSegmentResponse{seq: synSeq, ack: ack, flags: packet.TCPFlagSYN | packet.TCPFlagACK}, nil
+				response := tcpSegmentResponse{seq: synSeq, ack: ack, flags: packet.TCPFlagSYN | packet.TCPFlagACK}
+				pending := tcpPendingSegment{
+					seq:     synSeq,
+					nextSeq: t.sendSeq,
+					ack:     ack,
+					flags:   packet.TCPFlagSYN | packet.TCPFlagACK,
+				}
+				t.pending = &pending
+				response.retransmit = true
+				return response, nil
 			}
-			if segment.Flags&packet.TCPFlagACK != 0 && segment.Ack == t.sendSeq {
+			if segment.Flags&packet.TCPFlagACK != 0 {
+				if t.recvSeq == 0 || segment.Ack != t.sendSeq {
+					return tcpSegmentResponse{seq: segment.Ack, flags: packet.TCPFlagRST}, nil
+				}
+				if segment.Seq != t.recvSeq {
+					return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, nil
+				}
 				t.noteAck(segment.Ack)
 				t.established = true
 				t.signalReady()
@@ -627,6 +893,7 @@ func (t *TCPConn) processSegment(segment packet.TCPSegment) (tcpSegmentResponse,
 			if segment.Ack != t.sendSeq {
 				return tcpSegmentResponse{}, nil
 			}
+			t.notePeerMSSLocked(segment.MSS)
 			t.recvSeq = segment.Seq + 1
 			t.noteAck(segment.Ack)
 			t.established = true
@@ -640,32 +907,113 @@ func (t *TCPConn) processSegment(segment packet.TCPSegment) (tcpSegmentResponse,
 	return t.processEstablishedSegment(segment)
 }
 
-func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegmentResponse, error) {
-	if segment.Flags&packet.TCPFlagACK != 0 {
-		t.noteAck(segment.Ack)
-	}
-	fin := segment.Flags&packet.TCPFlagFIN != 0
-	if len(segment.Payload) == 0 && !fin {
+func (t *TCPConn) processResetSegment(segment packet.TCPSegment) (tcpSegmentResponse, error) {
+	if !t.established && t.passive {
+		if t.resetAcceptableLocked(segment) {
+			t.returnToPassiveListenLocked()
+			return tcpSegmentResponse{}, nil
+		}
+		if t.resetInWindowLocked(segment) {
+			return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, nil
+		}
 		return tcpSegmentResponse{}, nil
 	}
+	if t.resetAcceptableLocked(segment) {
+		return tcpSegmentResponse{}, errors.New("reading tcp packet: peer reset connection")
+	}
+	if t.established && tcpSeqInWindow(segment.Seq, t.recvSeq, uint32(tcpDefaultWindow)) {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, nil
+	}
+	return tcpSegmentResponse{}, nil
+}
 
-	if segment.Seq != t.recvSeq {
-		ack := t.recvSeq
+func (t *TCPConn) resetAcceptableLocked(segment packet.TCPSegment) bool {
+	if !t.established && !t.passive {
+		return segment.Flags&packet.TCPFlagACK != 0 && tcpSeqAfter(segment.Ack, t.ackedSeq) && !tcpSeqAfter(segment.Ack, t.sendSeq)
+	}
+	if !t.established && t.passive {
+		return t.recvSeq != 0 && segment.Seq == t.recvSeq
+	}
+	return segment.Seq == t.recvSeq
+}
+
+func (t *TCPConn) resetInWindowLocked(segment packet.TCPSegment) bool {
+	return t.recvSeq != 0 && tcpSeqInWindow(segment.Seq, t.recvSeq, uint32(tcpDefaultWindow))
+}
+
+func (t *TCPConn) selectPassiveISSLocked() error {
+	seq, err := tcpRandomISS()
+	if err != nil {
+		return fmt.Errorf("selecting passive tcp iss: %w", err)
+	}
+	t.initialSeq = seq
+	t.sendSeq = seq + 1
+	t.ackedSeq = seq
+	return nil
+}
+
+func (t *TCPConn) returnToPassiveListenLocked() {
+	t.recvSeq = 0
+	t.stream = nil
+	t.peerMSS = 0
+	t.pending = nil
+	t.established = false
+	select {
+	case t.ackCh <- struct{}{}:
+	default:
+	}
+}
+
+func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegmentResponse, error) {
+	ack := t.recvSeq
+	if segment.Flags&packet.TCPFlagSYN != 0 {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
+	}
+	if segment.Flags&packet.TCPFlagACK == 0 {
+		return tcpSegmentResponse{}, nil
+	}
+	if tcpSeqAfter(segment.Ack, t.sendSeq) {
 		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
 	}
 
-	nextRecv := segment.Seq + uint32(len(segment.Payload))
+	fin := segment.Flags&packet.TCPFlagFIN != 0
+	segLen := uint32(len(segment.Payload)) + tcpControlSequenceLen(segment.Flags)
+	if !tcpSegmentAcceptable(segment.Seq, segLen, t.recvSeq, uint32(tcpDefaultWindow)) {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
+	}
+
+	t.noteAck(segment.Ack)
+
+	if segLen == 0 {
+		return tcpSegmentResponse{}, nil
+	}
+
+	seq := segment.Seq
+	payload := segment.Payload
+	if tcpSeqAfter(t.recvSeq, seq) {
+		skip := t.recvSeq - seq
+		if skip > uint32(len(payload)) {
+			skip = uint32(len(payload))
+		}
+		payload = payload[skip:]
+		seq = t.recvSeq
+	}
+	if seq != t.recvSeq {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
+	}
+
+	nextRecv := seq + uint32(len(payload))
 	if fin {
 		nextRecv++
 	}
 	t.recvSeq = nextRecv
-	ack := t.recvSeq
+	ack = t.recvSeq
 	response := tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}
-	if len(segment.Payload) == 0 {
+	if len(payload) == 0 {
 		return response, errors.New("reading tcp packet: peer closed connection")
 	}
 
-	t.stream = append(t.stream, segment.Payload...)
+	t.stream = append(t.stream, payload...)
 	for {
 		msg, rest, ok, err := nextSIPMessage(t.stream)
 		if err != nil {
@@ -827,10 +1175,32 @@ func normalizedTCPDataACKTimeouts(values []time.Duration) ([]time.Duration, erro
 		return append([]time.Duration(nil), tcpDataACKTimeouts...), nil
 	}
 	timeouts := append([]time.Duration(nil), values...)
-	for _, timeout := range timeouts {
-		if timeout <= 0 {
-			return nil, errors.New("tcp data ack timeout must be > 0")
+	var budget time.Duration
+	for i, timeout := range timeouts {
+		if timeout < tcpInitialRTO {
+			return nil, fmt.Errorf("tcp data ack timeout must be >= %s", tcpInitialRTO)
 		}
+		if i > 0 {
+			minTimeout := tcpNextRTOFloor(timeouts[i-1])
+			if timeout < minTimeout {
+				return nil, fmt.Errorf("tcp data ack timeout %s is more aggressive than %s", timeout, minTimeout)
+			}
+		}
+		budget += timeout
+	}
+	if budget < tcpDataMinTimeout {
+		return nil, fmt.Errorf("tcp data ack timeout budget must be >= %s", tcpDataMinTimeout)
 	}
 	return timeouts, nil
+}
+
+func tcpNextRTOFloor(previous time.Duration) time.Duration {
+	if previous >= tcpRTOBackoffCeiling {
+		return previous
+	}
+	doubled := previous * 2
+	if doubled > tcpRTOBackoffCeiling {
+		return tcpRTOBackoffCeiling
+	}
+	return doubled
 }

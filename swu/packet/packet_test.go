@@ -224,6 +224,135 @@ func TestUDPSegmentMarshalNormalizesZeroChecksum(t *testing.T) {
 	}
 }
 
+func TestIPPacketUnmarshalRejectsInvalidIPv4Checksum(t *testing.T) {
+	wire, err := (IPPacket{
+		Version:  IPVersion4,
+		Protocol: ProtocolUDP,
+		SrcIP:    net.IPv4(10, 0, 0, 1),
+		DstIP:    net.IPv4(10, 0, 0, 2),
+		Payload:  []byte{0x01, 0x02, 0x03},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	wire[10] ^= 0xff
+
+	var pkt IPPacket
+	if err := pkt.UnmarshalBinary(wire); err == nil {
+		t.Fatal("UnmarshalBinary() error = nil, want checksum error")
+	}
+}
+
+func TestDecodePayloadValidatesTransportChecksum(t *testing.T) {
+	tests := []struct {
+		name    string
+		proto   byte
+		src     net.IP
+		dst     net.IP
+		payload func(t *testing.T, src, dst net.IP) []byte
+		wantErr bool
+	}{
+		{
+			name:  "udp ipv4 invalid nonzero checksum",
+			proto: ProtocolUDP,
+			src:   net.IPv4(10, 0, 0, 1),
+			dst:   net.IPv4(10, 0, 0, 2),
+			payload: func(t *testing.T, src, dst net.IP) []byte {
+				t.Helper()
+				wire, err := (UDPSegment{
+					Src:     &net.UDPAddr{IP: src, Port: 5062},
+					Dst:     &net.UDPAddr{IP: dst, Port: 5060},
+					Payload: []byte("sip"),
+				}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				wire[len(wire)-1] ^= 0xff
+				return wire
+			},
+			wantErr: true,
+		},
+		{
+			name:  "udp ipv4 zero checksum allowed",
+			proto: ProtocolUDP,
+			src:   net.IPv4(10, 0, 0, 1),
+			dst:   net.IPv4(10, 0, 0, 2),
+			payload: func(t *testing.T, src, dst net.IP) []byte {
+				t.Helper()
+				wire, err := (UDPSegment{
+					Src:     &net.UDPAddr{IP: src, Port: 5062},
+					Dst:     &net.UDPAddr{IP: dst, Port: 5060},
+					Payload: []byte("sip"),
+				}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				binary.BigEndian.PutUint16(wire[6:8], 0)
+				return wire
+			},
+		},
+		{
+			name:  "udp ipv6 zero checksum rejected",
+			proto: ProtocolUDP,
+			src:   net.ParseIP("2001:db8::1"),
+			dst:   net.ParseIP("2001:db8::2"),
+			payload: func(t *testing.T, src, dst net.IP) []byte {
+				t.Helper()
+				wire, err := (UDPSegment{
+					Src:     &net.UDPAddr{IP: src, Port: 5062},
+					Dst:     &net.UDPAddr{IP: dst, Port: 5060},
+					Payload: []byte("sip"),
+				}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				binary.BigEndian.PutUint16(wire[6:8], 0)
+				return wire
+			},
+			wantErr: true,
+		},
+		{
+			name:  "tcp invalid checksum",
+			proto: ProtocolTCP,
+			src:   net.ParseIP("2001:db8::1"),
+			dst:   net.ParseIP("2001:db8::2"),
+			payload: func(t *testing.T, src, dst net.IP) []byte {
+				t.Helper()
+				wire, err := (TCPSegment{
+					Src:     &net.TCPAddr{IP: src, Port: 40000},
+					Dst:     &net.TCPAddr{IP: dst, Port: 5060},
+					Seq:     1,
+					Ack:     2,
+					Flags:   TCPFlagACK | TCPFlagPSH,
+					Window:  65535,
+					Payload: []byte("REGISTER"),
+				}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				wire[len(wire)-1] ^= 0xff
+				return wire
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := DecodePayload(tt.proto, tt.src, tt.dst, tt.payload(t, tt.src, tt.dst))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("DecodePayload() error = nil, want checksum error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DecodePayload() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestTCPOptionsOnlyAdvertiseImplementedCapabilities(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -239,6 +368,42 @@ func TestTCPOptionsOnlyAdvertiseImplementedCapabilities(t *testing.T) {
 			got := tcpOptionsForFlags(tt.flags)
 			if !slices.Equal(got, tt.want) {
 				t.Fatalf("tcpOptionsForFlags() = %x, want %x", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTCPSegmentDecodeReadsMSSOption(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags byte
+		want  uint16
+	}{
+		{name: "syn", flags: TCPFlagSYN, want: tcpDefaultMSS},
+		{name: "syn ack", flags: TCPFlagSYN | TCPFlagACK, want: tcpDefaultMSS},
+		{name: "ack without mss", flags: TCPFlagACK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := (TCPSegment{
+				Src:    &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
+				Dst:    &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+				Seq:    1,
+				Ack:    2,
+				Flags:  tt.flags,
+				Window: 65535,
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			var got TCPSegment
+			got.Src = &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1)}
+			got.Dst = &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2)}
+			if err := got.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.MSS != tt.want {
+				t.Fatalf("MSS = %d, want %d", got.MSS, tt.want)
 			}
 		})
 	}

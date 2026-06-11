@@ -183,3 +183,19 @@ func TestReplayWindowAccept(t *testing.T) {
 		})
 	}
 }
+
+func TestReplayWindowWouldAcceptDoesNotMutate(t *testing.T) {
+	var window ReplayWindow
+	if !window.WouldAccept(1) {
+		t.Fatal("WouldAccept(1) = false, want true")
+	}
+	if !window.WouldAccept(1) {
+		t.Fatal("WouldAccept(1) second = false, want true before Accept")
+	}
+	if !window.Accept(1) {
+		t.Fatal("Accept(1) = false, want true")
+	}
+	if window.WouldAccept(1) {
+		t.Fatal("WouldAccept(1) after Accept = true, want false")
+	}
+}

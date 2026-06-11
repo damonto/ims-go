@@ -70,6 +70,22 @@ func (s *SecurityAssociations) acceptInboundESP(codec esp.Codec, sequence uint32
 	return inbound.replay.Accept(sequence)
 }
 
+func (s *SecurityAssociations) mayAcceptInboundESP(codec esp.Codec, sequence uint32) bool {
+	if !espIntegrityEnabled(codec.Integrity) {
+		return true
+	}
+	key := newAssociationKey(codec)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureState()
+	inbound := s.inbound[key]
+	if inbound == nil {
+		return sequence != 0
+	}
+	return inbound.replay.WouldAccept(sequence)
+}
+
 func (s *SecurityAssociations) ensureState() {
 	if s.outbound == nil {
 		s.outbound = make(map[associationKey]*outboundAssociation)

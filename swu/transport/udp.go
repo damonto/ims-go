@@ -223,6 +223,10 @@ func (t *UDPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	if spi != t.inboundESP.SPI {
 		return false
 	}
+	if sequence, ok := packetESPSequence(pkt.IP.Payload); ok && !t.mayAcceptInboundESP(sequence) {
+		t.session.Logger().Debug("dropping replayed secure UDP packet before decode", "spi", spi, "esp_sequence", sequence)
+		return false
+	}
 	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
 	if err != nil {
 		return false
@@ -295,6 +299,18 @@ func (t *UDPConn) acceptInboundESP(sequence uint32) bool {
 	associations := t.associations
 	t.mu.Unlock()
 	return associations.acceptInboundESP(codec, sequence)
+}
+
+func (t *UDPConn) mayAcceptInboundESP(sequence uint32) bool {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return false
+	}
+	codec := t.inboundESP
+	associations := t.associations
+	t.mu.Unlock()
+	return associations.mayAcceptInboundESP(codec, sequence)
 }
 
 func (t *UDPConn) closedErr(fallback string) error {

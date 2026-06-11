@@ -3,8 +3,8 @@ module github.com/damonto/vowifi-go
 go 1.26.3
 
 require (
-	github.com/damonto/ts43-go v0.0.0-20260608104423-08d96990ecbc
-	github.com/damonto/uicc-go v0.0.0-20260608104005-d1ab2eb31f2b
+	github.com/damonto/ts43-go v0.0.0-20260611125016-ab0c78f7aadd
+	github.com/damonto/uicc-go v0.0.0-20260611123120-01e3637ef8da
 )
 
 require (

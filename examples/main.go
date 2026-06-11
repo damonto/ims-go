@@ -20,9 +20,9 @@ import (
 
 	uiccat "github.com/damonto/uicc-go/at"
 	uiccccid "github.com/damonto/uicc-go/ccid"
-	uiccqmi "github.com/damonto/uicc-go/qualcomm/qmi"
-	uiccqrtr "github.com/damonto/uicc-go/qualcomm/qrtr"
-	uiccuim "github.com/damonto/uicc-go/qualcomm/uim"
+	uiccqmi "github.com/damonto/uicc-go/qcom/qmi"
+	uiccqrtr "github.com/damonto/uicc-go/qcom/qrtr"
+	uiccuim "github.com/damonto/uicc-go/qcom/uim"
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/vowifi-go"
@@ -609,13 +609,13 @@ func openDriver(ctx context.Context, opt options) (usimcard.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening QMI driver: -device is required")
 		}
-		drv, err := openQualcommQMIReader(ctx, opt.device, opt.slot)
+		drv, err := openQCOMQMIReader(ctx, opt.device, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QMI driver: %w", err)
 		}
 		return drv, nil
 	case "qrtr":
-		drv, err := openQualcommQRTRReader(ctx, opt.slot)
+		drv, err := openQCOMQRTRReader(ctx, opt.slot)
 		if err != nil {
 			return nil, fmt.Errorf("opening QRTR driver: %w", err)
 		}
@@ -633,8 +633,8 @@ func openAPDUReader(tx usimcard.Transmitter) (usimcard.Reader, error) {
 	return reader, nil
 }
 
-func openQualcommQMIReader(ctx context.Context, device string, slot int) (usimcard.Reader, error) {
-	qmiSlot, err := qualcommSlot(slot)
+func openQCOMQMIReader(ctx context.Context, device string, slot int) (usimcard.Reader, error) {
+	qmiSlot, err := qcomSlot(slot)
 	if err != nil {
 		return nil, err
 	}
@@ -649,11 +649,11 @@ func openQualcommQMIReader(ctx context.Context, device string, slot int) (usimca
 	if err := reader.ActivateSlot(ctx); err != nil {
 		return nil, errors.Join(err, reader.Close())
 	}
-	return openQualcommAdapter(reader)
+	return openQCOMAdapter(reader)
 }
 
-func openQualcommQRTRReader(ctx context.Context, slot int) (usimcard.Reader, error) {
-	qmiSlot, err := qualcommSlot(slot)
+func openQCOMQRTRReader(ctx context.Context, slot int) (usimcard.Reader, error) {
+	qmiSlot, err := qcomSlot(slot)
 	if err != nil {
 		return nil, err
 	}
@@ -668,18 +668,18 @@ func openQualcommQRTRReader(ctx context.Context, slot int) (usimcard.Reader, err
 	if err := reader.ActivateSlot(ctx); err != nil {
 		return nil, errors.Join(err, reader.Close())
 	}
-	return openQualcommAdapter(reader)
+	return openQCOMAdapter(reader)
 }
 
-func openQualcommAdapter(reader *uiccuim.Reader) (usimcard.Reader, error) {
-	adapter, err := usim.NewQualcomm(reader)
+func openQCOMAdapter(reader *uiccuim.Reader) (usimcard.Reader, error) {
+	adapter, err := usim.NewQCOM(reader)
 	if err != nil {
 		return nil, errors.Join(err, reader.Close())
 	}
 	return adapter, nil
 }
 
-func qualcommSlot(slot int) (uint8, error) {
+func qcomSlot(slot int) (uint8, error) {
 	if slot < 1 || slot > 5 {
 		return 0, fmt.Errorf("slot %d is out of range", slot)
 	}

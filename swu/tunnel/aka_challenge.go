@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/damonto/uicc-go/usim"
@@ -37,15 +38,6 @@ func akaPrimeKDFValues(attrs []eapaka.AKAAttribute) ([]uint16, error) {
 		values = append(values, kdf.Version)
 	}
 	return values, nil
-}
-
-func uint16sContain(values []uint16, value uint16) bool {
-	for _, candidate := range values {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
 }
 
 func uint16sHaveDuplicate(values []uint16) bool {
@@ -135,7 +127,7 @@ func (f *akaAuthFlow) akaPrimeKDFNegotiationResponse(message eapaka.AKAMessage) 
 	if kdfs[0] == akaPrimeKDFDefault {
 		return akaResponse{}, false, nil
 	}
-	if !uint16sContain(kdfs[1:], akaPrimeKDFDefault) {
+	if !slices.Contains(kdfs[1:], akaPrimeKDFDefault) {
 		return f.buildAKAPrimeAuthenticationReject(message.Identifier)
 	}
 	data, err := eapaka.BuildAKAPrimeKDFSelection(message.Identifier, akaPrimeKDFDefault)

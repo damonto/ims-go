@@ -138,3 +138,10 @@ func packetSPI(packet []byte) uint32 {
 	}
 	return binary.BigEndian.Uint32(packet[:4])
 }
+
+func packetESPSequence(packet []byte) (uint32, bool) {
+	if len(packet) < 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(packet[4:8]), true
+}

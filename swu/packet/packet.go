@@ -68,6 +68,7 @@ type TCPSegment struct {
 	Ack     uint32
 	Flags   byte
 	Window  uint16
+	MSS     uint16
 	Payload []byte
 }
 
@@ -396,6 +397,9 @@ func decodeIPv4Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) 
 	if ihl < 20 || len(packet) < ihl {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid header length")
 	}
+	if ipv4HeaderChecksum(packet[:ihl]) != 0 {
+		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid header checksum")
+	}
 	total := int(binary.BigEndian.Uint16(packet[2:4]))
 	if total < ihl || len(packet) < total {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid total length")
@@ -418,14 +422,24 @@ func decodeUDPSegment(srcIP, dstIP net.IP, payload []byte) (UDPSegment, error) {
 	if len(payload) < 8 {
 		return UDPSegment{}, errors.New("parsing udp segment: packet too short")
 	}
+	version, src, dst, validateChecksum, err := transportChecksumContext(srcIP, dstIP)
+	if err != nil {
+		return UDPSegment{}, fmt.Errorf("parsing udp segment: %w", err)
+	}
 	length := int(binary.BigEndian.Uint16(payload[4:6]))
 	if length < 8 || len(payload) < length {
 		return UDPSegment{}, errors.New("parsing udp segment: invalid udp length")
 	}
+	wire := payload[:length]
+	if validateChecksum {
+		if err := validateUDPChecksum(version, src, dst, wire); err != nil {
+			return UDPSegment{}, err
+		}
+	}
 	return UDPSegment{
-		Src:     &net.UDPAddr{IP: append(net.IP(nil), srcIP...), Port: int(binary.BigEndian.Uint16(payload[0:2]))},
-		Dst:     &net.UDPAddr{IP: append(net.IP(nil), dstIP...), Port: int(binary.BigEndian.Uint16(payload[2:4]))},
-		Payload: append([]byte(nil), payload[8:length]...),
+		Src:     &net.UDPAddr{IP: src, Port: int(binary.BigEndian.Uint16(wire[0:2]))},
+		Dst:     &net.UDPAddr{IP: dst, Port: int(binary.BigEndian.Uint16(wire[2:4]))},
+		Payload: append([]byte(nil), wire[8:]...),
 	}, nil
 }
 
@@ -433,17 +447,26 @@ func decodeTCPSegment(srcIP, dstIP net.IP, payload []byte) (TCPSegment, error) {
 	if len(payload) < 20 {
 		return TCPSegment{}, errors.New("parsing tcp segment: packet too short")
 	}
+	version, src, dst, validateChecksum, err := transportChecksumContext(srcIP, dstIP)
+	if err != nil {
+		return TCPSegment{}, fmt.Errorf("parsing tcp segment: %w", err)
+	}
 	offset := int(payload[12]>>4) * 4
 	if offset < 20 || len(payload) < offset {
 		return TCPSegment{}, errors.New("parsing tcp segment: invalid data offset")
 	}
+	if validateChecksum && tcpSegmentChecksum(version, src, dst, payload) != 0 {
+		return TCPSegment{}, errors.New("parsing tcp segment: invalid checksum")
+	}
+	options := payload[20:offset]
 	return TCPSegment{
-		Src:     &net.TCPAddr{IP: append(net.IP(nil), srcIP...), Port: int(binary.BigEndian.Uint16(payload[0:2]))},
-		Dst:     &net.TCPAddr{IP: append(net.IP(nil), dstIP...), Port: int(binary.BigEndian.Uint16(payload[2:4]))},
+		Src:     &net.TCPAddr{IP: src, Port: int(binary.BigEndian.Uint16(payload[0:2]))},
+		Dst:     &net.TCPAddr{IP: dst, Port: int(binary.BigEndian.Uint16(payload[2:4]))},
 		Seq:     binary.BigEndian.Uint32(payload[4:8]),
 		Ack:     binary.BigEndian.Uint32(payload[8:12]),
 		Flags:   payload[13],
 		Window:  binary.BigEndian.Uint16(payload[14:16]),
+		MSS:     tcpMSSOption(options),
 		Payload: append([]byte(nil), payload[offset:]...),
 	}, nil
 }
@@ -465,6 +488,17 @@ func normalizeIPPair(srcIP, dstIP net.IP, version int) (int, net.IP, net.IP, err
 	default:
 		return 0, nil, nil, errors.New("normalizing ip packet: mismatched ip family")
 	}
+}
+
+func transportChecksumContext(srcIP, dstIP net.IP) (int, net.IP, net.IP, bool, error) {
+	if len(srcIP) == 0 && len(dstIP) == 0 {
+		return 0, nil, nil, false, nil
+	}
+	version, src, dst, err := normalizeIPPair(srcIP, dstIP, 0)
+	if err != nil {
+		return 0, nil, nil, false, err
+	}
+	return version, src, dst, true, nil
 }
 
 func decodeOpaqueESPPacket(data []byte) (esp.ESPPacket, error) {
@@ -504,6 +538,31 @@ func padTCPOptions(options []byte) []byte {
 	return padded
 }
 
+func tcpMSSOption(options []byte) uint16 {
+	for i := 0; i < len(options); {
+		kind := options[i]
+		switch kind {
+		case 0:
+			return 0
+		case 1:
+			i++
+			continue
+		}
+		if i+1 >= len(options) {
+			return 0
+		}
+		length := int(options[i+1])
+		if length < 2 || i+length > len(options) {
+			return 0
+		}
+		if kind == 2 && length == 4 {
+			return binary.BigEndian.Uint16(options[i+2 : i+4])
+		}
+		i += length
+	}
+	return 0
+}
+
 func ipv4HeaderChecksum(header []byte) uint16 {
 	return checksum(header)
 }
@@ -535,6 +594,26 @@ func udpWireChecksum(sum uint16) uint16 {
 	return sum
 }
 
+func validateUDPChecksum(version int, src, dst net.IP, udp []byte) error {
+	wireChecksum := binary.BigEndian.Uint16(udp[6:8])
+	if wireChecksum == 0 {
+		if version == IPVersion4 {
+			return nil
+		}
+		return errors.New("parsing udp segment: checksum is zero")
+	}
+	var got uint16
+	if version == IPVersion4 {
+		got = udpChecksumIPv4(src.To4(), dst.To4(), udp)
+	} else {
+		got = udpChecksumIPv6(src.To16(), dst.To16(), udp)
+	}
+	if got != 0 {
+		return errors.New("parsing udp segment: invalid checksum")
+	}
+	return nil
+}
+
 func tcpChecksumIPv4(src, dst net.IP, tcp []byte) uint16 {
 	pseudo := make([]byte, 12+len(tcp))
 	copy(pseudo[0:4], src)
@@ -553,6 +632,13 @@ func tcpChecksumIPv6(src, dst net.IP, tcp []byte) uint16 {
 	pseudo[39] = ProtocolTCP
 	copy(pseudo[40:], tcp)
 	return checksum(pseudo)
+}
+
+func tcpSegmentChecksum(version int, src, dst net.IP, tcp []byte) uint16 {
+	if version == IPVersion4 {
+		return tcpChecksumIPv4(src.To4(), dst.To4(), tcp)
+	}
+	return tcpChecksumIPv6(src.To16(), dst.To16(), tcp)
 }
 
 func checksum(data []byte) uint16 {

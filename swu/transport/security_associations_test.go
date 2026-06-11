@@ -58,6 +58,27 @@ func TestSecurityAssociationsInboundReplaySharedBySA(t *testing.T) {
 	}
 }
 
+func TestSecurityAssociationsInboundReplayPrecheckDoesNotAdvanceWindow(t *testing.T) {
+	associations := NewSecurityAssociations()
+	codec := esp.Codec{SPI: 0x10203040, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: []byte("0123456789abcdef")}
+
+	if !associations.mayAcceptInboundESP(codec, 1) {
+		t.Fatal("mayAcceptInboundESP() first = false, want true")
+	}
+	if !associations.mayAcceptInboundESP(codec, 1) {
+		t.Fatal("mayAcceptInboundESP() second = false, want true before commit")
+	}
+	if !associations.acceptInboundESP(codec, 1) {
+		t.Fatal("acceptInboundESP() first = false, want true")
+	}
+	if associations.mayAcceptInboundESP(codec, 1) {
+		t.Fatal("mayAcceptInboundESP() duplicate = true, want false after commit")
+	}
+	if associations.acceptInboundESP(codec, 1) {
+		t.Fatal("acceptInboundESP() duplicate = true, want false")
+	}
+}
+
 func TestSecurityAssociationsZeroValue(t *testing.T) {
 	var associations SecurityAssociations
 	codec := esp.Codec{SPI: 0x10203040, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: []byte("0123456789abcdef")}

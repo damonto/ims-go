@@ -17,7 +17,7 @@ func (w *ReplayWindow) Reset() {
 }
 
 func (w *ReplayWindow) Accept(sequence uint32) bool {
-	if sequence == 0 {
+	if !w.WouldAccept(sequence) {
 		return false
 	}
 	if !w.initialized {
@@ -37,6 +37,21 @@ func (w *ReplayWindow) Accept(sequence uint32) bool {
 		return true
 	}
 	delta := w.highest - sequence
+	w.bitmap |= uint64(1) << delta
+	return true
+}
+
+func (w ReplayWindow) WouldAccept(sequence uint32) bool {
+	if sequence == 0 {
+		return false
+	}
+	if !w.initialized {
+		return true
+	}
+	if sequence > w.highest {
+		return true
+	}
+	delta := w.highest - sequence
 	if delta >= espReplayWindowSize {
 		return false
 	}
@@ -44,7 +59,6 @@ func (w *ReplayWindow) Accept(sequence uint32) bool {
 	if w.bitmap&bit != 0 {
 		return false
 	}
-	w.bitmap |= bit
 	return true
 }
 
