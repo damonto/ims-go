@@ -611,6 +611,164 @@ func TestNotifyRegInfoRefreshesRegistrationExpires(t *testing.T) {
 	}
 }
 
+func TestNotifyRegInfoMatchesTokenizedContactBySIPInstance(t *testing.T) {
+	tests := []struct {
+		name           string
+		contactState   string
+		contactEvent   string
+		wantRegistered bool
+		wantEvent      error
+	}{
+		{
+			name:           "active",
+			contactState:   "active",
+			contactEvent:   "registered",
+			wantRegistered: true,
+		},
+		{
+			name:         "terminated",
+			contactState: "terminated",
+			contactEvent: "deactivated",
+			wantEvent:    errNetworkDeregistered,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{IMEI: "869710031623444"}, transport, stubCard{})
+			svc.setRegistered(true)
+
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			notify.Headers.Add("Event", "reg")
+			notify.Headers.Add("Content-Type", "application/reginfo+xml")
+			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="%s" event="%s" expires="3600">
+      <uri>sip:192048834622471@10.160.92.1:5060;transport=udp;EriBindingId=192048834622471;eribind-generated-at=10.160.92.1</uri>
+      <unknown-param name="+sip.instance">&quot;&lt;urn:gsma:imei:869710031623444&gt;&quot; </unknown-param>
+    </contact>
+  </registration>
+</reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.contactEvent))
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			if got := svc.State().Registered; got != tt.wantRegistered {
+				t.Fatalf("Registered = %v, want %v", got, tt.wantRegistered)
+			}
+			if tt.wantEvent != nil {
+				expectRegistrationEvent(t, svc, tt.wantEvent)
+			} else {
+				expectNoRegistrationEvent(t, svc)
+			}
+			if got := countWrites(transport); got != 1 {
+				t.Fatalf("write count = %d, want NOTIFY 200 response", got)
+			}
+		})
+	}
+}
+
+func TestNotifyRegInfoMaintainsTableAcrossPartialUpdates(t *testing.T) {
+	transport := newTCPTransport(5062, 5060)
+	svc := newTestService(t, Config{}, transport, stubCard{})
+	svc.setRegistered(true)
+	ownAOR := svc.State().PublicIdentity
+	ownContact := svc.currentRegisterContactURI()
+
+	tests := []struct {
+		name           string
+		body           string
+		wantRegistered bool
+		wantExpires    time.Duration
+		wantEvent      error
+	}{
+		{
+			name: "full seeds own contact",
+			body: fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="registered" expires="120">
+      <uri>%s</uri>
+    </contact>
+  </registration>
+</reginfo>`, ownAOR, ownContact),
+			wantRegistered: true,
+			wantExpires:    2 * time.Minute,
+		},
+		{
+			name: "partial foreign contact keeps own contact",
+			body: `<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="partial">
+  <registration aor="sip:other@example.com" id="reg-2" state="active">
+    <contact id="contact-2" state="active" event="registered" expires="300">
+      <uri>sip:other@192.0.2.10:5060</uri>
+    </contact>
+  </registration>
+</reginfo>`,
+			wantRegistered: true,
+			wantExpires:    2 * time.Minute,
+		},
+		{
+			name: "partial own contact refreshes expires",
+			body: fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="3" state="partial">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="shortened" expires="60">
+      <uri>%s</uri>
+    </contact>
+  </registration>
+</reginfo>`, ownAOR, ownContact),
+			wantRegistered: true,
+			wantExpires:    time.Minute,
+		},
+		{
+			name: "partial own contact expired requires initial registration",
+			body: fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="4" state="partial">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="terminated" event="expired">
+      <uri>%s</uri>
+    </contact>
+  </registration>
+</reginfo>`, ownAOR, ownContact),
+			wantEvent: errInitialRegistrationNeeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			notify.Headers.Add("Event", "reg")
+			notify.Headers.Add("Content-Type", "application/reginfo+xml")
+			notify.Body = []byte(tt.body)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			if got := svc.State().Registered; got != tt.wantRegistered {
+				t.Fatalf("Registered = %v, want %v", got, tt.wantRegistered)
+			}
+			if tt.wantExpires > 0 && svc.State().RegisterExpires != tt.wantExpires {
+				t.Fatalf("RegisterExpires = %v, want %v", svc.State().RegisterExpires, tt.wantExpires)
+			}
+			if tt.wantEvent != nil {
+				expectRegistrationEvent(t, svc, tt.wantEvent)
+			} else {
+				expectNoRegistrationEvent(t, svc)
+			}
+		})
+	}
+}
+
 func TestNotifyRegInfoAcceptsContentTypeParameters(t *testing.T) {
 	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
@@ -640,16 +798,17 @@ func TestNotifyRegInfoAcceptsContentTypeParameters(t *testing.T) {
 	}
 }
 
-func TestNotifyRegInfoTerminatedContactRequiresInitialRegistration(t *testing.T) {
+func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) {
 	tests := []struct {
-		name  string
-		event string
+		name      string
+		event     string
+		wantEvent error
 	}{
-		{name: "deactivated", event: "deactivated"},
-		{name: "expired", event: "expired"},
-		{name: "unregistered", event: "unregistered"},
-		{name: "rejected", event: "rejected"},
-		{name: "probation", event: "probation"},
+		{name: "deactivated", event: "deactivated", wantEvent: errNetworkDeregistered},
+		{name: "rejected", event: "rejected", wantEvent: errNetworkDeregistered},
+		{name: "expired", event: "expired", wantEvent: errInitialRegistrationNeeded},
+		{name: "unregistered", event: "unregistered", wantEvent: errInitialRegistrationNeeded},
+		{name: "probation", event: "probation", wantEvent: errInitialRegistrationNeeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -662,7 +821,7 @@ func TestNotifyRegInfoTerminatedContactRequiresInitialRegistration(t *testing.T)
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
 			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
-  <registration aor="%s" id="reg-1" state="terminated">
+  <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="terminated" event="%s">
       <uri>%s</uri>
     </contact>
@@ -677,12 +836,52 @@ func TestNotifyRegInfoTerminatedContactRequiresInitialRegistration(t *testing.T)
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
-			expectRegistrationEvent(t, svc, errNetworkDeregistered)
+			expectRegistrationEvent(t, svc, tt.wantEvent)
 			if svc.State().Registered {
 				t.Fatal("Registered = true, want false")
 			}
 			if got := countWrites(transport); got != 1 {
 				t.Fatalf("write count = %d, want NOTIFY 200 response", got)
+			}
+		})
+	}
+}
+
+func TestNotifyRegInfoTerminatedRegistrationPublishesRegistrationEvent(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     string
+		wantEvent error
+	}{
+		{name: "deactivated", event: "deactivated", wantEvent: errNetworkDeregistered},
+		{name: "rejected", event: "rejected", wantEvent: errNetworkDeregistered},
+		{name: "expired", event: "expired", wantEvent: errInitialRegistrationNeeded},
+		{name: "unknown", event: "unknown", wantEvent: errInitialRegistrationNeeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			svc.setRegistered(true)
+
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			notify.Headers.Add("Event", "reg")
+			notify.Headers.Add("Content-Type", "application/reginfo+xml")
+			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
+  <registration aor="%s" id="reg-1" state="terminated" event="%s"/>
+</reginfo>`, svc.State().PublicIdentity, tt.event))
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			expectRegistrationEvent(t, svc, tt.wantEvent)
+			if svc.State().Registered {
+				t.Fatal("Registered = true, want false")
 			}
 		})
 	}
@@ -713,7 +912,7 @@ func TestNotifyRegInfoFullStateWithoutOwnContactRequiresInitialRegistration(t *t
 	if !handled {
 		t.Fatal("HandleRequest() handled = false, want true")
 	}
-	expectRegistrationEvent(t, svc, errNetworkDeregistered)
+	expectRegistrationEvent(t, svc, errInitialRegistrationNeeded)
 	if svc.State().Registered {
 		t.Fatal("Registered = true, want false")
 	}
@@ -744,7 +943,7 @@ func TestNotifyRegInfoFullStateWithoutOwnRegistrationRequiresInitialRegistration
 	if !handled {
 		t.Fatal("HandleRequest() handled = false, want true")
 	}
-	expectRegistrationEvent(t, svc, errNetworkDeregistered)
+	expectRegistrationEvent(t, svc, errInitialRegistrationNeeded)
 	if svc.State().Registered {
 		t.Fatal("Registered = true, want false")
 	}
@@ -789,7 +988,7 @@ func TestNotifyRegInfoEmptyFullStateRequiresInitialRegistration(t *testing.T) {
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
-			expectRegistrationEvent(t, svc, errNetworkDeregistered)
+			expectRegistrationEvent(t, svc, errInitialRegistrationNeeded)
 			if svc.State().Registered {
 				t.Fatal("Registered = true, want false")
 			}

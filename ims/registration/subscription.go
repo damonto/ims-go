@@ -26,6 +26,13 @@ type subscriptionDialog struct {
 	routeSet     []string
 }
 
+type regInfoRegistrationEntry struct {
+	AOR      string
+	State    string
+	Event    string
+	Contacts map[string]regInfoContact
+}
+
 func (s *Service) currentSubscribeExpires() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,10 +81,11 @@ func (s *Service) resetSubscription() {
 	s.mu.Unlock()
 }
 
-func (s *Service) resetRegInfoVersion() {
+func (s *Service) resetRegInfoState() {
 	s.mu.Lock()
 	s.regInfoVersion = 0
 	s.regInfoVersionSet = false
+	s.regInfoRegistrations = make(map[string]regInfoRegistrationEntry)
 	s.mu.Unlock()
 }
 
@@ -227,7 +235,7 @@ func (s *Service) applySubscriptionStateFromNotify(msg sip.Message) {
 	}
 	if strings.EqualFold(subscription.state, subscriptionStateTerminated) {
 		s.resetSubscription()
-		s.resetRegInfoVersion()
+		s.resetRegInfoState()
 		s.requestSubscribeRefresh()
 	}
 }
@@ -248,14 +256,11 @@ func (s *Service) applyRegInfoNotify(msg sip.Message) error {
 	if !ok {
 		return nil
 	}
-	apply, refresh := s.shouldApplyRegInfo(info)
+	refresh, err := s.applyRegInfo(info)
 	if refresh {
 		s.requestSubscribeRefresh()
 	}
-	if !apply {
-		return nil
-	}
-	return s.applyRegInfo(info)
+	return err
 }
 
 const subscriptionStateTerminated = "terminated"
@@ -284,66 +289,188 @@ func regInfoContentTypeMatches(value string) bool {
 	return strings.EqualFold(mediaType, regInfoContentType)
 }
 
-func (s *Service) shouldApplyRegInfo(info regInfo) (apply bool, refresh bool) {
-	version, ok := info.version()
-	if !ok {
-		return true, false
-	}
+func (s *Service) applyRegInfo(info regInfo) (bool, error) {
 	s.mu.Lock()
+	var versionGap bool
+	var currentVersion, receivedVersion int
+	defer func() {
+		if versionGap {
+			s.logger.Debug("registration event version gap", "current", currentVersion, "received", receivedVersion)
+		}
+	}()
 	defer s.mu.Unlock()
-	if !s.regInfoVersionSet {
-		s.regInfoVersion = version
-		s.regInfoVersionSet = true
-		return true, false
-	}
-	if version <= s.regInfoVersion {
-		return false, false
-	}
-	refresh = version > s.regInfoVersion+1
-	if version > s.regInfoVersion+1 {
-		s.logger.Debug("registration event version gap", "current", s.regInfoVersion, "received", version)
-	}
-	s.regInfoVersion = version
-	return true, refresh
-}
 
-func (s *Service) applyRegInfo(info regInfo) error {
-	state := s.State()
-	contactURI := s.currentRegisterContactURI()
-	foundRegistration := false
+	version, ok := info.version()
+	refresh := false
+	if ok {
+		if !s.regInfoVersionSet {
+			s.regInfoVersion = version
+			s.regInfoVersionSet = true
+		} else if version <= s.regInfoVersion {
+			return false, nil
+		} else {
+			refresh = version > s.regInfoVersion+1
+			if refresh {
+				versionGap = true
+				currentVersion = s.regInfoVersion
+				receivedVersion = version
+			}
+			s.regInfoVersion = version
+		}
+	}
+
+	s.updateRegInfoTable(info)
+	state := s.state
+	port := s.flow.RegisterPort
+	if s.flow.MessagePort != 0 {
+		port = s.flow.MessagePort
+	}
+	contactURI := contactURI(s.flow.ContactHost, port)
+	fullState := strings.EqualFold(strings.TrimSpace(info.State), regInfoStateFull)
+	foundOwnContact := false
 	foundActiveContact := false
+	var initialRequired bool
+	var initialReason string
 
-	for _, reg := range info.Registration {
+	for _, reg := range s.regInfoRegistrations {
 		if !samePublicIdentity(reg.AOR, state) {
 			continue
 		}
-		foundRegistration = true
-		for _, contact := range reg.Contact {
-			if !sameContactURI(contact.URI, contactURI) {
+		if reg.terminatedByNetwork() {
+			s.state.Registered = false
+			return refresh, networkDeregisteredError(reg.Event)
+		}
+		if reg.terminated() {
+			initialRequired = true
+			initialReason = "registration terminated"
+			continue
+		}
+		for _, contact := range reg.Contacts {
+			if !contactMatchesCurrentBinding(contact, state, contactURI) {
 				continue
 			}
+			foundOwnContact = true
 			if contact.active() {
 				foundActiveContact = true
-				s.setRegistered(true)
+				s.state.Registered = true
 				if expires, ok := contact.expiresDuration(); ok {
-					s.setRegisterExpires(expires)
+					s.state.RegisterExpires = expires
 				}
 				continue
 			}
 			if contact.terminated() {
-				s.setRegistered(false)
-				return networkDeregisteredError(contact.Event)
+				if contact.terminatedByNetwork() {
+					s.state.Registered = false
+					return refresh, networkDeregisteredError(contact.Event)
+				}
+				initialRequired = true
+				initialReason = "registration contact terminated"
 			}
 		}
 	}
 
+	if (initialRequired && !foundActiveContact) || (fullState && (!foundOwnContact || !foundActiveContact)) {
+		s.state.Registered = false
+		if initialReason == "" {
+			initialReason = "registration event full state missing current contact"
+		}
+		return refresh, initialRegistrationRequiredFromRegInfo(initialReason)
+	}
+	return refresh, nil
+}
+
+func (s *Service) updateRegInfoTable(info regInfo) {
 	if strings.EqualFold(strings.TrimSpace(info.State), regInfoStateFull) {
-		if !foundRegistration || !foundActiveContact {
-			s.setRegistered(false)
-			return errNetworkDeregistered
+		s.regInfoRegistrations = make(map[string]regInfoRegistrationEntry, len(info.Registration))
+	}
+	for _, reg := range info.Registration {
+		id := strings.TrimSpace(reg.ID)
+		entry, ok := s.regInfoRegistrations[id]
+		if !ok {
+			entry = regInfoRegistrationEntry{
+				Contacts: make(map[string]regInfoContact, len(reg.Contact)),
+			}
+		}
+		entry.AOR = strings.TrimSpace(reg.AOR)
+		entry.State = strings.TrimSpace(reg.State)
+		entry.Event = strings.TrimSpace(reg.Event)
+		if entry.Contacts == nil {
+			entry.Contacts = make(map[string]regInfoContact, len(reg.Contact))
+		}
+		for _, contact := range reg.Contact {
+			entry.Contacts[strings.TrimSpace(contact.ID)] = cloneRegInfoContact(contact)
+		}
+		s.regInfoRegistrations[id] = entry
+	}
+}
+
+func cloneRegInfoContact(contact regInfoContact) regInfoContact {
+	contact.Unknown = append([]regInfoUnknownParam(nil), contact.Unknown...)
+	return contact
+}
+
+func (r regInfoRegistrationEntry) terminatedByNetwork() bool {
+	return r.terminated() && networkDeregistrationEvent(r.Event)
+}
+
+func (r regInfoRegistrationEntry) terminated() bool {
+	return strings.EqualFold(strings.TrimSpace(r.State), regInfoRegistrationStateTerminated)
+}
+
+func (c regInfoContact) terminatedByNetwork() bool {
+	return c.terminated() && networkDeregistrationEvent(c.Event)
+}
+
+func networkDeregistrationEvent(event string) bool {
+	switch strings.ToLower(strings.TrimSpace(event)) {
+	case regInfoContactEventDeactivated, regInfoContactEventRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+func initialRegistrationRequiredFromRegInfo(reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return &initialRegistrationRequired{}
+	}
+	return fmt.Errorf("%w: %s", &initialRegistrationRequired{}, reason)
+}
+
+func contactMatchesCurrentBinding(contact regInfoContact, state State, contactURI string) bool {
+	if sameContactURI(contact.URI, contactURI) {
+		return true
+	}
+	instance := contactSIPInstance(contact)
+	return instance != "" && strings.EqualFold(instance, currentSIPInstance(state))
+}
+
+func contactSIPInstance(contact regInfoContact) string {
+	for _, param := range contact.Unknown {
+		if strings.EqualFold(strings.TrimSpace(param.Name), "+sip.instance") {
+			return normalizeSIPInstance(param.Value)
 		}
 	}
-	return nil
+	return ""
+}
+
+func currentSIPInstance(state State) string {
+	imei := strings.TrimSpace(state.IMEI)
+	if imei == "" {
+		return ""
+	}
+	return "urn:gsma:imei:" + imei
+}
+
+func normalizeSIPInstance(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"`)
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	return value
 }
 
 func networkDeregisteredError(event string) error {

@@ -44,16 +44,23 @@ type regInfoRegistration struct {
 	ID      string           `xml:"id,attr"`
 	AOR     string           `xml:"aor,attr"`
 	State   string           `xml:"state,attr"`
+	Event   string           `xml:"event,attr"`
 	Contact []regInfoContact `xml:"urn:ietf:params:xml:ns:reginfo contact"`
 }
 
 type regInfoContact struct {
-	ID          string `xml:"id,attr"`
-	State       string `xml:"state,attr"`
-	Event       string `xml:"event,attr"`
-	ExpiresAttr string `xml:"expires,attr"`
-	URI         string `xml:"urn:ietf:params:xml:ns:reginfo uri"`
-	Expires     string `xml:"urn:ietf:params:xml:ns:reginfo expires"`
+	ID          string                `xml:"id,attr"`
+	State       string                `xml:"state,attr"`
+	Event       string                `xml:"event,attr"`
+	ExpiresAttr string                `xml:"expires,attr"`
+	URI         string                `xml:"urn:ietf:params:xml:ns:reginfo uri"`
+	Expires     string                `xml:"urn:ietf:params:xml:ns:reginfo expires"`
+	Unknown     []regInfoUnknownParam `xml:"urn:ietf:params:xml:ns:reginfo unknown-param"`
+}
+
+type regInfoUnknownParam struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:",chardata"`
 }
 
 func parseRegInfo(body []byte) (regInfo, bool, error) {

@@ -150,6 +150,7 @@ func (s *Service) applyRegisterExpires(msg sip.Message) {
 }
 
 func (s *Service) applyRegisterSuccess(msg sip.Message) {
+	s.resetRegInfoState()
 	s.applyAssociatedURI(msg)
 	s.applyServiceRoutes(msg)
 	s.applyAuthenticationInfo(msg)

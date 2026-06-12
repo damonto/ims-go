@@ -119,6 +119,7 @@ type Service struct {
 	subscription         subscriptionDialog
 	regInfoVersion       int
 	regInfoVersionSet    bool
+	regInfoRegistrations map[string]regInfoRegistrationEntry
 
 	registrationEvents        chan error
 	subscribeRefreshRequests  chan struct{}
@@ -174,6 +175,7 @@ func New(cfg Config, sess *session.Session, card Card) (*Service, error) {
 		callID:                   callID,
 		sessionID:                sessionID,
 		tag:                      tag,
+		regInfoRegistrations:     make(map[string]regInfoRegistrationEntry),
 		registrationEvents:       make(chan error, 1),
 		subscribeRefreshRequests: make(chan struct{}, 1),
 		registrationGate:         make(chan struct{}, 1),

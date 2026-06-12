@@ -80,7 +80,7 @@ func (s *Service) subscribe(ctx context.Context, retried bool) error {
 	if err != nil {
 		if subscription.active {
 			s.resetSubscription()
-			s.resetRegInfoVersion()
+			s.resetRegInfoState()
 		}
 		return fmt.Errorf("subscribing IMS registration: %w", err)
 	}
@@ -95,7 +95,7 @@ func (s *Service) subscribe(ctx context.Context, retried bool) error {
 	}
 	if subscription.active && resp.StatusCode() == sipStatusCallTransactionDoesNotExist && !retried {
 		s.resetSubscription()
-		s.resetRegInfoVersion()
+		s.resetRegInfoState()
 		return s.subscribe(ctx, true)
 	}
 	if resp.StatusCode() == sipStatusServiceUnavailable {

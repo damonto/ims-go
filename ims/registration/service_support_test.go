@@ -307,3 +307,12 @@ func expectRegistrationEvent(t *testing.T, svc *Service, want error) {
 		t.Fatalf("registration event missing, want %v", want)
 	}
 }
+
+func expectNoRegistrationEvent(t *testing.T, svc *Service) {
+	t.Helper()
+	select {
+	case err := <-svc.registrationEvents:
+		t.Fatalf("registration event = %v, want none", err)
+	default:
+	}
+}

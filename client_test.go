@@ -2635,7 +2635,7 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	notify.Headers.Add("Content-Type", "application/reginfo+xml")
 	notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
-  <registration aor="%s" id="reg-1" state="terminated">
+  <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="terminated" event="deactivated">
       <uri>%s</uri>
     </contact>
