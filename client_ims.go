@@ -138,6 +138,8 @@ func (c *Client) buildIMSTransport(ctx context.Context, setup *connectSetup, tun
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Mode:          cfg.Mode,
+			Salt:          cfg.Salt,
 			Associations:  associations,
 		})
 	}
@@ -155,6 +157,8 @@ func (c *Client) buildIMSTransport(ctx context.Context, setup *connectSetup, tun
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Mode:          cfg.Mode,
+			Salt:          cfg.Salt,
 			Associations:  associations,
 		})
 	}
@@ -182,6 +186,8 @@ func (c *Client) buildIMSTransport(ctx context.Context, setup *connectSetup, tun
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Mode:          cfg.Mode,
+			Salt:          cfg.Salt,
 			Associations:  associations,
 		})
 	}
@@ -200,6 +206,8 @@ func (c *Client) buildIMSTransport(ctx context.Context, setup *connectSetup, tun
 			EncryptionKey: cfg.EncryptionKey,
 			Integrity:     cfg.Integrity,
 			IntegrityKey:  cfg.IntegrityKey,
+			Mode:          cfg.Mode,
+			Salt:          cfg.Salt,
 			Associations:  associations,
 		})
 	}

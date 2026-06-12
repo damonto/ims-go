@@ -36,9 +36,74 @@ func TestSecurityAssociationsSharesOutboundSequenceBySA(t *testing.T) {
 	}
 }
 
+func TestSecurityAssociationsKeepsOutboundSequencePerSalt(t *testing.T) {
+	associations := NewSecurityAssociations()
+	base := esp.Codec{
+		SPI:           0x10203040,
+		Encryption:    esp.EncryptionAESGCM,
+		EncryptionKey: []byte("0123456789abcdef"),
+		Integrity:     esp.IntegrityNull,
+	}
+	codecA := base
+	codecA.Salt = [4]byte{0x01, 0x02, 0x03, 0x04}
+	codecB := base
+	codecB.Salt = [4]byte{0x05, 0x06, 0x07, 0x08}
+
+	tests := []struct {
+		name  string
+		codec esp.Codec
+	}{
+		{name: "first salt", codec: codecA},
+		{name: "second salt", codec: codecB},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := associations.sealESP(tt.codec, packet.ProtocolUDP, []byte("payload"))
+			if err != nil {
+				t.Fatalf("sealESP() error = %v", err)
+			}
+			espPacket, err := tt.codec.Decode(wire)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if espPacket.Sequence != 1 {
+				t.Fatalf("sequence = %d, want 1", espPacket.Sequence)
+			}
+		})
+	}
+}
+
 func TestSecurityAssociationsInboundReplaySharedBySA(t *testing.T) {
 	associations := NewSecurityAssociations()
 	codec := esp.Codec{SPI: 0x10203040, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: []byte("0123456789abcdef")}
+
+	tests := []struct {
+		name     string
+		sequence uint32
+		want     bool
+	}{
+		{name: "first packet accepted", sequence: 1, want: true},
+		{name: "duplicate rejected", sequence: 1, want: false},
+		{name: "next packet accepted", sequence: 2, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := associations.acceptInboundESP(codec, tt.sequence); got != tt.want {
+				t.Fatalf("acceptInboundESP() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSecurityAssociationsAEADInboundReplayProtected(t *testing.T) {
+	associations := NewSecurityAssociations()
+	codec := esp.Codec{
+		SPI:           0x10203040,
+		Encryption:    esp.EncryptionAESGCM,
+		EncryptionKey: []byte("0123456789abcdef"),
+		Integrity:     esp.IntegrityNull,
+		Salt:          [4]byte{0x01, 0x02, 0x03, 0x04},
+	}
 
 	tests := []struct {
 		name     string

@@ -1,16 +1,28 @@
 package transport
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/damonto/vowifi-go/swu/esp"
 	"github.com/damonto/vowifi-go/swu/packet"
 	"github.com/damonto/vowifi-go/swu/tunnel"
+)
+
+const (
+	SecureModeTransport    = "trans"
+	SecureModeUDPEncTunnel = "UDP-enc-tun"
+
+	udpEncapsulatedESPPort             = 4500
+	udpEncapsulatedESPKeepalivePayload = 0xff
+	udpEncapsulatedESPKeepaliveTimeout = 2 * time.Second
+	udpEncapsulatedESPKeepaliveTick    = 20 * time.Second
 )
 
 func randomUint32() (uint32, error) {
@@ -29,21 +41,53 @@ func secureEncryption(value string) (string, error) {
 	if strings.EqualFold(value, esp.EncryptionAESCBC) {
 		return esp.EncryptionAESCBC, nil
 	}
+	if strings.EqualFold(value, esp.EncryptionAESGCM) {
+		return esp.EncryptionAESGCM, nil
+	}
 	return "", fmt.Errorf("unsupported encryption %q", value)
 }
 
-func espIntegrityEnabled(value string) bool {
-	return !strings.EqualFold(strings.TrimSpace(value), esp.IntegrityNone)
+func secureMode(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, SecureModeTransport) {
+		return SecureModeTransport, nil
+	}
+	if strings.EqualFold(value, SecureModeUDPEncTunnel) {
+		return SecureModeUDPEncTunnel, nil
+	}
+	return "", fmt.Errorf("unsupported ipsec mode %q", value)
+}
+
+func espReplayProtected(codec esp.Codec) bool {
+	return strings.EqualFold(codec.Encryption, esp.EncryptionAESGCM) || !espIntegrityDisabled(codec.Integrity)
+}
+
+func espIntegrityDisabled(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == esp.IntegrityNone || value == esp.IntegrityNull
 }
 
 func validateSecureESPConfig(encryption, integrity string, encryptionKey, integrityKey []byte) error {
-	if strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityNone) {
+	integrityDisabled := espIntegrityDisabled(integrity)
+	if encryption == esp.EncryptionAESGCM {
+		if !integrityDisabled {
+			return errors.New("AES-GCM requires null integrity")
+		}
+		if len(encryptionKey) == 0 {
+			return errors.New("encryption key is empty")
+		}
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityAESGMAC) && encryption != esp.EncryptionNull {
+		return errors.New("AES-GMAC requires null encryption")
+	}
+	if integrityDisabled {
 		return errors.New("integrity must be enabled")
 	}
 	if encryption == esp.EncryptionAESCBC && len(encryptionKey) == 0 {
 		return errors.New("encryption key is empty")
 	}
-	if espIntegrityEnabled(integrity) && len(integrityKey) == 0 {
+	if len(integrityKey) == 0 {
 		return errors.New("integrity key is empty")
 	}
 	return nil
@@ -53,6 +97,9 @@ func validateSecureSPIs(outbound, inbound uint32) error {
 	if !esp.ValidSPI(outbound) || !esp.ValidSPI(inbound) {
 		return errors.New("spi is reserved")
 	}
+	if outbound == inbound {
+		return errors.New("spi values must be unique")
+	}
 	return nil
 }
 
@@ -61,6 +108,120 @@ func secureAssociations(associations *SecurityAssociations) *SecurityAssociation
 		return associations
 	}
 	return NewSecurityAssociations()
+}
+
+func secureESPCodec(spi uint32, encryption string, encryptionKey []byte, integrity string, integrityKey []byte, salt [4]byte) esp.Codec {
+	return esp.Codec{
+		SPI:           spi,
+		Encryption:    encryption,
+		EncryptionKey: append([]byte(nil), encryptionKey...),
+		Integrity:     integrity,
+		IntegrityKey:  append([]byte(nil), integrityKey...),
+		Salt:          salt,
+	}
+}
+
+func secureInnerPacket(localIP, remoteIP net.IP, mode string, payload []byte) (packet.InnerPacket, error) {
+	switch mode {
+	case SecureModeUDPEncTunnel:
+		outer := packet.UDPSegment{
+			Src:     &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: udpEncapsulatedESPPort},
+			Dst:     &net.UDPAddr{IP: append(net.IP(nil), remoteIP...), Port: udpEncapsulatedESPPort},
+			Payload: append([]byte(nil), payload...),
+		}
+		return packet.InnerPacket{UDP: &outer}, nil
+	case SecureModeTransport:
+		return packet.InnerPacket{
+			IP: packet.IPPacket{
+				SrcIP:    append(net.IP(nil), localIP...),
+				DstIP:    append(net.IP(nil), remoteIP...),
+				Protocol: packet.ProtocolESP,
+				Payload:  append([]byte(nil), payload...),
+			},
+		}, nil
+	default:
+		return packet.InnerPacket{}, fmt.Errorf("building secure inner packet: unsupported ipsec mode %q", mode)
+	}
+}
+
+func secureESPPayload(pkt packet.InnerPacket, mode string) ([]byte, bool) {
+	switch mode {
+	case SecureModeUDPEncTunnel:
+		udp := pkt.UDP
+		if udp == nil {
+			inner, err := packet.DecodePayload(packet.ProtocolUDP, pkt.IP.SrcIP, pkt.IP.DstIP, pkt.IP.Payload)
+			if err != nil {
+				return nil, false
+			}
+			udp = inner.UDP
+		}
+		if udp == nil || udp.Dst == nil || udp.Dst.Port != udpEncapsulatedESPPort || len(udp.Payload) == 0 {
+			return nil, false
+		}
+		if udpEncapsulatedESPKeepalive(udp.Payload) {
+			return nil, false
+		}
+		return udp.Payload, true
+	case SecureModeTransport:
+		if pkt.IP.Protocol != packet.ProtocolESP {
+			return nil, false
+		}
+		return pkt.IP.Payload, true
+	default:
+		return nil, false
+	}
+}
+
+func secureTunnelNextHeader(srcIP, dstIP net.IP) (byte, error) {
+	return (packet.InnerPacket{IP: packet.IPPacket{SrcIP: srcIP, DstIP: dstIP}}).OuterNextHeader()
+}
+
+func udpEncapsulatedESPKeepalive(payload []byte) bool {
+	return len(payload) == 1 && payload[0] == udpEncapsulatedESPKeepalivePayload
+}
+
+func udpEncTunnelKeepalivePacket(localIP, remoteIP net.IP) (packet.InnerPacket, error) {
+	return secureInnerPacket(localIP, remoteIP, SecureModeUDPEncTunnel, []byte{udpEncapsulatedESPKeepalivePayload})
+}
+
+func writeUDPEncTunnelKeepalive(ctx context.Context, session *tunnel.Session, localIP, remoteIP net.IP) error {
+	if session == nil {
+		return errors.New("writing UDP-enc-tun keepalive: session is nil")
+	}
+	inner, err := udpEncTunnelKeepalivePacket(localIP, remoteIP)
+	if err != nil {
+		return fmt.Errorf("writing UDP-enc-tun keepalive: %w", err)
+	}
+	return session.WriteInnerPacket(ctx, inner)
+}
+
+func startUDPEncTunnelKeepalive(done <-chan struct{}, write func(context.Context) error, logErr func(error)) {
+	go func() {
+		ticker := time.NewTicker(udpEncapsulatedESPKeepaliveTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), udpEncapsulatedESPKeepaliveTimeout)
+			err := write(ctx)
+			cancel()
+			if err == nil {
+				continue
+			}
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if logErr != nil {
+				logErr(err)
+			}
+		}
+	}()
 }
 
 func connectedUDPAddrs(s *tunnel.Session) (*net.UDPAddr, *net.UDPAddr, error) {

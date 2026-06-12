@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -78,6 +79,24 @@ type Authorization struct {
 	AUTS               string
 }
 
+var (
+	_ encoding.TextMarshaler   = Param{}
+	_ encoding.TextUnmarshaler = (*Param)(nil)
+	_ fmt.Stringer             = Param{}
+
+	_ encoding.TextMarshaler   = Params{}
+	_ encoding.TextUnmarshaler = (*Params)(nil)
+	_ fmt.Stringer             = Params{}
+
+	_ encoding.TextUnmarshaler = (*Challenge)(nil)
+
+	_ encoding.TextMarshaler   = Info{}
+	_ encoding.TextUnmarshaler = (*Info)(nil)
+
+	_ encoding.TextMarshaler = Authorization{}
+	_ fmt.Stringer           = Authorization{}
+)
+
 type Identity struct {
 	PrivateIdentity string
 	RegisterURI     string
@@ -124,19 +143,33 @@ func NormalizeParam(p Param) (Param, bool) {
 	if p.EAlg == "" {
 		p.EAlg = "null"
 	}
-	if !supportedEncryptionAlg(p.EAlg) || !strings.EqualFold(p.Mod, "trans") || !strings.EqualFold(p.Prot, "esp") {
+	mode, ok := normalizeIPSecMode(p.Mod)
+	if !ok || !strings.EqualFold(p.Prot, "esp") {
+		return Param{}, false
+	}
+	ealg, ok := normalizeEncryptionAlg(p.EAlg)
+	if !ok {
 		return Param{}, false
 	}
 	alg, ok := normalizeIntegrityAlg(p.Alg)
-	if !ok || !validIPPort(p.PortC) || !validIPPort(p.PortS) || !ValidESPSPI(p.SPIC) || !ValidESPSPI(p.SPIS) {
+	if !ok || !validIPPort(p.PortC) || !validIPPort(p.PortS) || !validIPSecSPIs(p.SPIC, p.SPIS) {
+		return Param{}, false
+	}
+	if !compatibleIPSecAlgorithms(alg, ealg) {
 		return Param{}, false
 	}
 	p.Alg = alg
+	p.EAlg = ealg
+	p.Mod = mode
 	return p, true
 }
 
 func ValidESPSPI(spi uint32) bool {
 	return spi >= minUnreservedESPSPI
+}
+
+func validIPSecSPIs(client, server uint32) bool {
+	return ValidESPSPI(client) && ValidESPSPI(server) && client != server
 }
 
 func validIPPort(port int) bool {
@@ -514,18 +547,50 @@ func (p *Param) unmarshalText(text string) error {
 func normalizeIntegrityAlg(alg string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
 	case "hmac-sha-1-96", "hmac-sha1-96":
-		return "hmac-sha1-96", true
+		return "hmac-sha-1-96", true
+	case "aes-gmac":
+		return "aes-gmac", true
+	case "null":
+		return "null", true
 	default:
 		return "", false
 	}
 }
 
-func supportedEncryptionAlg(alg string) bool {
+func normalizeEncryptionAlg(alg string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
-	case "aes-cbc", "null":
-		return true
+	case "aes-cbc":
+		return "aes-cbc", true
+	case "aes-gcm":
+		return "aes-gcm", true
+	case "null":
+		return "null", true
 	default:
-		return false
+		return "", false
+	}
+}
+
+func normalizeIPSecMode(mode string) (string, bool) {
+	switch {
+	case strings.EqualFold(strings.TrimSpace(mode), "trans"):
+		return "trans", true
+	case strings.EqualFold(strings.TrimSpace(mode), "UDP-enc-tun"):
+		return "UDP-enc-tun", true
+	default:
+		return "", false
+	}
+}
+
+func compatibleIPSecAlgorithms(alg, ealg string) bool {
+	switch {
+	case alg == "null":
+		return ealg == "aes-gcm"
+	case ealg == "aes-gcm":
+		return alg == "null"
+	case alg == "aes-gmac":
+		return ealg == "null"
+	default:
+		return alg == "hmac-sha-1-96" && (ealg == "null" || ealg == "aes-cbc")
 	}
 }
 

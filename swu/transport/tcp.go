@@ -82,10 +82,12 @@ type SecureTCPConfig struct {
 	InboundSPI   uint32
 	Encryption   string
 	Integrity    string
+	Mode         string
 	Associations *SecurityAssociations
 
 	EncryptionKey []byte
 	IntegrityKey  []byte
+	Salt          [4]byte
 }
 
 type TCPConn struct {
@@ -99,6 +101,7 @@ type TCPConn struct {
 
 	outboundESP  esp.Codec
 	inboundESP   esp.Codec
+	secureMode   string
 	associations *SecurityAssociations
 
 	mu          sync.Mutex
@@ -162,6 +165,10 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
+	mode, err := secureMode(cfg.Mode)
+	if err != nil {
+		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
+	}
 	if err := validateSecureESPConfig(encryption, cfg.Integrity, cfg.EncryptionKey, cfg.IntegrityKey); err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
@@ -189,8 +196,9 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 		done:            make(chan struct{}),
 		dataACKTimeouts: dataACKTimeouts,
 		associations:    secureAssociations(cfg.Associations),
-		outboundESP:     esp.Codec{SPI: cfg.OutboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
-		inboundESP:      esp.Codec{SPI: cfg.InboundSPI, Encryption: encryption, EncryptionKey: append([]byte(nil), cfg.EncryptionKey...), Integrity: cfg.Integrity, IntegrityKey: append([]byte(nil), cfg.IntegrityKey...)},
+		outboundESP:     secureESPCodec(cfg.OutboundSPI, encryption, cfg.EncryptionKey, cfg.Integrity, cfg.IntegrityKey, cfg.Salt),
+		inboundESP:      secureESPCodec(cfg.InboundSPI, encryption, cfg.EncryptionKey, cfg.Integrity, cfg.IntegrityKey, cfg.Salt),
+		secureMode:      mode,
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
@@ -248,25 +256,18 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
 		}
+		mode, err := secureMode(secure.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
+		}
 		if err := validateSecureESPConfig(encryption, secure.Integrity, secure.EncryptionKey, secure.IntegrityKey); err != nil {
 			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
 		}
 		conn.secure = true
+		conn.secureMode = mode
 		conn.associations = secureAssociations(secure.Associations)
-		conn.outboundESP = esp.Codec{
-			SPI:           secure.OutboundSPI,
-			Encryption:    encryption,
-			EncryptionKey: append([]byte(nil), secure.EncryptionKey...),
-			Integrity:     secure.Integrity,
-			IntegrityKey:  append([]byte(nil), secure.IntegrityKey...),
-		}
-		conn.inboundESP = esp.Codec{
-			SPI:           secure.InboundSPI,
-			Encryption:    encryption,
-			EncryptionKey: append([]byte(nil), secure.EncryptionKey...),
-			Integrity:     secure.Integrity,
-			IntegrityKey:  append([]byte(nil), secure.IntegrityKey...),
-		}
+		conn.outboundESP = secureESPCodec(secure.OutboundSPI, encryption, secure.EncryptionKey, secure.Integrity, secure.IntegrityKey, secure.Salt)
+		conn.inboundESP = secureESPCodec(secure.InboundSPI, encryption, secure.EncryptionKey, secure.Integrity, secure.IntegrityKey, secure.Salt)
 	}
 	attachment, err := s.Attach(conn)
 	if err != nil {
@@ -275,14 +276,18 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 	conn.attachment = attachment
 
 	synTimedOut := false
+	finishDial := func() *TCPConn {
+		conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
+		conn.startUDPEncTunnelKeepalive()
+		return conn
+	}
 	for attempt, timeout := range tcpSYNTimeouts {
 		if ready, err := conn.dialReady(transportActionDialTCP); ready || err != nil {
 			if err != nil {
 				_ = conn.Close()
 				return nil, err
 			}
-			conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
-			return conn, nil
+			return finishDial(), nil
 		}
 		if err := conn.sendSegmentWithSeq(ctx, seq, 0, packet.TCPFlagSYN, nil); err != nil {
 			_ = conn.Close()
@@ -300,8 +305,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 				_ = conn.Close()
 				return nil, err
 			}
-			conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
-			return conn, nil
+			return finishDial(), nil
 		case <-wait.C:
 			synTimedOut = true
 			if ready, err := conn.dialReady(transportActionDialTCP); ready || err != nil {
@@ -309,8 +313,7 @@ func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *Secu
 					_ = conn.Close()
 					return nil, err
 				}
-				conn.applySYNTimeoutDataRTO(customDataACKTimeouts, synTimedOut)
-				return conn, nil
+				return finishDial(), nil
 			}
 			s.Logger().Debug("TCP SYN timed out", "attempt", attempt+1, "timeout", timeout)
 		}
@@ -494,27 +497,41 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		t.handleSegment(*pkt.TCP)
 		return true
 	}
-	if pkt.IP.Protocol != packet.ProtocolESP {
+	t.mu.Lock()
+	mode := t.secureMode
+	t.mu.Unlock()
+	espPayload, ok := secureESPPayload(pkt, mode)
+	if !ok {
 		return false
 	}
-	spi := packetSPI(pkt.IP.Payload)
+	spi := packetSPI(espPayload)
 	if spi != t.inboundESP.SPI {
 		return false
 	}
-	if sequence, ok := packetESPSequence(pkt.IP.Payload); ok && !t.mayAcceptInboundESP(sequence) {
+	if sequence, ok := packetESPSequence(espPayload); ok && !t.mayAcceptInboundESP(sequence) {
 		t.session.Logger().Debug("dropping replayed secure TCP packet before decode", "spi", spi, "esp_sequence", sequence)
 		return false
 	}
-	espPacket, err := t.inboundESP.Decode(pkt.IP.Payload)
+	espPacket, err := t.inboundESP.Decode(espPayload)
 	if err != nil {
 		return false
 	}
-	if espPacket.NextHeader != packet.ProtocolTCP {
-		return false
-	}
-	inner, err := packet.DecodePayload(packet.ProtocolTCP, pkt.IP.SrcIP, pkt.IP.DstIP, espPacket.Payload)
-	if err != nil || inner.TCP == nil {
-		t.session.Logger().Debug("parsing secure TCP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
+	var inner packet.InnerPacket
+	if mode == SecureModeUDPEncTunnel {
+		if espPacket.NextHeader != packet.OuterIPv4 && espPacket.NextHeader != packet.OuterIPv6 {
+			return false
+		}
+		if err := inner.UnmarshalBinary(espPacket.Payload); err != nil || inner.TCP == nil {
+			t.session.Logger().Debug("parsing secure TCP tunnel packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
+			return false
+		}
+	} else if espPacket.NextHeader == packet.ProtocolTCP {
+		inner, err = packet.DecodePayload(packet.ProtocolTCP, pkt.IP.SrcIP, pkt.IP.DstIP, espPacket.Payload)
+		if err != nil || inner.TCP == nil {
+			t.session.Logger().Debug("parsing secure TCP packet failed", "spi", spi, "local_addr", t.local, "remote_addr", t.remote, "err", err)
+			return false
+		}
+	} else {
 		return false
 	}
 	if !tcpFlowMatches(inner.TCP, t.local, t.remote) {
@@ -555,6 +572,36 @@ func (t *TCPConn) closeWithError(err error) {
 		close(t.done)
 		close(t.msgCh)
 	})
+}
+
+func (t *TCPConn) startUDPEncTunnelKeepalive() {
+	t.mu.Lock()
+	mode := t.secureMode
+	t.mu.Unlock()
+	if mode != SecureModeUDPEncTunnel {
+		return
+	}
+	startUDPEncTunnelKeepalive(t.done, t.writeUDPEncTunnelKeepalive, func(err error) {
+		if t.session != nil {
+			t.session.Logger().Debug("writing UDP-enc-tun keepalive", "err", err)
+		}
+	})
+}
+
+func (t *TCPConn) writeUDPEncTunnelKeepalive(ctx context.Context) error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return errors.New("writing UDP-enc-tun keepalive: transport is closed")
+	}
+	session := t.session
+	local := cloneTCPAddr(t.local)
+	remote := cloneTCPAddr(t.remote)
+	t.mu.Unlock()
+	if local == nil || remote == nil {
+		return errors.New("writing UDP-enc-tun keepalive: endpoint is nil")
+	}
+	return writeUDPEncTunnelKeepalive(ctx, session, local.IP, remote.IP)
 }
 
 func (t *TCPConn) acceptInboundESP(sequence uint32) bool {
@@ -1098,20 +1145,31 @@ func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags
 	}
 	t.mu.Lock()
 	codec := t.outboundESP
+	mode := t.secureMode
 	associations := t.associations
 	t.mu.Unlock()
-	sealed, err := associations.sealESP(codec, packet.ProtocolTCP, wire)
+	nextHeader := packet.ProtocolTCP
+	espPayload := wire
+	if mode == SecureModeUDPEncTunnel {
+		inner := packet.InnerPacket{TCP: &segment}
+		espPayload, err = inner.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("writing secure tcp packet: %w", err)
+		}
+		nextHeader, err = secureTunnelNextHeader(t.local.IP, t.remote.IP)
+		if err != nil {
+			return fmt.Errorf("writing secure tcp packet: %w", err)
+		}
+	}
+	sealed, err := associations.sealESP(codec, nextHeader, espPayload)
 	if err != nil {
 		return fmt.Errorf("writing secure tcp packet: %w", err)
 	}
-	return t.session.WriteInnerPacket(ctx, packet.InnerPacket{
-		IP: packet.IPPacket{
-			SrcIP:    append(net.IP(nil), t.local.IP...),
-			DstIP:    append(net.IP(nil), t.remote.IP...),
-			Protocol: packet.ProtocolESP,
-			Payload:  sealed,
-		},
-	})
+	inner, err := secureInnerPacket(t.local.IP, t.remote.IP, mode, sealed)
+	if err != nil {
+		return fmt.Errorf("writing secure tcp packet: %w", err)
+	}
+	return t.session.WriteInnerPacket(ctx, inner)
 }
 
 func nextSIPMessage(stream []byte) ([]byte, []byte, bool, error) {

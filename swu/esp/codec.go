@@ -15,29 +15,36 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"strings"
 	"sync"
 )
 
 const (
 	EncryptionNull   = "null"
 	EncryptionAESCBC = "aes-cbc"
+	EncryptionAESGCM = "aes-gcm"
 )
 
 const (
 	IntegrityNone          = "none"
+	IntegrityNull          = "null"
 	IntegrityHMACMD596     = "hmac-md5-96"
 	IntegrityHMACSHA196    = "hmac-sha1-96"
+	IntegrityHMACSHA196RFC = "hmac-sha-1-96"
 	IntegrityHMACSHA256128 = "hmac-sha256-128"
+	IntegrityAESGMAC       = "aes-gmac"
 )
 
 const (
-	espSPILen       = 4
-	espSequenceLen  = 4
-	espHeaderLen    = espSPILen + espSequenceLen
-	espTrailerLen   = 2
-	espMinPacketLen = espHeaderLen + espTrailerLen
-	espDefaultAlign = 4
-	ReservedSPIMax  = 255
+	espSPILen        = 4
+	espSequenceLen   = 4
+	espHeaderLen     = espSPILen + espSequenceLen
+	espTrailerLen    = 2
+	espMinPacketLen  = espHeaderLen + espTrailerLen
+	espDefaultAlign  = 4
+	espExplicitIVLen = 8
+	espGCMICVLen     = 16
+	ReservedSPIMax   = 255
 
 	// NextHeaderNoNext marks RFC 4303 dummy ESP packets.
 	NextHeaderNoNext = 59
@@ -101,6 +108,7 @@ type Codec struct {
 	Integrity     string
 	EncryptionKey []byte
 	IntegrityKey  []byte
+	Salt          [4]byte
 	Random        io.Reader
 }
 
@@ -180,6 +188,45 @@ func (c Codec) Encode(pkt ESPPacket) ([]byte, error) {
 	}
 	plaintext = append(plaintext, byte(padLen), pkt.NextHeader)
 
+	header := make([]byte, espHeaderLen)
+	binary.BigEndian.PutUint32(header[:espSPILen], pkt.SPI)
+	binary.BigEndian.PutUint32(header[espSPILen:espHeaderLen], pkt.Sequence)
+
+	if c.Encryption == EncryptionAESGCM {
+		iv, err := c.explicitIV(pkt.SPI, pkt.Sequence)
+		if err != nil {
+			return nil, err
+		}
+		aead, err := newAESGCM(c.EncryptionKey)
+		if err != nil {
+			return nil, err
+		}
+		sealed := aead.Seal(nil, nonce(c.Salt, iv), plaintext, header)
+		tagStart := len(sealed) - espGCMICVLen
+		buf := append([]byte(nil), header...)
+		buf = append(buf, iv...)
+		buf = append(buf, sealed[:tagStart]...)
+		buf = append(buf, sealed[tagStart:]...)
+		return buf, nil
+	}
+
+	if normalizeIntegrity(c.Integrity) == IntegrityAESGMAC {
+		iv, err := c.explicitIV(pkt.SPI, pkt.Sequence)
+		if err != nil {
+			return nil, err
+		}
+		aead, err := newAESGCM(c.IntegrityKey)
+		if err != nil {
+			return nil, err
+		}
+		buf := append([]byte(nil), header...)
+		buf = append(buf, iv...)
+		buf = append(buf, plaintext...)
+		tag := aead.Seal(nil, nonce(c.Salt, iv), nil, buf)
+		buf = append(buf, tag...)
+		return buf, nil
+	}
+
 	body := plaintext
 	if c.Encryption == EncryptionAESCBC {
 		block, err := aes.NewCipher(c.EncryptionKey)
@@ -201,9 +248,7 @@ func (c Codec) Encode(pkt ESPPacket) ([]byte, error) {
 		return nil, fmt.Errorf("encoding ESP: unsupported encryption %q", c.Encryption)
 	}
 
-	buf := make([]byte, espHeaderLen)
-	binary.BigEndian.PutUint32(buf[:espSPILen], pkt.SPI)
-	binary.BigEndian.PutUint32(buf[espSPILen:espHeaderLen], pkt.Sequence)
+	buf := append([]byte(nil), header...)
 	buf = append(buf, body...)
 	icv, err := c.integritySum(buf)
 	if err != nil {
@@ -220,6 +265,47 @@ func (c Codec) Decode(data []byte) (ESPPacket, error) {
 	if len(data) < espHeaderLen {
 		return ESPPacket{}, errors.New("decoding ESP: packet too short")
 	}
+	pkt := ESPPacket{SPI: binary.BigEndian.Uint32(data[:espSPILen]), Sequence: binary.BigEndian.Uint32(data[espSPILen:espHeaderLen])}
+
+	if c.Encryption == EncryptionAESGCM {
+		if len(data) < espHeaderLen+espExplicitIVLen+espGCMICVLen {
+			return ESPPacket{}, errors.New("decoding ESP: packet too short for AES-GCM")
+		}
+		header := data[:espHeaderLen]
+		iv := data[espHeaderLen : espHeaderLen+espExplicitIVLen]
+		ciphertext := data[espHeaderLen+espExplicitIVLen : len(data)-espGCMICVLen]
+		tag := data[len(data)-espGCMICVLen:]
+		aead, err := newAESGCM(c.EncryptionKey)
+		if err != nil {
+			return ESPPacket{}, err
+		}
+		sealed := make([]byte, 0, len(ciphertext)+len(tag))
+		sealed = append(sealed, ciphertext...)
+		sealed = append(sealed, tag...)
+		body, err := aead.Open(nil, nonce(c.Salt, iv), sealed, header)
+		if err != nil {
+			return ESPPacket{}, errors.New("decoding ESP: integrity check failed")
+		}
+		return decodePlaintext(pkt, body)
+	}
+
+	if normalizeIntegrity(c.Integrity) == IntegrityAESGMAC {
+		if len(data) < espHeaderLen+espExplicitIVLen+espTrailerLen+espGCMICVLen {
+			return ESPPacket{}, errors.New("decoding ESP: packet too short for AES-GMAC")
+		}
+		iv := data[espHeaderLen : espHeaderLen+espExplicitIVLen]
+		body := data[espHeaderLen+espExplicitIVLen : len(data)-espGCMICVLen]
+		tag := data[len(data)-espGCMICVLen:]
+		aead, err := newAESGCM(c.IntegrityKey)
+		if err != nil {
+			return ESPPacket{}, err
+		}
+		if _, err := aead.Open(nil, nonce(c.Salt, iv), tag, data[:len(data)-espGCMICVLen]); err != nil {
+			return ESPPacket{}, errors.New("decoding ESP: integrity check failed")
+		}
+		return decodePlaintext(pkt, body)
+	}
+
 	icvLen, err := c.integrityLength()
 	if err != nil {
 		return ESPPacket{}, err
@@ -238,7 +324,6 @@ func (c Codec) Decode(data []byte) (ESPPacket, error) {
 		data = data[:len(data)-icvLen]
 	}
 
-	pkt := ESPPacket{SPI: binary.BigEndian.Uint32(data[:espSPILen]), Sequence: binary.BigEndian.Uint32(data[espSPILen:espHeaderLen])}
 	body := data[espHeaderLen:]
 	if c.Encryption == EncryptionAESCBC {
 		if len(body) < aes.BlockSize || (len(body)-aes.BlockSize)%aes.BlockSize != 0 {
@@ -257,6 +342,10 @@ func (c Codec) Decode(data []byte) (ESPPacket, error) {
 		return ESPPacket{}, fmt.Errorf("decoding ESP: unsupported encryption %q", c.Encryption)
 	}
 
+	return decodePlaintext(pkt, body)
+}
+
+func decodePlaintext(pkt ESPPacket, body []byte) (ESPPacket, error) {
 	if len(body) < espTrailerLen {
 		return ESPPacket{}, errors.New("decoding ESP: missing trailer")
 	}
@@ -281,7 +370,7 @@ func (c Codec) CryptoPayloadBytes(payloadLen int) (uint64, error) {
 		return 0, errors.New("ESP crypto bytes: payload length must be >= 0")
 	}
 	switch c.Encryption {
-	case EncryptionAESCBC, EncryptionNull:
+	case EncryptionAESCBC, EncryptionAESGCM, EncryptionNull:
 	default:
 		return 0, fmt.Errorf("ESP crypto bytes: unsupported encryption %q", c.Encryption)
 	}
@@ -299,6 +388,9 @@ func (c Codec) CryptoPacketBytes(packetLen int) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if c.Encryption == EncryptionAESGCM {
+		icvLen = espGCMICVLen
+	}
 	if packetLen < espHeaderLen+icvLen {
 		return 0, errors.New("ESP crypto bytes: packet too short for ICV")
 	}
@@ -309,7 +401,18 @@ func (c Codec) CryptoPacketBytes(packetLen int) (uint64, error) {
 			return 0, errors.New("ESP crypto bytes: invalid AES-CBC body length")
 		}
 		return uint64(bodyLen - aes.BlockSize), nil
+	case EncryptionAESGCM:
+		if bodyLen < espExplicitIVLen {
+			return 0, errors.New("ESP crypto bytes: invalid AES-GCM body length")
+		}
+		return uint64(bodyLen - espExplicitIVLen), nil
 	case EncryptionNull:
+		if normalizeIntegrity(c.Integrity) == IntegrityAESGMAC {
+			if bodyLen < espExplicitIVLen {
+				return 0, errors.New("ESP crypto bytes: invalid AES-GMAC body length")
+			}
+			return uint64(bodyLen - espExplicitIVLen), nil
+		}
 		return uint64(bodyLen), nil
 	default:
 		return 0, fmt.Errorf("ESP crypto bytes: unsupported encryption %q", c.Encryption)
@@ -335,23 +438,30 @@ func (c Codec) integritySum(data []byte) ([]byte, error) {
 
 func (c Codec) validateAlgorithms() error {
 	switch c.Encryption {
-	case EncryptionAESCBC, EncryptionNull:
+	case EncryptionAESCBC, EncryptionAESGCM, EncryptionNull:
 	default:
 		return fmt.Errorf("unsupported encryption %q", c.Encryption)
 	}
-	switch c.Integrity {
-	case IntegrityNone, IntegrityHMACMD596, IntegrityHMACSHA196, IntegrityHMACSHA256128:
+	integrity := normalizeIntegrity(c.Integrity)
+	switch integrity {
+	case IntegrityNone, IntegrityHMACMD596, IntegrityHMACSHA196, IntegrityHMACSHA256128, IntegrityAESGMAC:
 	default:
 		return fmt.Errorf("unsupported integrity %q", c.Integrity)
 	}
-	if c.Encryption == EncryptionNull && c.Integrity == IntegrityNone {
+	if c.Encryption == EncryptionAESGCM && integrity != IntegrityNone {
+		return errors.New("AES-GCM requires null integrity")
+	}
+	if integrity == IntegrityAESGMAC && c.Encryption != EncryptionNull {
+		return errors.New("AES-GMAC requires null encryption")
+	}
+	if c.Encryption == EncryptionNull && integrity == IntegrityNone {
 		return errors.New("encryption and integrity must not both be null")
 	}
 	return nil
 }
 
 func (c Codec) integrityHash() (func() hash.Hash, error) {
-	switch c.Integrity {
+	switch normalizeIntegrity(c.Integrity) {
 	case IntegrityNone:
 		return nil, nil
 	case IntegrityHMACMD596:
@@ -366,12 +476,12 @@ func (c Codec) integrityHash() (func() hash.Hash, error) {
 }
 
 func (c Codec) integrityLength() (int, error) {
-	switch c.Integrity {
+	switch normalizeIntegrity(c.Integrity) {
 	case IntegrityNone:
 		return 0, nil
 	case IntegrityHMACMD596, IntegrityHMACSHA196:
 		return 12, nil
-	case IntegrityHMACSHA256128:
+	case IntegrityHMACSHA256128, IntegrityAESGMAC:
 		return 16, nil
 	default:
 		return 0, fmt.Errorf("ESP integrity: unsupported integrity %q", c.Integrity)
@@ -393,4 +503,46 @@ func (c Codec) blockSize() int {
 		return aes.BlockSize
 	}
 	return espDefaultAlign
+}
+
+func normalizeIntegrity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case IntegrityNull:
+		return IntegrityNone
+	case IntegrityHMACSHA196RFC:
+		return IntegrityHMACSHA196
+	default:
+		return value
+	}
+}
+
+func (c Codec) explicitIV(spi, sequence uint32) ([]byte, error) {
+	iv := make([]byte, espExplicitIVLen)
+	if c.Random == nil {
+		binary.BigEndian.PutUint32(iv[:4], spi)
+		binary.BigEndian.PutUint32(iv[4:], sequence)
+		return iv, nil
+	}
+	if _, err := io.ReadFull(c.Random, iv); err != nil {
+		return nil, fmt.Errorf("reading IV: %w", err)
+	}
+	return iv, nil
+}
+
+func nonce(salt [4]byte, iv []byte) []byte {
+	value := make([]byte, 0, len(salt)+len(iv))
+	value = append(value, salt[:]...)
+	return append(value, iv...)
+}
+
+func newAESGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("creating cipher: %w", err)
+	}
+	aead, err := cipher.NewGCMWithTagSize(block, espGCMICVLen)
+	if err != nil {
+		return nil, fmt.Errorf("creating AEAD: %w", err)
+	}
+	return aead, nil
 }

@@ -3,6 +3,7 @@ package sip
 import (
 	"bufio"
 	"bytes"
+	"encoding"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -25,8 +26,14 @@ type Message struct {
 }
 
 var (
-	_ io.WriterTo   = Message{}
-	_ io.ReaderFrom = (*Message)(nil)
+	_ encoding.TextMarshaler   = Headers{}
+	_ encoding.TextUnmarshaler = (*Headers)(nil)
+	_ io.WriterTo              = Headers{}
+
+	_ encoding.TextMarshaler   = Message{}
+	_ encoding.TextUnmarshaler = (*Message)(nil)
+	_ io.WriterTo              = Message{}
+	_ io.ReaderFrom            = (*Message)(nil)
 )
 
 func NewRequest(method, uri string) Message {

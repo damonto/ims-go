@@ -54,7 +54,7 @@ func (s *SecurityAssociations) sealESP(codec esp.Codec, nextHeader byte, payload
 }
 
 func (s *SecurityAssociations) acceptInboundESP(codec esp.Codec, sequence uint32) bool {
-	if !espIntegrityEnabled(codec.Integrity) {
+	if !espReplayProtected(codec) {
 		return true
 	}
 	key := newAssociationKey(codec)
@@ -71,7 +71,7 @@ func (s *SecurityAssociations) acceptInboundESP(codec esp.Codec, sequence uint32
 }
 
 func (s *SecurityAssociations) mayAcceptInboundESP(codec esp.Codec, sequence uint32) bool {
-	if !espIntegrityEnabled(codec.Integrity) {
+	if !espReplayProtected(codec) {
 		return true
 	}
 	key := newAssociationKey(codec)
@@ -99,12 +99,13 @@ func newAssociationKey(codec esp.Codec) associationKey {
 	var spi [4]byte
 	binary.BigEndian.PutUint32(spi[:], codec.SPI)
 
-	material := make([]byte, 0, len(spi)+len(codec.Encryption)+len(codec.EncryptionKey)+len(codec.Integrity)+len(codec.IntegrityKey)+4)
+	material := make([]byte, 0, len(spi)+len(codec.Encryption)+len(codec.EncryptionKey)+len(codec.Integrity)+len(codec.IntegrityKey)+len(codec.Salt)+4)
 	material = append(material, spi[:]...)
 	material = appendAssociationPart(material, []byte(codec.Encryption))
 	material = appendAssociationPart(material, codec.EncryptionKey)
 	material = appendAssociationPart(material, []byte(codec.Integrity))
 	material = appendAssociationPart(material, codec.IntegrityKey)
+	material = appendAssociationPart(material, codec.Salt[:])
 	digest := sha256.Sum256(material)
 	return associationKey{spi: codec.SPI, digest: digest}
 }

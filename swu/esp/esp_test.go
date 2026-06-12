@@ -140,6 +140,119 @@ func TestCodecRejectsNullEncryptionWithoutIntegrity(t *testing.T) {
 	}
 }
 
+func TestCodecAEADRoundTripAndTamper(t *testing.T) {
+	tests := []struct {
+		name  string
+		codec Codec
+	}{
+		{
+			name: "aes gcm",
+			codec: Codec{
+				Encryption:    EncryptionAESGCM,
+				EncryptionKey: []byte("0123456789abcdef"),
+				Integrity:     IntegrityNull,
+				Salt:          [4]byte{0x01, 0x02, 0x03, 0x04},
+			},
+		},
+		{
+			name: "aes gmac",
+			codec: Codec{
+				Encryption:   EncryptionNull,
+				Integrity:    IntegrityAESGMAC,
+				IntegrityKey: []byte("0123456789abcdef"),
+				Salt:         [4]byte{0x05, 0x06, 0x07, 0x08},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packet := ESPPacket{
+				SPI:        0x11223344,
+				Sequence:   7,
+				NextHeader: 17,
+				Payload:    []byte{0xAA, 0xBB, 0xCC},
+			}
+			wire, err := tt.codec.Encode(packet)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if len(wire) < espHeaderLen+espExplicitIVLen+espGCMICVLen {
+				t.Fatalf("Encode() length = %d, want at least ESP header + IV + ICV", len(wire))
+			}
+			got, err := tt.codec.Decode(wire)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if got.SPI != packet.SPI || got.Sequence != packet.Sequence || got.NextHeader != packet.NextHeader || string(got.Payload) != string(packet.Payload) {
+				t.Fatalf("Decode() = %+v, want %+v", got, packet)
+			}
+
+			tampered := append([]byte(nil), wire...)
+			tampered[espHeaderLen+espExplicitIVLen] ^= 0x01
+			if _, err := tt.codec.Decode(tampered); err == nil {
+				t.Fatal("Decode() tampered error = nil, want integrity error")
+			}
+		})
+	}
+}
+
+func TestCodecDefaultExplicitIVUsesSPIAndSequence(t *testing.T) {
+	tests := []struct {
+		name  string
+		codec Codec
+	}{
+		{
+			name: "aes gcm",
+			codec: Codec{
+				Encryption:    EncryptionAESGCM,
+				EncryptionKey: []byte("0123456789abcdef"),
+				Integrity:     IntegrityNull,
+				Salt:          [4]byte{0x01, 0x02, 0x03, 0x04},
+			},
+		},
+		{
+			name: "aes gmac",
+			codec: Codec{
+				Encryption:   EncryptionNull,
+				Integrity:    IntegrityAESGMAC,
+				IntegrityKey: []byte("0123456789abcdef"),
+				Salt:         [4]byte{0x05, 0x06, 0x07, 0x08},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packet := ESPPacket{
+				SPI:        0x11223344,
+				Sequence:   7,
+				NextHeader: 17,
+				Payload:    []byte{0xAA},
+			}
+			wire, err := tt.codec.Encode(packet)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			iv := wire[espHeaderLen : espHeaderLen+espExplicitIVLen]
+			want := []byte{0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0x07}
+			if string(iv) != string(want) {
+				t.Fatalf("explicit IV = % X, want % X", iv, want)
+			}
+
+			packet.SPI = 0x55667788
+			other, err := tt.codec.Encode(packet)
+			if err != nil {
+				t.Fatalf("Encode() other SPI error = %v", err)
+			}
+			otherIV := other[espHeaderLen : espHeaderLen+espExplicitIVLen]
+			if string(otherIV) == string(iv) {
+				t.Fatalf("explicit IV reused across SPIs: % X", iv)
+			}
+		})
+	}
+}
+
 func TestCodecCryptoPayloadBytesIncludesESPAlignmentPadding(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -149,6 +262,7 @@ func TestCodecCryptoPayloadBytesIncludesESPAlignmentPadding(t *testing.T) {
 	}{
 		{name: "null encryption aligns trailer", encryption: EncryptionNull, payloadLen: 3, want: 8},
 		{name: "aes cbc aligns to block size", encryption: EncryptionAESCBC, payloadLen: 3, want: 16},
+		{name: "aes gcm aligns trailer", encryption: EncryptionAESGCM, payloadLen: 3, want: 8},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -30,6 +30,8 @@ type SecureTCPConfig struct {
 	EncryptionKey   []byte
 	Integrity       string
 	IntegrityKey    []byte
+	Mode            string
+	Salt            [4]byte
 }
 
 type SecureUDPConfig struct {
@@ -41,6 +43,8 @@ type SecureUDPConfig struct {
 	EncryptionKey []byte
 	Integrity     string
 	IntegrityKey  []byte
+	Mode          string
+	Salt          [4]byte
 }
 
 type Config struct {

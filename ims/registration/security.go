@@ -2,6 +2,9 @@ package registration
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -539,6 +542,8 @@ func secureTransportConfigWithKeys(verify *security.Param, localPort, remotePort
 		EncryptionKey: append([]byte(nil), ck...),
 		Integrity:     verify.Alg,
 		IntegrityKey:  espIntegrityKey(verify.Alg, ik),
+		Mode:          verify.Mod,
+		Salt:          espSalt(verify, ck, ik),
 	}
 }
 
@@ -552,6 +557,8 @@ func secureDatagramConfigWithKeys(verify *security.Param, localPort, remotePort 
 		EncryptionKey: append([]byte(nil), ck...),
 		Integrity:     verify.Alg,
 		IntegrityKey:  espIntegrityKey(verify.Alg, ik),
+		Mode:          verify.Mod,
+		Salt:          espSalt(verify, ck, ik),
 	}
 }
 
@@ -564,6 +571,44 @@ func espIntegrityKey(alg string, ik []byte) []byte {
 		}
 	}
 	return key
+}
+
+func espSalt(verify *security.Param, ck, ik []byte) [4]byte {
+	if verify == nil {
+		return [4]byte{}
+	}
+	var fc byte
+	var label string
+	switch {
+	case strings.EqualFold(verify.Alg, "aes-gmac"):
+		fc = 0x58
+		label = "AES_GMAC_SALT"
+	case strings.EqualFold(verify.EAlg, "aes-gcm"):
+		fc = 0x59
+		label = "AES_GCM_SALT"
+	default:
+		return [4]byte{}
+	}
+	key := make([]byte, 0, len(ck)+len(ik))
+	key = append(key, ck...)
+	key = append(key, ik...)
+	digest := kdf33220(key, fc, []byte(label))
+	var salt [4]byte
+	copy(salt[:], digest[len(digest)-4:])
+	return salt
+}
+
+func kdf33220(key []byte, fc byte, params ...[]byte) []byte {
+	s := []byte{fc}
+	for _, param := range params {
+		s = append(s, param...)
+		var length [2]byte
+		binary.BigEndian.PutUint16(length[:], uint16(len(param)))
+		s = append(s, length[:]...)
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(s)
+	return mac.Sum(nil)
 }
 
 func (s *Service) dialSecureTransport(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) (session.Transport, error) {
@@ -733,6 +778,8 @@ func newSecurityClient(registerPort int) security.Param {
 	for serverPort == clientPort || serverPort == registerPort {
 		serverPort = randomIMSPort()
 	}
+	clientSPI := randomNonZeroUint32Except(0)
+	serverSPI := randomNonZeroUint32Except(clientSPI)
 	return security.Param{
 		Mechanism: "ipsec-3gpp",
 		Alg:       "hmac-sha-1-96",
@@ -741,18 +788,31 @@ func newSecurityClient(registerPort int) security.Param {
 		PortC:     clientPort,
 		PortS:     serverPort,
 		Prot:      "esp",
-		SPIC:      randomNonZeroUint32Except(0),
-		SPIS:      randomNonZeroUint32Except(0),
+		SPIC:      clientSPI,
+		SPIS:      serverSPI,
 	}
 }
 
 func securityClientCapabilities(base security.Param) security.Params {
-	ealgs := []string{"null", "aes-cbc"}
-	params := make(security.Params, 0, len(ealgs))
-	for _, ealg := range ealgs {
-		param := base
-		param.EAlg = ealg
-		params = append(params, param)
+	algorithms := []struct {
+		alg  string
+		ealg string
+	}{
+		{alg: "hmac-sha-1-96", ealg: "null"},
+		{alg: "hmac-sha-1-96", ealg: "aes-cbc"},
+		{alg: "null", ealg: "aes-gcm"},
+		{alg: "aes-gmac", ealg: "null"},
+	}
+	modes := []string{"trans", "UDP-enc-tun"}
+	params := make(security.Params, 0, len(algorithms)*len(modes))
+	for _, mode := range modes {
+		for _, algorithm := range algorithms {
+			param := base
+			param.Alg = algorithm.alg
+			param.EAlg = algorithm.ealg
+			param.Mod = mode
+			params = append(params, param)
+		}
 	}
 	return params
 }
@@ -763,14 +823,14 @@ func reauthSecurityClient(current security.Param, registerPort int) security.Par
 	for next.PortC == current.PortC || next.PortC == current.PortS || next.PortC == registerPort {
 		next.PortC = randomIMSPort()
 	}
-	next.SPIC = randomNonZeroUint32Except(current.SPIC)
-	next.SPIS = randomNonZeroUint32Except(current.SPIS)
+	next.SPIC = randomNonZeroUint32Except(current.SPIC, current.SPIS)
+	next.SPIS = randomNonZeroUint32Except(current.SPIC, current.SPIS, next.SPIC)
 	return next
 }
 
-func randomNonZeroUint32Except(except uint32) uint32 {
+func randomNonZeroUint32Except(except ...uint32) uint32 {
 	value := sip.RandomUint32()
-	for !security.ValidESPSPI(value) || value == except {
+	for !security.ValidESPSPI(value) || slices.Contains(except, value) {
 		value = sip.RandomUint32()
 	}
 	return value
