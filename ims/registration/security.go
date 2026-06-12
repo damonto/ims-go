@@ -794,25 +794,22 @@ func newSecurityClient(registerPort int) security.Param {
 }
 
 func securityClientCapabilities(base security.Param) security.Params {
+	// Keep the default offer conservative. Deployed P-CSCFs commonly reject
+	// Security-Client values that include optional algorithms they do not parse.
 	algorithms := []struct {
 		alg  string
 		ealg string
 	}{
 		{alg: "hmac-sha-1-96", ealg: "null"},
 		{alg: "hmac-sha-1-96", ealg: "aes-cbc"},
-		{alg: "null", ealg: "aes-gcm"},
-		{alg: "aes-gmac", ealg: "null"},
 	}
-	modes := []string{"trans", "UDP-enc-tun"}
-	params := make(security.Params, 0, len(algorithms)*len(modes))
-	for _, mode := range modes {
-		for _, algorithm := range algorithms {
-			param := base
-			param.Alg = algorithm.alg
-			param.EAlg = algorithm.ealg
-			param.Mod = mode
-			params = append(params, param)
-		}
+	params := make(security.Params, 0, len(algorithms))
+	for _, algorithm := range algorithms {
+		param := base
+		param.Alg = algorithm.alg
+		param.EAlg = algorithm.ealg
+		param.Mod = "trans"
+		params = append(params, param)
 	}
 	return params
 }

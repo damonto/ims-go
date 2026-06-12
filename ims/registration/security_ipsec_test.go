@@ -71,12 +71,6 @@ func TestSecurityClientCapabilities(t *testing.T) {
 	want := []security.Param{
 		{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
 		{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "trans"},
-		{Alg: "null", EAlg: "aes-gcm", Mod: "trans"},
-		{Alg: "aes-gmac", EAlg: "null", Mod: "trans"},
-		{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "UDP-enc-tun"},
-		{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
-		{Alg: "null", EAlg: "aes-gcm", Mod: "UDP-enc-tun"},
-		{Alg: "aes-gmac", EAlg: "null", Mod: "UDP-enc-tun"},
 	}
 
 	got := securityClientCapabilities(base)

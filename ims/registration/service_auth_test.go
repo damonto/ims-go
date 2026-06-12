@@ -164,14 +164,14 @@ func TestBuildRegisterAKAv2MD5BootstrapUsesIPSecSecurityAgreement(t *testing.T) 
 	if err := clients.UnmarshalText([]byte(msg.Header("Security-Client"))); err != nil {
 		t.Fatalf("parsing Security-Client: %v", err)
 	}
-	if len(clients) != 8 {
-		t.Fatalf("Security-Client count = %d, want 8", len(clients))
+	if len(clients) != 2 {
+		t.Fatalf("Security-Client count = %d, want 2", len(clients))
 	}
 	if clients[0].EAlg != "null" || clients[1].EAlg != "aes-cbc" {
 		t.Fatalf("Security-Client ealgs = %q/%q, want null/aes-cbc", clients[0].EAlg, clients[1].EAlg)
 	}
-	if clients[4].Mod != "UDP-enc-tun" {
-		t.Fatalf("Security-Client mode[4] = %q, want UDP-enc-tun", clients[4].Mod)
+	if clients[0].Mod != "trans" || clients[1].Mod != "trans" {
+		t.Fatalf("Security-Client modes = %q/%q, want trans/trans", clients[0].Mod, clients[1].Mod)
 	}
 	if got := msg.Header("Require"); got != "sec-agree" {
 		t.Fatalf("Require = %q, want sec-agree", got)

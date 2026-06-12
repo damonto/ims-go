@@ -33,6 +33,8 @@ const (
 	akaNonceMinLength        = akaRANDLength + akaAUTNLength
 	maxIPPort                = 65535
 	minUnreservedESPSPI      = 256
+	// TS 33.203 Annex H defines spvalue as exactly 10DIGIT.
+	ipsecSPIDecimalWidth = 10
 )
 
 type Param struct {
@@ -338,7 +340,9 @@ func (p Param) MarshalText() ([]byte, error) {
 }
 
 func paramString(p Param) string {
-	value := fmt.Sprintf("%s;alg=%s;ealg=%s;mod=%s;port-c=%d;port-s=%d;prot=%s;spi-c=%d;spi-s=%d", p.Mechanism, p.Alg, p.EAlg, p.Mod, p.PortC, p.PortS, p.Prot, p.SPIC, p.SPIS)
+	spiC := fmt.Sprintf("%0*d", ipsecSPIDecimalWidth, p.SPIC)
+	spiS := fmt.Sprintf("%0*d", ipsecSPIDecimalWidth, p.SPIS)
+	value := fmt.Sprintf("%s;alg=%s;ealg=%s;mod=%s;port-c=%d;port-s=%d;prot=%s;spi-c=%s;spi-s=%s", p.Mechanism, p.Alg, p.EAlg, p.Mod, p.PortC, p.PortS, p.Prot, spiC, spiS)
 	if p.Q != "" {
 		value += ";q=" + p.Q
 	}

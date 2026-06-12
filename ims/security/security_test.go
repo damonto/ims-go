@@ -88,6 +88,21 @@ func TestParamUnmarshalText(t *testing.T) {
 				Q:         "0.9",
 			}},
 		},
+		{
+			name:  "padded spis",
+			value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=0000000310;spi-s=4294967295",
+			want: Params{{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5060,
+				Prot:      "esp",
+				SPIC:      310,
+				SPIS:      4294967295,
+			}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -120,7 +135,7 @@ func TestParamsString(t *testing.T) {
 				{Mechanism: "ipsec-3gpp", Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans", PortC: 5062, PortS: 5063, Prot: "esp", SPIC: 310, SPIS: 320},
 				{Mechanism: "ipsec-3gpp", Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "trans", PortC: 5062, PortS: 5063, Prot: "esp", SPIC: 310, SPIS: 320},
 			},
-			want: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=310;spi-s=320,ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=310;spi-s=320",
+			want: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000310;spi-s=0000000320,ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000310;spi-s=0000000320",
 		},
 	}
 	for _, tt := range tests {

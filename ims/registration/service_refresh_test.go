@@ -182,11 +182,11 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 		if err := securityClients.UnmarshalText([]byte(req.Header("Security-Client"))); err != nil {
 			t.Fatalf("parsing Security-Client: %v", err)
 		}
-		if len(securityClients) != 8 {
-			t.Fatalf("Security-Client count = %d, want 8", len(securityClients))
+		if len(securityClients) != 2 {
+			t.Fatalf("Security-Client count = %d, want 2", len(securityClients))
 		}
-		if !strings.Contains(req.Header("Security-Client"), "mod=UDP-enc-tun") {
-			t.Fatalf("Security-Client = %q, want UDP-enc-tun capability", req.Header("Security-Client"))
+		if strings.Contains(req.Header("Security-Client"), "mod=UDP-enc-tun") {
+			t.Fatalf("Security-Client = %q, want conservative trans-only capabilities", req.Header("Security-Client"))
 		}
 		securityClient := securityClients[0]
 		if securityClient.PortS != oldSecurityClient.PortS {
