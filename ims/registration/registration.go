@@ -217,6 +217,7 @@ func (s *Service) Deregister(ctx context.Context) error {
 		}
 		if done {
 			s.setRegistered(false)
+			s.stopRegistrationKeepAlive("deregistered")
 			s.logger.Info("IMS deregistered")
 			return nil
 		}

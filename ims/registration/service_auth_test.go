@@ -320,14 +320,14 @@ func TestRegisterSynchronizationFailureSendsAUTSAndContinues(t *testing.T) {
 	}
 }
 
-func TestBuildRegisterViaKeepsIMSUDPProfile(t *testing.T) {
+func TestBuildRegisterViaIncludesRFC6223Keep(t *testing.T) {
 	tests := []struct {
 		name      string
 		transport *stubTransport
 		wantKeep  bool
 	}{
 		{name: "udp adds keep", transport: newUDPTransport(5062, 5060), wantKeep: true},
-		{name: "tcp omits keep", transport: newTCPTransport(5062, 5060), wantKeep: false},
+		{name: "tcp adds keep", transport: newTCPTransport(5062, 5060), wantKeep: true},
 	}
 
 	for _, tt := range tests {

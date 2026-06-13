@@ -749,3 +749,52 @@ func TestTopViaHasRPortDistinguishesBareParameter(t *testing.T) {
 		})
 	}
 }
+
+func TestTopViaHasKeepDistinguishesBareParameter(t *testing.T) {
+	tests := []struct {
+		name string
+		via  string
+		want string
+		has  bool
+	}{
+		{
+			name: "bare keep",
+			via:  "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1;keep",
+			has:  true,
+		},
+		{
+			name: "valued keep",
+			via:  "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1;keep=30",
+			want: "30",
+			has:  true,
+		},
+		{
+			name: "quoted keep",
+			via:  `SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1;keep="45"`,
+			want: "45",
+			has:  true,
+		},
+		{
+			name: "missing keep",
+			via:  "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1",
+			has:  false,
+		},
+		{
+			name: "top via only",
+			via:  "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1;keep=30, SIP/2.0/TCP proxy.example.com:5060;keep=60",
+			want: "30",
+			has:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TopViaKeep(tt.via); got != tt.want {
+				t.Fatalf("TopViaKeep() = %q, want %q", got, tt.want)
+			}
+			if got := TopViaHasKeep(tt.via); got != tt.has {
+				t.Fatalf("TopViaHasKeep() = %t, want %t", got, tt.has)
+			}
+		})
+	}
+}

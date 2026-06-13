@@ -455,6 +455,15 @@ func TopViaHasRPort(value string) bool {
 	return ok
 }
 
+func TopViaKeep(value string) string {
+	return viaParam(topViaValue(value), "keep")
+}
+
+func TopViaHasKeep(value string) bool {
+	_, ok := topViaParam(topViaValue(value), "keep")
+	return ok
+}
+
 func TopViaSentBy(value string) string {
 	fields := strings.Fields(topViaValue(value))
 	if len(fields) < 2 {

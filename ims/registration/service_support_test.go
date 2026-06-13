@@ -30,6 +30,7 @@ type stubTransport struct {
 	writes     [][]byte
 	readCh     chan []byte
 	onWrite    func([]byte)
+	writeErr   error
 	closeCount int
 }
 
@@ -62,6 +63,11 @@ func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
 
 func (t *stubTransport) WritePacket(ctx context.Context, data []byte) error {
 	t.mu.Lock()
+	if t.writeErr != nil {
+		err := t.writeErr
+		t.mu.Unlock()
+		return err
+	}
 	t.writes = append(t.writes, append([]byte(nil), data...))
 	onWrite := t.onWrite
 	t.mu.Unlock()

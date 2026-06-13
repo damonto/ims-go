@@ -130,6 +130,7 @@ type Service struct {
 	drainTimers               []*attachmentDrain
 	activeSecureSAExpiresAt   time.Time
 	activeSecureSAExpiry      *secureAssociationExpiry
+	registrationKeepAlive     *registrationKeepAlive
 	bgWG                      sync.WaitGroup
 	closed                    bool
 }

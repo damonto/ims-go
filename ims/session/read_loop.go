@@ -7,15 +7,20 @@ import (
 )
 
 func readTransportMessage(ctx context.Context, transport Transport) (inboundMessage, error) {
-	packet, peer, err := transport.ReadPacket(ctx)
-	if err != nil {
-		return inboundMessage{}, err
+	for {
+		packet, peer, err := transport.ReadPacket(ctx)
+		if err != nil {
+			return inboundMessage{}, err
+		}
+		if isKeepAlivePacket(packet) {
+			continue
+		}
+		msg, err := sip.ParseMessage(packet)
+		if err != nil {
+			return inboundMessage{}, err
+		}
+		return inboundMessage{msg: msg, transport: transport, peer: peer}, nil
 	}
-	msg, err := sip.ParseMessage(packet)
-	if err != nil {
-		return inboundMessage{}, err
-	}
-	return inboundMessage{msg: msg, transport: transport, peer: peer}, nil
 }
 
 func (s *Session) startBootstrapReadLoop(ctx context.Context, transport Transport, out chan<- inboundMessage) {

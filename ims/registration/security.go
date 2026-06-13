@@ -36,6 +36,7 @@ type secureResources struct {
 	responseAttachments []session.Attachment
 	drains              []*attachmentDrain
 	expiry              *secureAssociationExpiry
+	keepalive           *registrationKeepAlive
 }
 
 type registerSecurity struct {
@@ -298,12 +299,14 @@ func (s *Service) takeSecureResourcesLocked() secureResources {
 		responseAttachments: s.secureResponseAttachments,
 		drains:              s.drainTimers,
 		expiry:              s.activeSecureSAExpiry,
+		keepalive:           s.registrationKeepAlive,
 	}
 	s.secureServerAttachments = nil
 	s.secureResponseAttachments = nil
 	s.drainTimers = nil
 	s.activeSecureSAExpiry = nil
 	s.activeSecureSAExpiresAt = time.Time{}
+	s.registrationKeepAlive = nil
 	s.closeDoneLocked()
 	return resources
 }
@@ -311,6 +314,9 @@ func (s *Service) takeSecureResourcesLocked() secureResources {
 func (r secureResources) stop() {
 	if r.expiry != nil {
 		r.expiry.stop()
+	}
+	if r.keepalive != nil {
+		r.keepalive.stop()
 	}
 	for _, drain := range r.drains {
 		drain.cancel()

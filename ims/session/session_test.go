@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"strings"
@@ -250,6 +251,114 @@ func (h *requestHandler) requestList() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return strings.Join(h.requests, ",")
+}
+
+func TestSendKeepAliveWritesTransportSpecificPacket(t *testing.T) {
+	tests := []struct {
+		name       string
+		local      net.Addr
+		remote     net.Addr
+		assertData func(*testing.T, []byte)
+	}{
+		{
+			name:   "tcp crlf",
+			local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+			remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+			assertData: func(t *testing.T, data []byte) {
+				t.Helper()
+				if string(data) != "\r\n\r\n" {
+					t.Fatalf("keepalive packet = %q, want CRLF keepalive", string(data))
+				}
+			},
+		},
+		{
+			name:   "udp stun binding indication",
+			local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+			remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+			assertData: func(t *testing.T, data []byte) {
+				t.Helper()
+				if len(data) != stunHeaderBytes {
+					t.Fatalf("STUN packet length = %d, want %d", len(data), stunHeaderBytes)
+				}
+				if got := binary.BigEndian.Uint16(data[0:2]); got != stunBindingIndication {
+					t.Fatalf("STUN message type = %#x, want Binding Indication", got)
+				}
+				if got := binary.BigEndian.Uint16(data[2:4]); got != 0 {
+					t.Fatalf("STUN message length = %d, want 0", got)
+				}
+				if got := binary.BigEndian.Uint32(data[4:8]); got != stunMagicCookie {
+					t.Fatalf("STUN magic cookie = %#x, want %#x", got, stunMagicCookie)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			transport.local = tt.local
+			transport.remote = tt.remote
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			if err := sess.SendKeepAlive(context.Background()); err != nil {
+				t.Fatalf("SendKeepAlive() error = %v", err)
+			}
+			writes := transport.snapshotWrites()
+			if len(writes) != 1 {
+				t.Fatalf("write count = %d, want 1", len(writes))
+			}
+			tt.assertData(t, writes[0])
+		})
+	}
+}
+
+func TestRunTransportReadLoopIgnoresKeepAlivePackets(t *testing.T) {
+	tests := []struct {
+		name    string
+		packets func(*testing.T) [][]byte
+	}{
+		{
+			name: "crlf and stun",
+			packets: func(t *testing.T) [][]byte {
+				t.Helper()
+				stunPacket, err := newSTUNBindingIndication()
+				if err != nil {
+					t.Fatalf("newSTUNBindingIndication() error = %v", err)
+				}
+				return [][]byte{[]byte("\r\n\r\n"), stunPacket}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			out := make(chan inboundMessage, 1)
+			go runTransportReadLoop(ctx, transport, out, false)
+
+			for _, packet := range tt.packets(t) {
+				transport.readCh <- packet
+			}
+			transport.queueRead(newRequest("MESSAGE", "call-1", "1 MESSAGE"))
+
+			select {
+			case inbound := <-out:
+				if inbound.err != nil {
+					t.Fatalf("inbound error = %v, want SIP message", inbound.err)
+				}
+				if got := inbound.msg.Method(); got != "MESSAGE" {
+					t.Fatalf("inbound method = %q, want MESSAGE", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for SIP message after keepalives")
+			}
+		})
+	}
 }
 
 func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing.T) {

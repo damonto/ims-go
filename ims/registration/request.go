@@ -140,7 +140,7 @@ func (s *Service) buildRegisterRequestForFlow(auth *security.Authorization, lega
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d REGISTER", cseq))
 	transport := sip.TransportToken(s.sess.LocalAddr())
 	msg.Headers.Add("Via", sip.BuildViaWithOptions(transport, state.ContactHost, port, branch, sip.ViaOptions{
-		Keep: strings.EqualFold(transport, "UDP"),
+		Keep: true,
 	}))
 	accessNetworkInfo := ""
 	if registerCanCarryAccessNetworkInfo(auth, verify, flow) {

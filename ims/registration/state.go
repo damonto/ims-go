@@ -157,6 +157,7 @@ func (s *Service) applyRegisterSuccess(msg sip.Message) {
 	s.applyRegisterExpires(msg)
 	s.extendActiveSecureAssociationLifetime(s.secureAssociationExpiresAt(time.Now()))
 	s.setRegistered(true)
+	s.applyRegisterKeepAlive(msg)
 }
 
 func (s *Service) setRegistered(registered bool) {
