@@ -78,9 +78,6 @@ func (s *clientState) connectionErrorLocked(terminalID string, err error) error 
 	if err == nil {
 		err = clientUnavailableError(state)
 	}
-	if err == nil {
-		err = ErrClientNotConnected
-	}
 	return &ConnectionError{
 		State: state,
 		Err:   err,
