@@ -1,13 +1,10 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -116,13 +113,17 @@ type TCPConn struct {
 	ackedSeq    uint32
 	peerMSS     uint16
 	pending     *tcpPendingSegment
-	msgCh       chan []byte
-	errCh       chan error
-	readyCh     chan struct{}
-	ackCh       chan struct{}
-	done        chan struct{}
-	closeOnce   sync.Once
-	readyOnce   sync.Once
+	// Keep out-of-order data bounded so the missing in-order segment still has
+	// room to arrive and unblock delivery.
+	pendingRcvdSegments []tcpReceivedSegment
+	pendingRcvdBytes    int
+	msgCh               chan []byte
+	errCh               chan error
+	readyCh             chan struct{}
+	ackCh               chan struct{}
+	done                chan struct{}
+	closeOnce           sync.Once
+	readyOnce           sync.Once
 
 	dataACKTimeouts []time.Duration
 }
@@ -819,22 +820,23 @@ func tcpSeqAfter(a, b uint32) bool {
 	return int32(a-b) > 0
 }
 
+// tcpSeqInWindow follows gVisor's Linux-compatible right-edge behavior for
+// zero-length control segments.
 func tcpSeqInWindow(value, start uint32, window uint32) bool {
 	if window == 0 {
 		return value == start
 	}
-	return !tcpSeqAfter(start, value) && tcpSeqAfter(start+window, value)
+	return !tcpSeqAfter(start, value) && !tcpSeqAfter(value, start+window)
 }
 
 func tcpSegmentAcceptable(seq uint32, length uint32, recvSeq uint32, window uint32) bool {
+	if window == 0 {
+		return length == 0 && seq == recvSeq
+	}
 	if length == 0 {
 		return tcpSeqInWindow(seq, recvSeq, window)
 	}
-	if window == 0 {
-		return false
-	}
-	last := seq + length - 1
-	return tcpSeqInWindow(seq, recvSeq, window) || tcpSeqInWindow(last, recvSeq, window)
+	return tcpSeqAfter(seq+length, recvSeq) && !tcpSeqAfter(seq, recvSeq+window)
 }
 
 func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -1002,6 +1004,8 @@ func (t *TCPConn) selectPassiveISSLocked() error {
 func (t *TCPConn) returnToPassiveListenLocked() {
 	t.recvSeq = 0
 	t.stream = nil
+	t.pendingRcvdSegments = nil
+	t.pendingRcvdBytes = 0
 	t.peerMSS = 0
 	t.pending = nil
 	t.established = false
@@ -1023,7 +1027,6 @@ func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegme
 		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
 	}
 
-	fin := segment.Flags&packet.TCPFlagFIN != 0
 	segLen := uint32(len(segment.Payload)) + tcpControlSequenceLen(segment.Flags)
 	if !tcpSegmentAcceptable(segment.Seq, segLen, t.recvSeq, uint32(tcpDefaultWindow)) {
 		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
@@ -1037,6 +1040,7 @@ func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegme
 
 	seq := segment.Seq
 	payload := segment.Payload
+	flags := segment.Flags
 	if tcpSeqAfter(t.recvSeq, seq) {
 		skip := t.recvSeq - seq
 		if skip > uint32(len(payload)) {
@@ -1046,40 +1050,19 @@ func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegme
 		seq = t.recvSeq
 	}
 	if seq != t.recvSeq {
+		t.queuePendingSegment(seq, flags, payload)
 		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
 	}
 
-	nextRecv := seq + uint32(len(payload))
-	if fin {
-		nextRecv++
+	if err := t.consumeSegment(seq, flags, payload); errors.Is(err, errTCPReceiveQueueFull) {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
+	} else if err != nil {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, err
 	}
-	t.recvSeq = nextRecv
-	ack = t.recvSeq
-	response := tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}
-	if len(payload) == 0 {
-		return response, errors.New("reading tcp packet: peer closed connection")
+	if err := t.consumePendingSegments(); err != nil {
+		return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, err
 	}
-
-	t.stream = append(t.stream, payload...)
-	for {
-		msg, rest, ok, err := nextSIPMessage(t.stream)
-		if err != nil {
-			return response, err
-		}
-		if !ok {
-			t.stream = rest
-			if fin {
-				return response, errors.New("reading tcp packet: peer closed connection")
-			}
-			return response, nil
-		}
-		t.stream = rest
-		select {
-		case t.msgCh <- msg:
-		default:
-			return response, errors.New("reading tcp packet: message queue is full")
-		}
-	}
+	return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, nil
 }
 
 func (t *TCPConn) signalReady() {
@@ -1170,62 +1153,6 @@ func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags
 		return fmt.Errorf("writing secure tcp packet: %w", err)
 	}
 	return t.session.WriteInnerPacket(ctx, inner)
-}
-
-func nextSIPMessage(stream []byte) ([]byte, []byte, bool, error) {
-	stream = trimLeadingSIPCRLF(stream)
-	headersEnd := bytes.Index(stream, []byte("\r\n\r\n"))
-	if headersEnd < 0 {
-		if len(stream) > tcpMaxSIPHeaderBytes {
-			return nil, stream, false, errors.New("reading tcp packet: SIP header too large")
-		}
-		return nil, stream, false, nil
-	}
-	if headersEnd > tcpMaxSIPHeaderBytes {
-		return nil, stream, false, errors.New("reading tcp packet: SIP header too large")
-	}
-	headersBlob := string(stream[:headersEnd])
-	contentLength := 0
-	foundContentLength := false
-	for line := range strings.SplitSeq(headersBlob, "\r\n") {
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		name = strings.TrimSpace(name)
-		if !strings.EqualFold(name, "Content-Length") && !strings.EqualFold(name, "l") {
-			continue
-		}
-		foundContentLength = true
-		parsed, err := strconv.Atoi(strings.TrimSpace(value))
-		if err != nil {
-			return nil, stream, false, fmt.Errorf("reading tcp packet: parsing Content-Length: %w", err)
-		}
-		if parsed < 0 {
-			return nil, stream, false, errors.New("reading tcp packet: invalid negative Content-Length")
-		}
-		contentLength = parsed
-		break
-	}
-	if !foundContentLength {
-		return nil, stream, false, errors.New("reading tcp packet: missing Content-Length")
-	}
-	headersSize := headersEnd + 4
-	if contentLength > tcpMaxSIPMessageBytes-headersSize {
-		return nil, stream, false, errors.New("reading tcp packet: SIP message too large")
-	}
-	total := headersSize + contentLength
-	if len(stream) < total {
-		return nil, stream, false, nil
-	}
-	return append([]byte(nil), stream[:total]...), append([]byte(nil), stream[total:]...), true, nil
-}
-
-func trimLeadingSIPCRLF(stream []byte) []byte {
-	for len(stream) >= 2 && stream[0] == '\r' && stream[1] == '\n' {
-		stream = stream[2:]
-	}
-	return stream
 }
 
 func normalizedTCPDataACKTimeouts(values []time.Duration) ([]time.Duration, error) {

@@ -610,6 +610,36 @@ func TestTCPConnACKWindow(t *testing.T) {
 	}
 }
 
+func TestTCPSegmentAcceptable(t *testing.T) {
+	tests := []struct {
+		name   string
+		seq    uint32
+		length uint32
+		recv   uint32
+		window uint32
+		want   bool
+	}{
+		{name: "zero window exact ack", seq: 100, recv: 100, want: true},
+		{name: "zero window data rejected", seq: 100, length: 1, recv: 100},
+		{name: "left edge ack", seq: 100, recv: 100, window: 10, want: true},
+		{name: "right edge ack follows gvisor linux behavior", seq: 110, recv: 100, window: 10, want: true},
+		{name: "ack beyond right edge rejected", seq: 111, recv: 100, window: 10},
+		{name: "old overlap accepted", seq: 95, length: 10, recv: 100, window: 10, want: true},
+		{name: "right edge payload follows gvisor linux behavior", seq: 110, length: 1, recv: 100, window: 10, want: true},
+		{name: "payload beyond right edge rejected", seq: 111, length: 1, recv: 100, window: 10},
+		{name: "wrapped right edge ack accepted", seq: 4, recv: ^uint32(0) - 5, window: 10, want: true},
+		{name: "wrapped ack beyond right edge rejected", seq: 5, recv: ^uint32(0) - 5, window: 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tcpSegmentAcceptable(tt.seq, tt.length, tt.recv, tt.window); got != tt.want {
+				t.Fatalf("tcpSegmentAcceptable(%d, %d, %d, %d) = %t, want %t", tt.seq, tt.length, tt.recv, tt.window, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTCPConnPendingSegmentClearedOnACK(t *testing.T) {
 	conn := &TCPConn{
 		sendSeq:      1001,
@@ -1035,45 +1065,163 @@ func TestTCPConnPassiveHandshakeRejectsUnacceptableACK(t *testing.T) {
 	}
 }
 
-func TestTCPConnOutOfOrderPayloadAdvancesSendACKOnly(t *testing.T) {
-	conn := newEstablishedTCPConnForTest(t)
-	conn.sendSeq = 1100
-	conn.ackedSeq = 1000
-	conn.pending = &tcpPendingSegment{seq: 1001, nextSeq: 1050, flags: packet.TCPFlagACK | packet.TCPFlagPSH, payload: []byte("pending")}
-	payload := "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"
+func TestTCPConnOutOfOrderPayloadWaitsForGap(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		cut  int
+	}{
+		{name: "split sip message", msg: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", cut: 24},
+	}
 
-	conn.mu.Lock()
-	response, err := conn.processSegment(packet.TCPSegment{
-		Seq:     2002,
-		Ack:     1050,
-		Flags:   packet.TCPFlagACK | packet.TCPFlagPSH,
-		Payload: []byte(payload),
-	})
-	acked := conn.ackedSeq
-	pending := conn.pending
-	recvSeq := conn.recvSeq
-	conn.mu.Unlock()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.sendSeq = 1100
+			conn.ackedSeq = 1000
+			conn.pending = &tcpPendingSegment{seq: 1001, nextSeq: 1050, flags: packet.TCPFlagACK | packet.TCPFlagPSH, payload: []byte("pending")}
+			first := []byte(tt.msg[:tt.cut])
+			second := []byte(tt.msg[tt.cut:])
 
-	if err != nil {
-		t.Fatalf("processSegment() error = %v", err)
+			conn.mu.Lock()
+			response, err := conn.processSegment(packet.TCPSegment{
+				Seq:     2001 + uint32(len(first)),
+				Ack:     1050,
+				Flags:   packet.TCPFlagACK | packet.TCPFlagPSH,
+				Payload: second,
+			})
+			acked := conn.ackedSeq
+			pending := conn.pending
+			recvSeq := conn.recvSeq
+			pendingSegments := len(conn.pendingRcvdSegments)
+			conn.mu.Unlock()
+
+			if err != nil {
+				t.Fatalf("processSegment(out-of-order) error = %v", err)
+			}
+			want := tcpSegmentResponse{seq: 1100, ack: 2001, flags: packet.TCPFlagACK}
+			if response != want {
+				t.Fatalf("out-of-order response = %+v, want %+v", response, want)
+			}
+			if acked != 1050 {
+				t.Fatalf("ackedSeq = %d, want 1050", acked)
+			}
+			if recvSeq != 2001 {
+				t.Fatalf("recvSeq = %d, want 2001", recvSeq)
+			}
+			if pending != nil {
+				t.Fatalf("pending = %+v, want nil after ACK", pending)
+			}
+			if pendingSegments != 1 {
+				t.Fatalf("pendingSegments = %d, want 1", pendingSegments)
+			}
+			select {
+			case got := <-conn.msgCh:
+				t.Fatalf("message = %q, want none before gap is filled", string(got))
+			default:
+			}
+
+			conn.mu.Lock()
+			response, err = conn.processSegment(packet.TCPSegment{
+				Seq:     2001,
+				Ack:     1050,
+				Flags:   packet.TCPFlagACK,
+				Payload: first,
+			})
+			recvSeq = conn.recvSeq
+			pendingSegments = len(conn.pendingRcvdSegments)
+			conn.mu.Unlock()
+
+			if err != nil {
+				t.Fatalf("processSegment(gap) error = %v", err)
+			}
+			want = tcpSegmentResponse{seq: 1100, ack: 2001 + uint32(len(tt.msg)), flags: packet.TCPFlagACK}
+			if response != want {
+				t.Fatalf("gap response = %+v, want %+v", response, want)
+			}
+			if recvSeq != 2001+uint32(len(tt.msg)) {
+				t.Fatalf("recvSeq = %d, want %d", recvSeq, 2001+len(tt.msg))
+			}
+			if pendingSegments != 0 {
+				t.Fatalf("pendingSegments = %d, want 0", pendingSegments)
+			}
+			select {
+			case got := <-conn.msgCh:
+				if string(got) != tt.msg {
+					t.Fatalf("message = %q, want %q", string(got), tt.msg)
+				}
+			default:
+				t.Fatal("message was not delivered")
+			}
+		})
 	}
-	want := tcpSegmentResponse{seq: 1100, ack: 2001, flags: packet.TCPFlagACK}
-	if response != want {
-		t.Fatalf("response = %+v, want %+v", response, want)
+}
+
+func TestTCPConnPendingSegmentKeepsMostCompleteDuplicate(t *testing.T) {
+	tests := []struct {
+		name        string
+		first       tcpReceivedSegment
+		second      tcpReceivedSegment
+		wantPayload string
+		wantFlags   byte
+		wantBytes   int
+	}{
+		{
+			name: "shorter duplicate does not replace buffered data",
+			first: tcpReceivedSegment{
+				seq:     2020,
+				flags:   packet.TCPFlagFIN,
+				payload: []byte("Content-Length: 5\r\n\r\nhello"),
+			},
+			second: tcpReceivedSegment{
+				seq:     2020,
+				payload: []byte("Content-Length: 5"),
+			},
+			wantPayload: "Content-Length: 5\r\n\r\nhello",
+			wantFlags:   packet.TCPFlagFIN,
+			wantBytes:   len("Content-Length: 5\r\n\r\nhello") + 1,
+		},
+		{
+			name: "longer duplicate replaces partial data",
+			first: tcpReceivedSegment{
+				seq:     2020,
+				payload: []byte("Content-Length: 5"),
+			},
+			second: tcpReceivedSegment{
+				seq:     2020,
+				flags:   packet.TCPFlagFIN,
+				payload: []byte("Content-Length: 5\r\n\r\nhello"),
+			},
+			wantPayload: "Content-Length: 5\r\n\r\nhello",
+			wantFlags:   packet.TCPFlagFIN,
+			wantBytes:   len("Content-Length: 5\r\n\r\nhello") + 1,
+		},
 	}
-	if acked != 1050 {
-		t.Fatalf("ackedSeq = %d, want 1050", acked)
-	}
-	if recvSeq != 2001 {
-		t.Fatalf("recvSeq = %d, want 2001", recvSeq)
-	}
-	if pending != nil {
-		t.Fatalf("pending = %+v, want nil after ACK", pending)
-	}
-	select {
-	case got := <-conn.msgCh:
-		t.Fatalf("message = %q, want none", string(got))
-	default:
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &TCPConn{}
+
+			conn.queuePendingSegment(tt.first.seq, tt.first.flags, tt.first.payload)
+			conn.queuePendingSegment(tt.second.seq, tt.second.flags, tt.second.payload)
+
+			if len(conn.pendingRcvdSegments) != 1 {
+				t.Fatalf("pending segments = %d, want 1", len(conn.pendingRcvdSegments))
+			}
+			got := conn.pendingRcvdSegments[0]
+			if got.seq != tt.first.seq {
+				t.Fatalf("pending seq = %d, want %d", got.seq, tt.first.seq)
+			}
+			if string(got.payload) != tt.wantPayload {
+				t.Fatalf("pending payload = %q, want %q", got.payload, tt.wantPayload)
+			}
+			if got.flags != tt.wantFlags {
+				t.Fatalf("pending flags = %#x, want %#x", got.flags, tt.wantFlags)
+			}
+			if conn.pendingRcvdBytes != tt.wantBytes {
+				t.Fatalf("pending bytes = %d, want %d", conn.pendingRcvdBytes, tt.wantBytes)
+			}
+		})
 	}
 }
 
@@ -1131,6 +1279,81 @@ func TestTCPConnOverlappingPayloadConsumesOnlyNewBytes(t *testing.T) {
 			case got := <-conn.msgCh:
 				if string(got) != tt.wantMsg {
 					t.Fatalf("message = %q, want %q", string(got), tt.wantMsg)
+				}
+			default:
+				t.Fatal("message was not delivered")
+			}
+		})
+	}
+}
+
+func TestTCPConnFullMessageQueueDoesNotAdvanceReceive(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+	}{
+		{name: "complete sip message", msg: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.msgCh <- []byte("queued")
+
+			conn.mu.Lock()
+			response, err := conn.processSegment(packet.TCPSegment{
+				Seq:     2001,
+				Ack:     1001,
+				Flags:   packet.TCPFlagACK | packet.TCPFlagPSH,
+				Payload: []byte(tt.msg),
+			})
+			recvSeq := conn.recvSeq
+			streamLen := len(conn.stream)
+			conn.mu.Unlock()
+
+			if err != nil {
+				t.Fatalf("processSegment() error = %v", err)
+			}
+			want := tcpSegmentResponse{seq: 1001, ack: 2001, flags: packet.TCPFlagACK}
+			if response != want {
+				t.Fatalf("response = %+v, want %+v", response, want)
+			}
+			if recvSeq != 2001 {
+				t.Fatalf("recvSeq = %d, want 2001", recvSeq)
+			}
+			if streamLen != 0 {
+				t.Fatalf("stream len = %d, want 0", streamLen)
+			}
+
+			queued := <-conn.msgCh
+			if string(queued) != "queued" {
+				t.Fatalf("queued message = %q, want original queued marker", string(queued))
+			}
+
+			conn.mu.Lock()
+			response, err = conn.processSegment(packet.TCPSegment{
+				Seq:     2001,
+				Ack:     1001,
+				Flags:   packet.TCPFlagACK | packet.TCPFlagPSH,
+				Payload: []byte(tt.msg),
+			})
+			recvSeq = conn.recvSeq
+			conn.mu.Unlock()
+
+			if err != nil {
+				t.Fatalf("processSegment(retry) error = %v", err)
+			}
+			want = tcpSegmentResponse{seq: 1001, ack: 2001 + uint32(len(tt.msg)), flags: packet.TCPFlagACK}
+			if response != want {
+				t.Fatalf("retry response = %+v, want %+v", response, want)
+			}
+			if recvSeq != 2001+uint32(len(tt.msg)) {
+				t.Fatalf("recvSeq = %d, want %d", recvSeq, 2001+len(tt.msg))
+			}
+			select {
+			case got := <-conn.msgCh:
+				if string(got) != tt.msg {
+					t.Fatalf("message = %q, want %q", string(got), tt.msg)
 				}
 			default:
 				t.Fatal("message was not delivered")

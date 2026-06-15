@@ -15,6 +15,8 @@ import (
 
 var _ imssession.Transport = (*UDPConn)(nil)
 
+const udpReadQueueSize = 16
+
 type UDPConfig struct {
 	LocalPort  int
 	RemotePort int
@@ -102,7 +104,7 @@ func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action transportAc
 		inboundESP:   secureESPCodec(cfg.InboundSPI, encryption, cfg.EncryptionKey, cfg.Integrity, cfg.IntegrityKey, cfg.Salt),
 		secureMode:   mode,
 		associations: secureAssociations(cfg.Associations),
-		readCh:       make(chan inboundPacket, 16),
+		readCh:       make(chan inboundPacket, udpReadQueueSize),
 		done:         make(chan struct{}),
 	}
 	attachment, err := s.Attach(conn)
@@ -348,12 +350,20 @@ func (t *UDPConn) deliver(payload []byte, peer net.Addr) {
 	}
 	select {
 	case <-t.done:
-	case t.readCh <- inboundPacket{data: append([]byte(nil), payload...), addr: peer}:
+	case t.readCh <- inboundPacket{data: append([]byte(nil), payload...), addr: udpInboundAddr(peer)}:
 	default:
 		if t.session != nil {
 			t.session.Logger().Debug("dropping secure UDP packet: read queue is full", "peer_addr", peer, "payload_len", len(payload))
 		}
 	}
+}
+
+func udpInboundAddr(addr net.Addr) net.Addr {
+	udp, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return addr
+	}
+	return cloneUDPAddr(udp)
 }
 
 func (t *UDPConn) acceptInboundESP(sequence uint32) bool {

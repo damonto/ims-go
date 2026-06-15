@@ -65,6 +65,99 @@ func TestUDPConnReadPacketDrainsQueuedPacketBeforeTerminalError(t *testing.T) {
 	}
 }
 
+func TestUDPConnDeliverCopiesQueuedPacket(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  []byte
+		peer     net.Addr
+		mutate   func([]byte, net.Addr)
+		wantAddr string
+	}{
+		{
+			name:    "udp peer",
+			payload: []byte("REGISTER sip:ims.example SIP/2.0\r\nContent-Length: 0\r\n\r\n"),
+			peer:    &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 5060},
+			mutate: func(payload []byte, peer net.Addr) {
+				payload[0] = 'X'
+				peer.(*net.UDPAddr).Port = 6000
+			},
+			wantAddr: "192.0.2.10:5060",
+		},
+		{
+			name:    "nil peer",
+			payload: []byte("OPTIONS sip:ims.example SIP/2.0\r\nContent-Length: 0\r\n\r\n"),
+			mutate: func(payload []byte, _ net.Addr) {
+				payload[0] = 'X'
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &UDPConn{
+				readCh: make(chan inboundPacket, 1),
+				done:   make(chan struct{}),
+			}
+			payload := append([]byte(nil), tt.payload...)
+			conn.deliver(payload, tt.peer)
+			tt.mutate(payload, tt.peer)
+
+			got, ok := conn.nextPacket()
+			if !ok {
+				t.Fatal("nextPacket() ok = false, want queued packet")
+			}
+			if string(got.data) != string(tt.payload) {
+				t.Fatalf("queued data = %q, want %q", got.data, tt.payload)
+			}
+			if tt.wantAddr == "" {
+				if got.addr != nil {
+					t.Fatalf("queued addr = %v, want nil", got.addr)
+				}
+				return
+			}
+			if got.addr.String() != tt.wantAddr {
+				t.Fatalf("queued addr = %v, want %s", got.addr, tt.wantAddr)
+			}
+		})
+	}
+}
+
+func TestUDPConnDeliverDropsWhenReadQueueFull(t *testing.T) {
+	tests := []struct {
+		name    string
+		queued  []byte
+		dropped []byte
+	}{
+		{
+			name:    "keeps oldest datagram",
+			queued:  []byte("SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"),
+			dropped: []byte("SIP/2.0 486 Busy Here\r\nContent-Length: 0\r\n\r\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &UDPConn{
+				readCh: make(chan inboundPacket, 1),
+				done:   make(chan struct{}),
+			}
+			conn.deliver(tt.queued, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 5060})
+			conn.deliver(tt.dropped, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 5060})
+
+			got, ok := conn.nextPacket()
+			if !ok {
+				t.Fatal("nextPacket() ok = false, want queued packet")
+			}
+			if string(got.data) != string(tt.queued) {
+				t.Fatalf("queued data = %q, want first datagram %q", got.data, tt.queued)
+			}
+			if _, ok := conn.nextPacket(); ok {
+				t.Fatal("nextPacket() ok = true, want full-queue datagram dropped")
+			}
+		})
+	}
+}
+
 func TestProtectedUDPWriteRemoteStaysOnProtectedPeerFlow(t *testing.T) {
 	tests := []struct {
 		name       string
