@@ -45,10 +45,19 @@ func pcscfReselectionRequestedError(info Info) error {
 
 func pcscfInfoFromAddresses(previous Info, ips []net.IP) Info {
 	info := cloneInfo(previous)
-	info.PCSCFIPs = cloneIPList(ips)
-	info.PCSCFIP = nil
-	if len(info.PCSCFIPs) != 0 {
-		info.PCSCFIP = append(net.IP(nil), info.PCSCFIPs[0]...)
+	info.PCSCFIPs = nil
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			if len(info.InnerIPv4) != 0 {
+				info.PCSCFIPs = appendUniqueIP(info.PCSCFIPs, ip)
+			}
+			continue
+		}
+		if ip.To16() != nil {
+			if !info.InnerIPv6.IsZero() {
+				info.PCSCFIPs = appendUniqueIP(info.PCSCFIPs, ip)
+			}
+		}
 	}
 	return info
 }

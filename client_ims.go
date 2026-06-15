@@ -235,11 +235,7 @@ func (c *Client) dialPCSCFTCP(ctx context.Context, setup *connectSetup, pcscfIPs
 }
 
 func pcscfCandidateIPs(info swutunnel.Info) []net.IP {
-	candidates := info.PCSCFIPs
-	if len(candidates) == 0 && len(info.PCSCFIP) != 0 {
-		candidates = []net.IP{append(net.IP(nil), info.PCSCFIP...)}
-	}
-	return uniqueIPs(candidates)
+	return uniqueIPs(info.PCSCFAddresses())
 }
 
 func firstPCSCFIP(ips []net.IP) net.IP {

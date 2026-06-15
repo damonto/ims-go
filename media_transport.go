@@ -65,11 +65,15 @@ func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cf
 	if cfg.LocalPort == 0 {
 		return nil, errors.New("opening voice media transport: local port is required")
 	}
+	localIP := info.InnerIPForRemote(cfg.RemoteIP)
+	if len(localIP) == 0 {
+		return nil, errors.New("opening voice media transport: matching local ip is unavailable")
+	}
 	transport := &tunnelMediaTransport{
 		session: session,
 		logger:  session.Logger(),
 		local: &net.UDPAddr{
-			IP:   append(net.IP(nil), info.InnerIP...),
+			IP:   localIP,
 			Port: cfg.LocalPort,
 		},
 		readCh:   make(chan tunnelMediaPacket, 32),

@@ -194,8 +194,8 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	session.innerLocal = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062}
 	session.innerRemote = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060}
 	session.tunnel = Info{
-		InnerIP:         net.IPv4(10, 0, 0, 1),
-		PCSCFIP:         net.IPv4(10, 0, 0, 2),
+		InnerIPv4:       net.IPv4(10, 0, 0, 1),
+		PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 		ESPInitiatorSPI: 101,
 		ESPResponderSPI: 202,
 	}
@@ -262,7 +262,7 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	if innerLocal != nil || innerRemote != nil {
 		t.Fatalf("inner addrs = (%v, %v), want nil", innerLocal, innerRemote)
 	}
-	if len(info.InnerIP) != 0 || len(info.PCSCFIP) != 0 || info.ESPInitiatorSPI != 0 || info.ESPResponderSPI != 0 || info.Encryption != 0 || info.EncryptionKeyLen != 0 || info.Integrity != 0 {
+	if info.HasInnerAddress() || len(info.PCSCFAddresses()) != 0 || info.ESPInitiatorSPI != 0 || info.ESPResponderSPI != 0 || info.Encryption != 0 || info.EncryptionKeyLen != 0 || info.Integrity != 0 {
 		t.Fatalf("Info = %+v, want zero value", info)
 	}
 	if !errors.Is(tunnelErr, cause) {
@@ -298,7 +298,7 @@ func TestReadyInfoReportsTunnelState(t *testing.T) {
 			setup: func(session *Session) {
 				session.mu.Lock()
 				session.connected = true
-				session.tunnel = Info{InnerIP: net.IPv4(10, 0, 0, 1)}
+				session.tunnel = Info{InnerIPv4: net.IPv4(10, 0, 0, 1)}
 				session.mu.Unlock()
 			},
 		},
@@ -356,8 +356,8 @@ func TestReadyInfoReportsTunnelState(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ReadyInfo() error = %v", err)
 				}
-				if !info.InnerIP.Equal(net.IPv4(10, 0, 0, 1)) {
-					t.Fatalf("ReadyInfo().InnerIP = %v, want 10.0.0.1", info.InnerIP)
+				if !info.DefaultInnerIP().Equal(net.IPv4(10, 0, 0, 1)) {
+					t.Fatalf("ReadyInfo().DefaultInnerIP() = %v, want 10.0.0.1", info.DefaultInnerIP())
 				}
 				return
 			}
@@ -374,8 +374,7 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 	session.mu.Lock()
 	session.connected = true
 	session.tunnel = Info{
-		InnerIP:          net.IPv4(10, 0, 0, 1),
-		PCSCFIP:          net.IPv4(10, 0, 0, 2),
+		InnerIPv4:        net.IPv4(10, 0, 0, 1),
 		PCSCFIPs:         []net.IP{net.IPv4(10, 0, 0, 2)},
 		ESPInitiatorSPI:  101,
 		ESPResponderSPI:  202,
@@ -386,8 +385,7 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 	session.mu.Unlock()
 
 	want := Info{
-		InnerIP:          net.IPv4(10, 0, 0, 1),
-		PCSCFIP:          net.IPv4(10, 9, 8, 7),
+		InnerIPv4:        net.IPv4(10, 0, 0, 1),
 		PCSCFIPs:         []net.IP{net.IPv4(10, 9, 8, 7), net.IPv4(10, 9, 8, 8)},
 		ESPInitiatorSPI:  101,
 		ESPResponderSPI:  202,
@@ -398,8 +396,8 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 	session.applyPCSCFReselection(want)
 
 	info := session.Info()
-	if !info.PCSCFIP.Equal(want.PCSCFIP) {
-		t.Fatalf("PCSCFIP = %s, want %s", info.PCSCFIP, want.PCSCFIP)
+	if !info.DefaultPCSCFIP().Equal(want.DefaultPCSCFIP()) {
+		t.Fatalf("DefaultPCSCFIP() = %s, want %s", info.DefaultPCSCFIP(), want.DefaultPCSCFIP())
 	}
 	if !ipListEqual(info.PCSCFIPs, want.PCSCFIPs) {
 		t.Fatalf("PCSCFIPs = %v, want %v", info.PCSCFIPs, want.PCSCFIPs)
@@ -586,8 +584,8 @@ func TestRekeyReleaseWakesStateWaiters(t *testing.T) {
 				session.initiatorSPI = 0x0102030405060708
 				session.responderSPI = 0x1112131415161718
 				session.tunnel = Info{
-					InnerIP:                   net.IPv4(10, 0, 0, 1),
-					PCSCFIP:                   net.IPv4(10, 0, 0, 2),
+					InnerIPv4:                 net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:                  []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI:           0x01020304,
 					ESPResponderSPI:           0x10203040,
 					InitiatorTrafficSelectors: tsi,
@@ -1247,8 +1245,8 @@ func TestBuildCreateChildSAResponsePayloadsRejectsPeerChildCreate(t *testing.T) 
 					ChildIntegrity:         []uint16{transformINTEGHMACSHA196},
 				},
 				info: Info{
-					InnerIP:          net.IPv4(10, 0, 0, 1),
-					PCSCFIP:          net.IPv4(10, 0, 0, 2),
+					InnerIPv4:        net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:         []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI:  0x01020304,
 					ESPResponderSPI:  0x10203040,
 					Encryption:       transformENCRAESCBC,
@@ -1524,8 +1522,8 @@ func TestBuildCreateChildSAResponsePayloadsForPeerChildRekey(t *testing.T) {
 					ChildIntegrity:         []uint16{transformINTEGHMACSHA196},
 				},
 				info: Info{
-					InnerIP:                   net.IPv4(10, 0, 0, 1),
-					PCSCFIP:                   net.IPv4(10, 0, 0, 2),
+					InnerIPv4:                 net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:                  []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI:           0x01020304,
 					ESPResponderSPI:           tt.oldOutboundSPI,
 					Encryption:                transformENCRAESCBC,
@@ -1613,8 +1611,8 @@ func TestBuildCreateChildSAResponsePayloadsPreservesAcceptedChildProposalNumber(
 			ChildIntegrity:         []uint16{transformINTEGHMACSHA196},
 		},
 		info: Info{
-			InnerIP:                   net.IPv4(10, 0, 0, 1),
-			PCSCFIP:                   net.IPv4(10, 0, 0, 2),
+			InnerIPv4:                 net.IPv4(10, 0, 0, 1),
+			PCSCFIPs:                  []net.IP{net.IPv4(10, 0, 0, 2)},
 			ESPInitiatorSPI:           0x01020304,
 			ESPResponderSPI:           0x10203040,
 			Encryption:                transformENCRAESCBC,
@@ -1850,8 +1848,8 @@ func TestInitiatedChildSARekeyRetriesInvalidKEPayloadGroup(t *testing.T) {
 					ChildIntegrity:         []uint16{transformINTEGHMACSHA196},
 				}),
 				info: Info{
-					InnerIP:          net.IPv4(10, 0, 0, 1),
-					PCSCFIP:          net.IPv4(10, 0, 0, 2),
+					InnerIPv4:        net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:         []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI:  0x01020304,
 					ESPResponderSPI:  0x10203040,
 					Encryption:       transformENCRAESCBC,
@@ -2379,8 +2377,8 @@ func TestRekeyChildSACreatesReplacementAfterChildSANotFound(t *testing.T) {
 			session.responderSPI = 0x1112131415161718
 			session.outerNAT = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
 			session.tunnel = Info{
-				InnerIP:                   net.IPv4(10, 0, 0, 1),
-				PCSCFIP:                   net.IPv4(10, 0, 0, 2),
+				InnerIPv4:                 net.IPv4(10, 0, 0, 1),
+				PCSCFIPs:                  []net.IP{net.IPv4(10, 0, 0, 2)},
 				ESPInitiatorSPI:           0x01020304,
 				ESPResponderSPI:           0x10203040,
 				Encryption:                transformENCRAESCBC,
@@ -2467,8 +2465,8 @@ func TestRekeyChildSAIgnoresChildSANotFoundAfterSimultaneousRekey(t *testing.T) 
 			session.responderSPI = 0x1112131415161718
 			session.outerNAT = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
 			session.tunnel = Info{
-				InnerIP:                   net.IPv4(10, 0, 0, 1),
-				PCSCFIP:                   net.IPv4(10, 0, 0, 2),
+				InnerIPv4:                 net.IPv4(10, 0, 0, 1),
+				PCSCFIPs:                  []net.IP{net.IPv4(10, 0, 0, 2)},
 				ESPInitiatorSPI:           0x01020304,
 				ESPResponderSPI:           0x10203040,
 				Encryption:                transformENCRAESCBC,
@@ -2700,8 +2698,8 @@ func TestBuildCreateChildSAResponsePayloadsDuringLocalChildRekeyRespondsAsUsual(
 					ChildIntegrity:         []uint16{transformINTEGHMACSHA196},
 				},
 				info: Info{
-					InnerIP:          net.IPv4(10, 0, 0, 1),
-					PCSCFIP:          net.IPv4(10, 0, 0, 2),
+					InnerIPv4:        net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:         []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI:  0x01020304,
 					ESPResponderSPI:  tt.oldOutboundSPI,
 					Encryption:       transformENCRAESCBC,
@@ -2824,8 +2822,8 @@ func TestInstallLocalChildSAAfterSimultaneousRekeyRetiresPeerCreatedSAWithPendin
 			session.mu.Lock()
 			session.connected = true
 			session.tunnel = Info{
-				InnerIP:         net.IPv4(10, 0, 0, 1),
-				PCSCFIP:         net.IPv4(10, 0, 0, 2),
+				InnerIPv4:       net.IPv4(10, 0, 0, 1),
+				PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 				ESPInitiatorSPI: tt.oldInbound,
 				ESPResponderSPI: tt.oldOutbound,
 			}
@@ -2835,8 +2833,8 @@ func TestInstallLocalChildSAAfterSimultaneousRekeyRetiresPeerCreatedSAWithPendin
 
 			session.stageResponderChildSecurityAssociations(childSARekeyResult{
 				info: Info{
-					InnerIP:         net.IPv4(10, 0, 0, 1),
-					PCSCFIP:         net.IPv4(10, 0, 0, 2),
+					InnerIPv4:       net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI: tt.peerNewInbound,
 					ESPResponderSPI: tt.peerNewOutbound,
 				},
@@ -2846,8 +2844,8 @@ func TestInstallLocalChildSAAfterSimultaneousRekeyRetiresPeerCreatedSAWithPendin
 			})
 			session.installChildSecurityAssociations(childSARekeyResult{
 				info: Info{
-					InnerIP:         net.IPv4(10, 0, 0, 1),
-					PCSCFIP:         net.IPv4(10, 0, 0, 2),
+					InnerIPv4:       net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI: tt.localNewInbound,
 					ESPResponderSPI: tt.localNewOutbound,
 				},
@@ -2865,8 +2863,8 @@ func TestInstallLocalChildSAAfterSimultaneousRekeyRetiresPeerCreatedSAWithPendin
 			if !ok {
 				t.Fatal("delete payload not handled")
 			}
-			if action.deleteRetiredChildSPI != tt.peerNewInbound {
-				t.Fatalf("deleteRetiredChildSPI = %#x, want peer-created inbound %#x", action.deleteRetiredChildSPI, tt.peerNewInbound)
+			if !slices.Equal(action.deleteRetiredChildSPIs, []uint32{tt.peerNewInbound}) {
+				t.Fatalf("deleteRetiredChildSPIs = %#x, want peer-created inbound %#x", action.deleteRetiredChildSPIs, []uint32{tt.peerNewInbound})
 			}
 			if len(responsePayloads) != 1 {
 				t.Fatalf("response payload count = %d, want 1", len(responsePayloads))
@@ -4090,8 +4088,8 @@ func TestStageResponderChildSecurityAssociationsDefersOutboundSwitch(t *testing.
 			oldOutbound := esp.Codec{SPI: tt.oldOutbound}
 			result := childSARekeyResult{
 				info: Info{
-					InnerIP:          net.IPv4(10, 0, 0, 1),
-					PCSCFIP:          net.IPv4(10, 0, 0, 2),
+					InnerIPv4:        net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:         []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI:  tt.newInbound,
 					ESPResponderSPI:  tt.newOutbound,
 					Encryption:       transformENCRAESCBC,
@@ -4106,8 +4104,8 @@ func TestStageResponderChildSecurityAssociationsDefersOutboundSwitch(t *testing.
 			session.connected = true
 			session.dataPlaneDone = make(chan struct{})
 			session.tunnel = Info{
-				InnerIP:         net.IPv4(10, 0, 0, 1),
-				PCSCFIP:         net.IPv4(10, 0, 0, 2),
+				InnerIPv4:       net.IPv4(10, 0, 0, 1),
+				PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 				ESPInitiatorSPI: tt.oldInbound,
 				ESPResponderSPI: tt.oldOutbound,
 			}
@@ -4210,8 +4208,8 @@ func TestDeleteOldChildSAAfterPendingPromotionRespondsWithRetiredInbound(t *test
 			session.mu.Lock()
 			session.connected = true
 			session.tunnel = Info{
-				InnerIP:         net.IPv4(10, 0, 0, 1),
-				PCSCFIP:         net.IPv4(10, 0, 0, 2),
+				InnerIPv4:       net.IPv4(10, 0, 0, 1),
+				PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 				ESPInitiatorSPI: tt.oldInbound,
 				ESPResponderSPI: tt.oldOutbound,
 			}
@@ -4221,8 +4219,8 @@ func TestDeleteOldChildSAAfterPendingPromotionRespondsWithRetiredInbound(t *test
 
 			session.stageResponderChildSecurityAssociations(childSARekeyResult{
 				info: Info{
-					InnerIP:         net.IPv4(10, 0, 0, 1),
-					PCSCFIP:         net.IPv4(10, 0, 0, 2),
+					InnerIPv4:       net.IPv4(10, 0, 0, 1),
+					PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
 					ESPInitiatorSPI: tt.newInbound,
 					ESPResponderSPI: tt.newOutbound,
 				},
@@ -4247,8 +4245,8 @@ func TestDeleteOldChildSAAfterPendingPromotionRespondsWithRetiredInbound(t *test
 			if action.deleteChild || action.promotePendingChild {
 				t.Fatalf("action = %+v, want retired child cleanup only", action)
 			}
-			if action.deleteRetiredChildSPI != tt.oldInbound {
-				t.Fatalf("deleteRetiredChildSPI = %#x, want %#x", action.deleteRetiredChildSPI, tt.oldInbound)
+			if !slices.Equal(action.deleteRetiredChildSPIs, []uint32{tt.oldInbound}) {
+				t.Fatalf("deleteRetiredChildSPIs = %#x, want %#x", action.deleteRetiredChildSPIs, []uint32{tt.oldInbound})
 			}
 			if len(responsePayloads) != 1 {
 				t.Fatalf("response payload count = %d, want 1", len(responsePayloads))
@@ -4260,7 +4258,9 @@ func TestDeleteOldChildSAAfterPendingPromotionRespondsWithRetiredInbound(t *test
 			if got := binary.BigEndian.Uint32(deletePayload.SPIs[0]); got != tt.oldInbound {
 				t.Fatalf("response delete SPI = %#x, want retired inbound %#x", got, tt.oldInbound)
 			}
-			session.removeRetiredChildSA(action.deleteRetiredChildSPI)
+			for _, spi := range action.deleteRetiredChildSPIs {
+				session.removeRetiredChildSA(spi)
+			}
 			session.mu.RLock()
 			retiredCount := len(session.retiredChildSAs)
 			session.mu.RUnlock()
@@ -4271,12 +4271,113 @@ func TestDeleteOldChildSAAfterPendingPromotionRespondsWithRetiredInbound(t *test
 	}
 }
 
-func TestDeleteUnknownChildSARespondsWithoutDeletePayload(t *testing.T) {
+func TestDeleteKnownChildSAsAggregatesResponse(t *testing.T) {
 	tests := []struct {
-		name          string
-		state         informationalState
-		deleteSPIs    [][]byte
-		wantDeleteSPI uint32
+		name             string
+		state            informationalState
+		payloads         []ike.Payload
+		wantSPIs         []uint32
+		wantDeleteChild  bool
+		wantPromoteChild bool
+		wantRetiredSPIs  []uint32
+	}{
+		{
+			name: "active and retired child sas",
+			state: informationalState{
+				inboundSPI:  0x01020304,
+				outboundSPI: 0x10203040,
+				retiredChildSAs: []retiredChildSAState{{
+					inboundSPI:  0x11121314,
+					outboundSPI: 0x21222324,
+				}},
+			},
+			payloads: []ike.Payload{
+				&ike.DeletePayload{ProtocolID: protocolIDESP, SPIs: [][]byte{uint32Bytes(0x10203040)}},
+				&ike.DeletePayload{ProtocolID: protocolIDESP, SPIs: [][]byte{uint32Bytes(0x21222324)}},
+			},
+			wantSPIs:        []uint32{0x01020304, 0x11121314},
+			wantDeleteChild: true,
+			wantRetiredSPIs: []uint32{0x11121314},
+		},
+		{
+			name: "pending old and retired child sas",
+			state: informationalState{
+				inboundSPI:    0x11121314,
+				outboundSPI:   0x10203040,
+				pendingChild:  true,
+				oldInboundSPI: 0x01020304,
+				retiredChildSAs: []retiredChildSAState{{
+					inboundSPI:  0x21222324,
+					outboundSPI: 0x31323334,
+				}},
+			},
+			payloads: []ike.Payload{
+				&ike.DeletePayload{ProtocolID: protocolIDESP, SPIs: [][]byte{
+					uint32Bytes(0x10203040),
+					uint32Bytes(0x31323334),
+				}},
+			},
+			wantSPIs:         []uint32{0x01020304, 0x21222324},
+			wantPromoteChild: true,
+			wantRetiredSPIs:  []uint32{0x01020304, 0x21222324},
+		},
+		{
+			name: "mixed unknown and active child spi",
+			state: informationalState{
+				inboundSPI:  0x01020304,
+				outboundSPI: 0x10203040,
+			},
+			payloads: []ike.Payload{
+				&ike.DeletePayload{ProtocolID: protocolIDESP, SPIs: [][]byte{
+					uint32Bytes(0x50607080),
+					uint32Bytes(0x10203040),
+				}},
+			},
+			wantSPIs:        []uint32{0x01020304},
+			wantDeleteChild: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responsePayloads, action, ok, err := buildDeleteResponsePayloads(tt.state, tt.payloads)
+			if err != nil {
+				t.Fatalf("buildDeleteResponsePayloads() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("delete payload not handled")
+			}
+			if action.deleteChild != tt.wantDeleteChild || action.promotePendingChild != tt.wantPromoteChild {
+				t.Fatalf("action = %+v, want deleteChild=%t promotePendingChild=%t", action, tt.wantDeleteChild, tt.wantPromoteChild)
+			}
+			if !slices.Equal(action.deleteRetiredChildSPIs, tt.wantRetiredSPIs) {
+				t.Fatalf("deleteRetiredChildSPIs = %#x, want %#x", action.deleteRetiredChildSPIs, tt.wantRetiredSPIs)
+			}
+			if len(responsePayloads) != 1 {
+				t.Fatalf("response payload count = %d, want 1", len(responsePayloads))
+			}
+			deletePayload, ok := responsePayloads[0].(*ike.DeletePayload)
+			if !ok {
+				t.Fatalf("response payload = %T, want *ike.DeletePayload", responsePayloads[0])
+			}
+			if deletePayload.ProtocolID != protocolIDESP {
+				t.Fatalf("response protocol id = %d, want %d", deletePayload.ProtocolID, protocolIDESP)
+			}
+			gotSPIs := make([]uint32, 0, len(deletePayload.SPIs))
+			for _, spi := range deletePayload.SPIs {
+				gotSPIs = append(gotSPIs, binary.BigEndian.Uint32(spi))
+			}
+			if !slices.Equal(gotSPIs, tt.wantSPIs) {
+				t.Fatalf("response delete SPIs = %#x, want %#x", gotSPIs, tt.wantSPIs)
+			}
+		})
+	}
+}
+
+func TestDeleteUnknownChildSARespondsEmpty(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      informationalState
+		deleteSPIs [][]byte
 	}{
 		{
 			name: "unknown current child spi",
@@ -4292,6 +4393,34 @@ func TestDeleteUnknownChildSARespondsWithoutDeletePayload(t *testing.T) {
 			deleteSPIs: [][]byte{uint32Bytes(0x50607080)},
 		},
 		{
+			name:       "zero spi without active child state",
+			state:      informationalState{},
+			deleteSPIs: [][]byte{uint32Bytes(0)},
+		},
+		{
+			name: "zero spi with partial child state",
+			state: informationalState{
+				inboundSPI: 0x01020304,
+			},
+			deleteSPIs: [][]byte{uint32Bytes(0)},
+		},
+		{
+			name: "reserved spi with partial child state",
+			state: informationalState{
+				inboundSPI:  0x01020304,
+				outboundSPI: 255,
+			},
+			deleteSPIs: [][]byte{uint32Bytes(255)},
+		},
+		{
+			name: "pending child without old inbound spi",
+			state: informationalState{
+				outboundSPI:  0x10203040,
+				pendingChild: true,
+			},
+			deleteSPIs: [][]byte{uint32Bytes(0x10203040)},
+		},
+		{
 			name: "not a retired child spi",
 			state: informationalState{
 				inboundSPI:  0x01020304,
@@ -4302,15 +4431,6 @@ func TestDeleteUnknownChildSARespondsWithoutDeletePayload(t *testing.T) {
 				}},
 			},
 			deleteSPIs: [][]byte{uint32Bytes(0x50607080)},
-		},
-		{
-			name: "mixed unknown and known spi deletes known child",
-			state: informationalState{
-				inboundSPI:  0x01020304,
-				outboundSPI: 0x10203040,
-			},
-			deleteSPIs:    [][]byte{uint32Bytes(0x50607080), uint32Bytes(0x10203040)},
-			wantDeleteSPI: 0x01020304,
 		},
 	}
 	for _, tt := range tests {
@@ -4324,26 +4444,105 @@ func TestDeleteUnknownChildSARespondsWithoutDeletePayload(t *testing.T) {
 			if !ok {
 				t.Fatal("delete payload not handled")
 			}
-			if tt.wantDeleteSPI == 0 {
-				if action.deleteIKE || action.deleteChild || action.promotePendingChild || action.deleteRetiredChildSPI != 0 {
-					t.Fatalf("action = %+v, want no state change for unknown spi", action)
-				}
+			if action.deleteIKE || action.deleteChild || action.promotePendingChild || len(action.deleteRetiredChildSPIs) != 0 {
+				t.Fatalf("action = %+v, want no state change for unknown spi", action)
+			}
+			if len(responsePayloads) != 0 {
+				t.Fatalf("response payload count = %d, want 0", len(responsePayloads))
+			}
+		})
+	}
+}
+
+func TestAHDeletePayloadsAreIgnored(t *testing.T) {
+	tests := []struct {
+		name            string
+		payloads        []ike.Payload
+		wantResponseSPI uint32
+		wantDeleteChild bool
+	}{
+		{
+			name: "ah delete",
+			payloads: []ike.Payload{
+				&ike.DeletePayload{ProtocolID: protocolIDAH, SPIs: [][]byte{uint32Bytes(0x10203040)}},
+			},
+		},
+		{
+			name: "mixed ah and esp delete",
+			payloads: []ike.Payload{
+				&ike.DeletePayload{ProtocolID: protocolIDAH, SPIs: [][]byte{uint32Bytes(0x10203040)}},
+				&ike.DeletePayload{ProtocolID: protocolIDESP, SPIs: [][]byte{uint32Bytes(0x50607080)}},
+			},
+			wantResponseSPI: 0x01020304,
+			wantDeleteChild: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responsePayloads, action, ok, err := buildDeleteResponsePayloads(informationalState{
+				inboundSPI:  0x01020304,
+				outboundSPI: 0x50607080,
+			}, tt.payloads)
+			if err != nil {
+				t.Fatalf("buildDeleteResponsePayloads() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("delete payload not handled")
+			}
+			if action.deleteIKE || action.deleteChild != tt.wantDeleteChild || action.promotePendingChild || len(action.deleteRetiredChildSPIs) != 0 {
+				t.Fatalf("action = %+v, want deleteChild=%t", action, tt.wantDeleteChild)
+			}
+			if tt.wantResponseSPI == 0 {
 				if len(responsePayloads) != 0 {
-					t.Fatalf("response payload count = %d, want empty response", len(responsePayloads))
+					t.Fatalf("response payload count = %d, want 0", len(responsePayloads))
 				}
 				return
 			}
-			if !action.deleteChild {
-				t.Fatalf("action = %+v, want child delete", action)
+			if len(responsePayloads) != 1 {
+				t.Fatalf("response payload count = %d, want 1", len(responsePayloads))
 			}
 			deletePayload, ok := responsePayloads[0].(*ike.DeletePayload)
 			if !ok {
 				t.Fatalf("response payload = %T, want *ike.DeletePayload", responsePayloads[0])
 			}
-			if got := binary.BigEndian.Uint32(deletePayload.SPIs[0]); got != tt.wantDeleteSPI {
-				t.Fatalf("response delete SPI = %#x, want %#x", got, tt.wantDeleteSPI)
+			if deletePayload.ProtocolID != protocolIDESP {
+				t.Fatalf("response protocol id = %d, want %d", deletePayload.ProtocolID, protocolIDESP)
+			}
+			if len(deletePayload.SPIs) != 1 {
+				t.Fatalf("response delete spi count = %d, want 1", len(deletePayload.SPIs))
+			}
+			if got := binary.BigEndian.Uint32(deletePayload.SPIs[0]); got != tt.wantResponseSPI {
+				t.Fatalf("response delete SPI = %#x, want %#x", got, tt.wantResponseSPI)
 			}
 		})
+	}
+}
+
+func TestInvalidDeleteProtocolRespondsInvalidSyntax(t *testing.T) {
+	responsePayloads, action, ok, err := buildDeleteResponsePayloads(informationalState{
+		inboundSPI:  0x01020304,
+		outboundSPI: 0x50607080,
+	}, []ike.Payload{
+		&ike.DeletePayload{ProtocolID: 4, SPIs: [][]byte{uint32Bytes(0x10203040)}},
+	})
+	if err != nil {
+		t.Fatalf("buildDeleteResponsePayloads() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("delete payload not handled")
+	}
+	if action.deleteIKE || action.deleteChild || action.promotePendingChild || len(action.deleteRetiredChildSPIs) != 0 {
+		t.Fatalf("action = %+v, want no state change for invalid protocol", action)
+	}
+	if len(responsePayloads) != 1 {
+		t.Fatalf("response payload count = %d, want 1", len(responsePayloads))
+	}
+	notifyPayload, ok := responsePayloads[0].(*ike.NotifyPayload)
+	if !ok {
+		t.Fatalf("response payload = %T, want *ike.NotifyPayload", responsePayloads[0])
+	}
+	if notifyPayload.NotifyType != notifyTypeInvalidSyntax {
+		t.Fatalf("notify type = %d, want %d", notifyPayload.NotifyType, notifyTypeInvalidSyntax)
 	}
 }
 
@@ -4356,8 +4555,8 @@ func TestInstallChildSecurityAssociationsSwitchesESPState(t *testing.T) {
 		{
 			name: "new child sa replaces data plane",
 			info: Info{
-				InnerIP:          net.IPv4(10, 0, 0, 1),
-				PCSCFIP:          net.IPv4(10, 0, 0, 2),
+				InnerIPv4:        net.IPv4(10, 0, 0, 1),
+				PCSCFIPs:         []net.IP{net.IPv4(10, 0, 0, 2)},
 				ESPInitiatorSPI:  0x11121314,
 				ESPResponderSPI:  0x21222324,
 				Encryption:       transformENCRAESCBC,
@@ -4707,7 +4906,7 @@ func TestChildSAByteLifetimeTriggersSoftRekey(t *testing.T) {
 			session.childSARekeyAt = futureRekey
 			session.mu.Unlock()
 
-			if err := session.writeInner(context.Background(), make([]byte, tt.payloadLength), packet.ProtocolUDP); err != nil {
+			if err := session.writeInner(context.Background(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP); err != nil {
 				t.Fatalf("writeInner() error = %v", err)
 			}
 
@@ -4751,7 +4950,7 @@ func TestChildSAByteHardLifetimeDiscardsBeforeOutboundOverflow(t *testing.T) {
 			session.dataPlaneDone = make(chan struct{})
 			session.mu.Unlock()
 
-			err := session.writeInner(context.Background(), make([]byte, tt.payloadLength), packet.ProtocolUDP)
+			err := session.writeInner(context.Background(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP)
 
 			if !errors.Is(err, errChildSAExpired) {
 				t.Fatalf("writeInner() error = %v, want %v", err, errChildSAExpired)
@@ -5019,6 +5218,84 @@ func TestHandleESPPacketDropsPacketsOutsideTrafficSelectors(t *testing.T) {
 				if tt.wantRead {
 					t.Fatal("readCh empty, want delivered inner UDP payload")
 				}
+			}
+		})
+	}
+}
+
+func TestWriteInnerPacketRejectsPacketsOutsideTrafficSelectors(t *testing.T) {
+	ipv4Selector := func(ip net.IP, port uint16) ike.TrafficSelector {
+		selector := ike.TrafficSelectorsAny()[0]
+		binary.BigEndian.PutUint16(selector.Data[0:2], port)
+		binary.BigEndian.PutUint16(selector.Data[2:4], port)
+		ip4 := ip.To4()
+		copy(selector.Data[4:8], ip4)
+		copy(selector.Data[8:12], ip4)
+		return selector
+	}
+	innerPacket := func(src, dst net.IP) packet.InnerPacket {
+		return packet.InnerPacket{
+			UDP: &packet.UDPSegment{
+				Src:     &net.UDPAddr{IP: src, Port: 5062},
+				Dst:     &net.UDPAddr{IP: dst, Port: 5060},
+				Payload: []byte("ping"),
+			},
+		}
+	}
+	tests := []struct {
+		name      string
+		src       net.IP
+		dst       net.IP
+		wantErr   string
+		wantWrite bool
+	}{
+		{name: "matching selectors is written", src: net.IPv4(10, 0, 0, 1), dst: net.IPv4(10, 0, 0, 2), wantWrite: true},
+		{name: "source outside initiator selector is rejected", src: net.IPv4(10, 0, 0, 3), dst: net.IPv4(10, 0, 0, 2), wantErr: "outside child sa traffic selectors"},
+		{name: "destination outside responder selector is rejected", src: net.IPv4(10, 0, 0, 1), dst: net.IPv4(10, 0, 0, 4), wantErr: "outside child sa traffic selectors"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			codec := esp.Codec{SPI: 0x10203040, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: bytes.Repeat([]byte{0x11}, 20)}
+			session := mustDialSession(t, conn)
+			session.mu.Lock()
+			session.connected = true
+			session.outerNAT = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
+			session.outboundESP = codec
+			session.tunnel = Info{
+				ESPResponderSPI:           codec.SPI,
+				InitiatorTrafficSelectors: []ike.TrafficSelector{ipv4Selector(net.IPv4(10, 0, 0, 1), 5062)},
+				ResponderTrafficSelectors: []ike.TrafficSelector{ipv4Selector(net.IPv4(10, 0, 0, 2), 5060)},
+			}
+			session.mu.Unlock()
+
+			err := session.WriteInnerPacket(context.Background(), innerPacket(tt.src, tt.dst))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("WriteInnerPacket() error = %v, want %q", err, tt.wantErr)
+				}
+				if len(conn.writes) != 0 {
+					t.Fatalf("writes = %d, want 0", len(conn.writes))
+				}
+				session.mu.RLock()
+				seq := session.espSeq
+				session.mu.RUnlock()
+				if seq != 0 {
+					t.Fatalf("espSeq = %d, want 0", seq)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WriteInnerPacket() error = %v", err)
+			}
+			if len(conn.writes) != 1 {
+				t.Fatalf("writes = %d, want 1", len(conn.writes))
+			}
+			session.mu.RLock()
+			seq := session.espSeq
+			session.mu.RUnlock()
+			if seq != 1 {
+				t.Fatalf("espSeq = %d, want 1", seq)
 			}
 		})
 	}

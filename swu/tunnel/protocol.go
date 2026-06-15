@@ -84,6 +84,7 @@ const (
 const (
 	protocolIDUnset byte = 0
 	protocolIDIKE   byte = 1
+	protocolIDAH    byte = 2
 	protocolIDESP   byte = 3
 )
 
@@ -124,6 +125,8 @@ const (
 	notifyTypeIKEV2FragmentationSupported  uint16 = 16430
 	notifyTypeReactivationRequestedCause   uint16 = 40961
 	notifyTypeBackoffTimer                 uint16 = 41041
+	notifyTypePDNTypeIPv4OnlyAllowed       uint16 = 41050
+	notifyTypePDNTypeIPv6OnlyAllowed       uint16 = 41051
 	notifyTypeDeviceIdentity               uint16 = 41101
 	notifyTypePCSCFReselectionSupport      uint16 = 41304
 	notifyTypeN1ModeCapability             uint16 = 51015

@@ -424,6 +424,18 @@ func TestTrafficSelectorValidatesWireShape(t *testing.T) {
 			),
 		},
 		{
+			name: "protocol any with narrowed ports",
+			wire: trafficSelectorWire(
+				trafficSelectorIPv4Range,
+				ipProtocolAny,
+				5060,
+				5060,
+				net.IPv4(0, 0, 0, 0).To4(),
+				net.IPv4(255, 255, 255, 255).To4(),
+			),
+			wantErr: "protocol 0 requires port range",
+		},
+		{
 			name: "unknown type",
 			wire: trafficSelectorWire(
 				99,

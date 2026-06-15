@@ -52,7 +52,7 @@ func (s *Session) WritePacket(ctx context.Context, data []byte) error {
 	})
 }
 
-func (s *Session) prepareInnerWrite(payloadLen int) (innerWriteState, error) {
+func (s *Session) prepareInnerWrite(pkt packet.InnerPacket, payloadLen int) (innerWriteState, error) {
 	if s.isClosed() {
 		return innerWriteState{}, errors.New("writing packet: session is closed")
 	}
@@ -73,6 +73,10 @@ func (s *Session) prepareInnerWrite(payloadLen int) (innerWriteState, error) {
 		s.mu.Unlock()
 		s.discardChildSecurityAssociations(errChildSAExpired)
 		return innerWriteState{}, fmt.Errorf("writing packet: %w", errChildSAExpired)
+	}
+	if !innerPacketMatchesOutboundChildSASelectors(pkt, s.tunnel) {
+		s.mu.Unlock()
+		return innerWriteState{}, errors.New("writing packet: inner packet is outside child sa traffic selectors")
 	}
 	codec := s.outboundESP
 	protectedBytes, err := codec.CryptoPayloadBytes(payloadLen)
@@ -99,8 +103,8 @@ func sealInnerPacket(state innerWriteState, innerPacket []byte, nextHeader byte)
 	return state.codec.Encode(esp.ESPPacket{SPI: state.codec.SPI, Sequence: state.seq, NextHeader: nextHeader, Payload: innerPacket})
 }
 
-func (s *Session) writeInner(ctx context.Context, innerPacket []byte, nextHeader byte) error {
-	state, err := s.prepareInnerWrite(len(innerPacket))
+func (s *Session) writeInner(ctx context.Context, pkt packet.InnerPacket, innerPacket []byte, nextHeader byte) error {
+	state, err := s.prepareInnerWrite(pkt, len(innerPacket))
 	if err != nil {
 		return err
 	}
@@ -133,7 +137,7 @@ func (s *Session) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) 
 	if err != nil {
 		return fmt.Errorf("writing inner packet: %w", err)
 	}
-	return s.writeInner(ctx, wire, nextHeader)
+	return s.writeInner(ctx, pkt, wire, nextHeader)
 }
 
 func (s *Session) readConnectedPacket(ctx context.Context) ([]byte, net.Addr, error) {
@@ -361,19 +365,56 @@ func innerPacketMatchesChildSASelectors(pkt packet.InnerPacket, info Info) bool 
 	if len(info.InitiatorTrafficSelectors) == 0 || len(info.ResponderTrafficSelectors) == 0 {
 		return true
 	}
-	srcPort, dstPort := innerPacketPorts(pkt)
-	return ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, pkt.IP.SrcIP, pkt.IP.Protocol, srcPort) &&
-		ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, pkt.IP.DstIP, pkt.IP.Protocol, dstPort)
+	srcIP, dstIP, proto, srcPort, dstPort := innerPacketSelectorFields(pkt)
+	return ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, srcIP, proto, srcPort) &&
+		ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, dstIP, proto, dstPort)
 }
 
-func innerPacketPorts(pkt packet.InnerPacket) (int, int) {
+func innerPacketMatchesOutboundChildSASelectors(pkt packet.InnerPacket, info Info) bool {
+	if len(info.InitiatorTrafficSelectors) == 0 || len(info.ResponderTrafficSelectors) == 0 {
+		return true
+	}
+	srcIP, dstIP, proto, srcPort, dstPort := innerPacketSelectorFields(pkt)
+	return ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, srcIP, proto, srcPort) &&
+		ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, dstIP, proto, dstPort)
+}
+
+func innerPacketSelectorFields(pkt packet.InnerPacket) (net.IP, net.IP, byte, int, int) {
+	srcIP := pkt.IP.SrcIP
+	dstIP := pkt.IP.DstIP
+	proto := pkt.IP.Protocol
 	switch {
 	case pkt.UDP != nil:
-		return pkt.UDP.Src.Port, pkt.UDP.Dst.Port
+		proto = packet.ProtocolUDP
+		srcPort := 0
+		dstPort := 0
+		if pkt.UDP.Src != nil {
+			srcIP = pkt.UDP.Src.IP
+			srcPort = pkt.UDP.Src.Port
+		}
+		if pkt.UDP.Dst != nil {
+			dstIP = pkt.UDP.Dst.IP
+			dstPort = pkt.UDP.Dst.Port
+		}
+		return srcIP, dstIP, proto, srcPort, dstPort
 	case pkt.TCP != nil:
-		return pkt.TCP.Src.Port, pkt.TCP.Dst.Port
+		proto = packet.ProtocolTCP
+		srcPort := 0
+		dstPort := 0
+		if pkt.TCP.Src != nil {
+			srcIP = pkt.TCP.Src.IP
+			srcPort = pkt.TCP.Src.Port
+		}
+		if pkt.TCP.Dst != nil {
+			dstIP = pkt.TCP.Dst.IP
+			dstPort = pkt.TCP.Dst.Port
+		}
+		return srcIP, dstIP, proto, srcPort, dstPort
+	case pkt.ESP != nil:
+		proto = packet.ProtocolESP
+		return srcIP, dstIP, proto, 0, 0
 	default:
-		return 0, 0
+		return srcIP, dstIP, proto, 0, 0
 	}
 }
 

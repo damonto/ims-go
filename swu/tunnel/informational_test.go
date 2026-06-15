@@ -511,17 +511,23 @@ func TestBuildInformationalConfigReply(t *testing.T) {
 		{
 			name: "mixed request replies only supported p-cscf restoration attributes",
 			state: informationalState{
-				info: Info{InnerIP: net.IPv4(10, 0, 0, 1), PCSCFIP: net.IPv4(10, 0, 0, 2), PCSCFIPs: []net.IP{net.IPv4(10, 0, 0, 2)}},
+				info: Info{InnerIPv4: net.IPv4(10, 0, 0, 1), PCSCFIPs: []net.IP{net.IPv4(10, 0, 0, 2)}},
 			},
 			attrs: []ike.Attribute{
 				ike.NewTLVAttribute(configAttrPCSCFIPv4Address, net.IPv4(10, 9, 8, 7).To4()),
 				ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, nil),
 			},
 			wantTypes: []uint16{configAttrPCSCFIPv4Address},
-			wantInfo:  Info{InnerIP: net.IPv4(10, 0, 0, 1), PCSCFIP: net.IPv4(10, 9, 8, 7).To4(), PCSCFIPs: []net.IP{net.IPv4(10, 9, 8, 7).To4()}},
+			wantInfo:  Info{InnerIPv4: net.IPv4(10, 0, 0, 1), PCSCFIPs: []net.IP{net.IPv4(10, 9, 8, 7).To4()}},
 		},
 		{
 			name: "p-cscf restoration keeps all advertised addresses",
+			state: informationalState{
+				info: Info{
+					InnerIPv4: net.IPv4(10, 0, 0, 1),
+					InnerIPv6: IPAddress{IP: net.ParseIP("2001:db8::1").To16(), PrefixLen: 64},
+				},
+			},
 			attrs: []ike.Attribute{
 				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, net.ParseIP("2001:db8::7").To16()),
 				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, net.ParseIP("2001:db8::8").To16()),
@@ -529,7 +535,6 @@ func TestBuildInformationalConfigReply(t *testing.T) {
 			},
 			wantTypes: []uint16{configAttrPCSCFIPv6Address, configAttrPCSCFIPv4Address},
 			wantInfo: Info{
-				PCSCFIP: net.ParseIP("2001:db8::7").To16(),
 				PCSCFIPs: []net.IP{
 					net.ParseIP("2001:db8::7").To16(),
 					net.ParseIP("2001:db8::8").To16(),
@@ -579,8 +584,8 @@ func TestBuildInformationalConfigReply(t *testing.T) {
 			if !action.pcscfReselection {
 				t.Fatalf("pcscfReselection = false, want true")
 			}
-			if !action.pcscfInfo.PCSCFIP.Equal(tt.wantInfo.PCSCFIP) {
-				t.Fatalf("pcscfInfo.PCSCFIP = %s, want %s", action.pcscfInfo.PCSCFIP, tt.wantInfo.PCSCFIP)
+			if !action.pcscfInfo.DefaultPCSCFIP().Equal(tt.wantInfo.DefaultPCSCFIP()) {
+				t.Fatalf("pcscfInfo.DefaultPCSCFIP() = %s, want %s", action.pcscfInfo.DefaultPCSCFIP(), tt.wantInfo.DefaultPCSCFIP())
 			}
 			if !ipListEqual(action.pcscfInfo.PCSCFIPs, tt.wantInfo.PCSCFIPs) {
 				t.Fatalf("pcscfInfo.PCSCFIPs = %v, want %v", action.pcscfInfo.PCSCFIPs, tt.wantInfo.PCSCFIPs)
@@ -615,7 +620,7 @@ func TestBuildInformationalResponsePayloadsCookie2(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildInformationalResponsePayloads() error = %v", err)
 			}
-			if action.deleteIKE || action.deleteChild || action.reactivationRequested || action.pcscfReselection {
+			if action.deleteIKE || action.deleteChild || action.reactivationRequested || action.pdnDeactivated || action.pcscfReselection {
 				t.Fatalf("action = %+v, want zero value", action)
 			}
 			if len(responsePayloads) != 1 {

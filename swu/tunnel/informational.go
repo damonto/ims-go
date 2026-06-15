@@ -14,13 +14,14 @@ import (
 var invalidMessageIDNotifyTimeout = 750 * time.Millisecond
 
 type informationalAction struct {
-	deleteIKE             bool
-	deleteChild           bool
-	reactivationRequested bool
-	promotePendingChild   bool
-	deleteRetiredChildSPI uint32
-	pcscfReselection      bool
-	pcscfInfo             Info
+	deleteIKE              bool
+	deleteChild            bool
+	reactivationRequested  bool
+	pdnDeactivated         bool
+	promotePendingChild    bool
+	deleteRetiredChildSPIs []uint32
+	pcscfReselection       bool
+	pcscfInfo              Info
 }
 
 func (s *Session) closeDone() <-chan struct{} {

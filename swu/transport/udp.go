@@ -75,7 +75,7 @@ func ListenSecureUDP(s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
 }
 
 func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action transportAction) (*UDPConn, error) {
-	innerLocal, innerRemote, err := connectedUDPAddrs(s)
+	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
 	}

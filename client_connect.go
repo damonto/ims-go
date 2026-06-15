@@ -201,6 +201,7 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 
 	tunnelCfg := c.cfg.Tunnel
 	tunnelCfg.RemoteAddr = c.cfg.EPDG
+	c.applySWUPDNTypeRestriction(&tunnelCfg)
 
 	tunnelCfg, err := tunnelCfg.Normalized()
 	if err != nil {

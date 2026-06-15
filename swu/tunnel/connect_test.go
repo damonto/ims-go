@@ -205,12 +205,18 @@ func TestConnectIKEPeerUsesNATTOnlyWhenSelected(t *testing.T) {
 func TestTunnelAddressesAcceptsIPv6Subnet(t *testing.T) {
 	subnetValue := append(net.ParseIP("2001:db8::").To16(), 64)
 	pcscf := net.ParseIP("2001:db8::100").To16()
-	addresses := tunnelAddresses([]ike.Attribute{
+	addresses, err := tunnelAddresses([]ike.Attribute{
 		ike.NewTLVAttribute(configAttrInternalIPv6Subnet, subnetValue),
 		ike.NewTLVAttribute(configAttrPCSCFIPv6Address, pcscf),
 	}, 0, 0)
-	if !addresses.internalIPv6.Equal(net.ParseIP("2001:db8::")) {
-		t.Fatalf("internalIPv6 = %s, want 2001:db8::", addresses.internalIPv6)
+	if err != nil {
+		t.Fatalf("tunnelAddresses() error = %v", err)
+	}
+	if !addresses.internalIPv6.IsZero() {
+		t.Fatalf("internalIPv6 = %+v, want zero", addresses.internalIPv6)
+	}
+	if !addresses.internalIPv6Prefix.IP.Equal(net.ParseIP("2001:db8::")) || addresses.internalIPv6Prefix.PrefixLen != 64 {
+		t.Fatalf("internalIPv6Prefix = %+v, want 2001:db8::/64", addresses.internalIPv6Prefix)
 	}
 	if len(addresses.pcscfIPv6) != 1 || !addresses.pcscfIPv6[0].Equal(net.ParseIP("2001:db8::100")) {
 		t.Fatalf("pcscfIPv6 = %v, want [2001:db8::100]", addresses.pcscfIPv6)
@@ -227,6 +233,7 @@ func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
 		ipv6Attr      uint16
 		wantInternal4 net.IP
 		wantInternal6 net.IP
+		wantPrefix6   int
 		wantPCSCF4    []net.IP
 		wantPCSCF6    []net.IP
 	}{
@@ -244,6 +251,7 @@ func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
 			ipv4Attr:      16384,
 			ipv6Attr:      16384,
 			wantInternal6: net.ParseIP("2001:db8::1").To16(),
+			wantPrefix6:   64,
 			wantPCSCF6:    []net.IP{net.ParseIP("2001:db8::100").To16()},
 		},
 		{
@@ -274,12 +282,18 @@ func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			addresses := tunnelAddresses(tt.attrs, tt.ipv4Attr, tt.ipv6Attr)
+			addresses, err := tunnelAddresses(tt.attrs, tt.ipv4Attr, tt.ipv6Attr)
+			if err != nil {
+				t.Fatalf("tunnelAddresses() error = %v", err)
+			}
 			if !ipEqual(addresses.internalIPv4, tt.wantInternal4) {
 				t.Fatalf("internalIPv4 = %s, want %s", addresses.internalIPv4, tt.wantInternal4)
 			}
-			if !ipEqual(addresses.internalIPv6, tt.wantInternal6) {
-				t.Fatalf("internalIPv6 = %s, want %s", addresses.internalIPv6, tt.wantInternal6)
+			if !ipEqual(addresses.internalIPv6.IP, tt.wantInternal6) {
+				t.Fatalf("internalIPv6 = %+v, want %s", addresses.internalIPv6, tt.wantInternal6)
+			}
+			if tt.wantInternal6 != nil && addresses.internalIPv6.PrefixLen != tt.wantPrefix6 {
+				t.Fatalf("internalIPv6 prefix = %d, want %d", addresses.internalIPv6.PrefixLen, tt.wantPrefix6)
 			}
 			if !ipListEqual(addresses.pcscfIPv4, tt.wantPCSCF4) {
 				t.Fatalf("pcscfIPv4 = %v, want %v", addresses.pcscfIPv4, tt.wantPCSCF4)
@@ -305,7 +319,7 @@ func TestApplyTunnelAddressesHandlesInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv4Address, []byte{10, 1, 2, 3, 4}),
 				ike.NewTLVAttribute(configAttrPCSCFIPv4Address, net.IPv4(10, 9, 8, 7).To4()),
 			},
-			wantErr: "internal ip is missing",
+			wantErr: "internal ipv4 address length 5, want 4",
 		},
 		{
 			name: "internal ipv6 missing prefix length",
@@ -313,7 +327,7 @@ func TestApplyTunnelAddressesHandlesInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv6Address, net.ParseIP("2001:db8::1").To16()),
 				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, net.ParseIP("2001:db8::100").To16()),
 			},
-			wantErr: "internal ip is missing",
+			wantErr: "internal ipv6 address length 16, want 17",
 		},
 		{
 			name: "p-cscf ipv4 with trailing byte",
@@ -321,8 +335,7 @@ func TestApplyTunnelAddressesHandlesInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 1, 2, 3).To4()),
 				ike.NewTLVAttribute(configAttrPCSCFIPv4Address, []byte{10, 9, 8, 7, 6}),
 			},
-			wantInner:    net.IPv4(10, 1, 2, 3).To4(),
-			wantPCSCFNil: true,
+			wantErr: "p-cscf ipv4 address length 5, want 4",
 		},
 		{
 			name: "p-cscf ipv6 with trailing byte",
@@ -330,8 +343,7 @@ func TestApplyTunnelAddressesHandlesInvalidAddressLengths(t *testing.T) {
 				ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::1").To16(), 64)),
 				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, append(net.ParseIP("2001:db8::100").To16(), 0)),
 			},
-			wantInner:    net.ParseIP("2001:db8::1").To16(),
-			wantPCSCFNil: true,
+			wantErr: "p-cscf ipv6 address length 17, want 16",
 		},
 	}
 
@@ -348,11 +360,11 @@ func TestApplyTunnelAddressesHandlesInvalidAddressLengths(t *testing.T) {
 			if err != nil {
 				t.Fatalf("applyTunnelAddresses() error = %v", err)
 			}
-			if !ipEqual(tunnel.InnerIP, tt.wantInner) {
-				t.Fatalf("InnerIP = %s, want %s", tunnel.InnerIP, tt.wantInner)
+			if !ipEqual(tunnel.DefaultInnerIP(), tt.wantInner) {
+				t.Fatalf("DefaultInnerIP() = %s, want %s", tunnel.DefaultInnerIP(), tt.wantInner)
 			}
-			if tt.wantPCSCFNil && (tunnel.PCSCFIP != nil || len(tunnel.PCSCFIPs) != 0) {
-				t.Fatalf("P-CSCF = %s/%v, want empty", tunnel.PCSCFIP, tunnel.PCSCFIPs)
+			if tt.wantPCSCFNil && len(tunnel.PCSCFAddresses()) != 0 {
+				t.Fatalf("PCSCFAddresses() = %v, want empty", tunnel.PCSCFAddresses())
 			}
 		})
 	}
@@ -395,11 +407,11 @@ func TestApplyTunnelAddressesAllowsMissingPCSCF(t *testing.T) {
 			if err != nil {
 				t.Fatalf("applyTunnelAddresses() error = %v", err)
 			}
-			if !ipEqual(tunnel.InnerIP, tt.wantInner) {
-				t.Fatalf("InnerIP = %s, want %s", tunnel.InnerIP, tt.wantInner)
+			if !ipEqual(tunnel.DefaultInnerIP(), tt.wantInner) {
+				t.Fatalf("DefaultInnerIP() = %s, want %s", tunnel.DefaultInnerIP(), tt.wantInner)
 			}
-			if tunnel.PCSCFIP != nil || len(tunnel.PCSCFIPs) != 0 {
-				t.Fatalf("P-CSCF = %s/%v, want empty", tunnel.PCSCFIP, tunnel.PCSCFIPs)
+			if len(tunnel.PCSCFAddresses()) != 0 {
+				t.Fatalf("PCSCFAddresses() = %v, want empty", tunnel.PCSCFAddresses())
 			}
 		})
 	}
@@ -416,12 +428,94 @@ func TestApplyTunnelAddressesKeepsSameFamilyPCSCFList(t *testing.T) {
 	if err := applyTunnelAddresses(&tunnel, *config, handshake.Config{}); err != nil {
 		t.Fatalf("applyTunnelAddresses() error = %v", err)
 	}
-	if !tunnel.PCSCFIP.Equal(net.IPv4(10, 9, 8, 7)) {
-		t.Fatalf("PCSCFIP = %s, want first P-CSCF", tunnel.PCSCFIP)
+	if !tunnel.DefaultPCSCFIP().Equal(net.IPv4(10, 9, 8, 7)) {
+		t.Fatalf("DefaultPCSCFIP() = %s, want first P-CSCF", tunnel.DefaultPCSCFIP())
 	}
 	want := []net.IP{net.IPv4(10, 9, 8, 7).To4(), net.IPv4(10, 9, 8, 8).To4()}
-	if !ipListEqual(tunnel.PCSCFIPs, want) {
-		t.Fatalf("PCSCFIPs = %v, want %v", tunnel.PCSCFIPs, want)
+	if !ipListEqual(tunnel.PCSCFAddresses(), want) {
+		t.Fatalf("PCSCFAddresses() = %v, want %v", tunnel.PCSCFAddresses(), want)
+	}
+}
+
+func TestApplyTunnelAddressesAcceptsIPv6PrefixOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		prefix     net.IP
+		prefixLen  int
+		wantInner  net.IP
+		wantPrefix net.IP
+	}{
+		{
+			name:       "ipv6 prefix without host address",
+			prefix:     net.ParseIP("2001:db8::").To16(),
+			prefixLen:  64,
+			wantInner:  net.ParseIP("2001:db8::1").To16(),
+			wantPrefix: net.ParseIP("2001:db8::").To16(),
+		},
+		{
+			name:       "ipv6 host prefix",
+			prefix:     net.ParseIP("2001:db8::123").To16(),
+			prefixLen:  128,
+			wantInner:  net.ParseIP("2001:db8::123").To16(),
+			wantPrefix: net.ParseIP("2001:db8::123").To16(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tunnel := Info{}
+			attrs := []ike.Attribute{
+				ike.NewTLVAttribute(configAttrInternalIPv6Subnet, append(tt.prefix, byte(tt.prefixLen))),
+				ike.NewTLVAttribute(configAttrPCSCFIPv6Address, net.ParseIP("2001:db8::100").To16()),
+			}
+
+			if err := applyTunnelAddresses(&tunnel, ike.ConfigPayload{Attributes: attrs}, handshake.Config{}); err != nil {
+				t.Fatalf("applyTunnelAddresses() error = %v", err)
+			}
+			if !ipEqual(tunnel.InnerIPv6.IP, tt.wantInner) || tunnel.InnerIPv6.PrefixLen != tt.prefixLen {
+				t.Fatalf("InnerIPv6 = %+v, want %s/%d", tunnel.InnerIPv6, tt.wantInner, tt.prefixLen)
+			}
+			if !ipEqual(tunnel.InnerIPv6Prefix.IP, tt.wantPrefix) || tunnel.InnerIPv6Prefix.PrefixLen != tt.prefixLen {
+				t.Fatalf("InnerIPv6Prefix = %+v, want %s/%d", tunnel.InnerIPv6Prefix, tt.wantPrefix, tt.prefixLen)
+			}
+			wantPCSCF := []net.IP{net.ParseIP("2001:db8::100").To16()}
+			if !ipListEqual(tunnel.PCSCFAddresses(), wantPCSCF) {
+				t.Fatalf("PCSCFAddresses() = %v, want %v", tunnel.PCSCFAddresses(), wantPCSCF)
+			}
+		})
+	}
+}
+
+func TestApplyTunnelAddressesKeepsDualStackAssignment(t *testing.T) {
+	tunnel := Info{}
+	attrs := []ike.Attribute{
+		ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 1, 2, 3).To4()),
+		ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::1").To16(), 64)),
+		ike.NewTLVAttribute(configAttrInternalIPv6Subnet, append(net.ParseIP("2001:db8::").To16(), 64)),
+		ike.NewTLVAttribute(configAttrPCSCFIPv4Address, net.IPv4(10, 9, 8, 7).To4()),
+		ike.NewTLVAttribute(configAttrPCSCFIPv6Address, net.ParseIP("2001:db8::100").To16()),
+	}
+
+	if err := applyTunnelAddresses(&tunnel, ike.ConfigPayload{Attributes: attrs}, handshake.Config{}); err != nil {
+		t.Fatalf("applyTunnelAddresses() error = %v", err)
+	}
+	if !ipEqual(tunnel.InnerIPv4, net.IPv4(10, 1, 2, 3).To4()) {
+		t.Fatalf("InnerIPv4 = %s, want 10.1.2.3", tunnel.InnerIPv4)
+	}
+	if !ipEqual(tunnel.InnerIPv6.IP, net.ParseIP("2001:db8::1").To16()) || tunnel.InnerIPv6.PrefixLen != 64 {
+		t.Fatalf("InnerIPv6 = %+v, want 2001:db8::1/64", tunnel.InnerIPv6)
+	}
+	if !ipEqual(tunnel.InnerIPv6Prefix.IP, net.ParseIP("2001:db8::").To16()) || tunnel.InnerIPv6Prefix.PrefixLen != 64 {
+		t.Fatalf("InnerIPv6Prefix = %+v, want 2001:db8::/64", tunnel.InnerIPv6Prefix)
+	}
+	wantPCSCF := []net.IP{net.ParseIP("2001:db8::100").To16(), net.IPv4(10, 9, 8, 7).To4()}
+	if !ipListEqual(tunnel.PCSCFAddresses(), wantPCSCF) {
+		t.Fatalf("PCSCFAddresses() = %v, want %v", tunnel.PCSCFAddresses(), wantPCSCF)
+	}
+	if !ipEqual(tunnel.InnerIPForRemote(net.IPv4(10, 9, 8, 7)), net.IPv4(10, 1, 2, 3).To4()) {
+		t.Fatalf("InnerIPForRemote(ipv4) = %s, want 10.1.2.3", tunnel.InnerIPForRemote(net.IPv4(10, 9, 8, 7)))
+	}
+	if !ipEqual(tunnel.InnerIPForRemote(net.ParseIP("2001:db8::100")), net.ParseIP("2001:db8::1").To16()) {
+		t.Fatalf("InnerIPForRemote(ipv6) = %s, want 2001:db8::1", tunnel.InnerIPForRemote(net.ParseIP("2001:db8::100")))
 	}
 }
 
@@ -468,6 +562,60 @@ func TestDefaultIKEAuthInitPayloadsUsesConfiguredPCSCFAttributes(t *testing.T) {
 	}
 	if !hasConfigAttribute(config.Attributes, configAttrPCSCFIPv4Address) || !hasConfigAttribute(config.Attributes, configAttrPCSCFIPv6Address) {
 		t.Fatalf("config attrs = %v, want standard P-CSCF attrs", config.Attributes)
+	}
+}
+
+func TestDefaultIKEAuthInitPayloadsRequestsPDNTypeFamilies(t *testing.T) {
+	tests := []struct {
+		name    string
+		pdnType PDNType
+		want    []uint16
+		absent  []uint16
+	}{
+		{
+			name:    "unspecified requests dual stack",
+			pdnType: PDNTypeUnspecified,
+			want:    []uint16{configAttrInternalIPv4Address, configAttrInternalIPv4DNS, configAttrInternalIPv6Address, configAttrInternalIPv6DNS},
+		},
+		{
+			name:    "ipv4 requests ipv4 only",
+			pdnType: PDNTypeIPv4,
+			want:    []uint16{configAttrInternalIPv4Address, configAttrInternalIPv4DNS},
+			absent:  []uint16{configAttrInternalIPv6Address, configAttrInternalIPv6DNS},
+		},
+		{
+			name:    "ipv6 requests ipv6 only",
+			pdnType: PDNTypeIPv6,
+			want:    []uint16{configAttrInternalIPv6Address, configAttrInternalIPv6DNS},
+			absent:  []uint16{configAttrInternalIPv4Address, configAttrInternalIPv4DNS},
+		},
+		{
+			name:    "ipv4v6 requests dual stack",
+			pdnType: PDNTypeIPv4v6,
+			want:    []uint16{configAttrInternalIPv4Address, configAttrInternalIPv4DNS, configAttrInternalIPv6Address, configAttrInternalIPv6DNS},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payloads, err := defaultIKEAuthInitPayloads(handshake.Config{PDNType: tt.pdnType}, "001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org", 0x01020304)
+			if err != nil {
+				t.Fatalf("defaultIKEAuthInitPayloads() error = %v", err)
+			}
+			config := ike.FindConfigPayload(payloads)
+			if config == nil {
+				t.Fatal("config payload is missing")
+			}
+			for _, attr := range tt.want {
+				if !hasConfigAttribute(config.Attributes, attr) {
+					t.Fatalf("config attrs = %v, want attr %d", config.Attributes, attr)
+				}
+			}
+			for _, attr := range tt.absent {
+				if hasConfigAttribute(config.Attributes, attr) {
+					t.Fatalf("config attrs = %v, did not want attr %d", config.Attributes, attr)
+				}
+			}
+		})
 	}
 }
 
@@ -574,6 +722,37 @@ func TestApplyN1ModeInfoIgnoresNetworkDataWhenNotConfigured(t *testing.T) {
 	}
 	if tunnel.PDUSessionID != 0 || len(tunnel.SNSSAI) != 0 {
 		t.Fatalf("applyN1ModeInfo() = %+v, want no N1 data", tunnel)
+	}
+}
+
+func TestPDNTypeRestrictionParsesStatusNotify(t *testing.T) {
+	tests := []struct {
+		name     string
+		payloads []ike.Payload
+		want     PDNType
+	}{
+		{
+			name:     "ipv4 only allowed",
+			payloads: []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypePDNTypeIPv4OnlyAllowed}},
+			want:     PDNTypeIPv4,
+		},
+		{
+			name:     "ipv6 only allowed",
+			payloads: []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypePDNTypeIPv6OnlyAllowed}},
+			want:     PDNTypeIPv6,
+		},
+		{
+			name:     "unrelated notify",
+			payloads: []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer}},
+			want:     PDNTypeUnspecified,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pdnTypeRestriction(tt.payloads); got != tt.want {
+				t.Fatalf("pdnTypeRestriction() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

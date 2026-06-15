@@ -22,6 +22,7 @@ func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config, request
 	if err != nil {
 		return Info{}, err
 	}
+	tunnel.PDNTypeRestriction = pdnTypeRestriction(payloads)
 	tunnel.InitiatorTrafficSelectors = cloneTrafficSelectors(tsi.Selectors)
 	tunnel.ResponderTrafficSelectors = cloneTrafficSelectors(tsr.Selectors)
 	if err := applyTunnelAddresses(&tunnel, *config, cfg); err != nil {
@@ -168,29 +169,46 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 }
 
 func applyTunnelAddresses(tunnel *Info, config ike.ConfigPayload, cfg handshake.Config) error {
-	addresses := tunnelAddresses(config.Attributes, cfg.PCSCFIPv4ConfigAttribute, cfg.PCSCFIPv6ConfigAttribute)
+	addresses, err := tunnelAddresses(config.Attributes, cfg.PCSCFIPv4ConfigAttribute, cfg.PCSCFIPv6ConfigAttribute)
+	if err != nil {
+		return err
+	}
+	if addresses.internalIPv6.IsZero() && !addresses.internalIPv6Prefix.IsZero() {
+		addresses.internalIPv6 = ipv6AddressFromPrefix(addresses.internalIPv6Prefix)
+	}
+	tunnel.InnerIPv4 = append(net.IP(nil), addresses.internalIPv4...)
+	tunnel.InnerIPv6 = cloneIPAddress(addresses.internalIPv6)
+	tunnel.InnerIPv6Prefix = cloneIPPrefix(addresses.internalIPv6Prefix)
+	tunnel.PCSCFIPs = pcscfCandidates(addresses)
 	switch {
-	case addresses.internalIPv6 != nil:
-		tunnel.InnerIP = addresses.internalIPv6
-		tunnel.PCSCFIPs = cloneIPList(addresses.pcscfIPv6)
-	case addresses.internalIPv4 != nil:
-		tunnel.InnerIP = addresses.internalIPv4
-		tunnel.PCSCFIPs = cloneIPList(addresses.pcscfIPv4)
+	case len(tunnel.InnerIPv4) != 0 || !tunnel.InnerIPv6.IsZero():
+		return nil
 	default:
 		return errors.New("parsing ike_auth response: internal ip is missing")
 	}
-	tunnel.PCSCFIP = nil
-	if len(tunnel.PCSCFIPs) != 0 {
-		tunnel.PCSCFIP = append(net.IP(nil), tunnel.PCSCFIPs[0]...)
+}
+
+func pcscfCandidates(addresses tunnelAddressSet) []net.IP {
+	ips := make([]net.IP, 0, len(addresses.pcscfIPv6)+len(addresses.pcscfIPv4))
+	if !addresses.internalIPv6.IsZero() {
+		for _, ip := range addresses.pcscfIPv6 {
+			ips = appendUniqueIP(ips, ip)
+		}
 	}
-	return nil
+	if len(addresses.internalIPv4) != 0 {
+		for _, ip := range addresses.pcscfIPv4 {
+			ips = appendUniqueIP(ips, ip)
+		}
+	}
+	return ips
 }
 
 type tunnelAddressSet struct {
-	internalIPv4 net.IP
-	internalIPv6 net.IP
-	pcscfIPv4    []net.IP
-	pcscfIPv6    []net.IP
+	internalIPv4       net.IP
+	internalIPv6       IPAddress
+	internalIPv6Prefix IPPrefix
+	pcscfIPv4          []net.IP
+	pcscfIPv6          []net.IP
 }
 
 const (
@@ -198,7 +216,7 @@ const (
 	configAttrInternalIPv6SubnetLen  = net.IPv6len + 1
 )
 
-func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16) tunnelAddressSet {
+func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16) (tunnelAddressSet, error) {
 	if pcscfIPv4Attr == 0 {
 		pcscfIPv4Attr = configAttrPCSCFIPv4Address
 	}
@@ -209,35 +227,134 @@ func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16)
 	for _, attr := range attrs {
 		switch attr.Type {
 		case configAttrInternalIPv4Address:
-			if len(attr.Value) == net.IPv4len {
-				addresses.internalIPv4 = append(net.IP(nil), attr.Value...)
+			if len(attr.Value) == 0 {
+				continue
 			}
+			if len(attr.Value) != net.IPv4len {
+				return tunnelAddressSet{}, configAttributeLengthError("internal ipv4 address", len(attr.Value), net.IPv4len)
+			}
+			addresses.internalIPv4 = append(net.IP(nil), attr.Value...)
 		case configAttrInternalIPv6Address:
-			if len(attr.Value) == configAttrInternalIPv6AddressLen {
-				addresses.internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			if len(attr.Value) == 0 {
+				continue
 			}
+			address, err := ipv6AddressAttribute(attr.Value, "internal ipv6 address")
+			if err != nil {
+				return tunnelAddressSet{}, err
+			}
+			addresses.internalIPv6 = address
+			addresses.internalIPv6Prefix = ipv6Prefix(address.IP, address.PrefixLen)
 		case configAttrInternalIPv6Subnet:
-			if addresses.internalIPv6 == nil && len(attr.Value) == configAttrInternalIPv6SubnetLen {
-				addresses.internalIPv6 = append(net.IP(nil), attr.Value[:net.IPv6len]...)
+			if len(attr.Value) == 0 {
+				continue
+			}
+			prefix, err := ipv6PrefixAttribute(attr.Value, "internal ipv6 subnet")
+			if err != nil {
+				return tunnelAddressSet{}, err
+			}
+			if addresses.internalIPv6Prefix.IsZero() {
+				addresses.internalIPv6Prefix = prefix
 			}
 		}
 
 		matchesPCSCFIPv4 := attr.Type == pcscfIPv4Attr || attr.Type == configAttrPCSCFIPv4Address
 		matchesPCSCFIPv6 := attr.Type == pcscfIPv6Attr || attr.Type == configAttrPCSCFIPv6Address
-		switch {
-		case matchesPCSCFIPv4 && matchesPCSCFIPv6 && len(attr.Value) == net.IPv6len:
-			addresses.pcscfIPv6 = appendUniqueIP(addresses.pcscfIPv6, attr.Value)
-		case matchesPCSCFIPv4:
-			if len(attr.Value) == net.IPv4len {
-				addresses.pcscfIPv4 = appendUniqueIP(addresses.pcscfIPv4, attr.Value)
-			}
-		case matchesPCSCFIPv6:
-			if len(attr.Value) == net.IPv6len {
-				addresses.pcscfIPv6 = appendUniqueIP(addresses.pcscfIPv6, attr.Value)
-			}
+		if err := appendPCSCFAddressAttribute(&addresses, attr.Value, matchesPCSCFIPv4, matchesPCSCFIPv6); err != nil {
+			return tunnelAddressSet{}, err
 		}
 	}
-	return addresses
+	return addresses, nil
+}
+
+func appendPCSCFAddressAttribute(addresses *tunnelAddressSet, value []byte, matchesIPv4, matchesIPv6 bool) error {
+	if !matchesIPv4 && !matchesIPv6 {
+		return nil
+	}
+	if len(value) == 0 {
+		return nil
+	}
+	switch {
+	case matchesIPv4 && matchesIPv6:
+		switch len(value) {
+		case net.IPv4len:
+			addresses.pcscfIPv4 = appendUniqueIP(addresses.pcscfIPv4, value)
+		case net.IPv6len:
+			addresses.pcscfIPv6 = appendUniqueIP(addresses.pcscfIPv6, value)
+		default:
+			return fmt.Errorf("parsing configuration attributes: p-cscf address length %d, want %d or %d", len(value), net.IPv4len, net.IPv6len)
+		}
+	case matchesIPv4:
+		if len(value) != net.IPv4len {
+			return configAttributeLengthError("p-cscf ipv4 address", len(value), net.IPv4len)
+		}
+		addresses.pcscfIPv4 = appendUniqueIP(addresses.pcscfIPv4, value)
+	case matchesIPv6:
+		if len(value) != net.IPv6len {
+			return configAttributeLengthError("p-cscf ipv6 address", len(value), net.IPv6len)
+		}
+		addresses.pcscfIPv6 = appendUniqueIP(addresses.pcscfIPv6, value)
+	}
+	return nil
+}
+
+func configAttributeLengthError(name string, got, want int) error {
+	return fmt.Errorf("parsing configuration attributes: %s length %d, want %d", name, got, want)
+}
+
+func ipv6AddressAttribute(value []byte, name string) (IPAddress, error) {
+	if len(value) != configAttrInternalIPv6AddressLen {
+		return IPAddress{}, configAttributeLengthError(name, len(value), configAttrInternalIPv6AddressLen)
+	}
+	prefixLen := int(value[net.IPv6len])
+	if prefixLen > net.IPv6len*8 {
+		return IPAddress{}, fmt.Errorf("parsing configuration attributes: %s prefix length %d exceeds 128", name, prefixLen)
+	}
+	return IPAddress{
+		IP:        append(net.IP(nil), value[:net.IPv6len]...),
+		PrefixLen: prefixLen,
+	}, nil
+}
+
+func ipv6PrefixAttribute(value []byte, name string) (IPPrefix, error) {
+	if len(value) != configAttrInternalIPv6SubnetLen {
+		return IPPrefix{}, configAttributeLengthError(name, len(value), configAttrInternalIPv6SubnetLen)
+	}
+	prefixLen := int(value[net.IPv6len])
+	if prefixLen > net.IPv6len*8 {
+		return IPPrefix{}, fmt.Errorf("parsing configuration attributes: %s prefix length %d exceeds 128", name, prefixLen)
+	}
+	return ipv6Prefix(value[:net.IPv6len], prefixLen), nil
+}
+
+func ipv6Prefix(ip net.IP, prefixLen int) IPPrefix {
+	prefix := append(net.IP(nil), ip.To16()...)
+	if len(prefix) == net.IPv6len {
+		prefix = prefix.Mask(net.CIDRMask(prefixLen, net.IPv6len*8))
+	}
+	return IPPrefix{
+		IP:        prefix,
+		PrefixLen: prefixLen,
+	}
+}
+
+func ipv6AddressFromPrefix(prefix IPPrefix) IPAddress {
+	ip := append(net.IP(nil), prefix.IP.To16()...)
+	if len(ip) != net.IPv6len {
+		return IPAddress{}
+	}
+	if prefix.PrefixLen < net.IPv6len*8 {
+		incrementIPv6(ip)
+	}
+	return IPAddress{IP: ip, PrefixLen: prefix.PrefixLen}
+}
+
+func incrementIPv6(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			return
+		}
+	}
 }
 
 func appendUniqueIP(ips []net.IP, ip net.IP) []net.IP {
@@ -302,13 +419,7 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 		apn = DefaultAPN
 	}
 	childSA := &ike.SecurityAssociationPayload{Proposals: childSAProposals(cfg, espSPI)}
-	config := &ike.ConfigPayload{ConfigType: configTypeRequest, Attributes: []ike.Attribute{
-		ike.NewTLVAttribute(configAttrInternalIPv4Address, nil),
-		ike.NewTLVAttribute(configAttrInternalIPv4DNS, nil),
-		ike.NewTLVAttribute(configAttrInternalIPv6Address, nil),
-		ike.NewTLVAttribute(configAttrInternalIPv6DNS, nil),
-		ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, nil),
-	}}
+	config := &ike.ConfigPayload{ConfigType: configTypeRequest, Attributes: pdnConfigRequestAttributes(cfg.PDNType)}
 	for _, attr := range pcscfRequestAttributes(cfg) {
 		config.Attributes = append(config.Attributes, ike.NewTLVAttribute(attr, nil))
 	}
@@ -333,6 +444,40 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 		payloads = append(payloads, &ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeN1ModeCapability, Data: data})
 	}
 	return payloads, nil
+}
+
+func pdnConfigRequestAttributes(pdnType PDNType) []ike.Attribute {
+	attrs := make([]ike.Attribute, 0, 5)
+	if pdnType != PDNTypeIPv6 {
+		attrs = append(attrs,
+			ike.NewTLVAttribute(configAttrInternalIPv4Address, nil),
+			ike.NewTLVAttribute(configAttrInternalIPv4DNS, nil),
+		)
+	}
+	if pdnType != PDNTypeIPv4 {
+		attrs = append(attrs,
+			ike.NewTLVAttribute(configAttrInternalIPv6Address, nil),
+			ike.NewTLVAttribute(configAttrInternalIPv6DNS, nil),
+		)
+	}
+	attrs = append(attrs, ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, nil))
+	return attrs
+}
+
+func pdnTypeRestriction(payloads []ike.Payload) PDNType {
+	for _, payload := range payloads {
+		notify, ok := payload.(*ike.NotifyPayload)
+		if !ok {
+			continue
+		}
+		switch notify.NotifyType {
+		case notifyTypePDNTypeIPv4OnlyAllowed:
+			return PDNTypeIPv4
+		case notifyTypePDNTypeIPv6OnlyAllowed:
+			return PDNTypeIPv6
+		}
+	}
+	return PDNTypeUnspecified
 }
 
 func pcscfConfigAttributes(cfg handshake.Config) (uint16, uint16) {

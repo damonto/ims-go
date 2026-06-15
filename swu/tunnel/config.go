@@ -51,6 +51,9 @@ func (cfg Config) Normalized() (Config, error) {
 	if cfg.AKAPrimeNetworkName == "" {
 		cfg.AKAPrimeNetworkName = defaultAKAPrimeNetworkName
 	}
+	if !validPDNType(cfg.PDNType) {
+		return Config{}, fmt.Errorf("normalizing swu config: invalid pdn type %d", cfg.PDNType)
+	}
 
 	if err := validatePortRange("initial port", cfg.InitialPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
@@ -162,6 +165,15 @@ func (cfg Config) Normalized() (Config, error) {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	return cfg, nil
+}
+
+func validPDNType(pdnType PDNType) bool {
+	switch pdnType {
+	case PDNTypeUnspecified, PDNTypeIPv4, PDNTypeIPv6, PDNTypeIPv4v6:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeSALifetime(name string, lifetime, rekeyMargin *time.Duration, defaultLifetime, defaultRekeyMargin time.Duration) error {

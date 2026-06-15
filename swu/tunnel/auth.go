@@ -54,6 +54,7 @@ type akaAuthFlow struct {
 	akaAuthenticated         bool
 	protectedSuccessExpected bool
 	protectedSuccessReceived bool
+	ipmsIndication           bool
 	ipmsIndicated            bool
 	notificationReceived     bool
 }
@@ -107,6 +108,7 @@ func (s *Session) authenticateEAPAKA(ctx context.Context, card Card, imei, ident
 		nextRequestID:                    2,
 		akaPrimeNetworkName:              s.cfg.AKAPrimeNetworkName,
 		allowAKAPrimeNetworkNameMismatch: s.cfg.AllowAKAPrimeNetworkNameMismatch,
+		ipmsIndication:                   s.cfg.EnableIPMSIndication,
 	}
 	if reauthIdentity, ok := normalizedAKAReauthIdentity(initialState, realm); ok {
 		flow.reauthIdentity = reauthIdentity

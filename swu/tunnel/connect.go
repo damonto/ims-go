@@ -70,7 +70,7 @@ func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
 	}
 	s.commitConnect(state)
 	s.startBackgroundLoops()
-	s.logger.Info("SWu security associations established", "inner_ip", state.tunnel.InnerIP, "pcscf_ip", state.tunnel.PCSCFIP, "pcscf_ips", state.tunnel.PCSCFIPs, "esp_initiator_spi", state.tunnel.ESPInitiatorSPI, "esp_responder_spi", state.tunnel.ESPResponderSPI)
+	s.logger.Info("SWu security associations established", "inner_ip", state.tunnel.DefaultInnerIP(), "pcscf_ip", state.tunnel.DefaultPCSCFIP(), "pcscf_ips", state.tunnel.PCSCFAddresses(), "esp_initiator_spi", state.tunnel.ESPInitiatorSPI, "esp_responder_spi", state.tunnel.ESPResponderSPI)
 	return nil
 }
 
@@ -290,14 +290,13 @@ func inboundESPCodec(info Info, keys ESPKeys) esp.Codec {
 }
 
 func (state *connectState) innerLocalAddr(port int) *net.UDPAddr {
-	return &net.UDPAddr{IP: append(net.IP(nil), state.tunnel.InnerIP...), Port: port}
+	local, _ := innerAddrsForInfo(state.tunnel, nil, port, state.input.Config.SIPPort)
+	return local
 }
 
 func (state *connectState) innerRemoteAddr(port int) *net.UDPAddr {
-	if len(state.tunnel.PCSCFIP) == 0 {
-		return nil
-	}
-	return &net.UDPAddr{IP: append(net.IP(nil), state.tunnel.PCSCFIP...), Port: port}
+	_, remote := innerAddrsForInfo(state.tunnel, nil, state.input.Config.LocalSIPPort, port)
+	return remote
 }
 
 func (state *connectState) sessionLivenessTimeout() time.Duration {

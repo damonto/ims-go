@@ -211,6 +211,9 @@ func (s *Session) handleInformationalRequest(state informationalState, packet ik
 		if action.reactivationRequested {
 			cause = reactivationRequestedError(cause)
 		}
+		if action.pdnDeactivated {
+			cause = pdnDeactivatedError(cause)
+		}
 		s.failSecurityAssociations(cause)
 	}
 	if action.deleteChild {
@@ -219,14 +222,17 @@ func (s *Session) handleInformationalRequest(state informationalState, packet ik
 		if action.reactivationRequested {
 			cause = reactivationRequestedError(cause)
 		}
+		if action.pdnDeactivated {
+			cause = pdnDeactivatedError(cause)
+		}
 		s.discardChildSecurityAssociations(cause)
 	}
 	if action.promotePendingChild {
 		s.logger.Debug("received old child sa delete request", "message_id", packet.Header.MessageID, "old_inbound_spi", state.oldInboundSPI, "old_outbound_spi", state.outboundSPI)
 		s.promotePendingChildSecurityAssociation()
 	}
-	if action.deleteRetiredChildSPI != 0 {
-		s.removeRetiredChildSA(action.deleteRetiredChildSPI)
+	for _, spi := range action.deleteRetiredChildSPIs {
+		s.removeRetiredChildSA(spi)
 	}
 	if action.pcscfReselection {
 		s.applyPCSCFReselection(action.pcscfInfo)
@@ -268,8 +274,16 @@ func (s *Session) applyPCSCFReselection(info Info) {
 		s.mu.Unlock()
 		return
 	}
-	s.tunnel.PCSCFIP = append(net.IP(nil), info.PCSCFIP...)
-	s.tunnel.PCSCFIPs = cloneIPList(info.PCSCFIPs)
+	next := cloneInfo(s.tunnel)
+	next.PCSCFIPs = cloneIPList(info.PCSCFIPs)
+	local, remote := innerAddrsForInfo(next, nil, s.cfg.LocalSIPPort, s.cfg.SIPPort)
+	if local == nil || remote == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.tunnel = next
+	s.innerLocal = local
+	s.innerRemote = remote
 	current := cloneInfo(s.tunnel)
 	s.mu.Unlock()
 

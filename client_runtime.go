@@ -85,6 +85,7 @@ func (r *connectionRunner) reconnectAfterIMSFailure(cause error) bool {
 	}
 
 	_ = r.client.closeActiveRuntime(r.active)
+	r.client.clearSWUPDNTypeRestrictionAfterDisconnect(cause)
 
 	if !r.client.startReconnect() {
 		r.client.emitStatusError(StatusFailed, runErr)
@@ -178,7 +179,7 @@ func nextPCSCFInfo(info swutunnel.Info) (swutunnel.Info, bool) {
 	if len(ips) < 2 {
 		return info, false
 	}
-	current := info.PCSCFIP
+	current := info.DefaultPCSCFIP()
 	if len(current) == 0 {
 		current = ips[0]
 	}
@@ -191,7 +192,6 @@ func nextPCSCFInfo(info swutunnel.Info) (swutunnel.Info, bool) {
 	}
 	rotated := append(append(ips[:0:0], ips[next:]...), ips[:next]...)
 	info.PCSCFIPs = rotated
-	info.PCSCFIP = append(info.PCSCFIP[:0:0], rotated[0]...)
 	return info, true
 }
 

@@ -24,6 +24,7 @@ type Config struct {
 	LocalAddr                string
 	RemoteAddr               string
 	APN                      string
+	PDNType                  PDNType
 	InitialPort              int
 	NATTPort                 int
 	LocalSIPPort             int
@@ -38,14 +39,35 @@ type Config struct {
 	PCSCFIPv6ConfigAttribute uint16
 	PCSCFRestoration         bool
 	PDUSessionID             byte
+	IPMSIndication           bool
 	NATKeepaliveInterval     time.Duration
 	LivenessTimeout          time.Duration
 	IKERetransmitDelays      []time.Duration
 }
 
+type IPAddress struct {
+	IP        net.IP
+	PrefixLen int
+}
+
+func (a IPAddress) IsZero() bool {
+	return len(a.IP) == 0
+}
+
+type IPPrefix struct {
+	IP        net.IP
+	PrefixLen int
+}
+
+func (p IPPrefix) IsZero() bool {
+	return len(p.IP) == 0
+}
+
 type Info struct {
-	InnerIP                   net.IP
-	PCSCFIP                   net.IP
+	InnerIPv4                 net.IP
+	InnerIPv6                 IPAddress
+	InnerIPv6Prefix           IPPrefix
+	PDNTypeRestriction        PDNType
 	PCSCFIPs                  []net.IP
 	ESPInitiatorSPI           uint32
 	ESPResponderSPI           uint32
@@ -58,6 +80,15 @@ type Info struct {
 	SNSSAI                    []byte
 	SNSSAIPlmnID              []byte
 }
+
+type PDNType uint8
+
+const (
+	PDNTypeUnspecified PDNType = iota
+	PDNTypeIPv4
+	PDNTypeIPv6
+	PDNTypeIPv4v6
+)
 
 type ESPKeys struct {
 	EncryptionInitiator []byte

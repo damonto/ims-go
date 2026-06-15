@@ -224,23 +224,15 @@ func startUDPEncTunnelKeepalive(done <-chan struct{}, write func(context.Context
 	}()
 }
 
-func connectedUDPAddrs(s *tunnel.Session) (*net.UDPAddr, *net.UDPAddr, error) {
+func connectedUDPAddrs(s *tunnel.Session, remoteIP net.IP) (*net.UDPAddr, *net.UDPAddr, error) {
 	if s == nil {
 		return nil, nil, errors.New("session is nil")
 	}
-	info := s.Info()
-	if len(info.InnerIP) == 0 {
-		return nil, nil, errors.New("session is not connected")
+	localIP, resolvedRemoteIP, err := s.InnerIPsForRemote(remoteIP)
+	if err != nil {
+		return nil, nil, err
 	}
-	local, ok := s.LocalAddr().(*net.UDPAddr)
-	if !ok || local == nil {
-		return nil, nil, errors.New("session local address is not an inner udp address")
-	}
-	remote, ok := s.RemoteAddr().(*net.UDPAddr)
-	if !ok || remote == nil {
-		return nil, nil, errors.New("session remote address is not an inner udp address")
-	}
-	return cloneUDPAddr(local), cloneUDPAddr(remote), nil
+	return &net.UDPAddr{IP: localIP}, &net.UDPAddr{IP: resolvedRemoteIP}, nil
 }
 
 func udpRemoteAddr(innerRemote *net.UDPAddr, port int, remoteIP net.IP) *net.UDPAddr {

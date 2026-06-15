@@ -21,6 +21,7 @@ type Config struct {
 	LocalAddr                        string
 	RemoteAddr                       string
 	APN                              string
+	PDNType                          PDNType
 	AKAPrimeNetworkName              string
 	AllowAKAPrimeNetworkNameMismatch bool
 	PacketConn                       net.PacketConn
@@ -38,6 +39,7 @@ type Config struct {
 	PCSCFIPv6ConfigAttribute         uint16
 	DisablePCSCFRestoration          bool
 	PDUSessionID                     byte
+	EnableIPMSIndication             bool
 	NATKeepaliveInterval             time.Duration
 	LivenessTimeout                  time.Duration
 	IKERetransmitDelays              []time.Duration
@@ -53,6 +55,17 @@ type Config struct {
 	Logger                           *slog.Logger
 }
 
+type IPAddress = handshake.IPAddress
+type IPPrefix = handshake.IPPrefix
+type PDNType = handshake.PDNType
+
+const (
+	PDNTypeUnspecified = handshake.PDNTypeUnspecified
+	PDNTypeIPv4        = handshake.PDNTypeIPv4
+	PDNTypeIPv6        = handshake.PDNTypeIPv6
+	PDNTypeIPv4v6      = handshake.PDNTypeIPv4v6
+)
+
 type Card interface {
 	IMSI() string
 	MCC() string
@@ -61,8 +74,10 @@ type Card interface {
 }
 
 type Info struct {
-	InnerIP                   net.IP
-	PCSCFIP                   net.IP
+	InnerIPv4                 net.IP
+	InnerIPv6                 IPAddress
+	InnerIPv6Prefix           IPPrefix
+	PDNTypeRestriction        PDNType
 	PCSCFIPs                  []net.IP
 	ESPInitiatorSPI           uint32
 	ESPResponderSPI           uint32
@@ -250,6 +265,7 @@ func handshakeConfig(cfg Config) handshake.Config {
 		LocalAddr:                cfg.LocalAddr,
 		RemoteAddr:               cfg.RemoteAddr,
 		APN:                      cfg.APN,
+		PDNType:                  cfg.PDNType,
 		InitialPort:              cfg.InitialPort,
 		NATTPort:                 cfg.NATTPort,
 		LocalSIPPort:             cfg.LocalSIPPort,
@@ -264,6 +280,7 @@ func handshakeConfig(cfg Config) handshake.Config {
 		PCSCFIPv6ConfigAttribute: cfg.PCSCFIPv6ConfigAttribute,
 		PCSCFRestoration:         !cfg.DisablePCSCFRestoration,
 		PDUSessionID:             cfg.PDUSessionID,
+		IPMSIndication:           cfg.EnableIPMSIndication,
 		NATKeepaliveInterval:     cfg.NATKeepaliveInterval,
 		LivenessTimeout:          cfg.LivenessTimeout,
 		IKERetransmitDelays:      append([]time.Duration(nil), cfg.IKERetransmitDelays...),
@@ -272,8 +289,10 @@ func handshakeConfig(cfg Config) handshake.Config {
 
 func handshakeInfo(info Info) handshake.Info {
 	return handshake.Info{
-		InnerIP:                   append(net.IP(nil), info.InnerIP...),
-		PCSCFIP:                   append(net.IP(nil), info.PCSCFIP...),
+		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
+		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
+		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),
+		PDNTypeRestriction:        info.PDNTypeRestriction,
 		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
 		ESPInitiatorSPI:           info.ESPInitiatorSPI,
 		ESPResponderSPI:           info.ESPResponderSPI,
@@ -290,8 +309,10 @@ func handshakeInfo(info Info) handshake.Info {
 
 func infoFromHandshake(info handshake.Info) Info {
 	return Info{
-		InnerIP:                   append(net.IP(nil), info.InnerIP...),
-		PCSCFIP:                   append(net.IP(nil), info.PCSCFIP...),
+		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
+		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
+		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),
+		PDNTypeRestriction:        info.PDNTypeRestriction,
 		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
 		ESPInitiatorSPI:           info.ESPInitiatorSPI,
 		ESPResponderSPI:           info.ESPResponderSPI,
@@ -303,6 +324,20 @@ func infoFromHandshake(info handshake.Info) Info {
 		PDUSessionID:              info.PDUSessionID,
 		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
 		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
+	}
+}
+
+func cloneIPAddress(address IPAddress) IPAddress {
+	return IPAddress{
+		IP:        append(net.IP(nil), address.IP...),
+		PrefixLen: address.PrefixLen,
+	}
+}
+
+func cloneIPPrefix(prefix IPPrefix) IPPrefix {
+	return IPPrefix{
+		IP:        append(net.IP(nil), prefix.IP...),
+		PrefixLen: prefix.PrefixLen,
 	}
 }
 

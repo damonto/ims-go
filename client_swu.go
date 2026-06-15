@@ -89,6 +89,7 @@ func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel
 		return swutunnel.Info{}, fmt.Errorf("connecting swu: %w", err)
 	}
 	tunnelInfo := session.Info()
-	c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.InnerIP, "pcscf_ip", tunnelInfo.PCSCFIP, "pcscf_ips", tunnelInfo.PCSCFIPs, "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
+	c.recordSWUPDNTypeRestriction(tunnelInfo)
+	c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.DefaultInnerIP(), "pcscf_ip", tunnelInfo.DefaultPCSCFIP(), "pcscf_ips", tunnelInfo.PCSCFAddresses(), "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
 	return tunnelInfo, nil
 }

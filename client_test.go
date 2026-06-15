@@ -2376,6 +2376,116 @@ func TestSWUBackoffGateExpiresAndClears(t *testing.T) {
 	}
 }
 
+func TestSWUPDNTypeRestrictionGateAppliesPLMNAPN(t *testing.T) {
+	tests := []struct {
+		name    string
+		apn     string
+		card    Card
+		initial swutunnel.PDNType
+		want    swutunnel.PDNType
+	}{
+		{
+			name: "same plmn apn applies restriction",
+			apn:  "IMS",
+			card: stubCard{},
+			want: swutunnel.PDNTypeIPv6,
+		},
+		{
+			name: "different apn does not apply restriction",
+			apn:  "internet",
+			card: stubCard{},
+		},
+		{
+			name: "different plmn does not apply restriction",
+			apn:  "ims",
+			card: plmnTestCard{mcc: "002", mnc: "001"},
+		},
+		{
+			name:    "explicit conflicting request is restricted",
+			apn:     "ims",
+			card:    stubCard{},
+			initial: swutunnel.PDNTypeIPv4,
+			want:    swutunnel.PDNTypeIPv6,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newReadyClient(t, Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Tunnel:   swutunnel.Config{APN: "ims"},
+			})
+			defer client.Close()
+			client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeIPv6})
+			client.card = tt.card
+			cfg := swutunnel.Config{APN: tt.apn, PDNType: tt.initial}
+
+			client.applySWUPDNTypeRestriction(&cfg)
+
+			if cfg.PDNType != tt.want {
+				t.Fatalf("PDNType = %d, want %d", cfg.PDNType, tt.want)
+			}
+		})
+	}
+}
+
+func TestSWUPDNTypeRestrictionGateIgnoresUnrestrictedInfo(t *testing.T) {
+	client := newReadyClient(t, Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Tunnel:   swutunnel.Config{APN: "ims"},
+	})
+	defer client.Close()
+
+	client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeUnspecified})
+	cfg := swutunnel.Config{APN: "ims"}
+	client.applySWUPDNTypeRestriction(&cfg)
+	if cfg.PDNType != swutunnel.PDNTypeUnspecified {
+		t.Fatalf("PDNType = %d, want unspecified", cfg.PDNType)
+	}
+}
+
+func TestSWUPDNTypeRestrictionGateClearsAfterPDNDeactivation(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+		want  swutunnel.PDNType
+	}{
+		{
+			name:  "network deactivation clears restriction",
+			cause: fmt.Errorf("running IMS loop: %w", swutunnel.ErrPDNDeactivated),
+		},
+		{
+			name:  "reactivation requested keeps restriction",
+			cause: errors.Join(swutunnel.ErrPDNDeactivated, swutunnel.ErrReactivationRequested),
+			want:  swutunnel.PDNTypeIPv6,
+		},
+		{
+			name:  "other disconnect keeps restriction",
+			cause: errors.New("transport closed"),
+			want:  swutunnel.PDNTypeIPv6,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newReadyClient(t, Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Tunnel:   swutunnel.Config{APN: "ims"},
+			})
+			defer client.Close()
+
+			client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeIPv6})
+			client.clearSWUPDNTypeRestrictionAfterDisconnect(tt.cause)
+			cfg := swutunnel.Config{APN: "ims"}
+			client.applySWUPDNTypeRestriction(&cfg)
+
+			if cfg.PDNType != tt.want {
+				t.Fatalf("PDNType = %d, want %d", cfg.PDNType, tt.want)
+			}
+		})
+	}
+}
+
 func TestTerminalReconnectError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2406,7 +2516,6 @@ func TestPCSCFCandidateIPs(t *testing.T) {
 		{
 			name: "ordered list deduplicated",
 			info: swutunnel.Info{
-				PCSCFIP: net.IPv4(10, 0, 0, 1),
 				PCSCFIPs: []net.IP{
 					net.IPv4(10, 0, 0, 1),
 					net.IPv4(10, 0, 0, 2),
@@ -2416,8 +2525,12 @@ func TestPCSCFCandidateIPs(t *testing.T) {
 			want: []net.IP{net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)},
 		},
 		{
-			name: "legacy preferred address fallback",
-			info: swutunnel.Info{PCSCFIP: net.IPv4(10, 0, 0, 9)},
+			name: "single source list",
+			info: swutunnel.Info{
+				PCSCFIPs: []net.IP{
+					net.IPv4(10, 0, 0, 9),
+				},
+			},
 			want: []net.IP{net.IPv4(10, 0, 0, 9)},
 		},
 		{
@@ -2446,11 +2559,10 @@ func TestPCSCFCandidateIPs(t *testing.T) {
 
 func TestNextPCSCFInfoRotatesAwayFromCurrent(t *testing.T) {
 	info := swutunnel.Info{
-		PCSCFIP: net.IPv4(10, 0, 0, 2),
 		PCSCFIPs: []net.IP{
-			net.IPv4(10, 0, 0, 1),
 			net.IPv4(10, 0, 0, 2),
 			net.IPv4(10, 0, 0, 3),
+			net.IPv4(10, 0, 0, 1),
 		},
 	}
 
@@ -2458,16 +2570,17 @@ func TestNextPCSCFInfoRotatesAwayFromCurrent(t *testing.T) {
 	if !ok {
 		t.Fatal("nextPCSCFInfo() ok = false, want true")
 	}
-	if !got.PCSCFIP.Equal(net.IPv4(10, 0, 0, 3)) {
-		t.Fatalf("PCSCFIP = %s, want 10.0.0.3", got.PCSCFIP)
+	if !got.DefaultPCSCFIP().Equal(net.IPv4(10, 0, 0, 3)) {
+		t.Fatalf("DefaultPCSCFIP() = %s, want 10.0.0.3", got.DefaultPCSCFIP())
 	}
 	want := []net.IP{net.IPv4(10, 0, 0, 3), net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)}
-	if len(got.PCSCFIPs) != len(want) {
-		t.Fatalf("PCSCFIPs length = %d, want %d", len(got.PCSCFIPs), len(want))
+	gotIPs := got.PCSCFAddresses()
+	if len(gotIPs) != len(want) {
+		t.Fatalf("PCSCFAddresses() length = %d, want %d", len(gotIPs), len(want))
 	}
 	for i := range want {
-		if !got.PCSCFIPs[i].Equal(want[i]) {
-			t.Fatalf("PCSCFIPs[%d] = %s, want %s", i, got.PCSCFIPs[i], want[i])
+		if !gotIPs[i].Equal(want[i]) {
+			t.Fatalf("PCSCFAddresses()[%d] = %s, want %s", i, gotIPs[i], want[i])
 		}
 	}
 }

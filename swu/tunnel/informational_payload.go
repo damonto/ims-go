@@ -97,14 +97,21 @@ func pcscfReselectionReplyTypes(attrs []ike.Attribute, cfg Config) []uint16 {
 
 func pcscfReselectionInfo(previous Info, attrs []ike.Attribute, cfg Config) (Info, bool) {
 	pcscfIPv4Attr, pcscfIPv6Attr := pcscfConfigAttributes(handshakeConfig(cfg))
-	addresses := tunnelAddresses(attrs, pcscfIPv4Attr, pcscfIPv6Attr)
+	addresses, err := tunnelAddresses(attrs, pcscfIPv4Attr, pcscfIPv6Attr)
+	if err != nil {
+		return Info{}, false
+	}
 	ips := make([]net.IP, 0, len(addresses.pcscfIPv6)+len(addresses.pcscfIPv4))
 	ips = append(ips, addresses.pcscfIPv6...)
 	ips = append(ips, addresses.pcscfIPv4...)
 	if len(ips) == 0 {
 		return Info{}, false
 	}
-	return pcscfInfoFromAddresses(previous, ips), true
+	info := pcscfInfoFromAddresses(previous, ips)
+	if len(info.PCSCFIPs) == 0 {
+		return Info{}, false
+	}
+	return info, true
 }
 
 func containsUint16(values []uint16, target uint16) bool {

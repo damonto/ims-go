@@ -509,8 +509,10 @@ func childSAFromCreateChildResponseWithRequests(payloads []ike.Payload, previous
 		}
 		peerPublic = append([]byte(nil), ke.Data...)
 	}
-	info.InnerIP = append(net.IP(nil), previous.InnerIP...)
-	info.PCSCFIP = append(net.IP(nil), previous.PCSCFIP...)
+	info.InnerIPv4 = append(net.IP(nil), previous.InnerIPv4...)
+	info.InnerIPv6 = cloneIPAddress(previous.InnerIPv6)
+	info.InnerIPv6Prefix = cloneIPPrefix(previous.InnerIPv6Prefix)
+	info.PDNTypeRestriction = previous.PDNTypeRestriction
 	info.PCSCFIPs = cloneIPList(previous.PCSCFIPs)
 	info.InitiatorTrafficSelectors = cloneTrafficSelectors(tsi.Selectors)
 	info.ResponderTrafficSelectors = cloneTrafficSelectors(tsr.Selectors)
@@ -817,8 +819,10 @@ func (s *Session) childSALifetimeState() (time.Time, time.Time) {
 
 func cloneInfo(info Info) Info {
 	return Info{
-		InnerIP:                   append(net.IP(nil), info.InnerIP...),
-		PCSCFIP:                   append(net.IP(nil), info.PCSCFIP...),
+		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
+		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
+		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),
+		PDNTypeRestriction:        info.PDNTypeRestriction,
 		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
 		ESPInitiatorSPI:           info.ESPInitiatorSPI,
 		ESPResponderSPI:           info.ESPResponderSPI,

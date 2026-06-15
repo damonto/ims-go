@@ -1113,6 +1113,9 @@ func validateTrafficSelector(selector TrafficSelector) error {
 	if startPort > endPort {
 		return fmt.Errorf("parsing traffic selector: invalid port range %d-%d", startPort, endPort)
 	}
+	if selector.ProtocolID == ipProtocolAny && (startPort != 0 || endPort != math.MaxUint16) {
+		return fmt.Errorf("parsing traffic selector: protocol 0 requires port range 0-%d", math.MaxUint16)
+	}
 	startAddress := selector.Data[trafficSelectorPortsLen : trafficSelectorPortsLen+addressLen]
 	endAddress := selector.Data[trafficSelectorPortsLen+addressLen : trafficSelectorPortsLen+addressLen*2]
 	if compareBytes(startAddress, endAddress) > 0 {

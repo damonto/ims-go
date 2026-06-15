@@ -30,21 +30,7 @@ func (s *Session) RemoteAddr() net.Addr {
 func (s *Session) Tunnel() Info {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return Info{
-		InnerIP:                   append(net.IP(nil), s.tunnel.InnerIP...),
-		PCSCFIP:                   append(net.IP(nil), s.tunnel.PCSCFIP...),
-		PCSCFIPs:                  cloneIPList(s.tunnel.PCSCFIPs),
-		ESPInitiatorSPI:           s.tunnel.ESPInitiatorSPI,
-		ESPResponderSPI:           s.tunnel.ESPResponderSPI,
-		Encryption:                s.tunnel.Encryption,
-		EncryptionKeyLen:          s.tunnel.EncryptionKeyLen,
-		Integrity:                 s.tunnel.Integrity,
-		InitiatorTrafficSelectors: cloneTrafficSelectors(s.tunnel.InitiatorTrafficSelectors),
-		ResponderTrafficSelectors: cloneTrafficSelectors(s.tunnel.ResponderTrafficSelectors),
-		PDUSessionID:              s.tunnel.PDUSessionID,
-		SNSSAI:                    append([]byte(nil), s.tunnel.SNSSAI...),
-		SNSSAIPlmnID:              append([]byte(nil), s.tunnel.SNSSAIPlmnID...),
-	}
+	return cloneInfo(s.tunnel)
 }
 
 func (s *Session) Info() Info {
@@ -64,10 +50,96 @@ func (s *Session) ReadyInfo() (Info, error) {
 		return Info{}, errChildSAUnavailable
 	}
 	info := cloneInfo(s.tunnel)
-	if len(info.InnerIP) == 0 {
+	if !info.HasInnerAddress() {
 		return Info{}, errors.New("tunnel inner ip is empty")
 	}
 	return info, nil
+}
+
+func (s *Session) InnerIPsForRemote(remoteIP net.IP) (net.IP, net.IP, error) {
+	if s.isClosed() {
+		return nil, nil, errSessionClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.connected {
+		if err := s.disconnectedTunnelErr(); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, errChildSAUnavailable
+	}
+	local, remote := innerIPsForInfo(s.tunnel, remoteIP)
+	if len(local) == 0 {
+		return nil, nil, errors.New("tunnel inner local address is unavailable")
+	}
+	if len(remote) == 0 {
+		return nil, nil, errors.New("tunnel inner remote address is unavailable")
+	}
+	return local, remote, nil
+}
+
+func (info Info) HasInnerAddress() bool {
+	return len(info.InnerIPv4) != 0 || !info.InnerIPv6.IsZero()
+}
+
+func (info Info) DefaultInnerIP() net.IP {
+	if pcscf := info.DefaultPCSCFIP(); len(pcscf) != 0 {
+		return info.InnerIPForRemote(pcscf)
+	}
+	if !info.InnerIPv6.IsZero() {
+		return append(net.IP(nil), info.InnerIPv6.IP...)
+	}
+	return append(net.IP(nil), info.InnerIPv4...)
+}
+
+func (info Info) InnerIPForRemote(remoteIP net.IP) net.IP {
+	if len(remoteIP) == 0 {
+		return info.DefaultInnerIP()
+	}
+	if remoteIP.To4() != nil {
+		return append(net.IP(nil), info.InnerIPv4...)
+	}
+	if remoteIP.To16() != nil && !info.InnerIPv6.IsZero() {
+		return append(net.IP(nil), info.InnerIPv6.IP...)
+	}
+	return nil
+}
+
+func (info Info) DefaultPCSCFIP() net.IP {
+	ips := info.PCSCFAddresses()
+	if len(ips) == 0 {
+		return nil
+	}
+	return append(net.IP(nil), ips[0]...)
+}
+
+func (info Info) PCSCFAddresses() []net.IP {
+	return cloneIPList(info.PCSCFIPs)
+}
+
+func innerIPsForInfo(info Info, remoteIP net.IP) (net.IP, net.IP) {
+	remote := append(net.IP(nil), remoteIP...)
+	if len(remote) == 0 {
+		remote = info.DefaultPCSCFIP()
+	}
+	local := info.InnerIPForRemote(remote)
+	if len(local) == 0 && len(remote) == 0 {
+		local = info.DefaultInnerIP()
+	}
+	return local, remote
+}
+
+func innerAddrsForInfo(info Info, remoteIP net.IP, localPort, remotePort int) (*net.UDPAddr, *net.UDPAddr) {
+	local, remote := innerIPsForInfo(info, remoteIP)
+	var localAddr *net.UDPAddr
+	if len(local) != 0 {
+		localAddr = &net.UDPAddr{IP: local, Port: localPort}
+	}
+	var remoteAddr *net.UDPAddr
+	if len(remote) != 0 {
+		remoteAddr = &net.UDPAddr{IP: remote, Port: remotePort}
+	}
+	return localAddr, remoteAddr
 }
 
 func (s *Session) Logger() *slog.Logger {

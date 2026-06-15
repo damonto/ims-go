@@ -274,7 +274,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	responseCheckcode := f.challengeResponseCheckcode(message.Attributes, message.EAPType)
 	useResultInd := eapaka.HasAttribute(message.Attributes, akaAttrResultInd)
 	ipmsSupport := eapaka.IPMSSupport(0)
-	if useResultInd {
+	if useResultInd && f.ipmsIndication {
 		ipmsSupport = eapaka.IPMSSupportNBMOnly
 	}
 	data, err := eapaka.BuildChallengeResponsePacketWithOptions(eapaka.ChallengeResponseOptions{

@@ -1952,14 +1952,6 @@ func TestAKAAuthFlowProtectedResultIndRequiresSuccessNotification(t *testing.T) 
 		CK:  bytes.Repeat([]byte{0x44}, 16),
 	}
 	identity := "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
-	flow := akaAuthFlow{
-		session:     &Session{logger: slog.Default()},
-		card:        akaChallengeTestCard{result: akaResult},
-		identity:    identity,
-		eapIdentity: identity,
-		realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-		crypto:      &ikeCrypto{},
-	}
 	wire := buildSignedAKAChallenge(t, 8, identity, rand, autn, akaResult, eapaka.AKAAttribute{
 		Type:  akaAttrResultInd,
 		Value: []byte{0x00, 0x00},
@@ -1968,44 +1960,78 @@ func TestAKAAuthFlowProtectedResultIndRequiresSuccessNotification(t *testing.T) 
 	if err := message.UnmarshalBinary(wire); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
-	if err != nil {
-		t.Fatalf("buildChallengeResponse() error = %v", err)
-	}
-	if response.afterSend != nil {
-		t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
-	}
-	var responseMessage eapaka.AKAMessage
-	if err := responseMessage.UnmarshalBinary(response.data); err != nil {
-		t.Fatalf("response UnmarshalBinary() error = %v", err)
-	}
-	if eapaka.FindAttribute(responseMessage.Attributes, akaAttrResultInd) == nil {
-		t.Fatal("response AT_RESULT_IND is missing")
-	}
-	ipmsAttr := eapaka.FindAttribute(responseMessage.Attributes, akaAttrIPMSInd)
-	if ipmsAttr == nil {
-		t.Fatal("response AT_IPMS_IND is missing")
-	}
-	if !bytes.Equal(ipmsAttr.Value, []byte{0x00, byte(eapaka.IPMSSupportNBMOnly)}) {
-		t.Fatalf("response AT_IPMS_IND = % X, want 00 02", ipmsAttr.Value)
-	}
-	if err := flow.validateEAPSuccess(); err == nil || !strings.Contains(err.Error(), "before protected success notification") {
-		t.Fatalf("validateEAPSuccess() error = %v, want protected success notification error", err)
-	}
 
-	notificationWire, notification := buildSignedNotificationForTest(t, 9, akaNotificationSuccess, flow.currentAuthKey, eapaka.AKAAttribute{
-		Type:  akaAttrIPMSRes,
-		Value: []byte{0x00, byte(eapaka.IPMSSelectionNBM)},
-	})
-	notificationResponse, err := flow.buildNotificationResponse(notification, notificationWire)
-	if err != nil {
-		t.Fatalf("buildNotificationResponse() error = %v", err)
+	tests := []struct {
+		name              string
+		ipmsIndication    bool
+		wantIPMSInd       bool
+		notificationAttrs []eapaka.AKAAttribute
+	}{
+		{name: "default without ipms indication"},
+		{
+			name:           "configured ipms indication",
+			ipmsIndication: true,
+			wantIPMSInd:    true,
+			notificationAttrs: []eapaka.AKAAttribute{{
+				Type:  akaAttrIPMSRes,
+				Value: []byte{0x00, byte(eapaka.IPMSSelectionNBM)},
+			}},
+		},
 	}
-	if notificationResponse.afterSend != nil {
-		t.Fatalf("buildNotificationResponse() afterSend = %v, want nil", notificationResponse.afterSend)
-	}
-	if err := flow.validateEAPSuccess(); err != nil {
-		t.Fatalf("validateEAPSuccess() error = %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := akaAuthFlow{
+				session:        &Session{logger: slog.Default()},
+				card:           akaChallengeTestCard{result: akaResult},
+				identity:       identity,
+				eapIdentity:    identity,
+				realm:          "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:         &ikeCrypto{},
+				ipmsIndication: tt.ipmsIndication,
+			}
+			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if response.afterSend != nil {
+				t.Fatalf("buildChallengeResponse() afterSend = %v, want nil", response.afterSend)
+			}
+			var responseMessage eapaka.AKAMessage
+			if err := responseMessage.UnmarshalBinary(response.data); err != nil {
+				t.Fatalf("response UnmarshalBinary() error = %v", err)
+			}
+			if eapaka.FindAttribute(responseMessage.Attributes, akaAttrResultInd) == nil {
+				t.Fatal("response AT_RESULT_IND is missing")
+			}
+			ipmsAttr := eapaka.FindAttribute(responseMessage.Attributes, akaAttrIPMSInd)
+			if !tt.wantIPMSInd {
+				if ipmsAttr != nil {
+					t.Fatalf("response AT_IPMS_IND = % X, want missing", ipmsAttr.Value)
+				}
+			} else {
+				if ipmsAttr == nil {
+					t.Fatal("response AT_IPMS_IND is missing")
+				}
+				if !bytes.Equal(ipmsAttr.Value, []byte{0x00, byte(eapaka.IPMSSupportNBMOnly)}) {
+					t.Fatalf("response AT_IPMS_IND = % X, want 00 02", ipmsAttr.Value)
+				}
+			}
+			if err := flow.validateEAPSuccess(); err == nil || !strings.Contains(err.Error(), "before protected success notification") {
+				t.Fatalf("validateEAPSuccess() error = %v, want protected success notification error", err)
+			}
+
+			notificationWire, notification := buildSignedNotificationForTest(t, 9, akaNotificationSuccess, flow.currentAuthKey, tt.notificationAttrs...)
+			notificationResponse, err := flow.buildNotificationResponse(notification, notificationWire)
+			if err != nil {
+				t.Fatalf("buildNotificationResponse() error = %v", err)
+			}
+			if notificationResponse.afterSend != nil {
+				t.Fatalf("buildNotificationResponse() afterSend = %v, want nil", notificationResponse.afterSend)
+			}
+			if err := flow.validateEAPSuccess(); err != nil {
+				t.Fatalf("validateEAPSuccess() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -3244,6 +3270,20 @@ func TestReactivationRequestedErrorWrapsPeerDeleteCause(t *testing.T) {
 	}
 }
 
+func TestPDNDeactivatedErrorWrapsPeerDeleteCause(t *testing.T) {
+	cause := errors.New("peer deleted child SA")
+	err := pdnDeactivatedError(cause)
+	if !PDNDeactivated(err) {
+		t.Fatalf("PDNDeactivated() = false for %v", err)
+	}
+	if ReactivationRequested(err) {
+		t.Fatalf("ReactivationRequested() = true for %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is(err, cause) = false for %v", err)
+	}
+}
+
 func TestBuildInformationalResponsePayloadsDeleteHandling(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -3252,6 +3292,7 @@ func TestBuildInformationalResponsePayloadsDeleteHandling(t *testing.T) {
 		wantDeleteIKE    bool
 		wantDeleteChild  bool
 		wantReactivation bool
+		wantPDNDeact     bool
 		wantSPI          uint32
 	}{
 		{
@@ -3262,6 +3303,7 @@ func TestBuildInformationalResponsePayloadsDeleteHandling(t *testing.T) {
 			},
 			payloads:      []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}},
 			wantDeleteIKE: true,
+			wantPDNDeact:  true,
 		},
 		{
 			name: "ike delete with reactivation requested",
@@ -3289,6 +3331,7 @@ func TestBuildInformationalResponsePayloadsDeleteHandling(t *testing.T) {
 				},
 			},
 			wantDeleteChild: true,
+			wantPDNDeact:    true,
 			wantSPI:         0x10203040,
 		},
 		{
@@ -3323,6 +3366,9 @@ func TestBuildInformationalResponsePayloadsDeleteHandling(t *testing.T) {
 			}
 			if action.reactivationRequested != tt.wantReactivation {
 				t.Fatalf("reactivationRequested = %t, want %t", action.reactivationRequested, tt.wantReactivation)
+			}
+			if action.pdnDeactivated != tt.wantPDNDeact {
+				t.Fatalf("pdnDeactivated = %t, want %t", action.pdnDeactivated, tt.wantPDNDeact)
 			}
 			if !tt.wantDeleteChild {
 				if len(responsePayloads) != 0 {

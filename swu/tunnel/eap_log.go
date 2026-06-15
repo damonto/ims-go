@@ -225,6 +225,10 @@ func ikeNotifyName(notifyType uint16) string {
 		return "EAP_ONLY_AUTHENTICATION"
 	case notifyTypeBackoffTimer:
 		return "BACKOFF_TIMER"
+	case notifyTypePDNTypeIPv4OnlyAllowed:
+		return "PDN_TYPE_IPv4_ONLY_ALLOWED"
+	case notifyTypePDNTypeIPv6OnlyAllowed:
+		return "PDN_TYPE_IPv6_ONLY_ALLOWED"
 	case notifyTypePCSCFReselectionSupport:
 		return "P-CSCF_RESELECTION_SUPPORT"
 	case notifyTypeN1ModeCapability:

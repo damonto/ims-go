@@ -116,6 +116,7 @@ type clientState struct {
 	closeWG      sync.WaitGroup
 	closeOnce    sync.Once
 	swuBackoff   swuBackoffGate
+	swuPDNTypes  swuPDNTypeRestrictionGate
 	reconnectSeq atomic.Uint64
 }
 

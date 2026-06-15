@@ -152,7 +152,7 @@ func DialSecureTCP(ctx context.Context, s *tunnel.Session, cfg SecureTCPConfig) 
 }
 
 func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
-	innerLocal, innerRemote, err := connectedUDPAddrs(s)
+	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
@@ -210,7 +210,7 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 }
 
 func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *SecureTCPConfig) (*TCPConn, error) {
-	innerLocal, innerRemote, err := connectedUDPAddrs(s)
+	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("dialing tcp transport: %w", err)
 	}

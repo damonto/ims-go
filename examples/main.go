@@ -258,8 +258,8 @@ func run(opt options) error {
 		return fmt.Errorf("connecting client: %w", err)
 	}
 	slog.Info("registered to IMS")
-	if tunnel := client.Tunnel(); len(tunnel.PCSCFIP) > 0 {
-		slog.Info("tunnel ready", "inner_ip", tunnel.InnerIP.String(), "pcscf_ip", tunnel.PCSCFIP.String())
+	if tunnel := client.Tunnel(); len(tunnel.DefaultPCSCFIP()) > 0 {
+		slog.Info("tunnel ready", "inner_ip", tunnel.DefaultInnerIP().String(), "pcscf_ip", tunnel.DefaultPCSCFIP().String())
 	}
 
 	if opt.sendTo != "" {
