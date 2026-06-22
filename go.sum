@@ -1,9 +1,9 @@
 github.com/ElMostafaIdrassi/goscard v1.0.0 h1:RDG5QrqrQBUoi5MkzM4zILdYf8qDn62daYZszqvdgx0=
 github.com/ElMostafaIdrassi/goscard v1.0.0/go.mod h1:uGOakQe2fFlW2cVlr9cv6x07uelrf0j0aKPbR7jGgfg=
-github.com/damonto/ts43-go v0.0.0-20260611125016-ab0c78f7aadd h1:dxwNzmT5RFobzB0U+RPT3mUg7apMejvRnU6jFdFgQSs=
-github.com/damonto/ts43-go v0.0.0-20260611125016-ab0c78f7aadd/go.mod h1:+Gi3AP7ENR3brC4ai1LmupPRkH4NFuu3U0i749kfMU0=
-github.com/damonto/uicc-go v0.0.0-20260611123120-01e3637ef8da h1:QyFsvR+wiaBrgl5cCfH/1X1bo9knnJUIsF/HoDNxDvk=
-github.com/damonto/uicc-go v0.0.0-20260611123120-01e3637ef8da/go.mod h1:HxE1o++LfxWilgWp1cmwV+veqYMb7iAN0cFoZdpnS3M=
+github.com/damonto/ts43-go v0.0.0-20260622030018-3e953eacd018 h1:Er4yeZfHosM1N8ZM/ag/LBAvWDUne9WLApGhiOskrWs=
+github.com/damonto/ts43-go v0.0.0-20260622030018-3e953eacd018/go.mod h1:YHdBM5CGIls9gqG06hAab3RYHhlOEKmG4MuqXjtMI7M=
+github.com/damonto/uicc-go v0.0.0-20260622025011-5cf36d6c8626 h1:jcUx6ygMhU27ca9qn0qX3rZCa1956YYJcn/1NUhX8XQ=
+github.com/damonto/uicc-go v0.0.0-20260622025011-5cf36d6c8626/go.mod h1:4il4tcO0GJ2Bn8827RWDiMxNOnQpEApy3pwKliaR9uc=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/ISU=
@@ -14,7 +14,7 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.10.0 h1:Xv5erBjTwe/5IxqUQTdXv5kgmIvbHo3QQyRwhJsOfJA=
 github.com/stretchr/testify v1.10.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
-golang.org/x/sys v0.45.0 h1:dO4czNzziLiiXplLQgBCEpCvXQ3dnkn0SdaZSYdQ+FY=
-golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
+golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
