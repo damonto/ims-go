@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func (s *Service) targetURI(code string) string {
+func (s *Endpoint) targetURI(code string) string {
 	realm := strings.TrimPrefix(s.reg.State().RegisterURI, "sip:")
 	phoneContext := strings.TrimSpace(s.cfg.PhoneContextDomain)
 	if phoneContext == "" {
@@ -21,7 +21,7 @@ func (s *Service) targetURI(code string) string {
 	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=dialstring", dial, phoneContext, realm)
 }
 
-func (s *Service) sdp() string {
+func (s *Endpoint) sdp() string {
 	host := s.reg.State().ContactHost
 	network := "IP4"
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {

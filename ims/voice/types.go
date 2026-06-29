@@ -21,7 +21,7 @@ const (
 	mmtelICSI        = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
 	mmtelICSIEncoded = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
 
-	emergencyServiceURNSOS = "urn:service:sos"
+	emergencyServiceURNSOS = "urn:endpoint:sos"
 
 	currentLocationDiscoveryInfoPackage = "g.3gpp.current-location-discovery"
 	currentLocationDiscoveryContentType = "application/vnd.3gpp.current-location-discovery+xml"
@@ -99,10 +99,10 @@ type CallEvent struct {
 	At     time.Time
 }
 
-type Service struct {
+type Endpoint struct {
 	cfg        Config
 	sess       *session.Session
-	reg        *registration.Service
+	reg        *registration.Registrar
 	logger     *slog.Logger
 	attachment session.Attachment
 	timers     session.TransactionTimers
@@ -118,7 +118,7 @@ type Service struct {
 }
 
 type Call struct {
-	service *Service
+	endpoint *Endpoint
 
 	mu                  sync.Mutex
 	mediaSendMu         sync.Mutex

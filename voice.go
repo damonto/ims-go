@@ -26,12 +26,12 @@ type CallEvent struct {
 	At     time.Time
 }
 
-type VoiceService struct {
+type VoiceClient struct {
 	client *Client
 }
 
-func (s *VoiceService) Dial(ctx context.Context, req imsvoice.DialRequest) (*imsvoice.Call, error) {
-	low, err := s.client.currentVoiceService()
+func (s *VoiceClient) Dial(ctx context.Context, req imsvoice.DialRequest) (*imsvoice.Call, error) {
+	low, err := s.client.currentVoiceClient()
 	if err != nil {
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
@@ -44,8 +44,8 @@ func (s *VoiceService) Dial(ctx context.Context, req imsvoice.DialRequest) (*ims
 	return call, nil
 }
 
-func (c *Client) currentVoiceService() (*imsvoice.Service, error) {
-	return currentIMSService(c, func(ims imsRuntime) *imsvoice.Service { return ims.voice })
+func (c *Client) currentVoiceClient() (*imsvoice.Endpoint, error) {
+	return currentIMSEndpoint(c, func(ims imsStack) *imsvoice.Endpoint { return ims.voice })
 }
 
 func (c *Client) handleIncomingVoice(event imsvoice.IncomingCall) {

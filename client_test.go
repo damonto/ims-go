@@ -209,7 +209,7 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 			reconnecting: true,
 			wantErr:      ErrClientReconnecting,
 			call: func(client *Client) error {
-				_, err := client.currentSMSService()
+				_, err := client.currentSMSClient()
 				return err
 			},
 		},
@@ -220,7 +220,7 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 			connecting: true,
 			wantErr:    ErrClientConnecting,
 			call: func(client *Client) error {
-				_, err := client.currentUSSDService()
+				_, err := client.currentUSSDClient()
 				return err
 			},
 		},
@@ -230,7 +230,7 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 			closed:  true,
 			wantErr: ErrClientClosed,
 			call: func(client *Client) error {
-				_, err := client.currentVoiceService()
+				_, err := client.currentVoiceClient()
 				return err
 			},
 		},
@@ -240,7 +240,7 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 			active:  true,
 			wantErr: ErrClientNotConnected,
 			call: func(client *Client) error {
-				_, err := client.currentSMSService()
+				_, err := client.currentSMSClient()
 				return err
 			},
 		},
@@ -290,7 +290,7 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 	}
 }
 
-func TestCurrentVoiceServiceRejectsInactiveTunnel(t *testing.T) {
+func TestCurrentVoiceClientRejectsInactiveTunnel(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
@@ -312,17 +312,17 @@ func TestCurrentVoiceServiceRejectsInactiveTunnel(t *testing.T) {
 			client.emitStatus(StatusRegistered)
 			setClientActive(t, client, &activeConn{
 				tunnel: session,
-				ims: imsRuntime{
-					voice: new(imsvoice.Service),
+				ims: imsStack{
+					voice: new(imsvoice.Endpoint),
 				},
 			})
 
-			_, err = client.currentVoiceService()
+			_, err = client.currentVoiceClient()
 			if !errors.Is(err, ErrClientNotConnected) {
-				t.Fatalf("currentVoiceService() error = %v, want ErrClientNotConnected", err)
+				t.Fatalf("currentVoiceClient() error = %v, want ErrClientNotConnected", err)
 			}
 			if !strings.Contains(err.Error(), "tunnel not ready") || !strings.Contains(err.Error(), "child sa is unavailable") {
-				t.Fatalf("currentVoiceService() error = %v, want tunnel not ready cause", err)
+				t.Fatalf("currentVoiceClient() error = %v, want tunnel not ready cause", err)
 			}
 		})
 	}
@@ -565,7 +565,7 @@ func newUnauthorizedRegisterResponse(req imssip.Message, nonce string) imssip.Me
 	return res
 }
 
-func newRegisteredIMSRuntime(t *testing.T, transport *gatedCancelTransport, registerExpires time.Duration) (*imssession.Session, *registration.Service) {
+func newRegisteredIMS(t *testing.T, transport *gatedCancelTransport, registerExpires time.Duration) (*imssession.Session, *registration.Registrar) {
 	t.Helper()
 	sess, err := imssession.Open(imssession.Config{}, transport)
 	if err != nil {
@@ -1517,10 +1517,10 @@ func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 	})
 	defer client.Close()
 
-	runtime := newConnectionRuntime()
+	scope := newConnectionScope()
 	active := &activeConn{
-		runtime: runtime,
-		ims: imsRuntime{
+		scope: scope,
+		ims: imsStack{
 			sip: sess,
 			reg: reg,
 		},
@@ -1558,7 +1558,7 @@ func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 	}
 }
 
-func TestCloseActiveRuntimeSkipsDeregister(t *testing.T) {
+func TestCloseActiveConnectionSkipsDeregister(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
 	transport.onWrite = func(data []byte) {
@@ -1573,7 +1573,7 @@ func TestCloseActiveRuntimeSkipsDeregister(t *testing.T) {
 		case 2:
 			transport.queueRead(newIMSResponse(req, 200, "OK"))
 		default:
-			t.Fatalf("unexpected write during runtime cleanup: %s", req.StartLine)
+			t.Fatalf("unexpected write during scope cleanup: %s", req.StartLine)
 		}
 	}
 
@@ -1595,9 +1595,9 @@ func TestCloseActiveRuntimeSkipsDeregister(t *testing.T) {
 	}
 
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
-	active := &activeConn{ims: imsRuntime{sip: sess, reg: reg, ussd: ussdSvc}}
-	if err := client.closeActiveRuntime(active); err != nil {
-		t.Fatalf("closeActiveRuntime() error = %v", err)
+	active := &activeConn{ims: imsStack{sip: sess, reg: reg, ussd: ussdSvc}}
+	if err := client.closeActiveConnection(active); err != nil {
+		t.Fatalf("closeActiveConnection() error = %v", err)
 	}
 	if got := transport.writeCount(); got != 2 {
 		t.Fatalf("write count = %d, want registration only", got)
@@ -1650,10 +1650,10 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
 	defer client.Close()
 
-	runtime := newConnectionRuntime()
+	scope := newConnectionScope()
 	active := &activeConn{
-		runtime: runtime,
-		ims: imsRuntime{
+		scope: scope,
+		ims: imsStack{
 			sip: sess,
 			reg: reg,
 		},
@@ -1675,7 +1675,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 		t.Fatal("waiting for registration refresh")
 	}
 
-	runtime.stop()
+	scope.stop()
 	close(transport.cancelReadRelease)
 	select {
 	case <-runDone:
@@ -1702,7 +1702,7 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 			t.Fatalf("unexpected old transport write after failure: %s", req.StartLine)
 		}
 	}
-	oldSess, oldReg := newRegisteredIMSRuntime(t, oldTransport, time.Minute)
+	oldSess, oldReg := newRegisteredIMS(t, oldTransport, time.Minute)
 
 	newTransport := newGatedCancelTransport(5072, 5060)
 	newTransport.onWrite = func(data []byte) {
@@ -1720,16 +1720,16 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 			newTransport.queueRead(newIMSResponse(req, 200, "OK"))
 		}
 	}
-	newSess, newReg := newRegisteredIMSRuntime(t, newTransport, time.Minute)
+	newSess, newReg := newRegisteredIMS(t, newTransport, time.Minute)
 
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
 	defer client.Close()
 	events := client.Events()
 	defer events.Close()
 
-	oldActive := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: oldSess, reg: oldReg}}
-	newActive := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: newSess, reg: newReg}}
-	defer newActive.runtime.stop()
+	oldActive := &activeConn{scope: newConnectionScope(), ims: imsStack{sip: oldSess, reg: oldReg}}
+	newActive := &activeConn{scope: newConnectionScope(), ims: imsStack{sip: newSess, reg: newReg}}
+	defer newActive.scope.stop()
 
 	reconnected := make(chan struct{})
 	reconnect := func(error) (*activeConn, error) {
@@ -1805,10 +1805,10 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 		t.Fatal("client active connection was not replaced after reconnect")
 	}
 	if oldReg.State().Registered {
-		t.Fatal("old registration state still registered after runtime abort")
+		t.Fatal("old registration state still registered after scope abort")
 	}
 
-	newActive.runtime.stop()
+	newActive.scope.stop()
 	close(newTransport.cancelReadRelease)
 	select {
 	case <-runDone:
@@ -1839,7 +1839,7 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 			t.Fatalf("unexpected transport write: %s", req.StartLine)
 		}
 	}
-	sess, reg := newRegisteredIMSRuntime(t, transport, 2*time.Second)
+	sess, reg := newRegisteredIMS(t, transport, 2*time.Second)
 
 	client := newReadyClient(t, Config{
 		Terminal:       TerminalInfo{ID: testIMEI},
@@ -1861,8 +1861,8 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 		return nil, context.Canceled
 	}
 
-	active := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: sess, reg: reg}}
-	defer active.runtime.stop()
+	active := &activeConn{scope: newConnectionScope(), ims: imsStack{sip: sess, reg: reg}}
+	defer active.scope.stop()
 	setClientActive(t, client, active)
 
 	done, ok := client.reserveCloseTask()
@@ -1912,7 +1912,7 @@ func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
 			t.Fatalf("unexpected transport write after failure: %s", req.StartLine)
 		}
 	}
-	sess, reg := newRegisteredIMSRuntime(t, transport, time.Minute)
+	sess, reg := newRegisteredIMS(t, transport, time.Minute)
 
 	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
 	reconnectStarted := make(chan struct{})
@@ -1923,7 +1923,7 @@ func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
 		return nil, context.Canceled
 	}
 
-	active := &activeConn{runtime: newConnectionRuntime(), ims: imsRuntime{sip: sess, reg: reg}}
+	active := &activeConn{scope: newConnectionScope(), ims: imsStack{sip: sess, reg: reg}}
 	setClientActive(t, client, active)
 
 	done, ok := client.reserveCloseTask()
@@ -2155,7 +2155,7 @@ func TestReconnectDelayHonorsIMSSubscribeRetryAfter(t *testing.T) {
 	})
 	defer client.Close()
 	got := client.reconnectDelay(
-		fmt.Errorf("starting IMS runtime: %w", subscribeErr),
+		fmt.Errorf("starting IMS: %w", subscribeErr),
 		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
 		newReconnectBackoff(client.cfg.IMS.RegistrationRetryBase, client.cfg.IMS.RegistrationRetryMax),
 	)
@@ -2658,11 +2658,11 @@ func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *t
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	runtime := newConnectionRuntime()
-	defer runtime.stop()
+	scope := newConnectionScope()
+	defer scope.stop()
 	active := &activeConn{
-		runtime: runtime,
-		ims: imsRuntime{
+		scope: scope,
+		ims: imsStack{
 			sip: sess,
 			reg: reg,
 		},
@@ -2671,22 +2671,22 @@ func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *t
 	errCh := make(chan error, 1)
 	go func() {
 		runner := connectionRunner{active: active}
-		errCh <- runner.runIMSRuntime()
+		errCh <- runner.runIMS()
 	}()
 
 	select {
 	case err := <-errCh:
 		if err == nil {
-			t.Fatal("connectionRunner.runIMSRuntime() error = nil, want refresh error")
+			t.Fatal("connectionRunner.runIMS() error = nil, want refresh error")
 		}
 		if !strings.Contains(err.Error(), "maintaining IMS registration") {
-			t.Fatalf("connectionRunner.runIMSRuntime() error = %v, want maintaining IMS registration", err)
+			t.Fatalf("connectionRunner.runIMS() error = %v, want maintaining IMS registration", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("waiting for connectionRunner.runIMSRuntime refresh error")
+		t.Fatal("waiting for connectionRunner.runIMS refresh error")
 	}
-	if runtime.stopped() {
-		t.Fatal("runtime stopped, want active")
+	if scope.stopped() {
+		t.Fatal("scope stopped, want active")
 	}
 }
 
@@ -2722,11 +2722,11 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	runtime := newConnectionRuntime()
-	defer runtime.stop()
+	scope := newConnectionScope()
+	defer scope.stop()
 	active := &activeConn{
-		runtime: runtime,
-		ims: imsRuntime{
+		scope: scope,
+		ims: imsStack{
 			sip: sess,
 			reg: reg,
 		},
@@ -2735,7 +2735,7 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	errCh := make(chan error, 1)
 	go func() {
 		runner := connectionRunner{active: active}
-		errCh <- runner.runIMSRuntime()
+		errCh <- runner.runIMS()
 	}()
 	if err := sess.WaitStarted(context.Background()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
@@ -2759,18 +2759,18 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	select {
 	case err := <-errCh:
 		if err == nil {
-			t.Fatal("connectionRunner.runIMSRuntime() error = nil, want registration event termination")
+			t.Fatal("connectionRunner.runIMS() error = nil, want registration event termination")
 		}
 		if !strings.Contains(err.Error(), "ims registration terminated by network") {
-			t.Fatalf("connectionRunner.runIMSRuntime() error = %v, want network deregistration", err)
+			t.Fatalf("connectionRunner.runIMS() error = %v, want network deregistration", err)
 		}
 	case <-time.After(time.Second):
-		runtime.stop()
+		scope.stop()
 		close(transport.cancelReadRelease)
-		t.Fatal("waiting for connectionRunner.runIMSRuntime registration event termination")
+		t.Fatal("waiting for connectionRunner.runIMS registration event termination")
 	}
-	if runtime.stopped() {
-		t.Fatal("runtime stopped, want active")
+	if scope.stopped() {
+		t.Fatal("scope stopped, want active")
 	}
 	if reg.State().Registered {
 		t.Fatal("Registered = true, want false")

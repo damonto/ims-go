@@ -29,10 +29,10 @@ type Card interface {
 	SMSC() string
 }
 
-type Service struct {
+type Endpoint struct {
 	cfg        Config
 	sess       *session.Session
-	reg        *registration.Service
+	reg        *registration.Registrar
 	card       Card
 	logger     *slog.Logger
 	attachment session.Attachment

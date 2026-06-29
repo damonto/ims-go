@@ -3,6 +3,7 @@ package tunnel
 import (
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/damonto/vowifi-go/swu/esp"
@@ -11,6 +12,35 @@ import (
 var (
 	errChildSAUnavailable = errors.New("child sa is unavailable")
 	errChildSAExpired     = errors.New("child sa lifetime expired")
+)
+
+type tunnelConnection struct {
+	connected            bool
+	connecting           bool
+	innerLocal           *net.UDPAddr
+	innerRemote          *net.UDPAddr
+	tunnel               Info
+	tunnelErr            error
+	livenessTimeout      time.Duration
+	natKeepaliveInterval time.Duration
+}
+
+type ikeSAState uint8
+
+const (
+	ikeSAStateNone ikeSAState = iota
+	ikeSAStateActive
+	ikeSAStateRekeying
+	ikeSAStatePendingInstall
+)
+
+type childSAState uint8
+
+const (
+	childSAStateNone childSAState = iota
+	childSAStateActive
+	childSAStateRekeying
+	childSAStatePendingOutbound
 )
 
 func (s *Session) discardSecurityAssociations(cause error) {

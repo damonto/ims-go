@@ -13,6 +13,15 @@ import (
 
 var invalidMessageIDNotifyTimeout = 750 * time.Millisecond
 
+type ikeExchangeState struct {
+	informWaiters      map[ikeMessageKey]chan inboundIKE
+	informResponses    map[uint32][][]byte
+	informResponseReqs map[uint32][]byte
+	ikeFragments       map[ikeMessageKey]*ikeFragmentReassembly
+	ikeRequestGate     chan struct{}
+	rekeyWake          chan struct{}
+}
+
 type informationalAction struct {
 	deleteIKE              bool
 	deleteChild            bool

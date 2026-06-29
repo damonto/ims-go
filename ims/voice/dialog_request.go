@@ -35,7 +35,7 @@ type dialogSnapshot struct {
 func (c *Call) dialogSnapshot() dialogSnapshot {
 	// Keep SIP builders off Call's mutable fields. Callers take this snapshot
 	// while holding c.mu, then build messages from the copied state.
-	state := c.service.reg.State()
+	state := c.endpoint.reg.State()
 	invite := c.inviteRequest
 	invite.Headers = invite.Headers.Clone()
 	invite.Body = append([]byte(nil), invite.Body...)
@@ -51,12 +51,12 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 		inviteSeq:         c.inviteSeq,
 		inviteRequest:     invite,
 		localSDP:          append([]byte(nil), c.localSDP...),
-		sessionTimer:      c.service.cfg.SessionTimer,
-		preconditions:     c.service.cfg.Preconditions,
+		sessionTimer:      c.endpoint.cfg.SessionTimer,
+		preconditions:     c.endpoint.cfg.Preconditions,
 		flow:              state.Flow,
 		userAgent:         state.UserAgent,
 		accessNetworkInfo: state.AccessNetworkInfo,
-		transport:         sip.TransportToken(c.service.sess.LocalAddr()),
+		transport:         sip.TransportToken(c.endpoint.sess.LocalAddr()),
 		contactHost:       state.ContactHost,
 		messagePort:       state.MessagePort,
 		contact:           contactValue(state),

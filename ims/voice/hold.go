@@ -85,7 +85,7 @@ func (c *Call) beginLocalHoldModification(action callAction, hold bool, directio
 	if c.state != CallStateActive && c.state != CallStateConfirmed {
 		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, fmt.Errorf("%s: call state is %s", action, c.state)
 	}
-	if c.emergency && hold && !c.service.cfg.AllowHoldDuringEmergency {
+	if c.emergency && hold && !c.endpoint.cfg.AllowHoldDuringEmergency {
 		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, errors.New("holding call: emergency hold is disabled")
 	}
 	if c.localINVITEPending {
@@ -113,17 +113,17 @@ func (c *Call) beginLocalHoldModification(action callAction, hold bool, directio
 
 func (c *Call) localSDPWithDirection(direction mediaDirection) ([]byte, error) {
 	if len(c.localSDP) != 0 {
-		return sdpWithDirection(c.localSDP, direction, c.service.cfg.Preconditions), nil
+		return sdpWithDirection(c.localSDP, direction, c.endpoint.cfg.Preconditions), nil
 	}
 	offer := MediaOffer{}
 	if c.media.Codec != "" {
 		offer.Codecs = []AudioCodec{c.media.Codec}
 	}
-	body, _, err := buildSDPOfferWithDirection(c.service.cfg, c.service.localIP(), c.localPort, offer, direction)
+	body, _, err := buildSDPOfferWithDirection(c.endpoint.cfg, c.endpoint.localIP(), c.localPort, offer, direction)
 	if err != nil {
 		return nil, err
 	}
-	if c.service.cfg.Preconditions {
+	if c.endpoint.cfg.Preconditions {
 		body = sdpWithDirection(body, direction, true)
 	}
 	return body, nil
@@ -192,11 +192,11 @@ func (c *Call) applyMediaReINVITEAnswer(ctx context.Context, resp sip.Message) e
 	if err != nil {
 		return fmt.Errorf("parsing re-INVITE SDP answer: %w", err)
 	}
-	negotiated, ok := chooseCodec(answer, c.service.cfg.Codecs)
+	negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
 	if !ok {
 		return errors.New("no compatible re-INVITE answer codec")
 	}
-	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.service.cfg.Codecs, negotiated.ClockRate)
+	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
 	c.mu.Lock()
 	current := c.media
 	c.media = negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), dtmf, hasDTMF)
@@ -224,7 +224,7 @@ func (c *Call) setHoldState(hold CallHoldState, cause callAction) {
 	c.mu.Unlock()
 
 	c.restartMediaInactivityWatch()
-	c.service.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause.String(), At: time.Now()})
+	c.endpoint.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause.String(), At: time.Now()})
 }
 
 func setLocalHold(state CallHoldState, local bool) CallHoldState {

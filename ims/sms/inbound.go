@@ -13,7 +13,7 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) handleMessageRequest(ctx context.Context, req session.Request) error {
+func (s *Endpoint) handleMessageRequest(ctx context.Context, req session.Request) error {
 	msg := req.Message
 	payload, err := decodeMessagePayload(msg)
 	if err != nil {
@@ -76,7 +76,7 @@ func (s *Service) handleMessageRequest(ctx context.Context, req session.Request)
 	return s.handleInboundRP(ctx, msg, rp, payload.Info)
 }
 
-func (s *Service) writeMessageStatus(ctx context.Context, req session.Request, code int, reason string) error {
+func (s *Endpoint) writeMessageStatus(ctx context.Context, req session.Request, code int, reason string) error {
 	resp := sip.NewResponse(code, reason)
 	resp.Headers = sip.ResponseHeaders(req.Message, code)
 	if code == sipStatusUnsupportedMediaType {
@@ -85,7 +85,7 @@ func (s *Service) writeMessageStatus(ctx context.Context, req session.Request, c
 	return s.sess.WriteResponse(ctx, req, resp)
 }
 
-func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) error {
+func (s *Endpoint) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) error {
 	if rp.Type != rpDataNetworkToMS {
 		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageTypeNotImplemented), info)
 		return nil
@@ -157,7 +157,7 @@ func (s *Service) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMes
 	return nil
 }
 
-func (s *Service) handlePPDataDownload(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) {
+func (s *Endpoint) handlePPDataDownload(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) {
 	downloader, ok := s.card.(ppDownloader)
 	if !ok {
 		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", "card does not support SMS-PP download")
@@ -182,7 +182,7 @@ func isSubmitReport(rp rpMessage) bool {
 	return rp.Type == rpAckNetworkToMS || rp.Type == rpErrorNetworkToMS
 }
 
-func (s *Service) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) bool {
+func (s *Endpoint) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) bool {
 	if !s.markDeliveryReportSent(msg) {
 		return true
 	}
@@ -204,7 +204,7 @@ func (s *Service) sendInboundDeliveryReport(ctx context.Context, msg sip.Message
 	return true
 }
 
-func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) error {
+func (s *Endpoint) sendDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) error {
 	target := s.reportTarget(msg)
 	if target == "" {
 		return errors.New("delivery report target is empty")
@@ -227,7 +227,7 @@ func (s *Service) sendDeliveryReport(ctx context.Context, msg sip.Message, repor
 	return nil
 }
 
-func (s *Service) deliverIncoming(msg sip.Message, rp rpMessage, tpdu deliverTPDU) {
+func (s *Endpoint) deliverIncoming(msg sip.Message, rp rpMessage, tpdu deliverTPDU) {
 	incoming := tpdu.Message
 	recipient := incomingRecipient(msg)
 	incoming.CallID = strings.TrimSpace(msg.Header("Call-ID"))
@@ -241,7 +241,7 @@ func (s *Service) deliverIncoming(msg sip.Message, rp rpMessage, tpdu deliverTPD
 	s.deliverSingle(msg, incoming)
 }
 
-func (s *Service) deliverIncomingStatusReport(msg sip.Message, rp rpMessage, report StatusReport) {
+func (s *Endpoint) deliverIncomingStatusReport(msg sip.Message, rp rpMessage, report StatusReport) {
 	if s.cfg.OnStatusReport == nil {
 		return
 	}
@@ -282,7 +282,7 @@ func envelopeEndpoint(value string) endpoint {
 	}
 }
 
-func (s *Service) deliverSingle(msg sip.Message, incoming Incoming) {
+func (s *Endpoint) deliverSingle(msg sip.Message, incoming Incoming) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}

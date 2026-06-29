@@ -4,7 +4,28 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+
+	"github.com/damonto/vowifi-go/swu/handshake"
+	"github.com/damonto/vowifi-go/swu/ike"
 )
+
+type Info struct {
+	InnerIPv4                 net.IP
+	InnerIPv6                 IPAddress
+	InnerIPv6Prefix           IPPrefix
+	PDNTypeRestriction        PDNType
+	PCSCFIPs                  []net.IP
+	ESPInitiatorSPI           uint32
+	ESPResponderSPI           uint32
+	Encryption                uint16
+	EncryptionKeyLen          uint16
+	Integrity                 uint16
+	InitiatorTrafficSelectors []ike.TrafficSelector
+	ResponderTrafficSelectors []ike.TrafficSelector
+	PDUSessionID              byte
+	SNSSAI                    []byte
+	SNSSAIPlmnID              []byte
+}
 
 func (s *Session) LocalAddr() net.Addr {
 	s.mu.RLock()
@@ -140,6 +161,71 @@ func innerAddrsForInfo(info Info, remoteIP net.IP, localPort, remotePort int) (*
 		remoteAddr = &net.UDPAddr{IP: remote, Port: remotePort}
 	}
 	return localAddr, remoteAddr
+}
+
+func handshakeInfo(info Info) handshake.Info {
+	return handshake.Info{
+		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
+		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
+		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),
+		PDNTypeRestriction:        info.PDNTypeRestriction,
+		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
+		ESPInitiatorSPI:           info.ESPInitiatorSPI,
+		ESPResponderSPI:           info.ESPResponderSPI,
+		Encryption:                info.Encryption,
+		EncryptionKeyLen:          info.EncryptionKeyLen,
+		Integrity:                 info.Integrity,
+		InitiatorTrafficSelectors: cloneTrafficSelectors(info.InitiatorTrafficSelectors),
+		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
+		PDUSessionID:              info.PDUSessionID,
+		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
+		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
+	}
+}
+
+func infoFromHandshake(info handshake.Info) Info {
+	return Info{
+		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
+		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
+		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),
+		PDNTypeRestriction:        info.PDNTypeRestriction,
+		PCSCFIPs:                  cloneIPList(info.PCSCFIPs),
+		ESPInitiatorSPI:           info.ESPInitiatorSPI,
+		ESPResponderSPI:           info.ESPResponderSPI,
+		Encryption:                info.Encryption,
+		EncryptionKeyLen:          info.EncryptionKeyLen,
+		Integrity:                 info.Integrity,
+		InitiatorTrafficSelectors: cloneTrafficSelectors(info.InitiatorTrafficSelectors),
+		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
+		PDUSessionID:              info.PDUSessionID,
+		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
+		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
+	}
+}
+
+func cloneIPAddress(address IPAddress) IPAddress {
+	return IPAddress{
+		IP:        append(net.IP(nil), address.IP...),
+		PrefixLen: address.PrefixLen,
+	}
+}
+
+func cloneIPPrefix(prefix IPPrefix) IPPrefix {
+	return IPPrefix{
+		IP:        append(net.IP(nil), prefix.IP...),
+		PrefixLen: prefix.PrefixLen,
+	}
+}
+
+func cloneIPList(ips []net.IP) []net.IP {
+	if len(ips) == 0 {
+		return nil
+	}
+	cloned := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		cloned = append(cloned, append(net.IP(nil), ip...))
+	}
+	return cloned
 }
 
 func (s *Session) Logger() *slog.Logger {

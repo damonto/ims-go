@@ -82,10 +82,10 @@ type Message struct {
 	Request   bool
 }
 
-type Service struct {
+type Endpoint struct {
 	cfg        Config
 	sess       *session.Session
-	reg        *registration.Service
+	reg        *registration.Registrar
 	logger     *slog.Logger
 	attachment session.Attachment
 	done       chan struct{}
@@ -99,7 +99,7 @@ type Service struct {
 }
 
 type Session struct {
-	service          *Service
+	endpoint         *Endpoint
 	dialogAttachment session.Attachment
 	incomingInviteID string
 	callID           string

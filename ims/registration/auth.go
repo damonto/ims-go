@@ -24,7 +24,7 @@ type registerAuthChallenge struct {
 	rawSecurityServer   []string
 }
 
-func (s *Service) storeAuthChallenge(challenge security.Challenge, authorizationHeader string) {
+func (s *Registrar) storeAuthChallenge(challenge security.Challenge, authorizationHeader string) {
 	realm := strings.TrimSpace(challenge.Realm)
 	if realm == "" {
 		realm = strings.TrimPrefix(s.State().RegisterURI, "sip:")
@@ -45,7 +45,7 @@ func (s *Service) storeAuthChallenge(challenge security.Challenge, authorization
 	s.mu.Unlock()
 }
 
-func (s *Service) currentAuthState() (string, string, string, string) {
+func (s *Registrar) currentAuthState() (string, string, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	realm := s.authRealm
@@ -55,20 +55,20 @@ func (s *Service) currentAuthState() (string, string, string, string) {
 	return realm, s.authNonce, s.authAlgorithm, s.authQOP
 }
 
-func (s *Service) currentAuthorizationHeaderName() string {
+func (s *Registrar) currentAuthorizationHeaderName() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return registerAuthorizationHeaderName(s.authHeader)
 }
 
-func (s *Service) nextAuthNonceCount() uint32 {
+func (s *Registrar) nextAuthNonceCount() uint32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.authNonceCount++
 	return s.authNonceCount
 }
 
-func (s *Service) buildRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string) (*security.Authorization, error) {
+func (s *Registrar) buildRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string) (*security.Authorization, error) {
 	if nonce == "" {
 		return nil, nil
 	}
@@ -88,7 +88,7 @@ func (s *Service) buildRegisterAuthorization(ctx context.Context, realm, nonce, 
 	return auth, nil
 }
 
-func (s *Service) calculateRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string, nonceCount uint32) (*security.Authorization, []byte, []byte, string, error) {
+func (s *Registrar) calculateRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string, nonceCount uint32) (*security.Authorization, []byte, []byte, string, error) {
 	if nonce == "" {
 		return nil, nil, nil, "", nil
 	}
@@ -110,7 +110,7 @@ func (s *Service) calculateRegisterAuthorization(ctx context.Context, realm, non
 	return &auth, result.EncryptionKey, result.IntegrityKey, result.DigestPassword, nil
 }
 
-func (s *Service) calculateDigestRegisterAuthorization(realm, nonce, algorithm, qop string, nonceCount uint32, password string) (*security.Authorization, error) {
+func (s *Registrar) calculateDigestRegisterAuthorization(realm, nonce, algorithm, qop string, nonceCount uint32, password string) (*security.Authorization, error) {
 	result, err := security.BuildDigestAuthorization(security.Identity{
 		PrivateIdentity: s.State().PrivateIdentity,
 		RegisterURI:     s.State().RegisterURI,
@@ -128,7 +128,7 @@ func (s *Service) calculateDigestRegisterAuthorization(realm, nonce, algorithm, 
 	return &result, nil
 }
 
-func (s *Service) currentDigestCredential(nonce, algorithm string) (string, bool) {
+func (s *Registrar) currentDigestCredential(nonce, algorithm string) (string, bool) {
 	normalized, ok := security.NormalizeAKAAlgorithm(algorithm)
 	if !ok {
 		return "", false
@@ -141,7 +141,7 @@ func (s *Service) currentDigestCredential(nonce, algorithm string) (string, bool
 	return s.authDigestPassword, true
 }
 
-func (s *Service) storeDigestCredential(algorithm, nonce, password string, ck, ik []byte) {
+func (s *Registrar) storeDigestCredential(algorithm, nonce, password string, ck, ik []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if password != "" {
@@ -157,7 +157,7 @@ func (s *Service) storeDigestCredential(algorithm, nonce, password string, ck, i
 	}
 }
 
-func (s *Service) applyRegisterChallenge(resp sip.Message) (security.Challenge, error) {
+func (s *Registrar) applyRegisterChallenge(resp sip.Message) (security.Challenge, error) {
 	parsed, err := parseRegisterChallenge(resp)
 	if err != nil {
 		return security.Challenge{}, err
@@ -245,7 +245,7 @@ func selectRegisterChallenge(headerName string, values []string) (security.Chall
 	return security.Challenge{}, fmt.Errorf("selecting auth challenge: %w", firstErr)
 }
 
-func (s *Service) verifyAuthenticationInfo(msg sip.Message, auth *security.Authorization) error {
+func (s *Registrar) verifyAuthenticationInfo(msg sip.Message, auth *security.Authorization) error {
 	var info security.Info
 	if err := info.UnmarshalText([]byte(msg.Header("Authentication-Info"))); err != nil {
 		return err
@@ -266,7 +266,7 @@ func (s *Service) verifyAuthenticationInfo(msg sip.Message, auth *security.Autho
 	return nil
 }
 
-func (s *Service) applyAuthenticationInfo(msg sip.Message) {
+func (s *Registrar) applyAuthenticationInfo(msg sip.Message) {
 	var info security.Info
 	if err := info.UnmarshalText([]byte(msg.Header("Authentication-Info"))); err != nil || info.NextNonce == "" {
 		return
@@ -280,7 +280,7 @@ func (s *Service) applyAuthenticationInfo(msg sip.Message) {
 	s.mu.Unlock()
 }
 
-func (s *Service) exchangeAKAFailure(ctx context.Context, challenge security.Challenge, authorizationHeader string, cause error) (sip.Message, error) {
+func (s *Registrar) exchangeAKAFailure(ctx context.Context, challenge security.Challenge, authorizationHeader string, cause error) (sip.Message, error) {
 	var failure *security.AKAChallengeFailure
 	if !errors.As(cause, &failure) {
 		return sip.Message{}, cause
@@ -303,7 +303,7 @@ func (s *Service) exchangeAKAFailure(ctx context.Context, challenge security.Cha
 	return resp, nil
 }
 
-func (s *Service) exchangeCurrentAKAFailure(ctx context.Context, cause error) (sip.Message, error) {
+func (s *Registrar) exchangeCurrentAKAFailure(ctx context.Context, cause error) (sip.Message, error) {
 	realm, nonce, algorithm, qop := s.currentAuthState()
 	authorizationHeader := s.currentAuthorizationHeaderName()
 	return s.exchangeAKAFailure(ctx, security.Challenge{
@@ -314,7 +314,7 @@ func (s *Service) exchangeCurrentAKAFailure(ctx context.Context, cause error) (s
 	}, authorizationHeader, cause)
 }
 
-func (s *Service) akaFailureAuthorization(challenge security.Challenge, failure *security.AKAChallengeFailure) security.Authorization {
+func (s *Registrar) akaFailureAuthorization(challenge security.Challenge, failure *security.AKAChallengeFailure) security.Authorization {
 	auth := security.Authorization{
 		Nonce:              challenge.Nonce,
 		URI:                s.State().RegisterURI,

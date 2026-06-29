@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func (s *Service) preloadedRoutes(flow Flow) []string {
+func (s *Registrar) preloadedRoutes(flow Flow) []string {
 	routes := make([]string, 0, len(flow.ServiceRoutes)+1)
 	if route := pcscfRoute(s.sess.RemoteAddr(), flow); route != "" {
 		routes = append(routes, route)

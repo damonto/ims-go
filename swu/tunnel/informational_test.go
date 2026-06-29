@@ -260,7 +260,7 @@ func TestAllocateMessageIDStartsAtZeroAfterIKESARekey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := &Session{nextMessageID: tt.seed}
+			session := &Session{ikeMessageIDs: ikeMessageIDs{nextMessageID: tt.seed}}
 			for _, want := range tt.want {
 				got, err := session.allocateMessageID()
 				if err != nil {
@@ -283,7 +283,7 @@ func TestAllocateMessageIDRejectsOverflow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := &Session{nextMessageID: tt.seed}
+			session := &Session{ikeMessageIDs: ikeMessageIDs{nextMessageID: tt.seed}}
 
 			_, err := session.allocateMessageID()
 			if !errors.Is(err, errIKEMessageIDExhausted) {
@@ -310,7 +310,7 @@ func TestPeerRequestMessageIDWindow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := &Session{nextPeerMessageID: tt.seed}
+			session := &Session{ikeMessageIDs: ikeMessageIDs{nextPeerMessageID: tt.seed}}
 
 			if got := session.peerRequestMessageIDCurrent(tt.messageID); got != tt.wantCurrent {
 				t.Fatalf("peerRequestMessageIDCurrent() = %t, want %t", got, tt.wantCurrent)
@@ -338,7 +338,7 @@ func TestPeerRequestMessageIDRelation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := &Session{nextPeerMessageID: tt.seed}
+			session := &Session{ikeMessageIDs: ikeMessageIDs{nextPeerMessageID: tt.seed}}
 
 			got := session.peerRequestMessageIDRelationForState(informationalState{}, tt.messageID)
 
@@ -361,7 +361,7 @@ func TestAdvancePeerRequestMessageIDRejectsOverflow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := &Session{nextPeerMessageID: tt.seed}
+			session := &Session{ikeMessageIDs: ikeMessageIDs{nextPeerMessageID: tt.seed}}
 
 			err := session.advancePeerRequestMessageID(tt.messageID)
 			if tt.messageID == tt.seed {
@@ -1002,11 +1002,13 @@ func TestHandleProtectedResponseWithoutWaiterDoesNotCountAsTraffic(t *testing.T)
 			}
 			oldRx := time.Now().Add(-time.Minute)
 			session := &Session{
-				logger:             testLogger(),
-				closeCh:            make(chan struct{}),
-				ike:                crypto,
-				lastProtectedRx:    oldRx,
-				ikeSAByteExpiresAt: 1,
+				logger:         testLogger(),
+				closeCh:        make(chan struct{}),
+				ikeAssociation: ikeAssociation{ike: crypto},
+				saLifetime: saLifetime{
+					lastProtectedRx:    oldRx,
+					ikeSAByteExpiresAt: 1,
+				},
 			}
 			state := informationalState{
 				ike:            crypto,

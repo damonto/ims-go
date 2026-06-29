@@ -107,11 +107,11 @@ func invalidSessionTimerRefresher(msg sip.Message) bool {
 	return ok && sessionExpires.refresher != ""
 }
 
-func (s *Service) unsupportedRequiredTimer(msg sip.Message) bool {
+func (s *Endpoint) unsupportedRequiredTimer(msg sip.Message) bool {
 	return !s.cfg.SessionTimer && tokenHeaderContains(msg, "Require", sessionTimerOption)
 }
 
-func (s *Service) unsupportedRequiredPrecondition(msg sip.Message) bool {
+func (s *Endpoint) unsupportedRequiredPrecondition(msg sip.Message) bool {
 	return !s.cfg.Preconditions && tokenHeaderContains(msg, "Require", preconditionOption)
 }
 

@@ -60,7 +60,7 @@ func (state concatState) joinedRawTPDUs() [][]byte {
 	return raw
 }
 
-func (s *Service) deliverConcat(msg Incoming, concat concatInfo) {
+func (s *Endpoint) deliverConcat(msg Incoming, concat concatInfo) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
@@ -73,11 +73,11 @@ func (s *Service) deliverConcat(msg Incoming, concat concatInfo) {
 	}
 }
 
-func (s *Service) markConcatSeen(key string) bool {
+func (s *Endpoint) markConcatSeen(key string) bool {
 	return s.markRecentKey("concat|"+key, concatRetention)
 }
 
-func (s *Service) concatKey(msg Incoming, concat concatInfo) string {
+func (s *Endpoint) concatKey(msg Incoming, concat concatInfo) string {
 	sender := msg.From
 	if sender == "" {
 		sender = msg.FromURI
@@ -85,7 +85,7 @@ func (s *Service) concatKey(msg Incoming, concat concatInfo) string {
 	return fmt.Sprintf("%t|%d|%s|%s", concat.SixteenBit, concat.Reference, sender, msg.ServiceCenter)
 }
 
-func (s *Service) evictExpiredConcat(now time.Time) {
+func (s *Endpoint) evictExpiredConcat(now time.Time) {
 	for cacheKey, state := range s.concat {
 		if state.expired(now) {
 			delete(s.concat, cacheKey)
@@ -93,7 +93,7 @@ func (s *Service) evictExpiredConcat(now time.Time) {
 	}
 }
 
-func (s *Service) appendConcat(msg Incoming, concat concatInfo) (Incoming, bool, string) {
+func (s *Endpoint) appendConcat(msg Incoming, concat concatInfo) (Incoming, bool, string) {
 	key := s.concatKey(msg, concat)
 	now := time.Now()
 	s.mu.Lock()

@@ -12,19 +12,19 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) buildRegister(auth *security.Authorization, verify *security.Param) sip.Message {
+func (s *Registrar) buildRegister(auth *security.Authorization, verify *security.Param) sip.Message {
 	return s.buildRegisterForFlow(auth, verify, s.CurrentFlow())
 }
 
-func (s *Service) buildRegisterWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, authorizationHeader string) sip.Message {
+func (s *Registrar) buildRegisterWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, authorizationHeader string) sip.Message {
 	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, s.CurrentFlow(), authorizationHeader)
 }
 
-func (s *Service) buildRegisterForFlow(auth *security.Authorization, verify *security.Param, flow Flow) sip.Message {
+func (s *Registrar) buildRegisterForFlow(auth *security.Authorization, verify *security.Param, flow Flow) sip.Message {
 	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, flow, s.currentAuthorizationHeaderName())
 }
 
-func (s *Service) buildRegisterForFlowWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, flow Flow, authorizationHeader string) sip.Message {
+func (s *Registrar) buildRegisterForFlowWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, flow Flow, authorizationHeader string) sip.Message {
 	port := s.State().RegisterPort
 	if registerUsesProtectedPort(auth, verify) {
 		port = flow.SecurityClient.PortS
@@ -36,7 +36,7 @@ func (s *Service) buildRegisterForFlowWithAuthorizationHeader(auth *security.Aut
 	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(port), s.registerExpiresSeconds(), port, authorizationHeader)
 }
 
-func (s *Service) buildDeregister(auth *security.Authorization, verify *security.Param) sip.Message {
+func (s *Registrar) buildDeregister(auth *security.Authorization, verify *security.Param) sip.Message {
 	port := s.State().RegisterPort
 	if registerUsesProtectedPort(auth, verify) {
 		port = s.State().SecurityClient.PortS
@@ -44,7 +44,7 @@ func (s *Service) buildDeregister(auth *security.Authorization, verify *security
 	return s.buildRegisterRequest(auth, "", verify, "*", 0, port, s.currentAuthorizationHeaderName())
 }
 
-func (s *Service) registerRealm(auth *security.Authorization) string {
+func (s *Registrar) registerRealm(auth *security.Authorization) string {
 	realm := strings.TrimPrefix(s.State().RegisterURI, "sip:")
 	if auth == nil || strings.TrimSpace(auth.Realm) == "" {
 		return realm
@@ -52,7 +52,7 @@ func (s *Service) registerRealm(auth *security.Authorization) string {
 	return auth.Realm
 }
 
-func (s *Service) initialAuthorizationValue() string {
+func (s *Registrar) initialAuthorizationValue() string {
 	return (security.Authorization{
 		Nonce:              "",
 		URI:                s.State().RegisterURI,
@@ -64,7 +64,7 @@ func (s *Service) initialAuthorizationValue() string {
 	}).String()
 }
 
-func (s *Service) nextRegisterTransaction() (int64, string, string, string) {
+func (s *Registrar) nextRegisterTransaction() (int64, string, string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -79,7 +79,7 @@ func (s *Service) nextRegisterTransaction() (int64, string, string, string) {
 	return s.cseq, s.callID, s.sessionID, s.tag
 }
 
-func (s *Service) nextStandaloneCSeq() int64 {
+func (s *Registrar) nextStandaloneCSeq() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -90,7 +90,7 @@ func (s *Service) nextStandaloneCSeq() int64 {
 	return s.cseq
 }
 
-func (s *Service) resetRegisterTransaction() {
+func (s *Registrar) resetRegisterTransaction() {
 	callID, sessionID, tag, _ := sip.NewTransaction()
 	s.mu.Lock()
 	s.callID = callID
@@ -100,11 +100,11 @@ func (s *Service) resetRegisterTransaction() {
 	s.mu.Unlock()
 }
 
-func (s *Service) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
+func (s *Registrar) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
 	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, port, authorizationHeader)
 }
 
-func (s *Service) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
+func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
 	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
 	cseq, callID, sessionID, tag := s.nextRegisterTransaction()
@@ -249,11 +249,11 @@ func securityServerSupportsTLS(values []string) bool {
 	return false
 }
 
-func (s *Service) includePIDFForRegister() bool {
+func (s *Registrar) includePIDFForRegister() bool {
 	return slices.Contains(s.cfg.GeolocationPIDFRegister, pidf.GeolocationPIDFNonEmergencyWiFi)
 }
 
-func (s *Service) setRegisterPIDFBody(msg *sip.Message, state State) {
+func (s *Registrar) setRegisterPIDFBody(msg *sip.Message, state State) {
 	locationID := "pidf-" + sip.RandomAlphaNum(16)
 	msg.Headers.Add("Geolocation", "<cid:"+locationID+">")
 	msg.Headers.Add("Geolocation-Routing", "yes")
@@ -278,11 +278,11 @@ func registerPIDFEntityURI(state State) string {
 	return state.PublicIdentity
 }
 
-func (s *Service) buildSubscribe() sip.Message {
+func (s *Registrar) buildSubscribe() sip.Message {
 	return s.buildSubscribeWithDialog(subscriptionDialog{})
 }
 
-func (s *Service) buildSubscribeWithDialog(subscription subscriptionDialog) sip.Message {
+func (s *Registrar) buildSubscribeWithDialog(subscription subscriptionDialog) sip.Message {
 	state := s.State()
 	publicID := subscribePublicIdentity(state)
 	callID := subscription.callID
@@ -344,7 +344,7 @@ func subscribeHeaderWithTag(headerValue, fallbackURI, tag string) string {
 	return sip.WithTag(headerValue, fallbackURI, tag)
 }
 
-func (s *Service) messagePort() int {
+func (s *Registrar) messagePort() int {
 	flow := s.CurrentFlow()
 	if flow.MessagePort != 0 {
 		return flow.MessagePort
@@ -352,7 +352,7 @@ func (s *Service) messagePort() int {
 	return flow.RegisterPort
 }
 
-func (s *Service) subscribeContactValue(port int) string {
+func (s *Registrar) subscribeContactValue(port int) string {
 	params := []string{"text"}
 	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
 }
@@ -379,7 +379,7 @@ func reverseHeaderValues(values []string) []string {
 	return out
 }
 
-func (s *Service) registerContactValue(port int) string {
+func (s *Registrar) registerContactValue(port int) string {
 	params := []string{
 		`+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
 		`+g.3gpp.mid-call`,

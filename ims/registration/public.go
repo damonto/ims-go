@@ -9,7 +9,7 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) State() State {
+func (s *Registrar) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.state
@@ -28,39 +28,39 @@ func (s *Service) State() State {
 	return state
 }
 
-func (s *Service) CurrentFlow() Flow {
+func (s *Registrar) CurrentFlow() Flow {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.flow.clone()
 }
 
-func (s *Service) SecurityVerifyValue() string {
+func (s *Registrar) SecurityVerifyValue() string {
 	return s.CurrentFlow().SecurityVerifyValue()
 }
 
-func (s *Service) RequestPolicy() sip.ClientRequestPolicy {
+func (s *Registrar) RequestPolicy() sip.ClientRequestPolicy {
 	state := s.State()
 	return state.Flow.requestPolicy(s.preloadedRoutes(state.Flow), state.UserAgent, state.AccessNetworkInfo)
 }
 
-func (s *Service) DialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
+func (s *Registrar) DialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
 	state := s.State()
 	return state.Flow.DialogRequestPolicy(routes, state.UserAgent, state.AccessNetworkInfo)
 }
 
-func (s *Service) StrictDialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
+func (s *Registrar) StrictDialogRequestPolicy(routes []string) sip.ClientRequestPolicy {
 	state := s.State()
 	return state.Flow.StrictDialogRequestPolicy(routes, state.UserAgent, state.AccessNetworkInfo)
 }
 
-func (s *Service) Close() error {
+func (s *Registrar) Close() error {
 	s.closeSecureResources()
 	err := s.closeAttachment()
 	s.setRegistered(false)
 	return err
 }
 
-func (s *Service) closeAttachment() error {
+func (s *Registrar) closeAttachment() error {
 	s.mu.Lock()
 	attachment := s.attachment
 	s.attachment = nil
@@ -71,7 +71,7 @@ func (s *Service) closeAttachment() error {
 	return attachment.Close()
 }
 
-func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
+func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (bool, error) {
 	if !strings.EqualFold(req.Message.Method(), "NOTIFY") {
 		return false, nil
 	}
@@ -90,11 +90,4 @@ func (s *Service) HandleRequest(ctx context.Context, req session.Request) (bool,
 		s.publishRegistrationEvent(notifyErr)
 	}
 	return true, nil
-}
-
-func (s *Service) HandleError(err error) {
-	if err == nil {
-		return
-	}
-	s.logger.Warn("IMS registration session error", "err", err)
 }

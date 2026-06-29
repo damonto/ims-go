@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func (s *Service) storeCall(call *Call) error {
+func (s *Endpoint) storeCall(call *Call) error {
 	attachment, err := s.sess.RegisterDialog(sip.DialogID{
 		CallID:    call.id,
 		LocalTag:  call.localTag,
@@ -22,13 +22,13 @@ func (s *Service) storeCall(call *Call) error {
 	defer s.mu.Unlock()
 	if s.closed {
 		_ = attachment.Close()
-		return errors.New("storing call: service is closed")
+		return errors.New("storing call: endpoint is closed")
 	}
 	s.calls[call.id] = call
 	return nil
 }
 
-func (s *Service) removeCall(callID string) {
+func (s *Endpoint) removeCall(callID string) {
 	s.mu.Lock()
 	call := s.calls[callID]
 	if call != nil {
@@ -51,7 +51,7 @@ func (s *Service) removeCall(callID string) {
 	}
 }
 
-func (s *Service) lookupCallForMessage(msg sip.Message) *Call {
+func (s *Endpoint) lookupCallForMessage(msg sip.Message) *Call {
 	key, ok := s.sess.LookupDialogKey(msg)
 	if !ok {
 		return nil
@@ -59,13 +59,13 @@ func (s *Service) lookupCallForMessage(msg sip.Message) *Call {
 	return s.lookupCall(key)
 }
 
-func (s *Service) lookupCall(callID string) *Call {
+func (s *Endpoint) lookupCall(callID string) *Call {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls[callID]
 }
 
-func (s *Service) storeIncoming(msg sip.Message, call *Call) {
+func (s *Endpoint) storeIncoming(msg sip.Message, call *Call) {
 	key := incomingInviteKey(msg, "INVITE")
 	if key == "" {
 		return
@@ -75,7 +75,7 @@ func (s *Service) storeIncoming(msg sip.Message, call *Call) {
 	s.mu.Unlock()
 }
 
-func (s *Service) lookupIncoming(msg sip.Message) *Call {
+func (s *Endpoint) lookupIncoming(msg sip.Message) *Call {
 	method := sip.CSeqMethod(msg.Header("CSeq"))
 	if strings.EqualFold(method, "CANCEL") {
 		method = "INVITE"
@@ -89,7 +89,7 @@ func (s *Service) lookupIncoming(msg sip.Message) *Call {
 	return s.incomings[key]
 }
 
-func (s *Service) targetURI(to string) string {
+func (s *Endpoint) targetURI(to string) string {
 	to = strings.TrimSpace(to)
 	if to == "" {
 		return ""
@@ -104,7 +104,7 @@ func (s *Service) targetURI(to string) string {
 	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=phone", to, realm, realm)
 }
 
-func (s *Service) reserveRTPPort() int {
+func (s *Endpoint) reserveRTPPort() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	port := s.nextPort
@@ -118,7 +118,7 @@ func (s *Service) reserveRTPPort() int {
 	return port
 }
 
-func (s *Service) localIP() net.IP {
+func (s *Endpoint) localIP() net.IP {
 	ip := net.ParseIP(s.reg.State().ContactHost)
 	if ip == nil || ip.IsUnspecified() {
 		return net.IPv4(0, 0, 0, 0)
@@ -126,13 +126,13 @@ func (s *Service) localIP() net.IP {
 	return ip
 }
 
-func (s *Service) emit(event CallEvent) {
+func (s *Endpoint) emit(event CallEvent) {
 	if s.cfg.OnCallEvent != nil {
 		s.cfg.OnCallEvent(event)
 	}
 }
 
-func (s *Service) emitError(err error) {
+func (s *Endpoint) emitError(err error) {
 	if err == nil {
 		return
 	}
@@ -140,5 +140,5 @@ func (s *Service) emitError(err error) {
 		s.cfg.OnError(err)
 		return
 	}
-	s.logger.Debug("voice service error", "err", err)
+	s.logger.Debug("voice endpoint error", "err", err)
 }

@@ -84,7 +84,7 @@ func PCSCFReselectionRequired(err error) bool {
 	return errors.As(err, &reselection)
 }
 
-func (s *Service) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *bool) error {
+func (s *Registrar) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *bool) error {
 	if *adjusted {
 		return errors.New("repeated 423 response")
 	}
@@ -97,7 +97,7 @@ func (s *Service) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *bool)
 	return nil
 }
 
-func (s *Service) buildRefreshRegister(ctx context.Context) (sip.Message, *security.Authorization, error) {
+func (s *Registrar) buildRefreshRegister(ctx context.Context) (sip.Message, *security.Authorization, error) {
 	realm, nonce, algorithm, qop := s.currentAuthState()
 	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, algorithm, qop)
 	if err != nil {
@@ -106,7 +106,7 @@ func (s *Service) buildRefreshRegister(ctx context.Context) (sip.Message, *secur
 	return s.buildRegister(auth, s.currentSecurityVerify()), auth, nil
 }
 
-func (s *Service) handleRefreshRegistration(ctx context.Context, resp sip.Message, state *refreshRegisterState, auth *security.Authorization) (bool, error) {
+func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Message, state *refreshRegisterState, auth *security.Authorization) (bool, error) {
 	switch resp.StatusCode() {
 	case sipStatusOK:
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {

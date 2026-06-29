@@ -139,7 +139,7 @@ func (s SMSSubmission) Close() {
 	}
 }
 
-type SMSService struct {
+type SMSClient struct {
 	client *Client
 }
 
@@ -173,8 +173,8 @@ type smsSubmissionSink struct {
 	deliveryCancel  context.CancelFunc
 }
 
-func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, error) {
-	low, err := s.client.currentSMSService()
+func (s *SMSClient) Send(ctx context.Context, to, text string) (SMSSubmission, error) {
+	low, err := s.client.currentSMSClient()
 	if err != nil {
 		return SMSSubmission{}, fmt.Errorf("sending SMS: %w", err)
 	}
@@ -197,7 +197,7 @@ func (s *SMSService) Send(ctx context.Context, to, text string) (SMSSubmission, 
 	return submission, nil
 }
 
-func (s *SMSService) newSMSSubmission(to, text string, submittedAt time.Time, lowSubmission imssms.Submission) SMSSubmission {
+func (s *SMSClient) newSMSSubmission(to, text string, submittedAt time.Time, lowSubmission imssms.Submission) SMSSubmission {
 	segments := lowSubmission.Segments
 	id := fmt.Sprintf("sms-%d", s.client.smsSeq.Add(1))
 	sink := newSMSSubmissionSink(len(segments), s.client.cfg.smsRequestStatusReport)
@@ -234,8 +234,8 @@ func (s *SMSService) newSMSSubmission(to, text string, submittedAt time.Time, lo
 	return submission
 }
 
-func (c *Client) currentSMSService() (*imssms.Service, error) {
-	return currentIMSService(c, func(ims imsRuntime) *imssms.Service { return ims.sms })
+func (c *Client) currentSMSClient() (*imssms.Endpoint, error) {
+	return currentIMSEndpoint(c, func(ims imsStack) *imssms.Endpoint { return ims.sms })
 }
 
 func (c *Client) handleSMS(msg imssms.Incoming) {

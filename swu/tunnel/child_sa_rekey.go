@@ -46,6 +46,39 @@ type childSARekeyResult struct {
 	nonceR     []byte
 }
 
+type childAssociation struct {
+	outboundESP         esp.Codec
+	inboundESP          esp.Codec
+	espSeq              uint32
+	inboundReplay       esp.ReplayWindow
+	retiredChildSAs     []retiredChildSA
+	pendingChildSA      pendingChildSA
+	childSARekeying     bool
+	simultaneousChildSA simultaneousChildSARekey
+}
+
+type retiredChildSA struct {
+	inbound        esp.Codec
+	info           Info
+	outboundSPI    uint32
+	replay         esp.ReplayWindow
+	expiresAt      time.Time
+	protectedBytes uint64
+	byteExpiresAt  uint64
+}
+
+type pendingChildSA struct {
+	ready      bool
+	info       Info
+	outbound   esp.Codec
+	oldInbound uint32
+}
+
+type simultaneousChildSARekey struct {
+	ready bool
+	peer  childSARekeyResult
+}
+
 func (s *Session) RekeyChildSA(ctx context.Context) error {
 	state, release, err := s.beginChildSARekey()
 	if err != nil {

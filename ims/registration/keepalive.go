@@ -38,7 +38,7 @@ func (k *registrationKeepAlive) done() <-chan struct{} {
 	return k.stopCh
 }
 
-func (s *Service) applyRegisterKeepAlive(resp sip.Message) {
+func (s *Registrar) applyRegisterKeepAlive(resp sip.Message) {
 	recommended, interval, ok := registerKeepAliveTimingFromResponse(resp)
 	if !ok {
 		s.stopRegistrationKeepAlive("not_negotiated")
@@ -83,7 +83,7 @@ func percentageDuration(duration time.Duration, percent int) time.Duration {
 	return base*time.Duration(percent) + rem*time.Duration(percent)/100
 }
 
-func (s *Service) startRegistrationKeepAlive(recommended, interval time.Duration) {
+func (s *Registrar) startRegistrationKeepAlive(recommended, interval time.Duration) {
 	keepalive := newRegistrationKeepAlive()
 
 	s.mu.Lock()
@@ -111,7 +111,7 @@ func (s *Service) startRegistrationKeepAlive(recommended, interval time.Duration
 	s.logger.Info("IMS RFC6223 keepalive active", "recommended", recommended, "interval", interval, "transport", sip.TransportToken(s.sess.LocalAddr()), "remote_addr", s.sess.RemoteAddr())
 }
 
-func (s *Service) stopRegistrationKeepAlive(reason string) {
+func (s *Registrar) stopRegistrationKeepAlive(reason string) {
 	s.mu.Lock()
 	keepalive := s.registrationKeepAlive
 	s.registrationKeepAlive = nil
@@ -123,7 +123,7 @@ func (s *Service) stopRegistrationKeepAlive(reason string) {
 	}
 }
 
-func (s *Service) runRegistrationKeepAlive(done <-chan struct{}, keepalive *registrationKeepAlive, interval time.Duration) {
+func (s *Registrar) runRegistrationKeepAlive(done <-chan struct{}, keepalive *registrationKeepAlive, interval time.Duration) {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
@@ -146,7 +146,7 @@ func (s *Service) runRegistrationKeepAlive(done <-chan struct{}, keepalive *regi
 	}
 }
 
-func (s *Service) sendRegistrationKeepAlive(done <-chan struct{}, keepalive *registrationKeepAlive) error {
+func (s *Registrar) sendRegistrationKeepAlive(done <-chan struct{}, keepalive *registrationKeepAlive) error {
 	ctx, cancel := registrationKeepAliveWriteContext(done, keepalive.done(), registrationKeepAliveWriteTimeout)
 	defer cancel()
 

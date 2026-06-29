@@ -15,6 +15,12 @@ var errIKEMessageIDExhausted = errors.New("ike message id exhausted")
 
 type ikeMessageIDRelation byte
 
+type ikeMessageIDs struct {
+	nextMessageID        uint32
+	nextPeerMessageID    uint32
+	lastInvalidMessageID time.Time
+}
+
 const (
 	ikeMessageIDCurrent ikeMessageIDRelation = iota
 	ikeMessageIDOld

@@ -4,8 +4,60 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
+
+	"github.com/damonto/vowifi-go/swu/handshake"
+)
+
+type Config struct {
+	LocalAddr                        string
+	RemoteAddr                       string
+	APN                              string
+	PDNType                          PDNType
+	AKAPrimeNetworkName              string
+	AllowAKAPrimeNetworkNameMismatch bool
+	PacketConn                       net.PacketConn
+	InitialPort                      int
+	NATTPort                         int
+	LocalSIPPort                     int
+	SIPPort                          int
+	DHGroups                         []uint16
+	IKEEncryptionKeyLens             []uint16
+	IKEIntegrity                     []uint16
+	IKEPRF                           []uint16
+	ChildEncryptionKeyLens           []uint16
+	ChildIntegrity                   []uint16
+	PCSCFIPv4ConfigAttribute         uint16
+	PCSCFIPv6ConfigAttribute         uint16
+	DisablePCSCFRestoration          bool
+	PDUSessionID                     byte
+	EnableIPMSIndication             bool
+	NATKeepaliveInterval             time.Duration
+	LivenessTimeout                  time.Duration
+	IKERetransmitDelays              []time.Duration
+	IKESALifetime                    time.Duration
+	IKESARekeyMargin                 time.Duration
+	IKESAByteLifetime                uint64
+	IKESAByteRekeyMargin             uint64
+	ChildSALifetime                  time.Duration
+	ChildSARekeyMargin               time.Duration
+	ChildSAByteLifetime              uint64
+	ChildSAByteRekeyMargin           uint64
+	AddKEToChildSARekey              bool
+	Logger                           *slog.Logger
+}
+
+type IPAddress = handshake.IPAddress
+type IPPrefix = handshake.IPPrefix
+type PDNType = handshake.PDNType
+
+const (
+	PDNTypeUnspecified = handshake.PDNTypeUnspecified
+	PDNTypeIPv4        = handshake.PDNTypeIPv4
+	PDNTypeIPv6        = handshake.PDNTypeIPv6
+	PDNTypeIPv4v6      = handshake.PDNTypeIPv4v6
 )
 
 var (
@@ -165,6 +217,33 @@ func (cfg Config) Normalized() (Config, error) {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	return cfg, nil
+}
+
+func handshakeConfig(cfg Config) handshake.Config {
+	return handshake.Config{
+		LocalAddr:                cfg.LocalAddr,
+		RemoteAddr:               cfg.RemoteAddr,
+		APN:                      cfg.APN,
+		PDNType:                  cfg.PDNType,
+		InitialPort:              cfg.InitialPort,
+		NATTPort:                 cfg.NATTPort,
+		LocalSIPPort:             cfg.LocalSIPPort,
+		SIPPort:                  cfg.SIPPort,
+		DHGroups:                 append([]uint16(nil), cfg.DHGroups...),
+		IKEEncryptionKeyLens:     append([]uint16(nil), cfg.IKEEncryptionKeyLens...),
+		IKEIntegrity:             append([]uint16(nil), cfg.IKEIntegrity...),
+		IKEPRF:                   append([]uint16(nil), cfg.IKEPRF...),
+		ChildEncryptionKeyLens:   append([]uint16(nil), cfg.ChildEncryptionKeyLens...),
+		ChildIntegrity:           append([]uint16(nil), cfg.ChildIntegrity...),
+		PCSCFIPv4ConfigAttribute: cfg.PCSCFIPv4ConfigAttribute,
+		PCSCFIPv6ConfigAttribute: cfg.PCSCFIPv6ConfigAttribute,
+		PCSCFRestoration:         !cfg.DisablePCSCFRestoration,
+		PDUSessionID:             cfg.PDUSessionID,
+		IPMSIndication:           cfg.EnableIPMSIndication,
+		NATKeepaliveInterval:     cfg.NATKeepaliveInterval,
+		LivenessTimeout:          cfg.LivenessTimeout,
+		IKERetransmitDelays:      append([]time.Duration(nil), cfg.IKERetransmitDelays...),
+	}
 }
 
 func validPDNType(pdnType PDNType) bool {

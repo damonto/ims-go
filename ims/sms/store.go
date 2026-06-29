@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func (s *Service) markRecentKey(key string, ttl time.Duration) bool {
+func (s *Endpoint) markRecentKey(key string, ttl time.Duration) bool {
 	if key == "" {
 		return true
 	}
@@ -25,7 +25,7 @@ func (s *Service) markRecentKey(key string, ttl time.Duration) bool {
 	return true
 }
 
-func (s *Service) clearRecentKey(key string) {
+func (s *Endpoint) clearRecentKey(key string) {
 	if key == "" {
 		return
 	}
@@ -34,7 +34,7 @@ func (s *Service) clearRecentKey(key string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) markSeen(msg sip.Message) bool {
+func (s *Endpoint) markSeen(msg sip.Message) bool {
 	key, ok := seenKey(msg)
 	if !ok {
 		return true
@@ -42,7 +42,7 @@ func (s *Service) markSeen(msg sip.Message) bool {
 	return s.markRecentKey("sip|"+key, 2*time.Minute)
 }
 
-func (s *Service) markDeliveryReportSent(msg sip.Message) bool {
+func (s *Endpoint) markDeliveryReportSent(msg sip.Message) bool {
 	key, ok := seenKey(msg)
 	if !ok {
 		return true
@@ -50,7 +50,7 @@ func (s *Service) markDeliveryReportSent(msg sip.Message) bool {
 	return s.markRecentKey("report|"+key, 2*time.Minute)
 }
 
-func (s *Service) clearDeliveryReportSent(msg sip.Message) {
+func (s *Endpoint) clearDeliveryReportSent(msg sip.Message) {
 	key, ok := seenKey(msg)
 	if !ok {
 		return

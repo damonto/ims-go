@@ -1166,7 +1166,7 @@ func TestAddTransportCanJoinRunningSession(t *testing.T) {
 		t.Fatal("ReplacePrimary() error = nil, want non-nil")
 	}
 
-	aux.queueRead(newInboundRequest("NOTIFY", "runtime-add", "1 NOTIFY"))
+	aux.queueRead(newInboundRequest("NOTIFY", "run-add", "1 NOTIFY"))
 	select {
 	case got := <-handledCh:
 		if got != aux.LocalAddr().String() {

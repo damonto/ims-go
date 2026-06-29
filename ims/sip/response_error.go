@@ -87,7 +87,7 @@ func (w WarningValue) MarshalText() ([]byte, error) {
 	if strings.TrimSpace(w.Agent) == "" {
 		return nil, errors.New("marshaling SIP Warning: agent is empty")
 	}
-	return []byte(fmt.Sprintf(`%03d %s "%s"`, w.Code, strings.TrimSpace(w.Agent), quoteSIPString(w.Text))), nil
+	return fmt.Appendf(nil, `%03d %s "%s"`, w.Code, strings.TrimSpace(w.Agent), quoteSIPString(w.Text)), nil
 }
 
 func (w *WarningValue) UnmarshalText(text []byte) error {

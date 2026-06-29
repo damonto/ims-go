@@ -57,7 +57,7 @@ func contactURIHostPort(uri string) string {
 	return strings.TrimSpace(uri)
 }
 
-func (s *Service) currentRegisterContactURI() string {
+func (s *Registrar) currentRegisterContactURI() string {
 	flow := s.CurrentFlow()
 	port := flow.RegisterPort
 	if flow.MessagePort != 0 {
@@ -66,7 +66,7 @@ func (s *Service) currentRegisterContactURI() string {
 	return contactURI(flow.ContactHost, port)
 }
 
-func (s *Service) applyAssociatedURI(msg sip.Message) {
+func (s *Registrar) applyAssociatedURI(msg sip.Message) {
 	uris := associatedURIsFromMessage(msg)
 	if len(uris) == 0 {
 		return
@@ -87,7 +87,7 @@ func (s *Service) applyAssociatedURI(msg sip.Message) {
 	}
 }
 
-func (s *Service) applyServiceRoutes(msg sip.Message) {
+func (s *Registrar) applyServiceRoutes(msg sip.Message) {
 	routes := serviceRoutesFromMessage(msg)
 	s.mu.Lock()
 	s.flow.ServiceRoutes = append([]string(nil), routes...)
@@ -107,7 +107,7 @@ func serviceRoutesFromMessage(msg sip.Message) []string {
 	return routes
 }
 
-func (s *Service) currentRegisterExpires() time.Duration {
+func (s *Registrar) currentRegisterExpires() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state.RegisterExpires > 0 {
@@ -116,7 +116,7 @@ func (s *Service) currentRegisterExpires() time.Duration {
 	return s.cfg.RegisterExpires
 }
 
-func (s *Service) setRegisterExpires(expires time.Duration) {
+func (s *Registrar) setRegisterExpires(expires time.Duration) {
 	if expires <= 0 {
 		return
 	}
@@ -125,7 +125,7 @@ func (s *Service) setRegisterExpires(expires time.Duration) {
 	s.mu.Unlock()
 }
 
-func (s *Service) registerExpiresSeconds() int {
+func (s *Registrar) registerExpiresSeconds() int {
 	return expiresSeconds(s.currentRegisterExpires())
 }
 
@@ -137,11 +137,11 @@ func expiresSeconds(expires time.Duration) int {
 	return seconds
 }
 
-func (s *Service) refreshInterval() time.Duration {
+func (s *Registrar) refreshInterval() time.Duration {
 	return refreshIntervalFor(s.currentRegisterExpires())
 }
 
-func (s *Service) applyRegisterExpires(msg sip.Message) {
+func (s *Registrar) applyRegisterExpires(msg sip.Message) {
 	expires, ok := registerResponseExpires(msg, s.currentRegisterContactURI())
 	if !ok {
 		return
@@ -149,7 +149,7 @@ func (s *Service) applyRegisterExpires(msg sip.Message) {
 	s.setRegisterExpires(expires)
 }
 
-func (s *Service) applyRegisterSuccess(msg sip.Message) {
+func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
 	s.resetRegInfoState()
 	s.applyAssociatedURI(msg)
 	s.applyServiceRoutes(msg)
@@ -160,13 +160,13 @@ func (s *Service) applyRegisterSuccess(msg sip.Message) {
 	s.applyRegisterKeepAlive(msg)
 }
 
-func (s *Service) setRegistered(registered bool) {
+func (s *Registrar) setRegistered(registered bool) {
 	s.mu.Lock()
 	s.state.Registered = registered
 	s.mu.Unlock()
 }
 
-func (s *Service) isRegistered() bool {
+func (s *Registrar) isRegistered() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state.Registered

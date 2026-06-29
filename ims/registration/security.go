@@ -47,7 +47,7 @@ type registerSecurity struct {
 	responseAttachments []session.Attachment
 }
 
-func (s *Service) protectedRegisterExchangeOptions() session.ExchangeOptions {
+func (s *Registrar) protectedRegisterExchangeOptions() session.ExchangeOptions {
 	if !strings.EqualFold(sip.TransportToken(s.sess.LocalAddr()), "UDP") {
 		return session.ExchangeOptions{}
 	}
@@ -61,7 +61,7 @@ func (s *Service) protectedRegisterExchangeOptions() session.ExchangeOptions {
 	}
 }
 
-func (s *Service) currentSecurityVerify() *security.Param {
+func (s *Registrar) currentSecurityVerify() *security.Param {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.flow.SecurityVerify == nil {
@@ -81,7 +81,7 @@ func securityVerifyValueForFlow(flow Flow, verify *security.Param) string {
 	return verify.String()
 }
 
-func (s *Service) applySelectedSecurityServer(verify *security.Param, raw []string) {
+func (s *Registrar) applySelectedSecurityServer(verify *security.Param, raw []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flow.SecurityServerRaw = append([]string(nil), raw...)
@@ -160,7 +160,7 @@ func (r *registerSecurity) exchangeOptions() session.ExchangeOptions {
 	}
 }
 
-func (s *Service) replaceSecureServerAttachments(next []session.Attachment) []session.Attachment {
+func (s *Registrar) replaceSecureServerAttachments(next []session.Attachment) []session.Attachment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.secureServerAttachments
@@ -168,7 +168,7 @@ func (s *Service) replaceSecureServerAttachments(next []session.Attachment) []se
 	return old
 }
 
-func (s *Service) replaceSecureResponseAttachments(next []session.Attachment) []session.Attachment {
+func (s *Registrar) replaceSecureResponseAttachments(next []session.Attachment) []session.Attachment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.secureResponseAttachments
@@ -176,14 +176,14 @@ func (s *Service) replaceSecureResponseAttachments(next []session.Attachment) []
 	return old
 }
 
-func (s *Service) currentSecureServerTransports() []session.Transport {
+func (s *Registrar) currentSecureServerTransports() []session.Transport {
 	s.mu.Lock()
 	attachments := append([]session.Attachment(nil), s.secureServerAttachments...)
 	s.mu.Unlock()
 	return attachmentTransports(attachments)
 }
 
-func (s *Service) closeAttachmentsAfter(attachments []session.Attachment, delay time.Duration) {
+func (s *Registrar) closeAttachmentsAfter(attachments []session.Attachment, delay time.Duration) {
 	attachments = compactAttachments(attachments)
 	if len(attachments) == 0 {
 		return
@@ -262,7 +262,7 @@ func (e *secureAssociationExpiry) done() <-chan struct{} {
 	return e.stopCh
 }
 
-func (s *Service) forgetDrain(drain *attachmentDrain) {
+func (s *Registrar) forgetDrain(drain *attachmentDrain) {
 	s.mu.Lock()
 	s.drainTimers = slices.DeleteFunc(s.drainTimers, func(candidate *attachmentDrain) bool {
 		return candidate == drain
@@ -270,21 +270,21 @@ func (s *Service) forgetDrain(drain *attachmentDrain) {
 	s.mu.Unlock()
 }
 
-func (s *Service) closeSecureResources() {
+func (s *Registrar) closeSecureResources() {
 	resources := s.takeSecureResourcesForClose()
 	resources.stop()
 	s.bgWG.Wait()
 	resources.close()
 }
 
-func (s *Service) takeSecureResourcesForClose() secureResources {
+func (s *Registrar) takeSecureResourcesForClose() secureResources {
 	s.mu.Lock()
 	resources := s.takeSecureResourcesLocked()
 	s.mu.Unlock()
 	return resources
 }
 
-func (s *Service) takeSecureResourcesForExpiry(expiry *secureAssociationExpiry) (secureResources, bool) {
+func (s *Registrar) takeSecureResourcesForExpiry(expiry *secureAssociationExpiry) (secureResources, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.activeSecureSAExpiry != expiry {
@@ -293,7 +293,7 @@ func (s *Service) takeSecureResourcesForExpiry(expiry *secureAssociationExpiry) 
 	return s.takeSecureResourcesLocked(), true
 }
 
-func (s *Service) takeSecureResourcesLocked() secureResources {
+func (s *Registrar) takeSecureResourcesLocked() secureResources {
 	resources := secureResources{
 		serverAttachments:   s.secureServerAttachments,
 		responseAttachments: s.secureResponseAttachments,
@@ -345,20 +345,20 @@ func saDrainDelayBefore(expiresAt time.Time, timers session.TransactionTimers) t
 	return min(delay, remaining)
 }
 
-func (s *Service) secureAssociationExpiresAt(now time.Time) time.Time {
+func (s *Registrar) secureAssociationExpiresAt(now time.Time) time.Time {
 	if s.currentSecurityVerify() == nil {
 		return time.Time{}
 	}
 	return now.Add(s.currentRegisterExpires() + secureAssociationLifetimeGrace)
 }
 
-func (s *Service) currentSecureAssociationExpiresAt() time.Time {
+func (s *Registrar) currentSecureAssociationExpiresAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.activeSecureSAExpiresAt
 }
 
-func (s *Service) extendActiveSecureAssociationLifetime(expiresAt time.Time) {
+func (s *Registrar) extendActiveSecureAssociationLifetime(expiresAt time.Time) {
 	if expiresAt.IsZero() {
 		return
 	}
@@ -393,7 +393,7 @@ func (s *Service) extendActiveSecureAssociationLifetime(expiresAt time.Time) {
 	}
 }
 
-func (s *Service) runSecureAssociationExpiry(done <-chan struct{}, expiry *secureAssociationExpiry, delay time.Duration) {
+func (s *Registrar) runSecureAssociationExpiry(done <-chan struct{}, expiry *secureAssociationExpiry, delay time.Duration) {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
@@ -405,7 +405,7 @@ func (s *Service) runSecureAssociationExpiry(done <-chan struct{}, expiry *secur
 	}
 }
 
-func (s *Service) expireActiveSecureAssociation(expiry *secureAssociationExpiry) {
+func (s *Registrar) expireActiveSecureAssociation(expiry *secureAssociationExpiry) {
 	resources, ok := s.takeSecureResourcesForExpiry(expiry)
 	if !ok {
 		return
@@ -416,7 +416,7 @@ func (s *Service) expireActiveSecureAssociation(expiry *secureAssociationExpiry)
 	s.publishRegistrationEvent(errSecureSAExpired)
 }
 
-func (s *Service) commitReauthentication(challenge security.Challenge, authorizationHeader string, flow Flow, ck, ik []byte, password string) {
+func (s *Registrar) commitReauthentication(challenge security.Challenge, authorizationHeader string, flow Flow, ck, ik []byte, password string) {
 	realm := strings.TrimSpace(challenge.Realm)
 	if realm == "" {
 		realm = strings.TrimPrefix(s.State().RegisterURI, "sip:")
@@ -438,7 +438,7 @@ func (s *Service) commitReauthentication(challenge security.Challenge, authoriza
 	s.mu.Unlock()
 }
 
-func (s *Service) openRegisterSecurity(ctx context.Context) (*registerSecurity, error) {
+func (s *Registrar) openRegisterSecurity(ctx context.Context) (*registerSecurity, error) {
 	verify := s.currentSecurityVerify()
 	if verify == nil {
 		return nil, nil
@@ -473,7 +473,7 @@ func (s *Service) openRegisterSecurity(ctx context.Context) (*registerSecurity, 
 	return registration, nil
 }
 
-func (s *Service) exchangeProtectedRegister(ctx context.Context, registration *registerSecurity, auth *security.Authorization) (sip.Message, error) {
+func (s *Registrar) exchangeProtectedRegister(ctx context.Context, registration *registerSecurity, auth *security.Authorization) (sip.Message, error) {
 	req := s.buildRegister(auth, s.currentSecurityVerify())
 	if registration == nil || registration.outbound == nil {
 		return s.sess.ExchangeWithOptions(ctx, req, s.protectedRegisterExchangeOptions())
@@ -481,7 +481,7 @@ func (s *Service) exchangeProtectedRegister(ctx context.Context, registration *r
 	return s.sess.ExchangeWithTransport(ctx, registration.outbound, req, registration.exchangeOptions())
 }
 
-func (s *Service) commitRegisterSecurity(registration *registerSecurity) error {
+func (s *Registrar) commitRegisterSecurity(registration *registerSecurity) error {
 	if registration == nil || registration.outbound == nil {
 		return nil
 	}
@@ -617,7 +617,7 @@ func kdf33220(key []byte, fc byte, params ...[]byte) []byte {
 	return mac.Sum(nil)
 }
 
-func (s *Service) dialSecureTransport(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) (session.Transport, error) {
+func (s *Registrar) dialSecureTransport(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) (session.Transport, error) {
 	switch sip.TransportToken(s.sess.LocalAddr()) {
 	case "TCP":
 		if s.cfg.DialSecureTCP == nil {
@@ -640,12 +640,12 @@ func (s *Service) dialSecureTransport(ctx context.Context, verify *security.Para
 	}
 }
 
-func (s *Service) startSecureServerTransports(ctx context.Context, verify *security.Param) ([]session.Transport, []session.Attachment, error) {
+func (s *Registrar) startSecureServerTransports(ctx context.Context, verify *security.Param) ([]session.Transport, []session.Attachment, error) {
 	flow := s.CurrentFlow()
 	return s.startSecureServerTransportsWithKeys(ctx, verify, flow, s.authCK, s.authIK)
 }
 
-func (s *Service) startSecureServerTransportsWithKeys(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) ([]session.Transport, []session.Attachment, error) {
+func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, verify *security.Param, flow Flow, ck, ik []byte) ([]session.Transport, []session.Attachment, error) {
 	transports := make([]session.Transport, 0, 2)
 	attachments := make([]session.Attachment, 0, 2)
 	if s.cfg.ListenSecureTCP != nil {
@@ -681,7 +681,7 @@ func (s *Service) startSecureServerTransportsWithKeys(ctx context.Context, verif
 	return transports, attachments, nil
 }
 
-func (s *Service) startSecureResponseTransportsWithKeys(ctx context.Context, verify *security.Param, flow Flow, outbound session.Transport, inboundTransports []session.Transport, ck, ik []byte) ([]session.Attachment, error) {
+func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, verify *security.Param, flow Flow, outbound session.Transport, inboundTransports []session.Transport, ck, ik []byte) ([]session.Attachment, error) {
 	if outbound == nil || strings.EqualFold(sip.TransportToken(outbound.LocalAddr()), "UDP") {
 		return nil, nil
 	}

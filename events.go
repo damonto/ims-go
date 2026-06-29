@@ -187,7 +187,7 @@ func (c *Client) Events() *Events {
 	}
 }
 
-func (s *SMSService) Events() *SMSEvents {
+func (s *SMSClient) Events() *SMSEvents {
 	incomingSub := s.client.events.smsIncoming.subscribe(eventBufferSize)
 	reportSub := s.client.events.smsReports.subscribe(eventBufferSize)
 	return &SMSEvents{
@@ -200,7 +200,7 @@ func (s *SMSService) Events() *SMSEvents {
 	}
 }
 
-func (s *USSDService) Events() *USSDEvents {
+func (s *USSDClient) Events() *USSDEvents {
 	sub := s.client.events.ussd.subscribe(eventBufferSize)
 	return &USSDEvents{
 		Incoming: sub.channel,
@@ -208,7 +208,7 @@ func (s *USSDService) Events() *USSDEvents {
 	}
 }
 
-func (s *VoiceService) Events() *VoiceEvents {
+func (s *VoiceClient) Events() *VoiceEvents {
 	incomingSub := s.client.events.voiceIn.subscribe(eventBufferSize)
 	eventSub := s.client.events.voiceEvents.subscribe(eventBufferSize)
 	return &VoiceEvents{

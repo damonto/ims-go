@@ -11,7 +11,7 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) Send(ctx context.Context, to, text string) (Submission, error) {
+func (s *Endpoint) Send(ctx context.Context, to, text string) (Submission, error) {
 	if err := s.beginMOTransfer(); err != nil {
 		return Submission{}, err
 	}
@@ -37,7 +37,7 @@ func (s *Service) Send(ctx context.Context, to, text string) (Submission, error)
 	return submission, nil
 }
 
-func (s *Service) sendParts(ctx context.Context, to string, sc serviceCenter, parts []userDataPart, tracker *submissionTracker) (Submission, error) {
+func (s *Endpoint) sendParts(ctx context.Context, to string, sc serviceCenter, parts []userDataPart, tracker *submissionTracker) (Submission, error) {
 	submissions := make([]SubmissionSegment, 0, len(parts))
 	for i, part := range parts {
 		segment, err := s.newOutboundSegment(to, sc, part, i, len(parts), tracker)
@@ -76,7 +76,7 @@ func newSubmission(segments []SubmissionSegment, tracker *submissionTracker) Sub
 	return Submission{Segments: segments, Updates: updates}
 }
 
-func (s *Service) NotifyMemoryAvailable(ctx context.Context, target string) error {
+func (s *Endpoint) NotifyMemoryAvailable(ctx context.Context, target string) error {
 	if err := s.beginMOTransfer(); err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func (s *Service) NotifyMemoryAvailable(ctx context.Context, target string) erro
 	return s.waitMemoryAvailableReport(ctx, rpRef, reportCh)
 }
 
-func (s *Service) waitMemoryAvailableReport(ctx context.Context, rpRef byte, reportCh <-chan rpMessage) error {
+func (s *Endpoint) waitMemoryAvailableReport(ctx context.Context, rpRef byte, reportCh <-chan rpMessage) error {
 	timer := time.NewTimer(s.cfg.SubmitReportTimeout)
 	defer timer.Stop()
 	select {
@@ -138,7 +138,7 @@ func (s *Service) waitMemoryAvailableReport(ctx context.Context, rpRef byte, rep
 	}
 }
 
-func (s *Service) reserveReference() (byte, error) {
+func (s *Endpoint) reserveReference() (byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -156,21 +156,21 @@ func (s *Service) reserveReference() (byte, error) {
 	return 0, errors.New("sending SMS: no free RP reference")
 }
 
-func (s *Service) releaseReference(ref byte) {
+func (s *Endpoint) releaseReference(ref byte) {
 	s.mu.Lock()
 	delete(s.rpRefs, ref)
 	s.mu.Unlock()
 }
 
-func (s *Service) reserveTPReference() byte {
+func (s *Endpoint) reserveTPReference() byte {
 	return byte(atomic.AddUint32(&s.tpRef, 1))
 }
 
-func (s *Service) beginMOTransfer() error {
+func (s *Endpoint) beginMOTransfer() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return errors.New("sending SMS: service is closed")
+		return errors.New("sending SMS: endpoint is closed")
 	}
 	if s.moState != moTransferIdle {
 		return errors.New("sending SMS: mobile originated transfer in progress")
@@ -179,13 +179,13 @@ func (s *Service) beginMOTransfer() error {
 	return nil
 }
 
-func (s *Service) finishMOSend() {
+func (s *Endpoint) finishMOSend() {
 	s.mu.Lock()
 	s.moState = moTransferIdle
 	s.mu.Unlock()
 }
 
-func (s *Service) beginMTTransfer() bool {
+func (s *Endpoint) beginMTTransfer() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.mtState != mtTransferIdle {
@@ -195,13 +195,13 @@ func (s *Service) beginMTTransfer() bool {
 	return true
 }
 
-func (s *Service) endMTTransfer() {
+func (s *Endpoint) endMTTransfer() {
 	s.mu.Lock()
 	s.mtState = mtTransferIdle
 	s.mu.Unlock()
 }
 
-func (s *Service) newOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, tracker *submissionTracker) (outboundSegment, error) {
+func (s *Endpoint) newOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, tracker *submissionTracker) (outboundSegment, error) {
 	rpRef, err := s.reserveReference()
 	if err != nil {
 		return outboundSegment{}, err
@@ -209,7 +209,7 @@ func (s *Service) newOutboundSegment(to string, sc serviceCenter, part userDataP
 	return s.buildOutboundSegment(to, sc, part, index, count, rpRef, s.reserveTPReference(), tracker)
 }
 
-func (s *Service) buildOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, rpRef, tpRef byte, tracker *submissionTracker) (outboundSegment, error) {
+func (s *Endpoint) buildOutboundSegment(to string, sc serviceCenter, part userDataPart, index, count int, rpRef, tpRef byte, tracker *submissionTracker) (outboundSegment, error) {
 	tpDestination := to
 	if isSIPURI(to) {
 		tpDestination = dummyMSISDN
@@ -276,7 +276,7 @@ func isSIPURI(uri string) bool {
 	return strings.EqualFold(scheme, "sip") || strings.EqualFold(scheme, "sips")
 }
 
-func (s *Service) exchangeSegment(ctx context.Context, segment outboundSegment) (submitResponse, error) {
+func (s *Endpoint) exchangeSegment(ctx context.Context, segment outboundSegment) (submitResponse, error) {
 	resp, err := s.sess.Exchange(ctx, segment.msg)
 	if err != nil {
 		s.removePending(segment.callID)

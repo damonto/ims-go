@@ -2,6 +2,7 @@ package vowifi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,6 +13,13 @@ import (
 
 const ussdResultBufferSize = 16
 const ussdCleanupTimeout = 3 * time.Second
+
+var (
+	ErrUSSDNotStarted     = errors.New("ussd session is not started")
+	ErrUSSDAlreadyStarted = errors.New("ussd session is already started")
+	ErrUSSDClosed         = errors.New("ussd session is closed")
+	ErrUSSDInProgress     = errors.New("ussd session operation in progress")
+)
 
 type USSDMessage = imsussd.Message
 
@@ -28,7 +36,7 @@ type IncomingUSSD struct {
 	ReceivedAt time.Time
 }
 
-type USSDService struct {
+type USSDClient struct {
 	client *Client
 }
 
@@ -45,8 +53,8 @@ type USSDSession struct {
 	watchOnce sync.Once
 }
 
-func (s *USSDService) Start() (*USSDSession, error) {
-	if _, err := s.client.currentUSSDService(); err != nil {
+func (s *USSDClient) Start() (*USSDSession, error) {
+	if _, err := s.client.currentUSSDClient(); err != nil {
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
 	return newSession(s.client), nil
@@ -58,7 +66,7 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 	}
 	defer s.finishOperation()
 
-	service, err := s.client.currentUSSDService()
+	service, err := s.client.currentUSSDClient()
 	if err != nil {
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
@@ -133,8 +141,8 @@ func (s *USSDSession) Close(ctx context.Context) (USSDResult, error) {
 	return USSDResult{Closed: true, ReceivedAt: receivedAt}, nil
 }
 
-func (c *Client) currentUSSDService() (*imsussd.Service, error) {
-	return currentIMSService(c, func(ims imsRuntime) *imsussd.Service { return ims.ussd })
+func (c *Client) currentUSSDClient() (*imsussd.Endpoint, error) {
+	return currentIMSEndpoint(c, func(ims imsStack) *imsussd.Endpoint { return ims.ussd })
 }
 
 func (c *Client) handleUSSD(low *imsussd.Session, msg imsussd.Message) {

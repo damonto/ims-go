@@ -33,7 +33,54 @@ type regInfoRegistrationEntry struct {
 	Contacts map[string]regInfoContact
 }
 
-func (s *Service) currentSubscribeExpires() time.Duration {
+func (s *Registrar) Subscribe(ctx context.Context) error {
+	return s.subscribe(ctx, false)
+}
+
+func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
+	if s.isSubscribeUnsupported() {
+		return nil
+	}
+	subscription := s.currentSubscription()
+	msg := s.buildSubscribeWithDialog(subscription)
+	resp, err := s.sess.Exchange(ctx, msg)
+	if err != nil {
+		if subscription.active {
+			s.resetSubscription()
+			s.resetRegInfoState()
+		}
+		return fmt.Errorf("subscribing IMS registration: %w", err)
+	}
+	if subscription.active && resp.StatusCode() != sipStatusCallTransactionDoesNotExist {
+		s.applySubscribeRequestCSeq(msg)
+	}
+	if resp.StatusCode() == sipStatusBadEvent {
+		s.setSubscribeUnsupported(true)
+		s.resetSubscription()
+		s.logger.Info("registration event subscription unavailable", "status", resp.StatusCode())
+		return nil
+	}
+	if subscription.active && resp.StatusCode() == sipStatusCallTransactionDoesNotExist && !retried {
+		s.resetSubscription()
+		s.resetRegInfoState()
+		return s.subscribe(ctx, true)
+	}
+	if resp.StatusCode() == sipStatusServiceUnavailable {
+		if retryAfter, ok := retryAfterDelay(resp); ok {
+			return fmt.Errorf("subscribing IMS registration: %w after %w", &subscriptionRetryAfter{retryAfter: retryAfter}, sip.NewResponseError(resp))
+		}
+	}
+	if resp.StatusCode() != sipStatusOK {
+		return fmt.Errorf("subscribing IMS registration: expected 200, got %w", sip.NewResponseError(resp))
+	}
+	s.setSubscribeUnsupported(false)
+	s.applySubscribeExpires(resp)
+	s.applySubscribeDialog(msg, resp)
+	s.logger.Info("registration event subscription active", "expires", s.currentSubscribeExpires())
+	return nil
+}
+
+func (s *Registrar) currentSubscribeExpires() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.subscribeExpires > 0 {
@@ -42,7 +89,7 @@ func (s *Service) currentSubscribeExpires() time.Duration {
 	return defaultIMSExpires
 }
 
-func (s *Service) setSubscribeExpires(expires time.Duration) {
+func (s *Registrar) setSubscribeExpires(expires time.Duration) {
 	if expires <= 0 {
 		return
 	}
@@ -51,23 +98,23 @@ func (s *Service) setSubscribeExpires(expires time.Duration) {
 	s.mu.Unlock()
 }
 
-func (s *Service) subscribeRefreshInterval() time.Duration {
+func (s *Registrar) subscribeRefreshInterval() time.Duration {
 	return refreshIntervalFor(s.currentSubscribeExpires())
 }
 
-func (s *Service) setSubscribeUnsupported(unsupported bool) {
+func (s *Registrar) setSubscribeUnsupported(unsupported bool) {
 	s.mu.Lock()
 	s.subscribeUnsupported = unsupported
 	s.mu.Unlock()
 }
 
-func (s *Service) isSubscribeUnsupported() bool {
+func (s *Registrar) isSubscribeUnsupported() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.subscribeUnsupported
 }
 
-func (s *Service) currentSubscription() subscriptionDialog {
+func (s *Registrar) currentSubscription() subscriptionDialog {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	subscription := s.subscription
@@ -75,13 +122,13 @@ func (s *Service) currentSubscription() subscriptionDialog {
 	return subscription
 }
 
-func (s *Service) resetSubscription() {
+func (s *Registrar) resetSubscription() {
 	s.mu.Lock()
 	s.subscription = subscriptionDialog{}
 	s.mu.Unlock()
 }
 
-func (s *Service) resetRegInfoState() {
+func (s *Registrar) resetRegInfoState() {
 	s.mu.Lock()
 	s.regInfoVersion = 0
 	s.regInfoVersionSet = false
@@ -89,7 +136,7 @@ func (s *Service) resetRegInfoState() {
 	s.mu.Unlock()
 }
 
-func (s *Service) applySubscribeRequestCSeq(req sip.Message) {
+func (s *Registrar) applySubscribeRequestCSeq(req sip.Message) {
 	cseq := sip.CSeqNumber(req.Header("CSeq"))
 	if cseq <= 0 {
 		return
@@ -106,7 +153,7 @@ func (s *Service) applySubscribeRequestCSeq(req sip.Message) {
 	s.mu.Unlock()
 }
 
-func (s *Service) applySubscribeDialog(req, resp sip.Message) {
+func (s *Registrar) applySubscribeDialog(req, resp sip.Message) {
 	localHeader := req.Header("From")
 	remoteHeader := resp.Header("To")
 	remoteTag := sip.HeaderTag(remoteHeader)
@@ -138,7 +185,7 @@ func (s *Service) applySubscribeDialog(req, resp sip.Message) {
 	s.mu.Unlock()
 }
 
-func (s *Service) publishRegistrationEvent(err error) {
+func (s *Registrar) publishRegistrationEvent(err error) {
 	if err == nil {
 		return
 	}
@@ -148,14 +195,14 @@ func (s *Service) publishRegistrationEvent(err error) {
 	}
 }
 
-func (s *Service) requestSubscribeRefresh() {
+func (s *Registrar) requestSubscribeRefresh() {
 	select {
 	case s.subscribeRefreshRequests <- struct{}{}:
 	default:
 	}
 }
 
-func (s *Service) refreshSubscription(ctx context.Context) {
+func (s *Registrar) refreshSubscription(ctx context.Context) {
 	if s.isSubscribeUnsupported() {
 		return
 	}
@@ -185,7 +232,7 @@ func refreshIntervalFor(expires time.Duration) time.Duration {
 	return interval
 }
 
-func (s *Service) applySubscribeExpires(msg sip.Message) {
+func (s *Registrar) applySubscribeExpires(msg sip.Message) {
 	expires, ok := parsePositiveSeconds(msg.Header("Expires"))
 	if !ok {
 		return
@@ -193,7 +240,7 @@ func (s *Service) applySubscribeExpires(msg sip.Message) {
 	s.setSubscribeExpires(expires)
 }
 
-func (s *Service) notifyMatchesSubscription(msg sip.Message) bool {
+func (s *Registrar) notifyMatchesSubscription(msg sip.Message) bool {
 	subscription := s.currentSubscription()
 	if !subscription.active {
 		return true
@@ -205,7 +252,7 @@ func (s *Service) notifyMatchesSubscription(msg sip.Message) bool {
 	}.Matches(msg)
 }
 
-func (s *Service) recordNotifyCSeq(msg sip.Message) (int, string) {
+func (s *Registrar) recordNotifyCSeq(msg sip.Message) (int, string) {
 	if !s.currentSubscription().active {
 		return 0, ""
 	}
@@ -222,7 +269,7 @@ func (s *Service) recordNotifyCSeq(msg sip.Message) (int, string) {
 	return 0, ""
 }
 
-func (s *Service) applySubscriptionStateFromNotify(msg sip.Message) {
+func (s *Registrar) applySubscriptionStateFromNotify(msg sip.Message) {
 	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), regEventPackage) {
 		return
 	}
@@ -240,7 +287,7 @@ func (s *Service) applySubscriptionStateFromNotify(msg sip.Message) {
 	}
 }
 
-func (s *Service) applyRegInfoNotify(msg sip.Message) error {
+func (s *Registrar) applyRegInfoNotify(msg sip.Message) error {
 	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), regEventPackage) {
 		return nil
 	}
@@ -289,7 +336,7 @@ func regInfoContentTypeMatches(value string) bool {
 	return strings.EqualFold(mediaType, regInfoContentType)
 }
 
-func (s *Service) applyRegInfo(info regInfo) (bool, error) {
+func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 	s.mu.Lock()
 	var versionGap bool
 	var currentVersion, receivedVersion int
@@ -379,7 +426,7 @@ func (s *Service) applyRegInfo(info regInfo) (bool, error) {
 	return refresh, nil
 }
 
-func (s *Service) updateRegInfoTable(info regInfo) {
+func (s *Registrar) updateRegInfoTable(info regInfo) {
 	if strings.EqualFold(strings.TrimSpace(info.State), regInfoStateFull) {
 		s.regInfoRegistrations = make(map[string]regInfoRegistrationEntry, len(info.Registration))
 	}

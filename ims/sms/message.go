@@ -9,7 +9,7 @@ import (
 	"github.com/damonto/vowifi-go/ims/sip"
 )
 
-func (s *Service) buildMessage(target string, body []byte, inReplyTo string) (sip.Message, error) {
+func (s *Endpoint) buildMessage(target string, body []byte, inReplyTo string) (sip.Message, error) {
 	state := s.reg.State()
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -40,7 +40,7 @@ func (s *Service) buildMessage(target string, body []byte, inReplyTo string) (si
 	return msg, nil
 }
 
-func (s *Service) buildDeliveryReportMessage(target string, body []byte, inReplyTo string, info xmlInfo) (sip.Message, error) {
+func (s *Endpoint) buildDeliveryReportMessage(target string, body []byte, inReplyTo string, info xmlInfo) (sip.Message, error) {
 	if strings.TrimSpace(info.From) == "" {
 		return s.buildMessage(target, body, inReplyTo)
 	}
@@ -68,7 +68,7 @@ func preferredIdentity(state registration.State) string {
 	return state.PublicIdentity
 }
 
-func (s *Service) reportTarget(msg sip.Message) string {
+func (s *Endpoint) reportTarget(msg sip.Message) string {
 	return sipMessageTarget(sip.AddressURI(msg.Header("P-Asserted-Identity")))
 }
 

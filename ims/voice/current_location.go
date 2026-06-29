@@ -38,7 +38,7 @@ func (r currentLocationDiscoveryRequest) RequestsOneShot() bool {
 
 func (c *Call) handleINFO(ctx context.Context, req session.Request) error {
 	if !sip.TokenListContains(req.Message.Header("Info-Package"), currentLocationDiscoveryInfoPackage) {
-		return c.service.writeStatus(ctx, req, sipStatusBadInfoPackage, "Bad Info Package")
+		return c.endpoint.writeStatus(ctx, req, sipStatusBadInfoPackage, "Bad Info Package")
 	}
 	c.mu.Lock()
 	emergency := c.emergency
@@ -46,16 +46,16 @@ func (c *Call) handleINFO(ctx context.Context, req session.Request) error {
 	state := c.state
 	c.mu.Unlock()
 	if !emergency || !currentLocation {
-		return c.service.writeStatus(ctx, req, sipStatusBadInfoPackage, "Bad Info Package")
+		return c.endpoint.writeStatus(ctx, req, sipStatusBadInfoPackage, "Bad Info Package")
 	}
 	if state != CallStateConfirmed && state != CallStateActive {
-		return c.service.writeStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
+		return c.endpoint.writeStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
 	}
 	locationReq, code, reason, err := decodeCurrentLocationDiscoveryINFO(req.Message)
 	if err != nil {
-		return c.service.writeStatus(ctx, req, code, reason)
+		return c.endpoint.writeStatus(ctx, req, code, reason)
 	}
-	if err := c.service.writeStatus(ctx, req, sipStatusOK, "OK"); err != nil {
+	if err := c.endpoint.writeStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return err
 	}
 	if !locationReq.RequestsOneShot() {
@@ -90,8 +90,8 @@ func (c *Call) publishCurrentLocation(ctx context.Context) error {
 	snap := c.dialogSnapshot()
 	localURI := c.localURI
 	c.mu.Unlock()
-	msg := snap.buildCurrentLocationPUBLISH(c.nextCSeq(), pidf.Build(localURI, c.service.cfg.GeolocationCountry))
-	resp, err := c.service.sess.Exchange(ctx, msg)
+	msg := snap.buildCurrentLocationPUBLISH(c.nextCSeq(), pidf.Build(localURI, c.endpoint.cfg.GeolocationCountry))
+	resp, err := c.endpoint.sess.Exchange(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("publishing current location: %w", err)
 	}

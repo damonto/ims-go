@@ -6,6 +6,23 @@ import (
 	"time"
 )
 
+type saLifetime struct {
+	lastProtectedRx      time.Time
+	lastProtectedTx      time.Time
+	ikeSAExpiresAt       time.Time
+	ikeSARekeyAt         time.Time
+	ikeSAByteRekeyAt     uint64
+	ikeSAByteExpiresAt   uint64
+	ikeSAInboundBytes    uint64
+	ikeSAOutboundBytes   uint64
+	childSAExpiresAt     time.Time
+	childSARekeyAt       time.Time
+	childSAByteRekeyAt   uint64
+	childSAByteExpiresAt uint64
+	childSAInboundBytes  uint64
+	childSAOutboundBytes uint64
+}
+
 func childSAExpiry(now time.Time, lifetime time.Duration) time.Time {
 	if lifetime <= 0 {
 		return time.Time{}

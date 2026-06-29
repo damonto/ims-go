@@ -5,6 +5,34 @@ import (
 	"fmt"
 )
 
+type Attachment interface {
+	Close() error
+}
+
+type TransportAttachment interface {
+	Attachment
+	Transport() Transport
+}
+
+type handlerEntry struct {
+	session *Session
+	handler Handler
+	closed  bool
+}
+
+type transportAttachment struct {
+	session   *Session
+	transport Transport
+	closed    bool
+}
+
+type responseRouteAttachment struct {
+	session *Session
+	from    Transport
+	to      Transport
+	closed  bool
+}
+
 func (s *Session) Attach(h Handler) (Attachment, error) {
 	if h == nil {
 		return nil, errors.New("attaching handler: handler is nil")
@@ -34,12 +62,12 @@ func (s *Session) AddTransport(t Transport) (Attachment, error) {
 	}
 	s.aux = append(s.aux, t)
 	s.active[t] = struct{}{}
-	runtime := s.runtime
+	run := s.run
 	running := s.running
 	s.mu.Unlock()
 
 	if running {
-		s.startRuntimeReadLoop(runtime.ctx, t, runtime.inbound)
+		s.startReadLoop(run.ctx, t, run.inbound)
 	}
 	return &transportAttachment{session: s, transport: t}, nil
 }
@@ -150,7 +178,10 @@ func (s *Session) notifyHandlersOnce(handlers []*handlerEntry, err error) {
 		if !ok {
 			continue
 		}
-		handler.HandleError(err)
+		errorHandler, ok := handler.(ErrorHandler)
+		if ok {
+			errorHandler.HandleError(err)
+		}
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 
 var errSessionActive = errors.New("ussd session is active")
 
-func (s *Service) storeSession(session *Session) error {
+func (s *Endpoint) storeSession(session *Session) error {
 	key := session.sessionKey()
 	if s.hasActiveSession() {
 		return fmt.Errorf("storing USSD session: %w", errSessionActive)
@@ -36,20 +36,20 @@ func (s *Service) storeSession(session *Session) error {
 	return nil
 }
 
-func (s *Service) ensureNoActiveSession() error {
+func (s *Endpoint) ensureNoActiveSession() error {
 	if s.hasActiveSession() {
 		return errSessionActive
 	}
 	return nil
 }
 
-func (s *Service) hasActiveSession() bool {
+func (s *Endpoint) hasActiveSession() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.sessions) > 0
 }
 
-func (s *Service) lookupSessionByCallID(callID string) *Session {
+func (s *Endpoint) lookupSessionByCallID(callID string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, session := range s.sessions {
@@ -60,7 +60,7 @@ func (s *Service) lookupSessionByCallID(callID string) *Session {
 	return nil
 }
 
-func (s *Service) lookupIncomingInviteSession(msg sip.Message) *Session {
+func (s *Endpoint) lookupIncomingInviteSession(msg sip.Message) *Session {
 	inviteKey := incomingInviteKey(msg)
 	if inviteKey == "" {
 		return nil
@@ -74,7 +74,7 @@ func (s *Service) lookupIncomingInviteSession(msg sip.Message) *Session {
 	return s.sessions[key]
 }
 
-func (s *Service) lookupSessionForMessage(msg sip.Message) *Session {
+func (s *Endpoint) lookupSessionForMessage(msg sip.Message) *Session {
 	key, ok := s.sess.LookupDialogKey(msg)
 	if !ok {
 		return nil
@@ -84,7 +84,7 @@ func (s *Service) lookupSessionForMessage(msg sip.Message) *Session {
 	return s.sessions[key]
 }
 
-func (s *Service) removeSession(key string) {
+func (s *Endpoint) removeSession(key string) {
 	s.mu.Lock()
 	session := s.sessions[key]
 	if session != nil {

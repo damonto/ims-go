@@ -21,7 +21,7 @@ func TestCompletePendingRequiresInReplyToForSIPURI(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reportCh := make(chan rpMessage, 1)
-			svc := &Service{
+			svc := &Endpoint{
 				logger: slog.Default(),
 				pending: map[string]pendingEntry{
 					"call-1": {
@@ -53,7 +53,7 @@ func TestCompletePendingRequiresInReplyToForSIPURI(t *testing.T) {
 
 func TestCompletePendingAllowsReferenceFallbackForTelURI(t *testing.T) {
 	reportCh := make(chan rpMessage, 1)
-	svc := &Service{
+	svc := &Endpoint{
 		logger: slog.Default(),
 		pending: map[string]pendingEntry{
 			"call-1": {
@@ -101,7 +101,7 @@ func TestReserveReferenceSkipsRetainedSubmittedReferences(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := &Service{
+			svc := &Endpoint{
 				rpRef:     6,
 				rpRefs:    tt.rpRefs,
 				submitted: tt.submitted,
@@ -132,11 +132,11 @@ func TestReserveReferenceSkipsRetainedSubmittedReferences(t *testing.T) {
 func TestMOTransferStateMachine(t *testing.T) {
 	tests := []struct {
 		name  string
-		steps func(*testing.T, *Service)
+		steps func(*testing.T, *Endpoint)
 	}{
 		{
 			name: "send without pending returns idle",
-			steps: func(t *testing.T, svc *Service) {
+			steps: func(t *testing.T, svc *Endpoint) {
 				if err := svc.beginMOTransfer(); err != nil {
 					t.Fatalf("beginMOTransfer() error = %v", err)
 				}
@@ -154,7 +154,7 @@ func TestMOTransferStateMachine(t *testing.T) {
 		},
 		{
 			name: "send stays busy until finish",
-			steps: func(t *testing.T, svc *Service) {
+			steps: func(t *testing.T, svc *Endpoint) {
 				if err := svc.beginMOTransfer(); err != nil {
 					t.Fatalf("beginMOTransfer() error = %v", err)
 				}
@@ -169,7 +169,7 @@ func TestMOTransferStateMachine(t *testing.T) {
 		},
 		{
 			name: "closed rejects begin",
-			steps: func(t *testing.T, svc *Service) {
+			steps: func(t *testing.T, svc *Endpoint) {
 				svc.closed = true
 				if err := svc.beginMOTransfer(); err == nil {
 					t.Fatal("beginMOTransfer() error = nil, want closed error")
@@ -180,7 +180,7 @@ func TestMOTransferStateMachine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.steps(t, &Service{})
+			tt.steps(t, &Endpoint{})
 		})
 	}
 }
@@ -198,7 +198,7 @@ func TestMTTransferStateMachine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := &Service{closed: tt.closed}
+			svc := &Endpoint{closed: tt.closed}
 			if got := svc.beginMTTransfer(); got != tt.want {
 				t.Fatalf("beginMTTransfer() = %t, want %t", got, tt.want)
 			}

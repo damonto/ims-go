@@ -1,6 +1,7 @@
 package vowifi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,10 +10,77 @@ import (
 
 	"github.com/damonto/vowifi-go/ims/pidf"
 	"github.com/damonto/vowifi-go/ims/security"
+	imssession "github.com/damonto/vowifi-go/ims/session"
 	imssms "github.com/damonto/vowifi-go/ims/sms"
 	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	imsvoice "github.com/damonto/vowifi-go/ims/voice"
 	"github.com/damonto/vowifi-go/swu/tunnel"
 )
+
+type Config struct {
+	EPDG              string
+	Logger            *slog.Logger
+	ReconnectDelay    time.Duration
+	ReconnectMaxDelay time.Duration
+	Terminal          TerminalInfo
+	Tunnel            tunnel.Config
+	IMS               IMSConfig
+
+	smsRequestStatusReport bool
+}
+
+type TerminalInfo struct {
+	ID              string
+	Vendor          string
+	Model           string
+	SoftwareVersion string
+	Build           string
+	Type            string
+	HardwareSKU     string
+}
+
+func (terminal TerminalInfo) trimmed() TerminalInfo {
+	terminal.ID = strings.TrimSpace(terminal.ID)
+	terminal.Vendor = strings.TrimSpace(terminal.Vendor)
+	terminal.Model = strings.TrimSpace(terminal.Model)
+	terminal.SoftwareVersion = strings.TrimSpace(terminal.SoftwareVersion)
+	terminal.Build = strings.TrimSpace(terminal.Build)
+	terminal.Type = strings.TrimSpace(terminal.Type)
+	terminal.HardwareSKU = strings.TrimSpace(terminal.HardwareSKU)
+	return terminal
+}
+
+type IMSConfig struct {
+	Transport                string
+	PrivateIdentity          string
+	PublicIdentity           string
+	HomeDomain               string
+	PhoneContextDomain       string
+	USSDLanguage             string
+	USSDDomain               string
+	UserAgent                string
+	AccessNetworkInfo        string
+	WLANNodeID               string
+	RegisterExpires          time.Duration
+	AuthAlgorithm            string
+	RegistrationRetryBase    time.Duration
+	RegistrationRetryMax     time.Duration
+	ServiceCenter            string
+	IMEI                     string
+	GeolocationPIDFRegister  []int
+	GeolocationCountry       string
+	UseTelURIForPIDFXML      bool
+	SIPServerPort            int
+	SIPTimers                imssession.TransactionTimers
+	TCPDataACKTimeouts       []time.Duration
+	SMSDeliveryReportTimeout time.Duration
+	Voice                    imsvoice.Config
+
+	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
+	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
+	listenSecureTCP func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
+	listenSecureUDP func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
+}
 
 func cloneConfig(cfg *Config) Config {
 	if cfg == nil {
@@ -293,4 +361,32 @@ func defaultEPDGAddress(card Card) (string, error) {
 	}
 
 	return fmt.Sprintf("epdg.epc.mnc%s.mcc%s.pub.3gppnetwork.org", mnc, mcc), nil
+}
+
+func renderWFCUserAgent(template string, cfg Config, profile wfcProfile) string {
+	terminal := cfg.Terminal.trimmed()
+	replacer := strings.NewReplacer(
+		"#MANUFACTURE#", terminal.Vendor,
+		"#MANUFACTURER#", terminal.Vendor,
+		"#MODEL#", terminal.Model,
+		"#AV#", terminal.SoftwareVersion,
+		"#BUILD#", terminal.Build,
+		"#TYPE#", terminal.Type,
+		"#MCCMNC#", strings.TrimSpace(profile.MCC)+strings.TrimSpace(profile.MNC),
+		"#IMEISV#", imeisvFromIMEI(terminal.ID),
+		"#OPERATOR#", strings.TrimSpace(profile.WFCSPN),
+		"#HWSKU#", terminal.HardwareSKU,
+	)
+	return replacer.Replace(template)
+}
+
+func imeisvFromIMEI(imei string) string {
+	imei = strings.TrimSpace(imei)
+	if len(imei) >= 16 {
+		return imei[:16]
+	}
+	if len(imei) >= 14 {
+		return imei[:14] + "00"
+	}
+	return imei
 }

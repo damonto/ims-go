@@ -7,7 +7,7 @@ import (
 	"github.com/damonto/uicc-go/usim"
 )
 
-func (s *Service) resolveServiceCenter() (serviceCenter, error) {
+func (s *Endpoint) resolveServiceCenter() (serviceCenter, error) {
 	cfgValue := strings.TrimSpace(s.cfg.ServiceCenter)
 	cardCenter := usim.ServiceCenter{Address: strings.TrimSpace(s.card.SMSC())}
 	if provider, ok := s.card.(serviceCenterProvider); ok {

@@ -35,6 +35,37 @@ type ikeSARekeyResult struct {
 	localInitiator bool
 }
 
+type ikeAssociation struct {
+	ike               *ikeCrypto
+	pendingIKESA      ikeSARekeyResult
+	pendingIKESAReady bool
+	retiredIKESAs     []retiredIKESA
+	ikeLocalInitiator bool
+	initiatorSPI      uint64
+	responderSPI      uint64
+	deviceIdentity    string
+	ikeSARekeying     bool
+	simultaneousIKESA simultaneousIKESARekey
+}
+
+type retiredIKESA struct {
+	ike               *ikeCrypto
+	localInitiator    bool
+	initiatorSPI      uint64
+	responderSPI      uint64
+	peer              *net.UDPAddr
+	useNATT           bool
+	nextPeerMessageID uint32
+	responses         map[uint32][][]byte
+	responseReqs      map[uint32][]byte
+	expiresAt         time.Time
+}
+
+type simultaneousIKESARekey struct {
+	ready bool
+	peer  ikeSARekeyResult
+}
+
 func (s *Session) RekeyIKESA(ctx context.Context) error {
 	state, release, err := s.beginIKESARekey()
 	if err != nil {
