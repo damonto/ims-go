@@ -591,7 +591,7 @@ func openDriver(ctx context.Context, opt options) (usimcard.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening AT driver: -device is required")
 		}
-		tx, err := uiccat.Open(ctx, opt.device, 0)
+		tx, err := uiccat.Open(opt.device, 0)
 		if err != nil {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
 		}

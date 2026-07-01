@@ -373,26 +373,25 @@ func childSAProposals(cfg handshake.Config, espSPI uint32) []ike.Proposal {
 func childSAProposalsWithDH(cfg handshake.Config, espSPI uint32, dhGroup uint16) []ike.Proposal {
 	keyLens := uint16ValuesOrDefault(cfg.ChildEncryptionKeyLens, defaultEncryptionKeyLens)
 	integrity := uint16ValuesOrDefault(cfg.ChildIntegrity, defaultChildIntegrity)
-	proposals := make([]ike.Proposal, 0, len(keyLens)*len(integrity))
+	transforms := make([]ike.Transform, 0, len(keyLens)+len(integrity)+2)
 	for _, keyLen := range keyLens {
-		for _, integ := range integrity {
-			transforms := []ike.Transform{
-				aesCBCTransform(keyLen),
-				{TransformType: transformTypeINTEG, ID: integ},
-			}
-			if dhGroup != 0 {
-				transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
-			}
-			transforms = append(transforms, ike.Transform{TransformType: transformTypeESN, ID: transformESNNoESN})
-			proposals = append(proposals, ike.Proposal{
-				Number:     byte(len(proposals) + 1),
-				ProtocolID: proposalProtocolESP,
-				SPI:        uint32Bytes(espSPI),
-				Transforms: transforms,
-			})
-		}
+		transforms = append(transforms, aesCBCTransform(keyLen))
 	}
-	return proposals
+	for _, integ := range integrity {
+		transforms = append(transforms, ike.Transform{TransformType: transformTypeINTEG, ID: integ})
+	}
+	if dhGroup != 0 {
+		transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
+	}
+	transforms = append(transforms, ike.Transform{TransformType: transformTypeESN, ID: transformESNNoESN})
+	return []ike.Proposal{
+		{
+			Number:     1,
+			ProtocolID: proposalProtocolESP,
+			SPI:        uint32Bytes(espSPI),
+			Transforms: transforms,
+		},
+	}
 }
 
 func aesCBCTransform(keyLen uint16) ike.Transform {

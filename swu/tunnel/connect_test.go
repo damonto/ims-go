@@ -838,8 +838,8 @@ func TestSAProposalsUseConfigWithoutFallback(t *testing.T) {
 		{
 			name:            "defaults are pixel supported intersection",
 			cfg:             handshake.Config{},
-			wantIKE:         4,
-			wantChild:       2,
+			wantIKE:         1,
+			wantChild:       1,
 			wantIKEKeyLen:   128,
 			wantIKEInteg:    transformINTEGHMACSHA256,
 			wantIKEPRF:      transformPRFHMACSHA1,
@@ -891,6 +891,41 @@ func TestSAProposalsUseConfigWithoutFallback(t *testing.T) {
 				t.Fatalf("child integ = %d, want %d", got, tt.wantChildInteg)
 			}
 		})
+	}
+}
+
+func TestIKESAProposalsGroupTransformAlternatives(t *testing.T) {
+	proposals := ikeSAProposals(handshake.Config{
+		IKEEncryptionKeyLens: []uint16{128, 256},
+		IKEIntegrity:         []uint16{transformINTEGHMACSHA256},
+		IKEPRF:               []uint16{transformPRFHMACSHA1, transformPRFHMACSHA256},
+	}, transformDH2048MODP)
+
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	if got := proposalKeyLengths(t, proposals[0]); !slices.Equal(got, []uint16{128, 256}) {
+		t.Fatalf("ike key lengths = %v, want [128 256]", got)
+	}
+	if got := proposalTransformIDs(proposals[0], transformTypePRF); !slices.Equal(got, []uint16{transformPRFHMACSHA1, transformPRFHMACSHA256}) {
+		t.Fatalf("ike prfs = %v, want [%d %d]", got, transformPRFHMACSHA1, transformPRFHMACSHA256)
+	}
+}
+
+func TestChildSAProposalsGroupTransformAlternatives(t *testing.T) {
+	proposals := childSAProposals(handshake.Config{
+		ChildEncryptionKeyLens: []uint16{128, 256},
+		ChildIntegrity:         []uint16{transformINTEGHMACSHA196, transformINTEGHMACSHA256},
+	}, 0x01020304)
+
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	if got := proposalKeyLengths(t, proposals[0]); !slices.Equal(got, []uint16{128, 256}) {
+		t.Fatalf("child key lengths = %v, want [128 256]", got)
+	}
+	if got := proposalTransformIDs(proposals[0], transformTypeINTEG); !slices.Equal(got, []uint16{transformINTEGHMACSHA196, transformINTEGHMACSHA256}) {
+		t.Fatalf("child integrities = %v, want [%d %d]", got, transformINTEGHMACSHA196, transformINTEGHMACSHA256)
 	}
 }
 
@@ -1076,10 +1111,42 @@ func TestNegotiatedIKESAInitValidatesOfferedProposal(t *testing.T) {
 	}
 }
 
+func TestNegotiatedIKESAInitAcceptsGroupedKeyLengthAlternative(t *testing.T) {
+	const dhGroup = transformDH2048MODP
+	requestProposals := ikeSAProposals(handshake.Config{
+		IKEEncryptionKeyLens: []uint16{128, 256},
+		IKEIntegrity:         []uint16{transformINTEGHMACSHA256},
+		IKEPRF:               []uint16{transformPRFHMACSHA1},
+	}, dhGroup)
+	response := ike.Proposal{
+		Number:     1,
+		ProtocolID: proposalProtocolIKE,
+		Transforms: []ike.Transform{
+			aesCBCTransform(256),
+			{TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256},
+			{TransformType: transformTypePRF, ID: transformPRFHMACSHA1},
+			{TransformType: transformTypeDH, ID: dhGroup},
+		},
+	}
+	payloads := []ike.Payload{
+		&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{response}},
+		&ike.NoncePayload{Data: make([]byte, ikeNonceMinLen)},
+		&ike.KeyExchangePayload{DHGroup: dhGroup, Data: []byte{0x01}},
+	}
+
+	proposal, _, _, err := negotiatedIKESAFromPayloads(payloads, dhGroup, requestProposals)
+	if err != nil {
+		t.Fatalf("negotiatedIKESAFromPayloads() error = %v", err)
+	}
+	if proposal.EncryptionKeyLen != 256 {
+		t.Fatalf("negotiated key length = %d, want 256", proposal.EncryptionKeyLen)
+	}
+}
+
 func TestChildSAConfigValidatesNegotiatedProposal(t *testing.T) {
 	requestProposals := childSAProposals(handshake.Config{}, 0x01020304)
 	validProposal := func() ike.Proposal {
-		proposal := requestProposals[0]
+		proposal := selectedChildProposal(requestProposals[0])
 		proposal.SPI = append([]byte(nil), proposal.SPI...)
 		proposal.Transforms = append([]ike.Transform(nil), proposal.Transforms...)
 		for i := range proposal.Transforms {
@@ -1222,6 +1289,41 @@ func TestChildSAConfigValidatesNegotiatedProposal(t *testing.T) {
 				t.Fatalf("childSAConfig() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestChildSAConfigAcceptsGroupedKeyLengthAlternative(t *testing.T) {
+	requestProposals := childSAProposals(handshake.Config{
+		ChildEncryptionKeyLens: []uint16{128, 256},
+		ChildIntegrity:         []uint16{transformINTEGHMACSHA256},
+	}, 0x01020304)
+	response := ike.Proposal{
+		Number:     1,
+		ProtocolID: proposalProtocolESP,
+		SPI:        uint32Bytes(0x05060708),
+		Transforms: []ike.Transform{
+			aesCBCTransform(256),
+			{TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256},
+			{TransformType: transformTypeESN, ID: transformESNNoESN},
+		},
+	}
+	payloads := []ike.Payload{
+		&ike.ConfigPayload{ConfigType: configTypeReply},
+		&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{response}},
+		&ike.TrafficSelectorPayload{Tag: payloadTypeTSi, Selectors: ike.TrafficSelectorsAny()},
+		&ike.TrafficSelectorPayload{Tag: payloadTypeTSr, Selectors: ike.TrafficSelectorsAny()},
+	}
+
+	_, proposal, _, _, err := childSAConfig(payloads, requestProposals)
+	if err != nil {
+		t.Fatalf("childSAConfig() error = %v", err)
+	}
+	info, err := tunnelInfoFromProposal(proposal)
+	if err != nil {
+		t.Fatalf("tunnelInfoFromProposal() error = %v", err)
+	}
+	if info.EncryptionKeyLen != 256 {
+		t.Fatalf("negotiated child key length = %d, want 256", info.EncryptionKeyLen)
 	}
 }
 
@@ -1601,6 +1703,16 @@ func proposalTransformID(proposal ike.Proposal, transformType byte) uint16 {
 	return 0
 }
 
+func proposalTransformIDs(proposal ike.Proposal, transformType byte) []uint16 {
+	var ids []uint16
+	for _, transform := range proposal.Transforms {
+		if transform.TransformType == transformType {
+			ids = append(ids, transform.ID)
+		}
+	}
+	return ids
+}
+
 func proposalKeyLength(t *testing.T, proposal ike.Proposal) uint16 {
 	t.Helper()
 	for _, transform := range proposal.Transforms {
@@ -1620,6 +1732,41 @@ func proposalKeyLength(t *testing.T, proposal ike.Proposal) uint16 {
 	}
 	t.Fatal("key length attr is missing")
 	return 0
+}
+
+func proposalKeyLengths(t *testing.T, proposal ike.Proposal) []uint16 {
+	t.Helper()
+	var keyLens []uint16
+	for _, transform := range proposal.Transforms {
+		if transform.TransformType != transformTypeENCR {
+			continue
+		}
+		keyLen, ok := transformKeyLength(transform)
+		if !ok {
+			t.Fatal("key length attr is missing")
+		}
+		keyLens = append(keyLens, keyLen)
+	}
+	return keyLens
+}
+
+func selectedChildProposal(request ike.Proposal) ike.Proposal {
+	selected := ike.Proposal{
+		Number:     request.Number,
+		ProtocolID: request.ProtocolID,
+		SPI:        append([]byte(nil), request.SPI...),
+	}
+	for _, transformType := range []byte{transformTypeENCR, transformTypeINTEG, transformTypeDH, transformTypeESN} {
+		for _, transform := range request.Transforms {
+			if transform.TransformType != transformType {
+				continue
+			}
+			transform.Attributes = append([]ike.Attribute(nil), transform.Attributes...)
+			selected.Transforms = append(selected.Transforms, transform)
+			break
+		}
+	}
+	return selected
 }
 
 func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectState, ike.IKEPacket, []byte, []byte, *net.UDPAddr, *net.UDPAddr) {

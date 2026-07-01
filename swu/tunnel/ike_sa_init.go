@@ -321,24 +321,24 @@ func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
 	keyLens := uint16ValuesOrDefault(cfg.IKEEncryptionKeyLens, defaultEncryptionKeyLens)
 	integrity := uint16ValuesOrDefault(cfg.IKEIntegrity, defaultIKEIntegrity)
 	prfs := uint16ValuesOrDefault(cfg.IKEPRF, defaultIKEPRF)
-	proposals := make([]ike.Proposal, 0, len(keyLens)*len(integrity)*len(prfs))
+	transforms := make([]ike.Transform, 0, len(keyLens)+len(integrity)+len(prfs)+1)
 	for _, keyLen := range keyLens {
-		for _, integ := range integrity {
-			for _, prf := range prfs {
-				proposals = append(proposals, ike.Proposal{
-					Number:     byte(len(proposals) + 1),
-					ProtocolID: proposalProtocolIKE,
-					Transforms: []ike.Transform{
-						aesCBCTransform(keyLen),
-						{TransformType: transformTypeINTEG, ID: integ},
-						{TransformType: transformTypePRF, ID: prf},
-						{TransformType: transformTypeDH, ID: dhGroup},
-					},
-				})
-			}
-		}
+		transforms = append(transforms, aesCBCTransform(keyLen))
 	}
-	return proposals
+	for _, integ := range integrity {
+		transforms = append(transforms, ike.Transform{TransformType: transformTypeINTEG, ID: integ})
+	}
+	for _, prf := range prfs {
+		transforms = append(transforms, ike.Transform{TransformType: transformTypePRF, ID: prf})
+	}
+	transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
+	return []ike.Proposal{
+		{
+			Number:     1,
+			ProtocolID: proposalProtocolIKE,
+			Transforms: transforms,
+		},
+	}
 }
 
 func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, remote *net.UDPAddr) []ike.Payload {
