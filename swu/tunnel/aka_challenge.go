@@ -193,7 +193,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("calculating aka response: %w", err)
 	}
-	if aka.IsSynchronizationFailure() {
+	if aka.SynchronizationFailed() {
 		var data []byte
 		if message.EAPType == eapTypeAKAPrime {
 			kdfs, parseErr := akaPrimeKDFValues(message.Attributes)
@@ -209,7 +209,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		}
 		return akaResponse{data: data}, nil
 	}
-	if aka.IsAuthenticationReject() {
+	if aka.AuthenticationRejected() {
 		var data []byte
 		if message.EAPType == eapTypeAKAPrime {
 			data, err = eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
@@ -221,7 +221,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		}
 		return akaResponse{data: data}, nil
 	}
-	if !aka.IsSuccess() {
+	if !aka.Successful() {
 		return f.clientErrorResponse(message.Identifier, errors.New("processing aka result: aka result is incomplete"))
 	}
 	f.logger().Debug(

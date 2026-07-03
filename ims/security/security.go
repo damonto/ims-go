@@ -326,10 +326,10 @@ func digestAKAUsable(aka usim.AKAResult) bool {
 }
 
 func akaChallengeFailure(aka usim.AKAResult) *AKAChallengeFailure {
-	if aka.IsSynchronizationFailure() {
+	if aka.SynchronizationFailed() {
 		return &AKAChallengeFailure{AUTS: append([]byte(nil), aka.AUTS...)}
 	}
-	if aka.IsAuthenticationReject() {
+	if aka.AuthenticationRejected() {
 		return &AKAChallengeFailure{Reject: true}
 	}
 	return nil
