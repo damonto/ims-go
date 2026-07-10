@@ -8,8 +8,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 type createChildSARequestState struct {

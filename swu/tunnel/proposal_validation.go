@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func validateNegotiatedProposalFromRequests(response ike.Proposal, requests []ike.Proposal) error {

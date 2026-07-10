@@ -9,8 +9,8 @@ import (
 	"net"
 	"slices"
 
-	"github.com/damonto/vowifi-go/swu/handshake"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/handshake"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func (state *connectState) buildIKESAInitRequest(outerLocal, outerRemote *net.UDPAddr) ([]byte, error) {

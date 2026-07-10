@@ -11,23 +11,23 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 var ErrIMSDomainNotAllowed = errors.New("ims ussd is not allowed by domain policy")
 
 func New(cfg Config, sess *session.Session, reg *registration.Registrar) (*Endpoint, error) {
-	normalized, err := normalizeConfig(cfg)
+	endpointCfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 	endpoint := &Endpoint{
-		cfg:           normalized,
+		cfg:           endpointCfg,
 		sess:          sess,
 		reg:           reg,
-		logger:        normalized.Logger.With("component", "ims-ussd"),
+		logger:        endpointCfg.Logger.With("component", "ims-ussd"),
 		sessions:      make(map[string]*Session),
 		incomingIndex: make(map[string]string),
 		done:          make(chan struct{}),

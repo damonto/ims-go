@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"net"
 
-	"github.com/damonto/vowifi-go/swu/handshake"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/handshake"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 type Info struct {

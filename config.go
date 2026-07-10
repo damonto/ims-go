@@ -1,29 +1,27 @@
-package vowifi
+package ims
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/pidf"
-	"github.com/damonto/vowifi-go/ims/security"
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	imssms "github.com/damonto/vowifi-go/ims/sms"
-	imsussd "github.com/damonto/vowifi-go/ims/ussd"
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
-	"github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/security"
+	imssession "github.com/damonto/ims-go/ims/session"
+	imssms "github.com/damonto/ims-go/ims/sms"
+	imsussd "github.com/damonto/ims-go/ims/ussd"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+	"github.com/damonto/ims-go/swu/tunnel"
 )
 
 type Config struct {
-	EPDG              string
 	Logger            *slog.Logger
 	ReconnectDelay    time.Duration
 	ReconnectMaxDelay time.Duration
 	Terminal          TerminalInfo
-	Tunnel            tunnel.Config
+	Access            AccessConfig
 	IMS               IMSConfig
 
 	smsRequestStatusReport bool
@@ -75,18 +73,27 @@ type IMSConfig struct {
 	TCPDataACKTimeouts       []time.Duration
 	SMSDeliveryReportTimeout time.Duration
 	Voice                    imsvoice.Config
-
-	dialSecureTCP   func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
-	dialSecureUDP   func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
-	listenSecureTCP func(context.Context, imssession.SecureTCPConfig) (imssession.Transport, error)
-	listenSecureUDP func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
 }
 
 func cloneConfig(cfg *Config) Config {
 	if cfg == nil {
 		return Config{}
 	}
-	return *cfg
+	cloned := *cfg
+	cloned.Access = cfg.Access.clone()
+	return cloned
+}
+
+func (cfg AccessConfig) clone() AccessConfig {
+	if cfg.VoWiFi != nil {
+		wifi := *cfg.VoWiFi
+		cfg.VoWiFi = &wifi
+	}
+	if cfg.VoLTE != nil {
+		volte := *cfg.VoLTE
+		cfg.VoLTE = &volte
+	}
+	return cfg
 }
 
 func (cfg Config) normalized(card Card) (Config, error) {
@@ -114,19 +121,27 @@ func (cfg Config) normalized(card Card) (Config, error) {
 		return Config{}, errors.New("normalizing client config: terminal id is empty")
 	}
 	cfg.smsRequestStatusReport = true
-	profile, ok, err := loadWFCProfile(card)
+	accessCfg, err := cfg.Access.normalized()
 	if err != nil {
 		return Config{}, err
 	}
-	if ok {
-		cfg = cfg.withWFCProfile(profile, card)
-	}
-	if cfg.EPDG == "" {
-		epdg, err := defaultEPDGAddress(card)
+	cfg.Access = accessCfg
+
+	if cfg.usesVoWiFi() {
+		profile, ok, err := loadWFCProfile(card)
 		if err != nil {
 			return Config{}, err
 		}
-		cfg.EPDG = epdg
+		if ok {
+			cfg = cfg.withWFCProfile(profile, card)
+		}
+		if cfg.Access.VoWiFi.EPDG == "" {
+			epdg, err := defaultEPDGAddress(card)
+			if err != nil {
+				return Config{}, err
+			}
+			cfg.Access.VoWiFi.EPDG = epdg
+		}
 	}
 
 	imsCfg, err := cfg.normalizedIMS()
@@ -135,18 +150,24 @@ func (cfg Config) normalized(card Card) (Config, error) {
 	}
 	cfg.IMS = imsCfg
 
-	tunnelCfg, err := cfg.normalizedTunnel()
-	if err != nil {
-		return Config{}, err
+	if cfg.usesVoWiFi() {
+		tunnelCfg, err := cfg.normalizedTunnel()
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Access.VoWiFi.Tunnel = tunnelCfg
 	}
-	cfg.Tunnel = tunnelCfg
 
 	return cfg, nil
 }
 
 func (cfg Config) trimmed() Config {
-	cfg.EPDG = strings.TrimSpace(cfg.EPDG)
 	cfg.Terminal = cfg.Terminal.trimmed()
+	if cfg.Access.VoWiFi != nil {
+		wifi := *cfg.Access.VoWiFi
+		wifi.EPDG = strings.TrimSpace(wifi.EPDG)
+		cfg.Access.VoWiFi = &wifi
+	}
 	return cfg
 }
 
@@ -161,18 +182,18 @@ func (cfg Config) validate() error {
 }
 
 func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
-	tunnelCfg := cfg.Tunnel
+	tunnelCfg := cfg.Access.VoWiFi.Tunnel
 	if tunnelCfg.Logger == nil {
 		tunnelCfg.Logger = cfg.Logger
 	}
 	if tunnelCfg.SIPPort == 0 && cfg.IMS.SIPServerPort != 0 {
 		tunnelCfg.SIPPort = cfg.IMS.SIPServerPort
 	}
-	normalized, err := tunnelCfg.Normalized()
+	tunnelCfg, err := tunnelCfg.Normalized()
 	if err != nil {
 		return tunnel.Config{}, fmt.Errorf("normalizing tunnel config: %w", err)
 	}
-	return normalized, nil
+	return tunnelCfg, nil
 }
 
 func (cfg Config) normalizedIMS() (IMSConfig, error) {
@@ -180,19 +201,26 @@ func (cfg Config) normalizedIMS() (IMSConfig, error) {
 	if imsCfg.IMEI == "" {
 		imsCfg.IMEI = cfg.Terminal.trimmed().ID
 	}
+	var epdg string
+	if cfg.usesVoWiFi() {
+		epdg = strings.TrimSpace(cfg.Access.VoWiFi.EPDG)
+	}
 	// Over ePDG/SWu we default to TCP for SIP, matching the pre-refactor
 	// behavior and avoiding large initial REGISTER requests over UDP.
-	if strings.TrimSpace(imsCfg.Transport) == "" && strings.TrimSpace(cfg.EPDG) != "" {
+	if strings.TrimSpace(imsCfg.Transport) == "" && epdg != "" {
 		imsCfg.Transport = "tcp"
 	}
-	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && strings.TrimSpace(imsCfg.WLANNodeID) == "" && strings.TrimSpace(cfg.EPDG) != "" {
+	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && cfg.usesVoLTE() {
+		imsCfg.AccessNetworkInfo = cfg.Access.VoLTE.AccessNetworkInfo
+	}
+	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && strings.TrimSpace(imsCfg.WLANNodeID) == "" && epdg != "" {
 		imsCfg.AccessNetworkInfo = "IEEE-802.11"
 	}
-	normalized, err := imsCfg.Normalized()
+	imsCfg, err := imsCfg.Normalized()
 	if err != nil {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	return normalized, nil
+	return imsCfg, nil
 }
 
 func (cfg IMSConfig) Normalized() (IMSConfig, error) {

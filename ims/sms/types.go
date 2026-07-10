@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 type Config struct {

@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import "sync"
 

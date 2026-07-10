@@ -5,9 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 type CallDirection string

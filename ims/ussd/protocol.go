@@ -87,7 +87,7 @@ func escapeBareAmpersands(text []byte) []byte {
 		return text
 	}
 	var out []byte
-	for i := 0; i < len(text); i++ {
+	for i := range len(text) {
 		if text[i] != '&' || isXMLReference(text[i:]) {
 			out = append(out, text[i])
 			continue

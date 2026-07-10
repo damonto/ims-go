@@ -38,9 +38,8 @@ func (c *Call) SendDTMF(ctx context.Context, req DTMFRequest) error {
 	if duration < 0 {
 		return errors.New("sending dtmf: duration must be >= 0")
 	}
-	if duration < minDTMFDuration {
-		duration = minDTMFDuration
-	}
+	duration = max(duration, minDTMFDuration)
+
 	pause := req.Pause
 	if pause == 0 {
 		pause = defaultDTMFPause
@@ -184,14 +183,14 @@ func (c *Call) sendDTMFEvent(ctx context.Context, transport MediaTransport, medi
 
 func (c *Call) writeDTMFRTPPacket(ctx context.Context, transport MediaTransport, media NegotiatedMedia, rtp *rtpSendState, timestamp uint32, event byte, volume byte, duration uint16, end bool, marker bool) error {
 	payload := buildDTMFPayload(event, volume, duration, end)
-	wire, err := BuildRTPPacket(RTPPacket{
+	wire, err := (RTPPacket{
 		PayloadType:    media.DTMFPayloadType,
 		SequenceNumber: rtp.nextSequence,
 		Timestamp:      timestamp,
 		SSRC:           rtp.ssrc,
 		Marker:         marker,
 		Payload:        payload,
-	})
+	}).MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("sending dtmf: %w", err)
 	}
@@ -250,9 +249,9 @@ func mediaFrameTicks(media NegotiatedMedia) uint32 {
 }
 
 func normalizeDTMFInterval(duration time.Duration, frame time.Duration) time.Duration {
-	if duration < minDTMFDuration {
-		duration = minDTMFDuration
-	}
+
+	duration = max(duration, minDTMFDuration)
+
 	if frame <= 0 {
 		frame = defaultPTime
 	}

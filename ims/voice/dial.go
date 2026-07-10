@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {

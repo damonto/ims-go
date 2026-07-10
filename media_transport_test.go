@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"net"
 	"testing"
 
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
-	"github.com/damonto/vowifi-go/swu/packet"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+	"github.com/damonto/ims-go/swu/packet"
 )
 
 func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {
@@ -31,7 +31,7 @@ func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {
 			transport := &tunnelMediaTransport{
 				logger: testMediaLogger(),
 				local:  &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
-				remote: tt.remote,
+				remote: imsvoice.MediaRemote{RTP: tt.remote},
 				readCh: make(chan tunnelMediaPacket, 1),
 				rtcpCh: make(chan tunnelMediaPacket, 1),
 				done:   make(chan struct{}),
@@ -134,8 +134,8 @@ func TestTunnelMediaTransportConfiguresRemoteAfterPrepare(t *testing.T) {
 				t.Fatalf("RemoteAddr() = %v, want 192.0.2.10:50000", remote)
 			}
 			transport.mu.Lock()
-			rtcpRemote := transport.remoteMediaAddr(true)
-			rtcpMux := transport.rtcpMux
+			rtcpRemote := transport.remote.Addr(true)
+			rtcpMux := transport.remote.RTCPMux
 			transport.mu.Unlock()
 			if rtcpMux != tt.wantRTCPMux {
 				t.Fatalf("rtcpMux = %v, want %v", rtcpMux, tt.wantRTCPMux)
@@ -143,7 +143,7 @@ func TestTunnelMediaTransportConfiguresRemoteAfterPrepare(t *testing.T) {
 			if rtcpRemote.Port != tt.wantRTCPPort {
 				t.Fatalf("remote rtcp port = %d, want %d", rtcpRemote.Port, tt.wantRTCPPort)
 			}
-			if tt.wantRemoteRTCP != nil && !mediaAddrMatches(rtcpRemote, tt.wantRemoteRTCP) {
+			if tt.wantRemoteRTCP != nil && !imsvoice.UDPAddrMatches(rtcpRemote, tt.wantRemoteRTCP) {
 				t.Fatalf("remote rtcp addr = %v, want %v", rtcpRemote, tt.wantRemoteRTCP)
 			}
 		})
@@ -167,8 +167,7 @@ func TestTunnelMediaTransportHandlesRTCPMux(t *testing.T) {
 			transport := &tunnelMediaTransport{
 				logger:   testMediaLogger(),
 				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
-				remote:   &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
-				rtcpMux:  true,
+				remote:   imsvoice.MediaRemote{RTP: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}, RTCPMux: true},
 				readCh:   make(chan tunnelMediaPacket, 1),
 				rtcpCh:   make(chan tunnelMediaPacket, 1),
 				done:     make(chan struct{}),
@@ -221,7 +220,7 @@ func TestTunnelMediaTransportNotifiesMediaPackets(t *testing.T) {
 			transport := &tunnelMediaTransport{
 				logger:   testMediaLogger(),
 				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
-				remote:   &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
+				remote:   imsvoice.MediaRemote{RTP: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}},
 				readCh:   make(chan tunnelMediaPacket, 1),
 				rtcpCh:   make(chan tunnelMediaPacket, 1),
 				done:     make(chan struct{}),
@@ -267,7 +266,7 @@ func TestTunnelMediaTransportDrainsPacketsAfterClose(t *testing.T) {
 			transport := &tunnelMediaTransport{
 				logger:   testMediaLogger(),
 				local:    &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
-				remote:   &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000},
+				remote:   imsvoice.MediaRemote{RTP: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 50000}},
 				readCh:   make(chan tunnelMediaPacket, 1),
 				rtcpCh:   make(chan tunnelMediaPacket, 1),
 				done:     make(chan struct{}),

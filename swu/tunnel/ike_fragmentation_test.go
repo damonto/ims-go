@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func TestIKEFragmentReassemblyRoundTrip(t *testing.T) {

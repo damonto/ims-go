@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 type dialogSnapshot struct {
@@ -171,9 +171,9 @@ func (s dialogSnapshot) buildSessionRefreshUPDATE(cseq int64, timer sessionTimer
 	addTokenHeader(&msg, "Supported", sessionTimerOption)
 	if timer.active {
 		seconds := durationSeconds(timer.interval)
-		if timer.minSE > seconds {
-			seconds = timer.minSE
-		}
+
+		seconds = max(seconds, timer.minSE)
+
 		msg.Headers.Set("Session-Expires", sessionExpiresHeader{
 			seconds:   seconds,
 			refresher: sessionRefresherUAC,
@@ -219,9 +219,7 @@ func (s dialogSnapshot) buildSessionRefreshRequest(cseq int64, timer sessionTime
 	}
 	if timer.active {
 		seconds := durationSeconds(timer.interval)
-		if timer.minSE > seconds {
-			seconds = timer.minSE
-		}
+		seconds = max(seconds, timer.minSE)
 		msg.Headers.Set("Session-Expires", sessionExpiresHeader{
 			seconds:   seconds,
 			refresher: sessionRefresherUAC,
@@ -241,9 +239,9 @@ func (s dialogSnapshot) buildMediaReINVITE(cseq int64, timer sessionTimerState, 
 	s.addPreconditionSupport(&msg, body)
 	if timer.active {
 		seconds := durationSeconds(timer.interval)
-		if timer.minSE > seconds {
-			seconds = timer.minSE
-		}
+
+		seconds = max(seconds, timer.minSE)
+
 		msg.Headers.Set("Session-Expires", sessionExpiresHeader{
 			seconds:   seconds,
 			refresher: sessionRefresherUAC,

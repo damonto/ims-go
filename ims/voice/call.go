@@ -7,8 +7,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (c *Call) ID() string {

@@ -4,7 +4,8 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/damonto/vowifi-go/swu/packet"
+	imssession "github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/swu/packet"
 )
 
 // Keep the out-of-order queue below the advertised window so retransmitted
@@ -29,9 +30,9 @@ func (t *TCPConn) consumeSegment(seq uint32, flags byte, payload []byte) error {
 	}
 	if tcpSeqAfter(t.recvSeq, seq) {
 		skip := t.recvSeq - seq
-		if skip > uint32(len(payload)) {
-			skip = uint32(len(payload))
-		}
+
+		skip = min(skip, uint32(len(payload)))
+
 		payload = payload[skip:]
 		seq = t.recvSeq
 	}
@@ -50,7 +51,7 @@ func (t *TCPConn) consumeSegment(seq uint32, flags byte, payload []byte) error {
 	}
 
 	stream := append(append([]byte(nil), t.stream...), payload...)
-	messages, rest, err := stageSIPMessages(stream)
+	messages, rest, err := imssession.StageSIPMessages(stream)
 	if err != nil && len(messages) > cap(t.msgCh)-len(t.msgCh) {
 		return errTCPReceiveQueueFull
 	}

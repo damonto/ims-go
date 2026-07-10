@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/damonto/vowifi-go/eapaka"
+	"github.com/damonto/ims-go/eapaka"
 )
 
 func eapAKAChallengeResponse(ctx context.Context, card Card, challengeText string) (string, error) {

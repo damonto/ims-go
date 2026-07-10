@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/damonto/ims-go/eapaka"
+	"github.com/damonto/ims-go/swu/ike"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/eapaka"
-	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 type akaAuthFlow struct {

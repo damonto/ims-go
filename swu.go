@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
+	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 
 func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel.Info, error) {
@@ -163,7 +163,7 @@ func (c *Client) swuBackoffKeys() []swuBackoffKey {
 func swuBackoffKeyFor(cfg Config, card Card, scope swutunnel.BackoffScope) (swuBackoffKey, bool) {
 	key := swuBackoffKey{scope: scope}
 	if scope == swutunnel.BackoffScopeEPDG {
-		epdg := strings.ToLower(strings.TrimSpace(cfg.EPDG))
+		epdg := strings.ToLower(strings.TrimSpace(cfg.Access.VoWiFi.EPDG))
 		if epdg == "" {
 			return swuBackoffKey{}, false
 		}
@@ -187,7 +187,7 @@ func swuBackoffKeyFor(cfg Config, card Card, scope swutunnel.BackoffScope) (swuB
 }
 
 func swuBackoffAPNFor(cfg Config) string {
-	apn := strings.ToLower(strings.TrimSpace(cfg.Tunnel.APN))
+	apn := strings.ToLower(strings.TrimSpace(cfg.Access.VoWiFi.Tunnel.APN))
 	if apn == "" {
 		return swutunnel.DefaultAPN
 	}
@@ -226,7 +226,7 @@ func (c *Client) recordSWUPDNTypeRestriction(info swutunnel.Info) {
 		return
 	}
 	c.withStateLock(func(s *clientState) {
-		key, ok := swuPDNTypeRestrictionKeyFor(c.card, c.cfg.Tunnel)
+		key, ok := swuPDNTypeRestrictionKeyFor(c.card, c.cfg.Access.VoWiFi.Tunnel)
 		if !ok {
 			return
 		}
@@ -260,7 +260,7 @@ func (c *Client) clearSWUPDNTypeRestrictionAfterDisconnect(cause error) {
 
 func (c *Client) clearSWUPDNTypeRestriction() {
 	c.withStateLock(func(s *clientState) {
-		key, ok := swuPDNTypeRestrictionKeyFor(c.card, c.cfg.Tunnel)
+		key, ok := swuPDNTypeRestrictionKeyFor(c.card, c.cfg.Access.VoWiFi.Tunnel)
 		if !ok || len(s.swuPDNTypes.entries) == 0 {
 			return
 		}

@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/damonto/vowifi-go/ims/pidf"
-	"github.com/damonto/vowifi-go/ims/security"
+	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/security"
 )
 
 type clientIdentity struct {

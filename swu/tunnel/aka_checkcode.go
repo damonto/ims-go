@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/damonto/vowifi-go/eapaka"
+	"github.com/damonto/ims-go/eapaka"
 )
 
 func checkcodeValue(attrs []eapaka.AKAAttribute, eapType byte) ([]byte, bool, error) {

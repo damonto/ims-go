@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/damonto/vowifi-go/swu/handshake"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/handshake"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) error {

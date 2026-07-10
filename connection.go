@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -7,14 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/damonto/ims-go/ims/registration"
+	imssession "github.com/damonto/ims-go/ims/session"
+	imssms "github.com/damonto/ims-go/ims/sms"
+	imsussd "github.com/damonto/ims-go/ims/ussd"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
-	"github.com/damonto/vowifi-go/ims/registration"
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	imssms "github.com/damonto/vowifi-go/ims/sms"
-	imsussd "github.com/damonto/vowifi-go/ims/ussd"
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
-	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 type connectionScope struct {
@@ -24,6 +24,7 @@ type connectionScope struct {
 
 type activeConn struct {
 	scope  *connectionScope
+	access accessSession
 	tunnel *swutunnel.Session
 	ims    imsStack
 }
@@ -32,6 +33,7 @@ type connectSetup struct {
 	client    *Client
 	setupStop context.CancelFunc
 	scope     *connectionScope
+	access    accessSession
 	tunnelCfg swutunnel.Config
 	imsCfg    IMSConfig
 	tunnel    *swutunnel.Session
@@ -141,17 +143,20 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	if !internal {
 		c.emitStatus(StatusConnecting)
 	}
-	tunnelInfo, err := c.openTunnel(setupCtx, setup)
-	if err != nil {
-		c.recordSWUBackoff(err, time.Now())
+	if err := c.openAccess(setupCtx, setup); err != nil {
+		if c.cfg.usesVoWiFi() {
+			c.recordSWUBackoff(err, time.Now())
+		}
 		if !internal {
 			c.emitConnectFailure(ctx, err)
 		}
 		return nil, err
 	}
-	c.clearCurrentSWUBackoff()
+	if c.cfg.usesVoWiFi() {
+		c.clearCurrentSWUBackoff()
+	}
 
-	if err := c.openIMS(setupCtx, setup, tunnelInfo); err != nil {
+	if err := c.openIMS(setupCtx, setup); err != nil {
 		if !internal {
 			c.emitConnectFailure(ctx, err)
 		}
@@ -185,10 +190,12 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 		c.finishConnectAttempt()
 		return nil, nil, err
 	}
-	if err := c.waitSWUBackoff(setupCtx); err != nil {
-		setupStop()
-		c.finishConnectAttempt()
-		return nil, nil, err
+	if c.cfg.usesVoWiFi() {
+		if err := c.waitSWUBackoff(setupCtx); err != nil {
+			setupStop()
+			c.finishConnectAttempt()
+			return nil, nil, err
+		}
 	}
 
 	scope := newConnectionScope()
@@ -199,22 +206,16 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 		return nil, nil, err
 	}
 
-	tunnelCfg := c.cfg.Tunnel
-	tunnelCfg.RemoteAddr = c.cfg.EPDG
-	c.applySWUPDNTypeRestriction(&tunnelCfg)
-
-	tunnelCfg, err := tunnelCfg.Normalized()
-	if err != nil {
-		return fail(fmt.Errorf("preparing connect: %w", err))
-	}
-	if tunnelCfg.RemoteAddr == "" {
-		return fail(errors.New("preparing connect: tunnel remote address is empty"))
-	}
-
 	imsCfg := c.cfg.IMS
-	imsCfg, err = imsCfg.Normalized()
-	if err != nil {
-		return fail(fmt.Errorf("preparing connect: %w", err))
+	var tunnelCfg swutunnel.Config
+	if c.cfg.usesVoWiFi() {
+		tunnelCfg = c.cfg.Access.VoWiFi.Tunnel
+		tunnelCfg.RemoteAddr = c.cfg.Access.VoWiFi.EPDG
+		c.applySWUPDNTypeRestriction(&tunnelCfg)
+
+		if tunnelCfg.RemoteAddr == "" {
+			return fail(errors.New("preparing connect: tunnel remote address is empty"))
+		}
 	}
 
 	return &connectSetup{
@@ -246,12 +247,14 @@ func (c *Client) ensureReady(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("loading USIM: %w", err)
 	}
-	normalized, err := cfg.normalized(card)
+	readyCfg, err := cfg.normalized(card)
 	if err != nil {
 		return fmt.Errorf("normalizing client config: %w", err)
 	}
-	if err := c.checkWFCSetup(ctx, &normalized, card); err != nil {
-		return err
+	if readyCfg.usesVoWiFi() {
+		if err := c.checkWFCSetup(ctx, &readyCfg, card); err != nil {
+			return err
+		}
 	}
 
 	var closed bool
@@ -259,8 +262,8 @@ func (c *Client) ensureReady(ctx context.Context) error {
 		closed = s.closed
 		if c.card == nil {
 			c.card = card
-			c.cfg = normalized
-			c.logger = normalized.Logger.With("component", "vowifi-go")
+			c.cfg = readyCfg
+			c.logger = readyCfg.Logger.With("component", "ims-go")
 		}
 	})
 	if closed {
@@ -269,9 +272,30 @@ func (c *Client) ensureReady(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) openAccess(ctx context.Context, setup *connectSetup) error {
+	var (
+		access accessSession
+		err    error
+	)
+	switch {
+	case c.cfg.Access.VoWiFi != nil:
+		access, err = c.openVoWiFiAccess(ctx, setup)
+	case c.cfg.Access.VoLTE != nil:
+		access, err = c.openVoLTEAccess(ctx, setup)
+	default:
+		err = errors.New("opening access: access config is empty")
+	}
+	if err != nil {
+		return err
+	}
+	setup.access = access
+	return nil
+}
+
 func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	active := &activeConn{
 		scope:  setup.scope,
+		access: setup.access,
 		tunnel: setup.tunnel,
 		ims:    setup.ims,
 	}
@@ -286,6 +310,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	}
 	setup.client = nil
 	setup.scope = nil
+	setup.access = nil
 	setup.tunnel = nil
 	setup.ims = imsStack{}
 	return active, nil
@@ -303,7 +328,9 @@ func (s *connectSetup) rollback() {
 	}
 	s.scope.stop()
 	_ = s.ims.close()
-	if s.tunnel != nil {
+	if s.access != nil {
+		_ = s.access.Close()
+	} else if s.tunnel != nil {
 		_ = s.tunnel.Close()
 	}
 }
@@ -383,9 +410,6 @@ func (c *Client) Close() error {
 		} else {
 			err = errors.Join(err, context.DeadlineExceeded)
 			err = errors.Join(err, c.closeActiveConnection(active))
-			if active != nil && active.tunnel != nil {
-				err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
-			}
 		}
 		if reader != nil {
 			err = errors.Join(err, wrapCloseError(closeActionReader, reader.Close()))
@@ -414,6 +438,7 @@ type closeAction uint8
 
 const (
 	closeActionReader closeAction = iota
+	closeActionAccess
 	closeActionTunnel
 	closeActionUSSDEndpoint
 	closeActionVoiceEndpoint
@@ -426,6 +451,8 @@ func (a closeAction) String() string {
 	switch a {
 	case closeActionReader:
 		return "closing reader"
+	case closeActionAccess:
+		return "closing access"
 	case closeActionTunnel:
 		return "closing tunnel"
 	case closeActionUSSDEndpoint:
@@ -457,7 +484,9 @@ func (c *Client) closeActive(active *activeConn) error {
 	c.clearUSSDSessionBindings()
 
 	err := active.ims.close()
-	if active.tunnel != nil {
+	if active.access != nil {
+		err = errors.Join(err, wrapCloseError(closeActionAccess, normalizeCloseError(active.access.Close())))
+	} else if active.tunnel != nil {
 		err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
 	}
 	return err
@@ -468,7 +497,9 @@ func (c *Client) closeActiveConnection(active *activeConn) error {
 		return nil
 	}
 	err := c.closeIMS(active)
-	if active.tunnel != nil {
+	if active.access != nil {
+		err = errors.Join(err, wrapCloseError(closeActionAccess, normalizeCloseError(active.access.Close())))
+	} else if active.tunnel != nil {
 		err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
 	}
 	return err
@@ -514,7 +545,9 @@ func (c *Client) finishReconnect() {
 
 func (c *Client) reconnect(cause error) (*activeConn, error) {
 	reconnectID := c.state.nextReconnectID()
-	c.recordSWUBackoff(cause, time.Now())
+	if c.cfg.usesVoWiFi() {
+		c.recordSWUBackoff(cause, time.Now())
+	}
 	if terminalReconnectError(cause) {
 		return nil, cause
 	}
@@ -556,7 +589,8 @@ func terminalReconnectError(err error) bool {
 }
 
 func (c *Client) reconnectDelay(err error, backoff, registrationBackoff *reconnectBackoff) time.Duration {
-	if swutunnel.ReactivationRequested(err) || swutunnel.PCSCFReselectionRequested(err) {
+	useSWUBackoff := c.cfg.usesVoWiFi()
+	if useSWUBackoff && (swutunnel.ReactivationRequested(err) || swutunnel.PCSCFReselectionRequested(err)) {
 		return 0
 	}
 	if registration.InitialRegistrationRequired(err) {
@@ -564,7 +598,7 @@ func (c *Client) reconnectDelay(err error, backoff, registrationBackoff *reconne
 		if retryAfter, ok := registration.RetryAfterDelay(err); ok {
 			delay = max(delay, retryAfter)
 		}
-		if tunnelBackoff, ok := swutunnel.BackoffDelay(err); ok {
+		if tunnelBackoff, ok := swutunnel.BackoffDelay(err); useSWUBackoff && ok {
 			delay = max(delay, tunnelBackoff)
 		}
 		return delay
@@ -574,7 +608,7 @@ func (c *Client) reconnectDelay(err error, backoff, registrationBackoff *reconne
 	if retryAfter, ok := registration.RetryAfterDelay(err); ok {
 		delay = max(delay, retryAfter)
 	}
-	if tunnelBackoff, ok := swutunnel.BackoffDelay(err); ok {
+	if tunnelBackoff, ok := swutunnel.BackoffDelay(err); useSWUBackoff && ok {
 		delay = max(delay, tunnelBackoff)
 	}
 	return delay
@@ -674,6 +708,9 @@ func (r *connectionRunner) recover(cause error) bool {
 }
 
 func (r *connectionRunner) restoreIMSAfterSWUPCSCF(cause error) (bool, error) {
+	if r.active == nil || r.active.tunnel == nil {
+		return false, cause
+	}
 	if !swutunnel.PCSCFReselectionRequested(cause) {
 		return false, cause
 	}
@@ -687,6 +724,9 @@ func (r *connectionRunner) restoreIMSAfterSWUPCSCF(cause error) (bool, error) {
 }
 
 func (r *connectionRunner) restoreIMSAfterRegistrationPCSCF(cause error) (bool, error) {
+	if r.active == nil || r.active.tunnel == nil {
+		return false, cause
+	}
 	if !registration.PCSCFReselectionRequired(cause) {
 		return false, cause
 	}
@@ -707,7 +747,9 @@ func (r *connectionRunner) reconnectAfterIMSFailure(cause error) bool {
 	}
 
 	_ = r.client.closeActiveConnection(r.active)
-	r.client.clearSWUPDNTypeRestrictionAfterDisconnect(cause)
+	if r.client.cfg.usesVoWiFi() {
+		r.client.clearSWUPDNTypeRestrictionAfterDisconnect(cause)
+	}
 
 	if !r.client.startReconnect() {
 		r.client.emitStatusError(StatusFailed, runErr)
@@ -813,25 +855,23 @@ func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunn
 	setupCtx, setupStop := c.newIMSRestoreContext(active.scope)
 	defer setupStop()
 
-	tunnelCfg := c.cfg.Tunnel
-	tunnelCfg.RemoteAddr = c.cfg.EPDG
-	tunnelCfg, err := tunnelCfg.Normalized()
-	if err != nil {
-		return nil, fmt.Errorf("normalizing tunnel config: %w", err)
-	}
-	imsCfg, err := c.cfg.IMS.Normalized()
-	if err != nil {
-		return nil, fmt.Errorf("normalizing IMS config: %w", err)
-	}
+	tunnelCfg := c.cfg.Access.VoWiFi.Tunnel
+	tunnelCfg.RemoteAddr = c.cfg.Access.VoWiFi.EPDG
+	imsCfg := c.cfg.IMS
 
 	setup := &connectSetup{
 		setupStop: setupStop,
 		scope:     active.scope,
+		access: &voWiFiAccess{
+			session:   active.tunnel,
+			tunnelCfg: tunnelCfg,
+			info:      tunnelInfo,
+		},
 		tunnelCfg: tunnelCfg,
 		imsCfg:    imsCfg,
 		tunnel:    active.tunnel,
 	}
-	if err := c.openIMS(setupCtx, setup, tunnelInfo); err != nil {
+	if err := c.openIMS(setupCtx, setup); err != nil {
 		_ = setup.closeIMS()
 		return nil, err
 	}
@@ -865,10 +905,11 @@ func nextPCSCFInfo(info swutunnel.Info) (swutunnel.Info, bool) {
 }
 
 func (c *Client) commitIMSRestore(active *activeConn, setup *connectSetup) error {
-	if err := c.state.restoreIMS(active, setup.ims); err != nil {
+	if err := c.state.restoreIMS(active, setup.ims, setup.access); err != nil {
 		return err
 	}
 	setup.ims = imsStack{}
+	setup.access = nil
 	c.clearUSSDSessionBindings()
 	return nil
 }

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/damonto/ims-go/eapaka"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/eapaka"
 )
 
 type akaIdentityStateProvider interface {

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/damonto/ims-go/ims/security"
+	"github.com/damonto/ims-go/ims/sip"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/ims/security"
-	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 const (

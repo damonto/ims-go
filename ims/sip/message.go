@@ -341,7 +341,7 @@ func SplitHeaderList(value string) []string {
 	start := 0
 	inQuote := false
 	angleDepth := 0
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		switch value[i] {
 		case '"':
 			inQuote = !inQuote
@@ -372,7 +372,7 @@ func SplitHeaderList(value string) []string {
 // HeaderParam returns a semicolon parameter value using SIP's case-insensitive
 // parameter names.
 func HeaderParam(params, name string) string {
-	for _, part := range strings.Split(params, ";") {
+	for part := range strings.SplitSeq(params, ";") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -391,7 +391,7 @@ func HeaderTag(value string) string {
 	if value == "" {
 		return ""
 	}
-	for _, part := range strings.Split(value, ";") {
+	for part := range strings.SplitSeq(value, ";") {
 		name, val, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if ok && strings.EqualFold(name, "tag") {
 			return strings.Trim(strings.TrimSpace(val), `"`)
@@ -493,11 +493,11 @@ func viaParam(value, want string) string {
 }
 
 func topViaParam(value, want string) (string, bool) {
-	idx := strings.IndexByte(value, ';')
-	if idx < 0 {
+	_, after, ok := strings.Cut(value, ";")
+	if !ok {
 		return "", false
 	}
-	for _, field := range strings.Split(value[idx+1:], ";") {
+	for field := range strings.SplitSeq(after, ";") {
 		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !strings.EqualFold(name, want) {
 			continue

@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/damonto/vowifi-go/ims/pidf"
-	"github.com/damonto/vowifi-go/ims/security"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/security"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Registrar) buildRegister(auth *security.Authorization, verify *security.Param) sip.Message {

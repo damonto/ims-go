@@ -3,7 +3,7 @@ package ussd
 import (
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 var errSessionActive = errors.New("ussd session is active")

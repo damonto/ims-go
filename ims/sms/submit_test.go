@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func TestCompletePendingRequiresInReplyToForSIPURI(t *testing.T) {

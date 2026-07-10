@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/pidf"
 	"log/slog"
 	"net"
 	"slices"

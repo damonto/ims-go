@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/damonto/vowifi-go/swu/packet"
+	"github.com/damonto/ims-go/swu/packet"
 )
 
 var errSessionClosed = errors.New("session is closed")

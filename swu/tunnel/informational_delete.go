@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func (state informationalState) sealDeleteRequest(messageID uint32) ([][]byte, error) {

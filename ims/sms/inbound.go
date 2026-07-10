@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/damonto/ims-go/ims/identity"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 	usimcard "github.com/damonto/uicc-go/usim/card"
-	"github.com/damonto/vowifi-go/ims/identity"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
 )
 
 func (s *Endpoint) handleMessageRequest(ctx context.Context, req session.Request) error {

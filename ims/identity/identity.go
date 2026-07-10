@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 // MSISDN extracts an MSISDN-like number from a SIP name-addr, SIP URI, or TEL URI.

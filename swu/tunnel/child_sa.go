@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/handshake"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/handshake"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config, requestProposals []ike.Proposal) (Info, error) {

@@ -359,7 +359,7 @@ func (p *Proposal) UnmarshalBinary(data []byte) error {
 	proposal.SPI = append([]byte(nil), data[4:4+int(data[2])]...)
 	remaining := data[4+int(data[2]):]
 	transformType := payloadTypeTransform
-	for i := 0; i < int(data[3]); i++ {
+	for range int(data[3]) {
 		if len(remaining) < 4 {
 			return errors.New("parsing proposal: truncated transform")
 		}

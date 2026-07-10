@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"errors"
@@ -307,7 +307,7 @@ func (s *clientState) nextReconnectID() uint64 {
 	return s.reconnectSeq.Add(1)
 }
 
-func (s *clientState) restoreIMS(active *activeConn, ims imsStack) error {
+func (s *clientState) restoreIMS(active *activeConn, ims imsStack, access accessSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -317,6 +317,9 @@ func (s *clientState) restoreIMS(active *activeConn, ims imsStack) error {
 		return errors.New("restoring IMS after P-CSCF reselection: active connection changed")
 	}
 	active.ims = ims
+	if access != nil {
+		active.access = access
+	}
 	return nil
 }
 

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/damonto/vowifi-go/eapaka"
+	"github.com/damonto/ims-go/eapaka"
 )
 
 func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {

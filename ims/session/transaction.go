@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 type TransactionTimers struct {
@@ -196,7 +196,7 @@ func transactionLayerErrorResponse(req sip.Message, err error) (sip.Message, boo
 	}
 	resp := sip.NewResponse(sipStatusServiceUnavailable, "Service Unavailable")
 	resp.Headers = sip.ResponseHeaders(req, sipStatusServiceUnavailable)
-	warning := sip.WarningValue{Code: 399, Agent: "vowifi-go", Text: cause.Error()}
+	warning := sip.WarningValue{Code: 399, Agent: "ims-go", Text: cause.Error()}
 	if text, marshalErr := warning.MarshalText(); marshalErr == nil {
 		resp.Headers.Add("Warning", string(text))
 	}
@@ -294,9 +294,7 @@ func (tx *clientTransaction) runNonInvite() {
 				retransmitDelay = tx.timers.T2
 			} else if retransmitDelay < tx.timers.T2 {
 				retransmitDelay *= 2
-				if retransmitDelay > tx.timers.T2 {
-					retransmitDelay = tx.timers.T2
-				}
+				retransmitDelay = min(retransmitDelay, tx.timers.T2)
 			}
 			timerE.Reset(retransmitDelay)
 		case inbound := <-tx.responseCh:

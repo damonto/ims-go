@@ -31,10 +31,12 @@ go.work.sum
 # Other
 refs/
 scripts/
+testdata/
 
 # AI
 AGENTS.md
 .codex
+.codex*
 .agents
 .cluade
 REVIEW.md

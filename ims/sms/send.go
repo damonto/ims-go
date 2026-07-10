@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) Send(ctx context.Context, to, text string) (Submission, error) {

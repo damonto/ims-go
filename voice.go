@@ -1,11 +1,11 @@
-package vowifi
+package ims
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
 )
 
 type IncomingCall struct {

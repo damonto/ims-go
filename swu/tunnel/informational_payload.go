@@ -5,7 +5,7 @@ import (
 	"net"
 	"slices"
 
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 const minCookie2NotifyDataLength = 8

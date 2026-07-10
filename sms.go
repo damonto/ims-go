@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	imssms "github.com/damonto/vowifi-go/ims/sms"
+	imssms "github.com/damonto/ims-go/ims/sms"
 )
 
 type SMS struct {

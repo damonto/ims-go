@@ -7,23 +7,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Registrar) (*Endpoint, error) {
-	normalized, err := cfg.Normalized()
+	endpointCfg, err := cfg.Normalized()
 	if err != nil {
 		return nil, err
 	}
 	endpoint := &Endpoint{
-		cfg:       normalized,
+		cfg:       endpointCfg,
 		sess:      sess,
 		reg:       reg,
-		logger:    normalized.Logger.With("component", "ims-voice"),
+		logger:    endpointCfg.Logger.With("component", "ims-voice"),
 		timers:    sess.TransactionTimers(),
-		nextPort:  normalized.LocalRTPPortMin,
+		nextPort:  endpointCfg.LocalRTPPortMin,
 		calls:     make(map[string]*Call),
 		incomings: make(map[string]*Call),
 		bgDone:    make(chan struct{}),

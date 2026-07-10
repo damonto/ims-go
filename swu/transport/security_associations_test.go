@@ -3,8 +3,8 @@ package transport
 import (
 	"testing"
 
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/packet"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/packet"
 )
 
 func TestSecurityAssociationsSharesOutboundSequenceBySA(t *testing.T) {

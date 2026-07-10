@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/damonto/ims-go/eapaka"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/eapaka"
 )
 
 func akaPrimeNetworkNamesMatch(peerNetworkName, serverNetworkName string) bool {

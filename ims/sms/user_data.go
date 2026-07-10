@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"unicode/utf16"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 const (

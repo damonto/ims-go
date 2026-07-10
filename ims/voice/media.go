@@ -200,8 +200,8 @@ func (c *Call) WriteRTP(ctx context.Context, data []byte) error {
 }
 
 func (c *Call) prepareOutgoingRTPPacket(data []byte) ([]byte, RTPPacket, bool, error) {
-	packet, err := ParseRTPPacket(data)
-	if err != nil {
+	var packet RTPPacket
+	if err := packet.UnmarshalBinary(data); err != nil {
 		return data, RTPPacket{}, false, nil
 	}
 	c.mu.Lock()

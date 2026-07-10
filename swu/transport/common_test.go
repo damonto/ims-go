@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/packet"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/packet"
 )
 
 func TestRemoteAddrOverridesIP(t *testing.T) {

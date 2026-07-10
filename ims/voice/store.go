@@ -3,7 +3,7 @@ package voice
 import (
 	"errors"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 	"net"
 	"strings"
 )

@@ -15,8 +15,8 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/damonto/vowifi-go/eapaka"
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/eapaka"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 var (

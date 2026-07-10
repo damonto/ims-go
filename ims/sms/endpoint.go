@@ -5,24 +5,24 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/session"
 	"mime"
 	"strings"
 	"time"
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Registrar, card Card) (*Endpoint, error) {
-	normalized, err := normalizeConfig(cfg)
+	endpointCfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 	endpoint := &Endpoint{
-		cfg:       normalized,
+		cfg:       endpointCfg,
 		sess:      sess,
 		reg:       reg,
 		card:      card,
-		logger:    normalized.Logger.With("component", "ims-sms"),
+		logger:    endpointCfg.Logger.With("component", "ims-sms"),
 		done:      make(chan struct{}),
 		rpRefs:    make(map[byte]struct{}),
 		pending:   make(map[string]pendingEntry),

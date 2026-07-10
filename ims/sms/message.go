@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) buildMessage(target string, body []byte, inReplyTo string) (sip.Message, error) {

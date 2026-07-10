@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/packet"
-	"github.com/damonto/vowifi-go/swu/tunnel"
+	imssession "github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/swu/tunnel"
 )
 
 const (
@@ -26,8 +26,6 @@ const (
 	tcpRTOBackoffCeiling  = 60 * time.Second
 	tcpSYNMinTimeout      = 3 * time.Minute
 	tcpDataMinTimeout     = 100 * time.Second
-	tcpMaxSIPHeaderBytes  = 32 * 1024
-	tcpMaxSIPMessageBytes = 1024 * 1024
 )
 
 var tcpSYNTimeouts = []time.Duration{
@@ -1043,9 +1041,9 @@ func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegme
 	flags := segment.Flags
 	if tcpSeqAfter(t.recvSeq, seq) {
 		skip := t.recvSeq - seq
-		if skip > uint32(len(payload)) {
-			skip = uint32(len(payload))
-		}
+
+		skip = min(skip, uint32(len(payload)))
+
 		payload = payload[skip:]
 		seq = t.recvSeq
 	}

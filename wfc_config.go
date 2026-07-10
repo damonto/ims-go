@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	_ "embed"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
 )
 
 //go:embed wfc_config.json
@@ -231,74 +231,78 @@ func normalizeGID1(gid1 string) string {
 }
 
 func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
-	if cfg.EPDG == "" {
-		cfg.EPDG = firstNonEmpty(profile.EPDG, profile.EPDGAddresses...)
+	if cfg.Access.VoWiFi == nil {
+		cfg.Access.VoWiFi = &VoWiFiConfig{}
+	}
+	wifi := cfg.Access.VoWiFi
+	if wifi.EPDG == "" {
+		wifi.EPDG = firstNonEmpty(profile.EPDG, profile.EPDGAddresses...)
 	}
 
-	if cfg.Tunnel.InitialPort == 0 {
-		cfg.Tunnel.InitialPort = profile.InitialPort
+	if wifi.Tunnel.InitialPort == 0 {
+		wifi.Tunnel.InitialPort = profile.InitialPort
 	}
-	if cfg.Tunnel.NATTPort == 0 {
-		cfg.Tunnel.NATTPort = profile.NATTPort
+	if wifi.Tunnel.NATTPort == 0 {
+		wifi.Tunnel.NATTPort = profile.NATTPort
 	}
-	if cfg.Tunnel.LocalSIPPort == 0 {
-		cfg.Tunnel.LocalSIPPort = profile.LocalSIPPort
+	if wifi.Tunnel.LocalSIPPort == 0 {
+		wifi.Tunnel.LocalSIPPort = profile.LocalSIPPort
 	}
-	if cfg.Tunnel.SIPPort == 0 {
-		cfg.Tunnel.SIPPort = firstNonZero(profile.SIPPort, profile.IMSSIPServerPort)
+	if wifi.Tunnel.SIPPort == 0 {
+		wifi.Tunnel.SIPPort = firstNonZero(profile.SIPPort, profile.IMSSIPServerPort)
 	}
-	if len(cfg.Tunnel.DHGroups) == 0 {
-		cfg.Tunnel.DHGroups = cloneUint16s(profile.DHGroups)
+	if len(wifi.Tunnel.DHGroups) == 0 {
+		wifi.Tunnel.DHGroups = cloneUint16s(profile.DHGroups)
 	}
-	if len(cfg.Tunnel.IKEEncryptionKeyLens) == 0 {
-		cfg.Tunnel.IKEEncryptionKeyLens = cloneUint16s(profile.IKEEncryptionKeyLens)
+	if len(wifi.Tunnel.IKEEncryptionKeyLens) == 0 {
+		wifi.Tunnel.IKEEncryptionKeyLens = cloneUint16s(profile.IKEEncryptionKeyLens)
 	}
-	if len(cfg.Tunnel.IKEIntegrity) == 0 {
-		cfg.Tunnel.IKEIntegrity = cloneUint16s(profile.IKEIntegrity)
+	if len(wifi.Tunnel.IKEIntegrity) == 0 {
+		wifi.Tunnel.IKEIntegrity = cloneUint16s(profile.IKEIntegrity)
 	}
-	if len(cfg.Tunnel.IKEPRF) == 0 {
-		cfg.Tunnel.IKEPRF = cloneUint16s(profile.IKEPRF)
+	if len(wifi.Tunnel.IKEPRF) == 0 {
+		wifi.Tunnel.IKEPRF = cloneUint16s(profile.IKEPRF)
 	}
-	if len(cfg.Tunnel.ChildEncryptionKeyLens) == 0 {
-		cfg.Tunnel.ChildEncryptionKeyLens = cloneUint16s(profile.ChildEncryptionKeyLens)
+	if len(wifi.Tunnel.ChildEncryptionKeyLens) == 0 {
+		wifi.Tunnel.ChildEncryptionKeyLens = cloneUint16s(profile.ChildEncryptionKeyLens)
 	}
-	if len(cfg.Tunnel.ChildIntegrity) == 0 {
-		cfg.Tunnel.ChildIntegrity = cloneUint16s(profile.ChildIntegrity)
+	if len(wifi.Tunnel.ChildIntegrity) == 0 {
+		wifi.Tunnel.ChildIntegrity = cloneUint16s(profile.ChildIntegrity)
 	}
-	if cfg.Tunnel.PCSCFIPv4ConfigAttribute == 0 {
-		cfg.Tunnel.PCSCFIPv4ConfigAttribute = profile.PCSCFIPv4ConfigAttribute
+	if wifi.Tunnel.PCSCFIPv4ConfigAttribute == 0 {
+		wifi.Tunnel.PCSCFIPv4ConfigAttribute = profile.PCSCFIPv4ConfigAttribute
 	}
-	if cfg.Tunnel.PCSCFIPv6ConfigAttribute == 0 {
-		cfg.Tunnel.PCSCFIPv6ConfigAttribute = profile.PCSCFIPv6ConfigAttribute
+	if wifi.Tunnel.PCSCFIPv6ConfigAttribute == 0 {
+		wifi.Tunnel.PCSCFIPv6ConfigAttribute = profile.PCSCFIPv6ConfigAttribute
 	}
-	if cfg.Tunnel.NATKeepaliveInterval == 0 {
-		cfg.Tunnel.NATKeepaliveInterval = wfcDurationValue(profile.NATKeepaliveInterval)
+	if wifi.Tunnel.NATKeepaliveInterval == 0 {
+		wifi.Tunnel.NATKeepaliveInterval = wfcDurationValue(profile.NATKeepaliveInterval)
 	}
-	if cfg.Tunnel.LivenessTimeout == 0 && profile.LivenessTimeout != nil {
-		cfg.Tunnel.LivenessTimeout = profile.LivenessTimeout.Duration
+	if wifi.Tunnel.LivenessTimeout == 0 && profile.LivenessTimeout != nil {
+		wifi.Tunnel.LivenessTimeout = profile.LivenessTimeout.Duration
 	}
-	if len(cfg.Tunnel.IKERetransmitDelays) == 0 {
-		cfg.Tunnel.IKERetransmitDelays = wfcIKEReTransmitDelays(profile)
+	if len(wifi.Tunnel.IKERetransmitDelays) == 0 {
+		wifi.Tunnel.IKERetransmitDelays = wfcIKEReTransmitDelays(profile)
 	}
-	if cfg.Tunnel.IKESALifetime == 0 {
-		cfg.Tunnel.IKESALifetime, cfg.Tunnel.IKESARekeyMargin = saLifetimeFromWFCProfile(
+	if wifi.Tunnel.IKESALifetime == 0 {
+		wifi.Tunnel.IKESALifetime, wifi.Tunnel.IKESARekeyMargin = saLifetimeFromWFCProfile(
 			profile.IKESALifetime,
 			profile.IKESARekeySoftTime,
 			profile.IKESARekeyHardTime,
 			profile.IKESARekeyTime,
 		)
 	}
-	if cfg.Tunnel.ChildSALifetime == 0 {
-		cfg.Tunnel.ChildSALifetime, cfg.Tunnel.ChildSARekeyMargin = saLifetimeFromWFCProfile(
+	if wifi.Tunnel.ChildSALifetime == 0 {
+		wifi.Tunnel.ChildSALifetime, wifi.Tunnel.ChildSARekeyMargin = saLifetimeFromWFCProfile(
 			profile.ChildSALifetime,
 			profile.ChildSARekeySoftTime,
 			profile.ChildSARekeyHardTime,
 			profile.ChildSARekeyTime,
 		)
 	}
-	if !cfg.Tunnel.AddKEToChildSARekey {
+	if !wifi.Tunnel.AddKEToChildSARekey {
 		if addKE, ok := wfcAddKEToChildSARekey(profile); ok {
-			cfg.Tunnel.AddKEToChildSARekey = addKE
+			wifi.Tunnel.AddKEToChildSARekey = addKE
 		}
 	}
 

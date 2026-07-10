@@ -127,7 +127,7 @@ func unquoteSIPString(value string) string {
 	var b strings.Builder
 	b.Grow(len(value))
 	escaped := false
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		if escaped {
 			b.WriteByte(value[i])
 			escaped = false
@@ -148,7 +148,7 @@ func unquoteSIPString(value string) string {
 func quoteSIPString(value string) string {
 	var b strings.Builder
 	b.Grow(len(value))
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		switch value[i] {
 		case '\\', '"':
 			b.WriteByte('\\')

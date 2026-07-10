@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/ims-go/swu/handshake"
+	"github.com/damonto/ims-go/swu/ike"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/swu/handshake"
-	"github.com/damonto/vowifi-go/swu/ike"
 )
 
 func TestNewConnectCryptoStateUses32ByteNonce(t *testing.T) {

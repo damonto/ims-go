@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/damonto/vowifi-go/eapaka"
+	"github.com/damonto/ims-go/eapaka"
 )
 
 func (f *akaAuthFlow) logger() *slog.Logger {

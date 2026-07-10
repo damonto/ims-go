@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/packet"
-	"github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/swu/tunnel"
 )
 
 const (

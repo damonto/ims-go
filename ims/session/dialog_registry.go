@@ -3,7 +3,7 @@ package session
 import (
 	"errors"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 type dialogEntry struct {

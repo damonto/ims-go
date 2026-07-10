@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) error {
@@ -222,9 +222,8 @@ func (c *Call) retrySessionRefreshesWithMinSE(ctx context.Context, req sip.Messa
 			return sip.Message{}, fmt.Errorf("session timer retry: invalid Min-SE %q", resp.Header("Min-SE"))
 		}
 		c.mu.Lock()
-		if c.sessionTimer.minSE < minSE {
-			c.sessionTimer.minSE = minSE
-		}
+
+		c.sessionTimer.minSE = max(c.sessionTimer.minSE, minSE)
 		retryMinSE := max(minSE, c.sessionTimer.minSE)
 		c.mu.Unlock()
 		if retryMinSE <= requestMinSessionExpiresSeconds(req) {
@@ -263,9 +262,9 @@ func (c *Call) sessionRefreshRetryRequest(req sip.Message, minSE int) sip.Messag
 			refresher: sessionRefresherUAC,
 		}
 	}
-	if sessionExpires.seconds < minSE {
-		sessionExpires.seconds = minSE
-	}
+
+	sessionExpires.seconds = max(sessionExpires.seconds, minSE)
+
 	if sessionExpires.refresher == "" {
 		sessionExpires.refresher = sessionRefresherUAC
 	}
@@ -359,9 +358,9 @@ func (c *Call) applySessionTimerResponse(resp sip.Message, localWasUAC bool, all
 		localRefresher: localRefresher,
 	}
 	c.mu.Lock()
-	if c.sessionTimer.minSE > timer.minSE {
-		timer.minSE = c.sessionTimer.minSE
-	}
+
+	timer.minSE = max(timer.minSE, c.sessionTimer.minSE)
+
 	c.mu.Unlock()
 	c.replaceSessionTimer(timer)
 	return nil
@@ -387,9 +386,9 @@ func (c *Call) localSessionTimerFallback(localWasUAC bool) (sessionTimerState, b
 		minSE:          durationSeconds(defaultMinSessionExpires),
 		localRefresher: true,
 	}
-	if current.minSE > timer.minSE {
-		timer.minSE = current.minSE
-	}
+
+	timer.minSE = max(timer.minSE, current.minSE)
+
 	if timer.minSE > seconds {
 		timer.interval = time.Duration(timer.minSE) * time.Second
 	}
@@ -535,8 +534,8 @@ func (c *Call) rememberSessionTimerMinSE(msg sip.Message) {
 		return
 	}
 	c.mu.Lock()
-	if c.sessionTimer.minSE < minSE {
-		c.sessionTimer.minSE = minSE
-	}
+
+	c.sessionTimer.minSE = max(c.sessionTimer.minSE, minSE)
+
 	c.mu.Unlock()
 }

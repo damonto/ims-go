@@ -9,13 +9,13 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/damonto/ims-go/ims/pidf"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/ims/pidf"
 
-	"github.com/damonto/vowifi-go/ims/security"
-	"github.com/damonto/vowifi-go/ims/session"
+	"github.com/damonto/ims-go/ims/security"
+	"github.com/damonto/ims-go/ims/session"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 	"io"
 	"log/slog"
 	"net"

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/swu/ike"
+	"github.com/damonto/ims-go/swu/packet"
 	"github.com/damonto/uicc-go/usim"
-	"github.com/damonto/vowifi-go/swu/esp"
-	"github.com/damonto/vowifi-go/swu/ike"
-	"github.com/damonto/vowifi-go/swu/packet"
 )
 
 type sessionTestCard struct{}

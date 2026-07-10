@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 type serverTransaction struct {
@@ -370,9 +370,7 @@ func (tx *serverTransaction) retransmitInviteFinal() {
 		return
 	}
 	nextDelay := tx.retryDelay * 2
-	if nextDelay > timers.T2 {
-		nextDelay = timers.T2
-	}
+	nextDelay = min(nextDelay, timers.T2)
 	tx.retryDelay = nextDelay
 	tx.retryTimer.Reset(nextDelay)
 }

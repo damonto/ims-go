@@ -12,50 +12,9 @@ import (
 
 	"log/slog"
 
-	"github.com/damonto/vowifi-go/swu/packet"
-	"github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/swu/tunnel"
 )
-
-func TestNextSIPMessage(t *testing.T) {
-	tests := []struct {
-		name    string
-		stream  string
-		wantMsg string
-		wantOK  bool
-		wantErr bool
-	}{
-		{name: "complete", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantMsg: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantOK: true},
-		{name: "leading crlf ignored", stream: "\r\n\r\nMESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantMsg: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello", wantOK: true},
-		{name: "incomplete body", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhel", wantOK: false},
-		{name: "missing length", stream: "MESSAGE sip:test SIP/2.0\r\nVia: SIP/2.0/TCP 127.0.0.1:5060\r\n\r\n", wantErr: true},
-		{name: "invalid length", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: nope\r\n\r\n", wantErr: true},
-		{name: "negative length", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: -1\r\n\r\n", wantErr: true},
-		{name: "compact length", stream: "MESSAGE sip:test SIP/2.0\r\nl: 5\r\n\r\nhello", wantMsg: "MESSAGE sip:test SIP/2.0\r\nl: 5\r\n\r\nhello", wantOK: true},
-		{name: "header too large", stream: "MESSAGE sip:test SIP/2.0\r\n" + strings.Repeat("X-Test: x\r\n", tcpMaxSIPHeaderBytes/10+1), wantErr: true},
-		{name: "message too large", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 1048577\r\n\r\n", wantErr: true},
-		{name: "message length overflows total", stream: "MESSAGE sip:test SIP/2.0\r\nContent-Length: 9223372036854775807\r\n\r\n", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msg, _, ok, err := nextSIPMessage([]byte(tt.stream))
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("nextSIPMessage() error = nil, want error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("nextSIPMessage() error = %v", err)
-			}
-			if ok != tt.wantOK {
-				t.Fatalf("ok = %t, want %t", ok, tt.wantOK)
-			}
-			if tt.wantOK && string(msg) != tt.wantMsg {
-				t.Fatalf("msg = %q, want %q", string(msg), tt.wantMsg)
-			}
-		})
-	}
-}
 
 func TestTCPConnReserveSendSegmentAcceptsFastACK(t *testing.T) {
 	conn := &TCPConn{

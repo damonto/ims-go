@@ -3,8 +3,8 @@ package ussd
 import (
 	"context"
 	"fmt"
-	"github.com/damonto/vowifi-go/ims/registration"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/sip"
 	"net"
 	"strconv"
 	"strings"

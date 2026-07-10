@@ -1,12 +1,12 @@
-package vowifi
+package ims
 
 import (
 	"log/slog"
 	"testing"
 	"time"
 
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	imsussd "github.com/damonto/vowifi-go/ims/ussd"
+	imssession "github.com/damonto/ims-go/ims/session"
+	imsussd "github.com/damonto/ims-go/ims/ussd"
 )
 
 func TestConfigNormalized(t *testing.T) {
@@ -36,6 +36,7 @@ func TestConfigNormalized(t *testing.T) {
 			cfg: Config{
 				Logger:   logger,
 				Terminal: TerminalInfo{ID: " 12345 "},
+				Access:   VoWiFi(VoWiFiConfig{}),
 				IMS:      IMSConfig{},
 			},
 			wantTerminalID:   "12345",
@@ -57,7 +58,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "explicit epdg wins over automatic default",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: "root-imei"},
-				EPDG:     " epdg.example.com ",
+				Access:   VoWiFi(VoWiFiConfig{EPDG: " epdg.example.com "}),
 			},
 			wantTerminalID:   "root-imei",
 			wantEPDG:         "epdg.example.com",
@@ -79,6 +80,7 @@ func TestConfigNormalized(t *testing.T) {
 			cfg: func() Config {
 				cfg := cloneConfig(nil)
 				cfg.Terminal.ID = testIMEI
+				cfg.Access = VoWiFi(VoWiFiConfig{})
 				return cfg
 			}(),
 			wantTerminalID:   testIMEI,
@@ -100,6 +102,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "explicit ims transport is preserved",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
 				IMS: IMSConfig{
 					Transport: "udp",
 				},
@@ -123,6 +126,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "explicit ims profile values are preserved",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
 				IMS: IMSConfig{
 					AccessNetworkInfo:        "IEEE-802.11ac;i-wlan-node-id=aabbcc",
 					PhoneContextDomain:       "ims.example",
@@ -302,8 +306,8 @@ func TestConfigNormalized(t *testing.T) {
 			if got.Terminal.ID != tt.wantTerminalID {
 				t.Fatalf("Terminal.ID = %q, want %q", got.Terminal.ID, tt.wantTerminalID)
 			}
-			if got.EPDG != tt.wantEPDG {
-				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
+			if gotEPDG := configEPDG(got); gotEPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", gotEPDG, tt.wantEPDG)
 			}
 			if got.IMS.Transport != tt.wantTransport {
 				t.Fatalf("IMS.Transport = %q, want %q", got.IMS.Transport, tt.wantTransport)
@@ -332,8 +336,8 @@ func TestConfigNormalized(t *testing.T) {
 			if got.IMS.RegistrationRetryMax != tt.wantIMSRetryMax {
 				t.Fatalf("IMS.RegistrationRetryMax = %v, want %v", got.IMS.RegistrationRetryMax, tt.wantIMSRetryMax)
 			}
-			if got.Tunnel.SIPPort != tt.wantSIPPort {
-				t.Fatalf("Tunnel.SIPPort = %d, want %d", got.Tunnel.SIPPort, tt.wantSIPPort)
+			if gotSIPPort := configTunnel(got).SIPPort; gotSIPPort != tt.wantSIPPort {
+				t.Fatalf("Tunnel.SIPPort = %d, want %d", gotSIPPort, tt.wantSIPPort)
 			}
 			if got.IMS.SIPServerPort != 0 && got.IMS.SIPServerPort != tt.wantSIPPort {
 				t.Fatalf("IMS.SIPServerPort = %d, want %d", got.IMS.SIPServerPort, tt.wantSIPPort)

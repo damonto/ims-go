@@ -3,7 +3,7 @@ package registration
 import (
 	"testing"
 
-	"github.com/damonto/vowifi-go/ims/security"
+	"github.com/damonto/ims-go/ims/security"
 )
 
 func TestESPSaltDerivation(t *testing.T) {

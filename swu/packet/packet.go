@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/damonto/vowifi-go/swu/esp"
+	"github.com/damonto/ims-go/swu/esp"
 )
 
 const (

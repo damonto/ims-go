@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -15,16 +15,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/ims-go/ims/registration"
+	imssession "github.com/damonto/ims-go/ims/session"
+	imssip "github.com/damonto/ims-go/ims/sip"
+	imssms "github.com/damonto/ims-go/ims/sms"
+	imsussd "github.com/damonto/ims-go/ims/ussd"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
 	"github.com/damonto/uicc-go/usim/simfile"
-	"github.com/damonto/vowifi-go/ims/registration"
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	imssip "github.com/damonto/vowifi-go/ims/sip"
-	imssms "github.com/damonto/vowifi-go/ims/sms"
-	imsussd "github.com/damonto/vowifi-go/ims/ussd"
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
-	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 type stubCard struct{}
@@ -484,6 +484,7 @@ func newStandaloneClient(t *testing.T) *Client {
 	t.Helper()
 	return newReadyClient(t, Config{
 		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
 		IMS: IMSConfig{
 			RegisterExpires: time.Minute,
 		},
@@ -502,7 +503,7 @@ func newReadyClient(t *testing.T, cfg Config) *Client {
 	}
 	client.card = stubCard{}
 	client.cfg = normalized
-	client.logger = normalized.Logger.With("component", "vowifi-go")
+	client.logger = normalized.Logger.With("component", "ims-go")
 	return client
 }
 
@@ -1318,7 +1319,10 @@ func TestConnectReportsUSIMLoadError(t *testing.T) {
 		},
 	}
 
-	client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client, err := New(reader, &Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1361,7 +1365,10 @@ func TestConnectUsesContextForUSIMLoad(t *testing.T) {
 					return nil, ctx.Err()
 				},
 			}
-			client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
+			client, err := New(reader, &Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1383,7 +1390,10 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	}
-	client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client, err := New(reader, &Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1424,7 +1434,10 @@ func TestConnectLeavesReaderOwnedAfterUSIMLoadError(t *testing.T) {
 		},
 	}
 
-	client, err := New(reader, &Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client, err := New(reader, &Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1511,6 +1524,7 @@ func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 
 	client := newReadyClient(t, Config{
 		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
 		IMS: IMSConfig{
 			RegisterExpires: time.Minute,
 		},
@@ -1594,7 +1608,10 @@ func TestCloseActiveConnectionSkipsDeregister(t *testing.T) {
 		t.Fatalf("ussd.New() error = %v", err)
 	}
 
-	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client := newReadyClient(t, Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	active := &activeConn{ims: imsStack{sip: sess, reg: reg, ussd: ussdSvc}}
 	if err := client.closeActiveConnection(active); err != nil {
 		t.Fatalf("closeActiveConnection() error = %v", err)
@@ -1647,7 +1664,10 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client := newReadyClient(t, Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	defer client.Close()
 
 	scope := newConnectionScope()
@@ -1722,7 +1742,10 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 	}
 	newSess, newReg := newRegisteredIMS(t, newTransport, time.Minute)
 
-	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client := newReadyClient(t, Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	defer client.Close()
 	events := client.Events()
 	defer events.Close()
@@ -1843,6 +1866,7 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 
 	client := newReadyClient(t, Config{
 		Terminal:       TerminalInfo{ID: testIMEI},
+		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: 3 * time.Second,
 		IMS: IMSConfig{
 			RegistrationRetryBase: 20 * time.Second,
@@ -1914,7 +1938,10 @@ func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
 	}
 	sess, reg := newRegisteredIMS(t, transport, time.Minute)
 
-	client := newReadyClient(t, Config{Terminal: TerminalInfo{ID: testIMEI}})
+	client := newReadyClient(t, Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	})
 	reconnectStarted := make(chan struct{})
 	doneCh := clientDone(t, client)
 	reconnect := func(error) (*activeConn, error) {
@@ -2020,6 +2047,7 @@ func TestReconnectDelayHonorsIMSRegistrationRetryPolicy(t *testing.T) {
 
 	client := newReadyClient(t, Config{
 		Terminal:       TerminalInfo{ID: testIMEI},
+		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: 3 * time.Second,
 		IMS: IMSConfig{
 			RegistrationRetryBase: 20 * time.Second,
@@ -2147,6 +2175,7 @@ func TestReconnectDelayHonorsIMSSubscribeRetryAfter(t *testing.T) {
 
 	client := newReadyClient(t, Config{
 		Terminal:       TerminalInfo{ID: testIMEI},
+		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: 3 * time.Second,
 		IMS: IMSConfig{
 			RegistrationRetryBase: 20 * time.Second,
@@ -2167,6 +2196,7 @@ func TestReconnectDelayHonorsIMSSubscribeRetryAfter(t *testing.T) {
 func TestReconnectStopsOnAccessRejectedCause(t *testing.T) {
 	client := newReadyClient(t, Config{
 		Terminal:       TerminalInfo{ID: testIMEI},
+		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: time.Hour,
 	})
 	defer client.Close()
@@ -2201,39 +2231,39 @@ func TestSWUBackoffGateScopesPolicy(t *testing.T) {
 		{
 			name:      "network failure blocks same epdg",
 			recordErr: testTunnelBackoffError{delay: 2 * time.Minute, scope: swutunnel.BackoffScopeEPDG},
-			cfg:       Config{EPDG: "epdg.example"},
+			cfg:       testVoWiFiConfig("epdg.example", swutunnel.Config{}),
 			card:      stubCard{},
 			wantDelay: 2 * time.Minute,
 		},
 		{
 			name:      "network failure does not block different epdg",
 			recordErr: testTunnelBackoffError{delay: 2 * time.Minute, scope: swutunnel.BackoffScopeEPDG},
-			cfg:       Config{EPDG: "other.example"},
+			cfg:       testVoWiFiConfig("other.example", swutunnel.Config{}),
 			card:      stubCard{},
 		},
 		{
 			name:      "no apn subscription blocks same plmn apn across epdgs",
 			recordErr: testTunnelBackoffError{delay: 3 * time.Minute, scope: swutunnel.BackoffScopePLMNAPN},
-			cfg:       Config{EPDG: "other.example"},
+			cfg:       testVoWiFiConfig("other.example", swutunnel.Config{}),
 			card:      stubCard{},
 			wantDelay: 3 * time.Minute,
 		},
 		{
 			name:      "no apn subscription does not block different plmn",
 			recordErr: testTunnelBackoffError{delay: 3 * time.Minute, scope: swutunnel.BackoffScopePLMNAPN},
-			cfg:       Config{EPDG: "epdg.example"},
+			cfg:       testVoWiFiConfig("epdg.example", swutunnel.Config{}),
 			card:      plmnTestCard{mcc: "002", mnc: "001"},
 		},
 		{
 			name:      "no apn subscription does not block different apn",
 			recordErr: testTunnelBackoffError{delay: 3 * time.Minute, scope: swutunnel.BackoffScopePLMNAPN},
-			cfg:       Config{EPDG: "other.example", Tunnel: swutunnel.Config{APN: "internet"}},
+			cfg:       testVoWiFiConfig("other.example", swutunnel.Config{APN: "internet"}),
 			card:      stubCard{},
 		},
 		{
 			name:      "deactivated blocks terminally",
 			recordErr: testTunnelBackoffError{deactivated: true, scope: swutunnel.BackoffScopeEPDG},
-			cfg:       Config{EPDG: "epdg.example"},
+			cfg:       testVoWiFiConfig("epdg.example", swutunnel.Config{}),
 			card:      stubCard{},
 			wantBlock: true,
 		},
@@ -2242,13 +2272,13 @@ func TestSWUBackoffGateScopesPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newReadyClient(t, Config{
-				EPDG:     "epdg.example",
+				Access:   VoWiFi(VoWiFiConfig{EPDG: "epdg.example"}),
 				Terminal: TerminalInfo{ID: testIMEI},
 			})
 			defer client.Close()
 			client.recordSWUBackoff(tt.recordErr, now)
-			client.cfg.EPDG = tt.cfg.EPDG
-			client.cfg.Tunnel.APN = tt.cfg.Tunnel.APN
+			client.cfg.Access.VoWiFi.EPDG = configEPDG(tt.cfg)
+			client.cfg.Access.VoWiFi.Tunnel.APN = configTunnel(tt.cfg).APN
 			client.card = tt.card
 
 			gotDelay, gotBlock, gotActive := client.swuBackoffDelay(now)
@@ -2277,30 +2307,27 @@ func TestSWUBackoffGateRecordsImplementationSpecificPolicy(t *testing.T) {
 		{
 			name:      "network failure without timer blocks same epdg",
 			err:       fmt.Errorf("connecting swu: %w", swutunnel.ErrNetworkFailure),
-			cfg:       Config{EPDG: "epdg.example"},
+			cfg:       testVoWiFiConfig("epdg.example", swutunnel.Config{}),
 			card:      stubCard{},
 			wantDelay: 5 * time.Second,
 		},
 		{
 			name: "network failure without timer does not block different epdg",
 			err:  fmt.Errorf("connecting swu: %w", swutunnel.ErrNetworkFailure),
-			cfg:  Config{EPDG: "other.example"},
+			cfg:  testVoWiFiConfig("other.example", swutunnel.Config{}),
 			card: stubCard{},
 		},
 		{
 			name:      "no apn subscription without timer blocks same plmn apn",
 			err:       fmt.Errorf("connecting swu: %w", swutunnel.ErrNoAPNSubscription),
-			cfg:       Config{EPDG: "other.example"},
+			cfg:       testVoWiFiConfig("other.example", swutunnel.Config{}),
 			card:      stubCard{},
 			wantDelay: 5 * time.Second,
 		},
 		{
 			name: "no apn subscription without timer does not block different apn",
 			err:  fmt.Errorf("connecting swu: %w", swutunnel.ErrNoAPNSubscription),
-			cfg: Config{
-				EPDG:   "other.example",
-				Tunnel: swutunnel.Config{APN: "internet"},
-			},
+			cfg:  testVoWiFiConfig("other.example", swutunnel.Config{APN: "internet"}),
 			card: stubCard{},
 		},
 	}
@@ -2308,14 +2335,14 @@ func TestSWUBackoffGateRecordsImplementationSpecificPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newReadyClient(t, Config{
-				EPDG:           "epdg.example",
+				Access:         VoWiFi(VoWiFiConfig{EPDG: "epdg.example"}),
 				ReconnectDelay: 5 * time.Second,
 				Terminal:       TerminalInfo{ID: testIMEI},
 			})
 			defer client.Close()
 			client.recordSWUBackoff(tt.err, now)
-			client.cfg.EPDG = tt.cfg.EPDG
-			client.cfg.Tunnel.APN = tt.cfg.Tunnel.APN
+			client.cfg.Access.VoWiFi.EPDG = configEPDG(tt.cfg)
+			client.cfg.Access.VoWiFi.Tunnel.APN = configTunnel(tt.cfg).APN
 			client.card = tt.card
 
 			gotDelay, gotBlock, gotActive := client.swuBackoffDelay(now)
@@ -2334,7 +2361,7 @@ func TestSWUBackoffGateRecordsImplementationSpecificPolicy(t *testing.T) {
 
 func TestSWUBackoffGateClearsExplicitZeroPolicy(t *testing.T) {
 	client := newReadyClient(t, Config{
-		EPDG:           "epdg.example",
+		Access:         VoWiFi(VoWiFiConfig{EPDG: "epdg.example"}),
 		ReconnectDelay: 5 * time.Second,
 		Terminal:       TerminalInfo{ID: testIMEI},
 	})
@@ -2354,7 +2381,7 @@ func TestSWUBackoffGateClearsExplicitZeroPolicy(t *testing.T) {
 
 func TestSWUBackoffGateExpiresAndClears(t *testing.T) {
 	client := newReadyClient(t, Config{
-		EPDG:     "epdg.example",
+		Access:   VoWiFi(VoWiFiConfig{EPDG: "epdg.example"}),
 		Terminal: TerminalInfo{ID: testIMEI},
 	})
 	defer client.Close()
@@ -2413,7 +2440,7 @@ func TestSWUPDNTypeRestrictionGateAppliesPLMNAPN(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newReadyClient(t, Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				Tunnel:   swutunnel.Config{APN: "ims"},
+				Access:   VoWiFi(VoWiFiConfig{Tunnel: swutunnel.Config{APN: "ims"}}),
 			})
 			defer client.Close()
 			client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeIPv6})
@@ -2432,7 +2459,7 @@ func TestSWUPDNTypeRestrictionGateAppliesPLMNAPN(t *testing.T) {
 func TestSWUPDNTypeRestrictionGateIgnoresUnrestrictedInfo(t *testing.T) {
 	client := newReadyClient(t, Config{
 		Terminal: TerminalInfo{ID: testIMEI},
-		Tunnel:   swutunnel.Config{APN: "ims"},
+		Access:   VoWiFi(VoWiFiConfig{Tunnel: swutunnel.Config{APN: "ims"}}),
 	})
 	defer client.Close()
 
@@ -2470,7 +2497,7 @@ func TestSWUPDNTypeRestrictionGateClearsAfterPDNDeactivation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newReadyClient(t, Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				Tunnel:   swutunnel.Config{APN: "ims"},
+				Access:   VoWiFi(VoWiFiConfig{Tunnel: swutunnel.Config{APN: "ims"}}),
 			})
 			defer client.Close()
 

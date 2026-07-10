@@ -9,7 +9,7 @@
   "use strict";
 
   const PREFIX = "TS43_VOWIFI_CALLBACK";
-  const STORAGE_KEY = "vowifi-go.vowifi.callbacks";
+  const STORAGE_KEY = "ims-go.vowifi.callbacks";
 
   function emit(event) {
     const record = {

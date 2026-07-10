@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/identity"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/identity"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) canSendReliableProvisional(msg sip.Message) bool {

@@ -16,7 +16,7 @@
   "use strict";
 
   const CALLBACK_LOG_PREFIX = "VOWIFI_CALLBACK";
-  const STORAGE_KEY = "vowifi-go.vowifi.callbacks";
+  const STORAGE_KEY = "ims-go.vowifi.callbacks";
 
   function now() {
     return new Date().toISOString();

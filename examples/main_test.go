@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/vowifi-go/wfcsetup"
+	"github.com/damonto/ims-go/wfcsetup"
 )
 
 func TestTCPAPDUFrameRoundTrip(t *testing.T) {

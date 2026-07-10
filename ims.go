@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -7,56 +7,44 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/registration"
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	imssms "github.com/damonto/vowifi-go/ims/sms"
-	imsussd "github.com/damonto/vowifi-go/ims/ussd"
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
-	swutransport "github.com/damonto/vowifi-go/swu/transport"
-	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
+	"github.com/damonto/ims-go/ims/registration"
+	imssession "github.com/damonto/ims-go/ims/session"
+	imssms "github.com/damonto/ims-go/ims/sms"
+	imsussd "github.com/damonto/ims-go/ims/ussd"
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 
-type tunnelDatagramTransport struct {
-	session *swutunnel.Session
-}
-
-func (t tunnelDatagramTransport) LocalAddr() net.Addr {
-	return t.session.LocalAddr()
-}
-
-func (t tunnelDatagramTransport) RemoteAddr() net.Addr {
-	return t.session.RemoteAddr()
-}
-
-func (t tunnelDatagramTransport) WritePacket(ctx context.Context, data []byte) error {
-	return t.session.WritePacket(ctx, data)
-}
-
-func (t tunnelDatagramTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	return t.session.ReadPacket(ctx)
-}
-
-func (t tunnelDatagramTransport) Close() error {
-	return nil
-}
-
-func (c *Client) openIMS(ctx context.Context, setup *connectSetup, tunnelInfo swutunnel.Info) error {
-	transport, err := c.buildIMSTransport(ctx, setup, tunnelInfo)
+func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
+	if setup.access == nil {
+		return errors.New("opening IMS: access session is missing")
+	}
+	accessIMS, err := setup.access.OpenIMS(ctx, accessIMSConfig{
+		Transport:          setup.imsCfg.Transport,
+		SIPServerPort:      setup.imsCfg.SIPServerPort,
+		TCPDataACKTimeouts: setup.imsCfg.TCPDataACKTimeouts,
+	})
 	if err != nil {
 		return err
+	}
+	if accessIMS.SIP == nil {
+		return errors.New("opening IMS: SIP transport is nil")
+	}
+	if setup.imsCfg.AccessNetworkInfo == "" && accessIMS.AccessNetworkInfo != "" {
+		setup.imsCfg.AccessNetworkInfo = accessIMS.AccessNetworkInfo
 	}
 
 	imsSession, err := imssession.Open(imssession.Config{
 		Transport:         setup.imsCfg.Transport,
 		Logger:            c.cfg.Logger,
 		TransactionTimers: setup.imsCfg.SIPTimers,
-	}, transport)
+	}, accessIMS.SIP)
 	if err != nil {
 		return fmt.Errorf("opening IMS session: %w", err)
 	}
 	setup.ims.sip = imsSession
 
-	reg, err := registration.New(c.buildRegistrationConfig(setup.imsCfg), imsSession, c.card)
+	reg, err := registration.New(c.buildRegistrationConfig(setup.imsCfg, accessIMS.Security), imsSession, c.card)
 	if err != nil {
 		return fmt.Errorf("creating IMS registrar: %w", err)
 	}
@@ -98,10 +86,10 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup, tunnelInfo sw
 
 	voiceCfg := setup.imsCfg.Voice
 	if voiceCfg.PrepareMedia == nil {
-		voiceCfg.PrepareMedia = openMediaTransport(setup.tunnel)
+		voiceCfg.PrepareMedia = accessIMS.OpenMedia
 	}
 	if voiceCfg.OpenMedia == nil {
-		voiceCfg.OpenMedia = openMediaTransport(setup.tunnel)
+		voiceCfg.OpenMedia = accessIMS.OpenMedia
 	}
 	voiceCfg.OnIncomingCall = c.handleIncomingVoice
 	voiceCfg.OnCallEvent = c.handleVoiceEvent
@@ -115,125 +103,6 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup, tunnelInfo sw
 	return nil
 }
 
-func (c *Client) buildIMSTransport(ctx context.Context, setup *connectSetup, tunnelInfo swutunnel.Info) (imssession.Transport, error) {
-	setup.imsCfg.dialSecureTCP = nil
-	setup.imsCfg.dialSecureUDP = nil
-	setup.imsCfg.listenSecureTCP = nil
-	setup.imsCfg.listenSecureUDP = nil
-
-	pcscfIPs := pcscfCandidateIPs(tunnelInfo)
-	selectedPCSCF := firstPCSCFIP(pcscfIPs)
-	associations := swutransport.NewSecurityAssociations()
-	var transport imssession.Transport = tunnelDatagramTransport{session: setup.tunnel}
-	setup.imsCfg.dialSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-		return swutransport.DialSecureUDP(ctx, setup.tunnel, swutransport.SecureUDPConfig{
-			UDPConfig: swutransport.UDPConfig{
-				LocalPort:  cfg.LocalPort,
-				RemotePort: cfg.RemotePort,
-				RemoteIP:   selectedPCSCF,
-			},
-			OutboundSPI:   cfg.OutboundSPI,
-			InboundSPI:    cfg.InboundSPI,
-			Encryption:    cfg.Encryption,
-			EncryptionKey: cfg.EncryptionKey,
-			Integrity:     cfg.Integrity,
-			IntegrityKey:  cfg.IntegrityKey,
-			Mode:          cfg.Mode,
-			Salt:          cfg.Salt,
-			Associations:  associations,
-		})
-	}
-	setup.imsCfg.listenSecureUDP = func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-		_ = ctx
-		return swutransport.ListenSecureUDP(setup.tunnel, swutransport.SecureUDPConfig{
-			UDPConfig: swutransport.UDPConfig{
-				LocalPort:  cfg.LocalPort,
-				RemotePort: cfg.RemotePort,
-				RemoteIP:   selectedPCSCF,
-			},
-			OutboundSPI:   cfg.OutboundSPI,
-			InboundSPI:    cfg.InboundSPI,
-			Encryption:    cfg.Encryption,
-			EncryptionKey: cfg.EncryptionKey,
-			Integrity:     cfg.Integrity,
-			IntegrityKey:  cfg.IntegrityKey,
-			Mode:          cfg.Mode,
-			Salt:          cfg.Salt,
-			Associations:  associations,
-		})
-	}
-	if setup.imsCfg.Transport != "tcp" {
-		return transport, nil
-	}
-
-	tcpTransport, selectedIP, err := c.dialPCSCFTCP(ctx, setup, pcscfIPs)
-	if err != nil {
-		return nil, fmt.Errorf("dialing ims tcp transport: %w", err)
-	}
-	transport = tcpTransport
-	selectedPCSCF = selectedIP
-	setup.imsCfg.dialSecureTCP = func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
-		return swutransport.DialSecureTCP(ctx, setup.tunnel, swutransport.SecureTCPConfig{
-			TCPConfig: swutransport.TCPConfig{
-				LocalPort:       cfg.LocalPort,
-				RemotePort:      cfg.RemotePort,
-				RemoteIP:        selectedPCSCF,
-				DataACKTimeouts: configuredTCPDataACKTimeouts(cfg.DataACKTimeouts, setup.imsCfg.TCPDataACKTimeouts),
-			},
-			OutboundSPI:   cfg.OutboundSPI,
-			InboundSPI:    cfg.InboundSPI,
-			Encryption:    cfg.Encryption,
-			EncryptionKey: cfg.EncryptionKey,
-			Integrity:     cfg.Integrity,
-			IntegrityKey:  cfg.IntegrityKey,
-			Mode:          cfg.Mode,
-			Salt:          cfg.Salt,
-			Associations:  associations,
-		})
-	}
-	setup.imsCfg.listenSecureTCP = func(ctx context.Context, cfg imssession.SecureTCPConfig) (imssession.Transport, error) {
-		_ = ctx
-		return swutransport.ListenSecureTCP(setup.tunnel, swutransport.SecureTCPConfig{
-			TCPConfig: swutransport.TCPConfig{
-				LocalPort:       cfg.LocalPort,
-				RemotePort:      cfg.RemotePort,
-				RemoteIP:        selectedPCSCF,
-				DataACKTimeouts: configuredTCPDataACKTimeouts(cfg.DataACKTimeouts, setup.imsCfg.TCPDataACKTimeouts),
-			},
-			OutboundSPI:   cfg.OutboundSPI,
-			InboundSPI:    cfg.InboundSPI,
-			Encryption:    cfg.Encryption,
-			EncryptionKey: cfg.EncryptionKey,
-			Integrity:     cfg.Integrity,
-			IntegrityKey:  cfg.IntegrityKey,
-			Mode:          cfg.Mode,
-			Salt:          cfg.Salt,
-			Associations:  associations,
-		})
-	}
-	return transport, nil
-}
-
-func (c *Client) dialPCSCFTCP(ctx context.Context, setup *connectSetup, pcscfIPs []net.IP) (*swutransport.TCPConn, net.IP, error) {
-	candidates := pcscfIPs
-	if len(candidates) == 0 {
-		candidates = []net.IP{nil}
-	}
-	var errs error
-	for _, ip := range candidates {
-		tcpTransport, err := swutransport.DialTCP(ctx, setup.tunnel, swutransport.TCPConfig{
-			RemotePort:      setup.tunnelCfg.SIPPort,
-			RemoteIP:        ip,
-			DataACKTimeouts: setup.imsCfg.TCPDataACKTimeouts,
-		})
-		if err == nil {
-			return tcpTransport, tcpRemoteIP(tcpTransport), nil
-		}
-		errs = errors.Join(errs, fmt.Errorf("dialing P-CSCF %s: %w", ipLabel(ip), err))
-	}
-	return nil, nil, errs
-}
-
 func pcscfCandidateIPs(info swutunnel.Info) []net.IP {
 	return uniqueIPs(info.PCSCFAddresses())
 }
@@ -243,11 +112,6 @@ func firstPCSCFIP(ips []net.IP) net.IP {
 		return nil
 	}
 	return append(net.IP(nil), ips[0]...)
-}
-
-func tcpRemoteIP(conn *swutransport.TCPConn) net.IP {
-	remote := conn.RemoteAddr().(*net.TCPAddr)
-	return append(net.IP(nil), remote.IP...)
 }
 
 func configuredTCPDataACKTimeouts(primary, fallback []time.Duration) []time.Duration {
@@ -284,7 +148,7 @@ func ipLabel(ip net.IP) string {
 	return ip.String()
 }
 
-func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
+func (c *Client) buildRegistrationConfig(cfg IMSConfig, security imsSecurity) registration.Config {
 	return registration.Config{
 		PrivateIdentity:         cfg.PrivateIdentity,
 		PublicIdentity:          cfg.PublicIdentity,
@@ -299,9 +163,9 @@ func (c *Client) buildRegistrationConfig(cfg IMSConfig) registration.Config {
 		GeolocationCountry:      cfg.GeolocationCountry,
 		UseTelURIForPIDFXML:     cfg.UseTelURIForPIDFXML,
 		Logger:                  c.cfg.Logger,
-		DialSecureTCP:           cfg.dialSecureTCP,
-		DialSecureUDP:           cfg.dialSecureUDP,
-		ListenSecureTCP:         cfg.listenSecureTCP,
-		ListenSecureUDP:         cfg.listenSecureUDP,
+		DialSecureTCP:           security.DialSecureTCP,
+		DialSecureUDP:           security.DialSecureUDP,
+		ListenSecureTCP:         security.ListenSecureTCP,
+		ListenSecureUDP:         security.ListenSecureUDP,
 	}
 }

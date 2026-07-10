@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/security"
-	"github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/security"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 type attachmentDrain struct {
@@ -373,9 +373,9 @@ func (s *Registrar) extendActiveSecureAssociationLifetime(expiresAt time.Time) {
 	}
 	s.activeSecureSAExpiresAt = expiresAt
 	delay := time.Until(expiresAt)
-	if delay < 0 {
-		delay = 0
-	}
+
+	delay = max(delay, 0)
+
 	oldExpiry := s.activeSecureSAExpiry
 	expiry := newSecureAssociationExpiry()
 	done := s.done

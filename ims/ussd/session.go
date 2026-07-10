@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/ims/sip"
+	imssession "github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 	"strconv"
 	"strings"
 )

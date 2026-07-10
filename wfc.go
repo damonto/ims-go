@@ -1,10 +1,10 @@
-package vowifi
+package ims
 
 import (
 	"context"
 	"strings"
 
-	"github.com/damonto/vowifi-go/wfcsetup"
+	"github.com/damonto/ims-go/wfcsetup"
 )
 
 func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) error {

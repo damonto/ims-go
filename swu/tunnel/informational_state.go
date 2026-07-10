@@ -4,7 +4,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 type informationalState struct {

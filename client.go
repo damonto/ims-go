@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	imsussd "github.com/damonto/ims-go/ims/ussd"
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
-	imsussd "github.com/damonto/vowifi-go/ims/ussd"
 )
 
 type Card interface {
@@ -54,9 +54,9 @@ func New(reader usimcard.Reader, cfg *Config) (*Client, error) {
 	}
 	raw = raw.trimmed()
 	if err := raw.validate(); err != nil {
+	raw.Terminal = raw.Terminal.trimmed()
 		return nil, errors.Join(fmt.Errorf("creating client: %w", err), wrapCloseError(closeActionReader, reader.Close()))
 	}
-	raw.Terminal = raw.Terminal.trimmed()
 	if raw.Terminal.ID == "" {
 		return nil, errors.Join(errors.New("creating client: terminal id is empty"), wrapCloseError(closeActionReader, reader.Close()))
 	}
@@ -68,7 +68,7 @@ func New(reader usimcard.Reader, cfg *Config) (*Client, error) {
 func newClient(cfg Config) *Client {
 	client := &Client{
 		cfg:    cfg,
-		logger: cfg.Logger.With("component", "vowifi-go"),
+		logger: cfg.Logger.With("component", "ims-go"),
 		state: clientState{
 			done:   make(chan struct{}),
 			status: StatusIdle,

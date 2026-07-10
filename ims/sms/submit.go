@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func submitResponseFromMessage(resp sip.Message) submitResponse {

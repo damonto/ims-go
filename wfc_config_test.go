@@ -1,4 +1,4 @@
-package vowifi
+package ims
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 	"github.com/damonto/uicc-go/usim"
-	imsvoice "github.com/damonto/vowifi-go/ims/voice"
-	swutunnel "github.com/damonto/vowifi-go/swu/tunnel"
 )
 
 type wfcTestCard struct{}
@@ -182,31 +182,32 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 			},
 			check: func(t *testing.T, got Config) {
 				t.Helper()
-				if got.EPDG != "epdg.ims.2degrees.net.nz" {
-					t.Fatalf("EPDG = %q, want profile ePDG", got.EPDG)
+				tunnel := configTunnel(got)
+				if gotEPDG := configEPDG(got); gotEPDG != "epdg.ims.2degrees.net.nz" {
+					t.Fatalf("EPDG = %q, want profile ePDG", gotEPDG)
 				}
-				if got.Tunnel.InitialPort != 501 || got.Tunnel.NATTPort != 4501 || got.Tunnel.LocalSIPPort != 5064 || got.Tunnel.SIPPort != 5070 {
-					t.Fatalf("Tunnel ports = %d/%d/%d/%d, want profile ports", got.Tunnel.InitialPort, got.Tunnel.NATTPort, got.Tunnel.LocalSIPPort, got.Tunnel.SIPPort)
+				if tunnel.InitialPort != 501 || tunnel.NATTPort != 4501 || tunnel.LocalSIPPort != 5064 || tunnel.SIPPort != 5070 {
+					t.Fatalf("Tunnel ports = %d/%d/%d/%d, want profile ports", tunnel.InitialPort, tunnel.NATTPort, tunnel.LocalSIPPort, tunnel.SIPPort)
 				}
-				if len(got.Tunnel.DHGroups) != 2 || got.Tunnel.DHGroups[0] != 2 || got.Tunnel.DHGroups[1] != 14 {
-					t.Fatalf("Tunnel.DHGroups = %v, want [2 14]", got.Tunnel.DHGroups)
+				if len(tunnel.DHGroups) != 2 || tunnel.DHGroups[0] != 2 || tunnel.DHGroups[1] != 14 {
+					t.Fatalf("Tunnel.DHGroups = %v, want [2 14]", tunnel.DHGroups)
 				}
-				if got.Tunnel.NATKeepaliveInterval != 60*time.Second {
-					t.Fatalf("Tunnel.NATKeepaliveInterval = %v, want 60s", got.Tunnel.NATKeepaliveInterval)
+				if tunnel.NATKeepaliveInterval != 60*time.Second {
+					t.Fatalf("Tunnel.NATKeepaliveInterval = %v, want 60s", tunnel.NATKeepaliveInterval)
 				}
-				if got.Tunnel.PCSCFIPv4ConfigAttribute != 16384 || got.Tunnel.PCSCFIPv6ConfigAttribute != 16386 {
-					t.Fatalf("Tunnel P-CSCF attrs = %d/%d, want 16384/16386", got.Tunnel.PCSCFIPv4ConfigAttribute, got.Tunnel.PCSCFIPv6ConfigAttribute)
+				if tunnel.PCSCFIPv4ConfigAttribute != 16384 || tunnel.PCSCFIPv6ConfigAttribute != 16386 {
+					t.Fatalf("Tunnel P-CSCF attrs = %d/%d, want 16384/16386", tunnel.PCSCFIPv4ConfigAttribute, tunnel.PCSCFIPv6ConfigAttribute)
 				}
-				if len(got.Tunnel.IKERetransmitDelays) != 3 || got.Tunnel.IKERetransmitDelays[2] != 4*time.Second {
-					t.Fatalf("Tunnel.IKERetransmitDelays = %v, want [1s 2s 4s]", got.Tunnel.IKERetransmitDelays)
+				if len(tunnel.IKERetransmitDelays) != 3 || tunnel.IKERetransmitDelays[2] != 4*time.Second {
+					t.Fatalf("Tunnel.IKERetransmitDelays = %v, want [1s 2s 4s]", tunnel.IKERetransmitDelays)
 				}
-				if got.Tunnel.IKESALifetime != 7200*time.Second || got.Tunnel.IKESARekeyMargin != 300*time.Second {
-					t.Fatalf("Tunnel IKE SA lifetime = %v/%v, want 7200s/300s", got.Tunnel.IKESALifetime, got.Tunnel.IKESARekeyMargin)
+				if tunnel.IKESALifetime != 7200*time.Second || tunnel.IKESARekeyMargin != 300*time.Second {
+					t.Fatalf("Tunnel IKE SA lifetime = %v/%v, want 7200s/300s", tunnel.IKESALifetime, tunnel.IKESARekeyMargin)
 				}
-				if got.Tunnel.ChildSALifetime != 3600*time.Second || got.Tunnel.ChildSARekeyMargin != 300*time.Second {
-					t.Fatalf("Tunnel Child SA lifetime = %v/%v, want 3600s/300s", got.Tunnel.ChildSALifetime, got.Tunnel.ChildSARekeyMargin)
+				if tunnel.ChildSALifetime != 3600*time.Second || tunnel.ChildSARekeyMargin != 300*time.Second {
+					t.Fatalf("Tunnel Child SA lifetime = %v/%v, want 3600s/300s", tunnel.ChildSALifetime, tunnel.ChildSARekeyMargin)
 				}
-				if !got.Tunnel.AddKEToChildSARekey {
+				if !tunnel.AddKEToChildSARekey {
 					t.Fatal("Tunnel AddKEToChildSARekey = false, want profile value")
 				}
 				if got.IMS.Transport != "tcp" || got.IMS.HomeDomain != "ims.mnc024.mcc530.3gppnetwork.org" {
@@ -288,8 +289,10 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 			name: "explicit config overrides profile",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				EPDG:     "epdg.example.com",
-				Tunnel:   tunnelConfigForWFCOverride(),
+				Access: VoWiFi(VoWiFiConfig{
+					EPDG:   "epdg.example.com",
+					Tunnel: tunnelConfigForWFCOverride(),
+				}),
 				IMS: IMSConfig{
 					Transport:             "udp",
 					HomeDomain:            "ims.example.com",
@@ -314,14 +317,15 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 			},
 			check: func(t *testing.T, got Config) {
 				t.Helper()
-				if got.EPDG != "epdg.example.com" {
-					t.Fatalf("EPDG = %q, want explicit value", got.EPDG)
+				tunnel := configTunnel(got)
+				if gotEPDG := configEPDG(got); gotEPDG != "epdg.example.com" {
+					t.Fatalf("EPDG = %q, want explicit value", gotEPDG)
 				}
-				if got.Tunnel.InitialPort != 502 || got.Tunnel.SIPPort != 5091 {
-					t.Fatalf("Tunnel ports = %d/%d, want explicit values", got.Tunnel.InitialPort, got.Tunnel.SIPPort)
+				if tunnel.InitialPort != 502 || tunnel.SIPPort != 5091 {
+					t.Fatalf("Tunnel ports = %d/%d, want explicit values", tunnel.InitialPort, tunnel.SIPPort)
 				}
-				if got.Tunnel.PCSCFIPv4ConfigAttribute != 16384 || got.Tunnel.PCSCFIPv6ConfigAttribute != 16386 {
-					t.Fatalf("Tunnel P-CSCF attrs = %d/%d, want profile values", got.Tunnel.PCSCFIPv4ConfigAttribute, got.Tunnel.PCSCFIPv6ConfigAttribute)
+				if tunnel.PCSCFIPv4ConfigAttribute != 16384 || tunnel.PCSCFIPv6ConfigAttribute != 16386 {
+					t.Fatalf("Tunnel P-CSCF attrs = %d/%d, want profile values", tunnel.PCSCFIPv4ConfigAttribute, tunnel.PCSCFIPv6ConfigAttribute)
 				}
 				if got.IMS.Transport != "udp" || got.IMS.HomeDomain != "ims.example.com" {
 					t.Fatalf("IMS transport/domain = %q/%q, want explicit values", got.IMS.Transport, got.IMS.HomeDomain)
@@ -361,7 +365,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 			if err != nil {
 				t.Fatalf("normalizedTunnel() error = %v", err)
 			}
-			got.Tunnel = tunnelCfg
+			got.Access.VoWiFi.Tunnel = tunnelCfg
 			tt.check(t, got)
 		})
 	}
@@ -702,6 +706,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			name: "embedded profile fills epdg",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
 			},
 			card:     wfcTestCard{},
 			wantEPDG: "epdg.ims.2degrees.net.nz",
@@ -710,7 +715,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			name: "explicit epdg still wins",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				EPDG:     "epdg.example.com",
+				Access:   VoWiFi(VoWiFiConfig{EPDG: "epdg.example.com"}),
 			},
 			card:     wfcTestCard{},
 			wantEPDG: "epdg.example.com",
@@ -719,6 +724,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			name: "embedded two digit mnc profile matches padded card mnc",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
 			},
 			card:     paddedTwoDigitMNCCard{},
 			wantEPDG: "epdg.eps.truphone.net",
@@ -727,6 +733,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			name: "embedded gid profile wins over base profile",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
 			},
 			card:     paddedTwoDigitGID1Card{gid1: "547275554B3030656EFFFF"},
 			wantEPDG: "epdg.eps.truphone.net",
@@ -739,21 +746,24 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
-			if got.EPDG != tt.wantEPDG {
-				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
+			if gotEPDG := configEPDG(got); gotEPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", gotEPDG, tt.wantEPDG)
 			}
 		})
 	}
 }
 
 func TestConfigNormalizedUsesEmbeddedLivenessTimeout(t *testing.T) {
-	cfg := Config{Terminal: TerminalInfo{ID: testIMEI}}
+	cfg := Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	}
 	got, err := cfg.normalized(plmnWFCCard{mcc: "505", mnc: "03", mncLength: 2})
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
-	if got.Tunnel.LivenessTimeout != 90*time.Second {
-		t.Fatalf("Tunnel.LivenessTimeout = %v, want Vodafone AU liveness timeout 90s", got.Tunnel.LivenessTimeout)
+	if gotLivenessTimeout := configTunnel(got).LivenessTimeout; gotLivenessTimeout != 90*time.Second {
+		t.Fatalf("Tunnel.LivenessTimeout = %v, want Vodafone AU liveness timeout 90s", gotLivenessTimeout)
 	}
 }
 
@@ -821,19 +831,25 @@ func TestEmbeddedWFCConfigPixelEPDG(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			got, err := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			}.normalized(tt.card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
-			if got.EPDG != tt.wantEPDG {
-				t.Fatalf("EPDG = %q, want %q", got.EPDG, tt.wantEPDG)
+			if gotEPDG := configEPDG(got); gotEPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", gotEPDG, tt.wantEPDG)
 			}
 		})
 	}
 }
 
 func TestEmbeddedWFCConfigATTUsesConfiguredIMSIdentities(t *testing.T) {
-	got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
+	got, err := Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
@@ -1021,7 +1037,10 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 }
 
 func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
-	got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
+	got, err := Config{
+		Terminal: TerminalInfo{ID: testIMEI},
+		Access:   VoWiFi(VoWiFiConfig{}),
+	}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
@@ -1098,7 +1117,10 @@ func TestEmbeddedWFCConfigUsesWFCWidebandDTMFPayloads(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			got, err := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			}.normalized(tt.card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
@@ -1165,7 +1187,10 @@ func TestEmbeddedWFCConfigUsesAudioInactivityCallEndReasons(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			got, err := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			}.normalized(tt.card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
@@ -1192,7 +1217,10 @@ func TestEmbeddedWFCConfigPreservesDisabledRTCPInactivityTimer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(tt.card)
+			got, err := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			}.normalized(tt.card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}
@@ -1229,7 +1257,10 @@ func TestEmbeddedWFCConfigMatchesNSDSProfiles(t *testing.T) {
 				mnc:       profile.MNC,
 				mncLength: len(profile.MNC),
 			}
-			got, err := Config{Terminal: TerminalInfo{ID: testIMEI}}.normalized(card)
+			got, err := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			}.normalized(card)
 			if err != nil {
 				t.Fatalf("normalized() error = %v", err)
 			}

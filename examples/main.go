@@ -18,6 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/damonto/ims-go"
+	imssession "github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/swu/tunnel"
+	"github.com/damonto/ims-go/wfcsetup"
 	uiccat "github.com/damonto/uicc-go/at"
 	uiccccid "github.com/damonto/uicc-go/ccid"
 	uiccqmi "github.com/damonto/uicc-go/qcom/qmi"
@@ -25,10 +29,6 @@ import (
 	uiccuim "github.com/damonto/uicc-go/qcom/uim"
 	"github.com/damonto/uicc-go/usim"
 	usimcard "github.com/damonto/uicc-go/usim/card"
-	"github.com/damonto/vowifi-go"
-	imssession "github.com/damonto/vowifi-go/ims/session"
-	"github.com/damonto/vowifi-go/swu/tunnel"
-	"github.com/damonto/vowifi-go/wfcsetup"
 )
 
 const (
@@ -206,22 +206,24 @@ func run(opt options) error {
 		return err
 	}
 
-	cfg := &vowifi.Config{
-		EPDG:   opt.epdgAddr,
+	cfg := &ims.Config{
 		Logger: slog.Default(),
-		Terminal: vowifi.TerminalInfo{
+		Terminal: ims.TerminalInfo{
 			ID:              opt.imei,
 			Vendor:          opt.terminalVendor,
 			Model:           opt.terminalModel,
 			SoftwareVersion: opt.terminalSW,
 			Build:           opt.terminalBuild,
 		},
-		Tunnel: tunnel.Config{
-			SIPPort:              opt.sipPort,
-			NATKeepaliveInterval: opt.nattKeepalive,
-			IKERetransmitDelays:  ikeRetransmit,
-		},
-		IMS: vowifi.IMSConfig{
+		Access: ims.VoWiFi(ims.VoWiFiConfig{
+			EPDG: opt.epdgAddr,
+			Tunnel: tunnel.Config{
+				SIPPort:              opt.sipPort,
+				NATKeepaliveInterval: opt.nattKeepalive,
+				IKERetransmitDelays:  ikeRetransmit,
+			},
+		}),
+		IMS: ims.IMSConfig{
 			Transport:          opt.transport,
 			PrivateIdentity:    opt.privateID,
 			PublicIdentity:     opt.publicID,
@@ -236,7 +238,7 @@ func run(opt options) error {
 		},
 	}
 
-	client, err := vowifi.New(reader, cfg)
+	client, err := ims.New(reader, cfg)
 	if err != nil {
 		return err
 	}
@@ -492,7 +494,7 @@ func wfcUserActionFromError(err error) (wfcUserAction, bool) {
 	return wfcUserAction{Source: "unknown"}, true
 }
 
-func runUSSD(ctx context.Context, client *vowifi.Client, code string) error {
+func runUSSD(ctx context.Context, client *ims.Client, code string) error {
 	session, err := client.USSD().Start()
 	if err != nil {
 		return fmt.Errorf("starting USSD: %w", err)
@@ -935,7 +937,7 @@ func isCleanTCPAPDUClose(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }
 
-func logClientEvents(events *vowifi.Events) {
+func logClientEvents(events *ims.Events) {
 	for {
 		select {
 		case state, ok := <-events.State:
@@ -952,7 +954,7 @@ func logClientEvents(events *vowifi.Events) {
 	}
 }
 
-func logSMSEvents(events *vowifi.SMSEvents) {
+func logSMSEvents(events *ims.SMSEvents) {
 	for {
 		select {
 		case sms, ok := <-events.Incoming:
@@ -969,7 +971,7 @@ func logSMSEvents(events *vowifi.SMSEvents) {
 	}
 }
 
-func logSMSSubmissionUpdates(submission vowifi.SMSSubmission) {
+func logSMSSubmissionUpdates(submission ims.SMSSubmission) {
 	for update := range submission.Updates {
 		attrs := []any{
 			"id", update.SubmissionID,
@@ -992,7 +994,7 @@ func logSMSSubmissionUpdates(submission vowifi.SMSSubmission) {
 	}
 }
 
-func logUSSDResult(result vowifi.USSDResult) {
+func logUSSDResult(result ims.USSDResult) {
 	if !result.HasMessage {
 		slog.Info("ussd session updated", "closed", result.Closed, "received_at", result.ReceivedAt.Format(time.RFC3339))
 		return

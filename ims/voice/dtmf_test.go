@@ -86,9 +86,9 @@ func TestSendDTMFWritesTelephoneEventRTP(t *testing.T) {
 	var packets []RTPPacket
 	for len(writes) > 0 {
 		wire := <-writes
-		packet, err := ParseRTPPacket(wire)
-		if err != nil {
-			t.Fatalf("ParseRTPPacket() error = %v", err)
+		var packet RTPPacket
+		if err := packet.UnmarshalBinary(wire); err != nil {
+			t.Fatalf("RTPPacket.UnmarshalBinary() error = %v", err)
 		}
 		packets = append(packets, packet)
 	}
@@ -157,24 +157,24 @@ func TestWriteRTPRebasesSpeechAfterDTMF(t *testing.T) {
 		<-writes
 	}
 
-	speech, err := BuildRTPPacket(RTPPacket{
+	speech, err := (RTPPacket{
 		PayloadType:    102,
 		SequenceNumber: 77,
 		Timestamp:      9000,
 		SSRC:           0xaabbccdd,
 		Marker:         true,
 		Payload:        []byte{0xaa, 0xbb},
-	})
+	}).MarshalBinary()
 	if err != nil {
-		t.Fatalf("BuildRTPPacket() error = %v", err)
+		t.Fatalf("RTPPacket.MarshalBinary() error = %v", err)
 	}
 	if err := call.WriteRTP(context.Background(), speech); err != nil {
 		t.Fatalf("WriteRTP() error = %v", err)
 	}
 	gotWire := <-writes
-	got, err := ParseRTPPacket(gotWire)
-	if err != nil {
-		t.Fatalf("ParseRTPPacket() error = %v", err)
+	var got RTPPacket
+	if err := got.UnmarshalBinary(gotWire); err != nil {
+		t.Fatalf("RTPPacket.UnmarshalBinary() error = %v", err)
 	}
 	if got.PayloadType != 102 || got.SequenceNumber != 1006 || got.Timestamp != 3280 || got.SSRC != 0x01020304 {
 		t.Fatalf("speech RTP = %+v, want payload 102 seq 1006 timestamp 3280 ssrc 0x01020304", got)

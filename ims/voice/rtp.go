@@ -42,6 +42,7 @@ const (
 	amrToCFrameTypeShift = 3
 	amrToCFrameTypeMask  = 0x0f
 	amrToCQualityFlag    = 0x04
+	amrToCReservedBits   = 0x03
 	amrNoDataFrameType   = 15
 	amrWBNoDataFrameType = 15
 	amrWBSpeechLostType  = 14
@@ -50,12 +51,21 @@ const (
 	amrToCFrameTypeBits  = 4
 	amrToCQualityBits    = 1
 
+	evsHeaderHFlag     = 0x80
+	evsHeaderFFlag     = 0x40
+	evsHeaderAMRWBIO   = 0x20
+	evsHeaderQuality   = 0x10
+	evsHeaderFrameMask = 0x0f
+	evsSpeechLostType  = 14
+	evsNoDataType      = 15
+
 	bitsPerByte = 8
 )
 
 var (
 	amrFrameBits   = []int{95, 103, 118, 134, 148, 159, 204, 244, 39}
 	amrWBFrameBits = []int{132, 177, 253, 285, 317, 365, 397, 461, 477, 40}
+	evsFrameBits   = []int{56, 144, 160, 192, 264, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0}
 )
 
 type RTPPacket struct {
@@ -72,69 +82,103 @@ type AMRPayload struct {
 	Frames []AMRFrame
 }
 
+// AMRPayloadCodec marshals AMR RTP payloads with negotiated media context.
+type AMRPayloadCodec struct {
+	Media NegotiatedMedia
+}
+
 type AMRFrame struct {
 	FrameType int
 	Quality   bool
 	Data      []byte
 }
 
-func ParseRTPPacket(packet []byte) (RTPPacket, error) {
-	if len(packet) < rtpHeaderSize {
-		return RTPPacket{}, errors.New("parsing RTP packet: packet is too short")
+// AMRToCEntry is one AMR RTP table-of-contents entry.
+type AMRToCEntry struct {
+	Follow    bool
+	FrameType int
+	Quality   bool
+}
+
+// EVSPayload contains the EVS frames carried by one RTP payload.
+type EVSPayload struct {
+	Frames []EVSFrame
+}
+
+// EVSFrame contains one native EVS access unit without the RTP payload header.
+type EVSFrame struct {
+	FrameType int
+	Quality   bool
+	Data      []byte
+}
+
+// MarshalBinary returns one RTP packet.
+func (p RTPPacket) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+// AppendBinary appends one RTP packet to dst.
+func (p RTPPacket) AppendBinary(dst []byte) ([]byte, error) {
+	if p.PayloadType < 0 || p.PayloadType > rtpPayloadTypeMax {
+		return nil, fmt.Errorf("marshaling RTP packet: payload type %d is outside 0..%d", p.PayloadType, rtpPayloadTypeMax)
 	}
-	if version := packet[0] >> rtpVersionShift; version != rtpVersion {
-		return RTPPacket{}, fmt.Errorf("parsing RTP packet: unsupported version %d", version)
+	offset := len(dst)
+	dst = append(dst, make([]byte, rtpHeaderSize+len(p.Payload))...)
+	out := dst[offset:]
+	out[0] = rtpVersion << rtpVersionShift
+	out[1] = byte(p.PayloadType)
+	if p.Marker {
+		out[1] |= rtpMarkerFlag
 	}
-	hasPadding := packet[0]&rtpPaddingFlag != 0
-	hasExtension := packet[0]&rtpExtensionFlag != 0
-	csrcCount := int(packet[0] & rtpCSRCCountMask)
+	binary.BigEndian.PutUint16(out[2:4], p.SequenceNumber)
+	binary.BigEndian.PutUint32(out[4:8], p.Timestamp)
+	binary.BigEndian.PutUint32(out[8:12], p.SSRC)
+	copy(out[rtpHeaderSize:], p.Payload)
+	return dst, nil
+}
+
+// UnmarshalBinary fills p from one RTP packet.
+func (p *RTPPacket) UnmarshalBinary(data []byte) error {
+	if len(data) < rtpHeaderSize {
+		return errors.New("unmarshaling RTP packet: packet is too short")
+	}
+	if version := data[0] >> rtpVersionShift; version != rtpVersion {
+		return fmt.Errorf("unmarshaling RTP packet: unsupported version %d", version)
+	}
+	hasPadding := data[0]&rtpPaddingFlag != 0
+	hasExtension := data[0]&rtpExtensionFlag != 0
+	csrcCount := int(data[0] & rtpCSRCCountMask)
 	offset := rtpHeaderSize + csrcCount*rtpCSRCSize
-	if offset > len(packet) {
-		return RTPPacket{}, errors.New("parsing RTP packet: csrc list is truncated")
+	if offset > len(data) {
+		return errors.New("unmarshaling RTP packet: csrc list is truncated")
 	}
 	if hasExtension {
-		if offset+rtpExtensionHeaderSize > len(packet) {
-			return RTPPacket{}, errors.New("parsing RTP packet: extension header is truncated")
+		if offset+rtpExtensionHeaderSize > len(data) {
+			return errors.New("unmarshaling RTP packet: extension header is truncated")
 		}
-		extensionWords := int(binary.BigEndian.Uint16(packet[offset+2 : offset+rtpExtensionHeaderSize]))
+		extensionWords := int(binary.BigEndian.Uint16(data[offset+2 : offset+rtpExtensionHeaderSize]))
 		offset += rtpExtensionHeaderSize + extensionWords*rtpExtensionWordSize
-		if offset > len(packet) {
-			return RTPPacket{}, errors.New("parsing RTP packet: extension payload is truncated")
+		if offset > len(data) {
+			return errors.New("unmarshaling RTP packet: extension payload is truncated")
 		}
 	}
-	end := len(packet)
+	end := len(data)
 	if hasPadding {
-		padding := int(packet[len(packet)-1])
-		if padding == 0 || padding > len(packet)-offset {
-			return RTPPacket{}, errors.New("parsing RTP packet: padding is invalid")
+		padding := int(data[len(data)-1])
+		if padding == 0 || padding > len(data)-offset {
+			return errors.New("unmarshaling RTP packet: padding is invalid")
 		}
 		end -= padding
 	}
-	return RTPPacket{
-		PayloadType:    int(packet[1] & rtpPayloadTypeMask),
-		SequenceNumber: binary.BigEndian.Uint16(packet[2:4]),
-		Timestamp:      binary.BigEndian.Uint32(packet[4:8]),
-		SSRC:           binary.BigEndian.Uint32(packet[8:12]),
-		Marker:         packet[1]&rtpMarkerFlag != 0,
-		Payload:        append([]byte(nil), packet[offset:end]...),
-	}, nil
-}
-
-func BuildRTPPacket(packet RTPPacket) ([]byte, error) {
-	if packet.PayloadType < 0 || packet.PayloadType > rtpPayloadTypeMax {
-		return nil, fmt.Errorf("building RTP packet: payload type %d is outside 0..%d", packet.PayloadType, rtpPayloadTypeMax)
+	*p = RTPPacket{
+		PayloadType:    int(data[1] & rtpPayloadTypeMask),
+		SequenceNumber: binary.BigEndian.Uint16(data[2:4]),
+		Timestamp:      binary.BigEndian.Uint32(data[4:8]),
+		SSRC:           binary.BigEndian.Uint32(data[8:12]),
+		Marker:         data[1]&rtpMarkerFlag != 0,
+		Payload:        append(p.Payload[:0], data[offset:end]...),
 	}
-	out := make([]byte, rtpHeaderSize+len(packet.Payload))
-	out[0] = rtpVersion << rtpVersionShift
-	out[1] = byte(packet.PayloadType)
-	if packet.Marker {
-		out[1] |= rtpMarkerFlag
-	}
-	binary.BigEndian.PutUint16(out[2:4], packet.SequenceNumber)
-	binary.BigEndian.PutUint32(out[4:8], packet.Timestamp)
-	binary.BigEndian.PutUint32(out[8:12], packet.SSRC)
-	copy(out[rtpHeaderSize:], packet.Payload)
-	return out, nil
+	return nil
 }
 
 func randomRTCPSSRC() uint32 {
@@ -157,7 +201,7 @@ func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
 		cname = cname[:rtcpCNAMEMaxLen]
 	}
 	if cname == "" {
-		cname = "vowifi-go"
+		cname = "ims-go"
 	}
 
 	rr := make([]byte, 8)
@@ -185,54 +229,65 @@ func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
 	return out
 }
 
-func ParseAMRPayload(media NegotiatedMedia, payload []byte) (AMRPayload, error) {
-	if !isAMRCodec(media.Codec) {
-		return AMRPayload{}, fmt.Errorf("parsing AMR payload: media codec is %s", media.Codec)
-	}
-	if media.OctetAlign {
-		return ParseAMROctetAlignedPayload(media.Codec, payload)
-	}
-	return ParseAMRBandwidthEfficientPayload(media.Codec, payload)
+// Marshal builds one AMR RTP payload.
+func (c AMRPayloadCodec) Marshal(p AMRPayload) ([]byte, error) {
+	return c.Append(nil, p)
 }
 
-func BuildAMRPayload(media NegotiatedMedia, frames []AMRFrame, cmr int) ([]byte, error) {
-	if !isAMRCodec(media.Codec) {
-		return nil, fmt.Errorf("building AMR payload: media codec is %s", media.Codec)
+// Append appends one AMR RTP payload to dst.
+func (c AMRPayloadCodec) Append(dst []byte, p AMRPayload) ([]byte, error) {
+	mediaCodec := normalizedAMRCodec(c.Media.Codec)
+	if !isAMRCodec(mediaCodec) {
+		return nil, fmt.Errorf("marshaling AMR payload: media codec is %s", c.Media.Codec)
 	}
-	if media.OctetAlign {
-		return BuildAMROctetAlignedPayload(media.Codec, frames, cmr)
+	if c.Media.OctetAlign {
+		return c.appendOctetAligned(dst, mediaCodec, p)
 	}
-	return BuildAMRBandwidthEfficientPayload(media.Codec, frames, cmr)
+	return c.appendBandwidthEfficient(dst, mediaCodec, p)
 }
 
-func ParseAMROctetAlignedPayload(codec AudioCodec, payload []byte) (AMRPayload, error) {
+// Unmarshal parses one AMR RTP payload.
+func (c AMRPayloadCodec) Unmarshal(data []byte) (AMRPayload, error) {
+	mediaCodec := normalizedAMRCodec(c.Media.Codec)
+	if !isAMRCodec(mediaCodec) {
+		return AMRPayload{}, fmt.Errorf("unmarshaling AMR payload: media codec is %s", c.Media.Codec)
+	}
+	if c.Media.OctetAlign {
+		return c.unmarshalOctetAligned(mediaCodec, data)
+	}
+	return c.unmarshalBandwidthEfficient(mediaCodec, data)
+}
+
+func (c AMRPayloadCodec) unmarshalOctetAligned(codec AudioCodec, payload []byte) (AMRPayload, error) {
 	if len(payload) < 2 {
-		return AMRPayload{}, errors.New("parsing AMR octet-aligned payload: payload is too short")
+		return AMRPayload{}, errors.New("unmarshaling AMR octet-aligned payload: payload is too short")
 	}
 	result := AMRPayload{CMR: int(payload[0] >> amrCMRShift)}
 	offset := 1
 	for more := true; more; {
 		if offset >= len(payload) {
-			return AMRPayload{}, errors.New("parsing AMR octet-aligned payload: table of contents is truncated")
+			return AMRPayload{}, errors.New("unmarshaling AMR octet-aligned payload: table of contents is truncated")
 		}
-		toc := payload[offset]
+		var toc AMRToCEntry
+		if err := toc.UnmarshalBinary(payload[offset : offset+1]); err != nil {
+			return AMRPayload{}, err
+		}
 		offset++
-		more = toc&amrToCFollowFlag != 0
-		frameType := int((toc >> amrToCFrameTypeShift) & amrToCFrameTypeMask)
-		frameBytes, err := amrFrameBytes(codec, frameType)
+		frameBytes, err := amrFrameBytes(codec, toc.FrameType)
 		if err != nil {
-			return AMRPayload{}, fmt.Errorf("parsing AMR octet-aligned payload: %w", err)
+			return AMRPayload{}, fmt.Errorf("unmarshaling AMR octet-aligned payload: %w", err)
 		}
 		result.Frames = append(result.Frames, AMRFrame{
-			FrameType: frameType,
-			Quality:   toc&amrToCQualityFlag != 0,
+			FrameType: toc.FrameType,
+			Quality:   toc.Quality,
 			Data:      make([]byte, frameBytes),
 		})
+		more = toc.Follow
 	}
 	for i := range result.Frames {
 		end := offset + len(result.Frames[i].Data)
 		if end > len(payload) {
-			return AMRPayload{}, errors.New("parsing AMR octet-aligned payload: speech data is truncated")
+			return AMRPayload{}, errors.New("unmarshaling AMR octet-aligned payload: speech data is truncated")
 		}
 		copy(result.Frames[i].Data, payload[offset:end])
 		offset = end
@@ -240,126 +295,233 @@ func ParseAMROctetAlignedPayload(codec AudioCodec, payload []byte) (AMRPayload, 
 	return result, nil
 }
 
-func BuildAMROctetAlignedPayload(codec AudioCodec, frames []AMRFrame, cmr int) ([]byte, error) {
-	if len(frames) == 0 {
-		return nil, errors.New("building AMR octet-aligned payload: at least one frame is required")
+func (c AMRPayloadCodec) appendOctetAligned(dst []byte, codec AudioCodec, payload AMRPayload) ([]byte, error) {
+	cmr, err := validateAMRPayloadFrames(codec, payload, "marshaling AMR octet-aligned payload")
+	if err != nil {
+		return nil, err
 	}
-	if cmr < 0 {
-		cmr = AMRNoModeRequest
-	}
-	if cmr > amrCMRMax {
-		return nil, fmt.Errorf("building AMR octet-aligned payload: cmr %d is outside 0..%d", cmr, amrCMRMax)
-	}
-	speechBytes := 0
-	for _, frame := range frames {
-		frameBytes, err := amrFrameBytes(codec, frame.FrameType)
+	dst = append(dst, byte(cmr<<amrCMRShift))
+	for i, frame := range payload.Frames {
+		toc := AMRToCEntry{
+			Follow:    i < len(payload.Frames)-1,
+			FrameType: frame.FrameType,
+			Quality:   frame.Quality,
+		}
+		dst, err = toc.AppendBinary(dst)
 		if err != nil {
-			return nil, fmt.Errorf("building AMR octet-aligned payload: %w", err)
+			return nil, err
 		}
-		if len(frame.Data) != frameBytes {
-			return nil, fmt.Errorf("building AMR octet-aligned payload: frame type %d has %d bytes, want %d", frame.FrameType, len(frame.Data), frameBytes)
-		}
-		speechBytes += frameBytes
 	}
-	out := make([]byte, 1+len(frames)+speechBytes)
-	out[0] = byte(cmr << amrCMRShift)
-	offset := 1
-	for i, frame := range frames {
-		toc := byte((frame.FrameType & amrToCFrameTypeMask) << amrToCFrameTypeShift)
-		if i < len(frames)-1 {
-			toc |= amrToCFollowFlag
-		}
-		if frame.Quality {
-			toc |= amrToCQualityFlag
-		}
-		out[offset] = toc
-		offset++
+	for _, frame := range payload.Frames {
+		dst = append(dst, frame.Data...)
 	}
-	for _, frame := range frames {
-		copy(out[offset:], frame.Data)
-		offset += len(frame.Data)
-	}
-	return out, nil
+	return dst, nil
 }
 
-func ParseAMRBandwidthEfficientPayload(codec AudioCodec, payload []byte) (AMRPayload, error) {
+func (c AMRPayloadCodec) unmarshalBandwidthEfficient(codec AudioCodec, payload []byte) (AMRPayload, error) {
 	reader := bitReader{data: payload}
 	cmr, ok := reader.readBits(amrCMRBits)
 	if !ok {
-		return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: cmr is truncated")
+		return AMRPayload{}, errors.New("unmarshaling AMR bandwidth-efficient payload: cmr is truncated")
 	}
 	result := AMRPayload{CMR: int(cmr)}
 	for more := true; more; {
-		f, ok := reader.readBits(amrToCFollowBits)
+		toc, ok := readAMRToCEntryBits(&reader)
 		if !ok {
-			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: table of contents is truncated")
+			return AMRPayload{}, errors.New("unmarshaling AMR bandwidth-efficient payload: table of contents is truncated")
 		}
-		ft, ok := reader.readBits(amrToCFrameTypeBits)
-		if !ok {
-			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: frame type is truncated")
-		}
-		q, ok := reader.readBits(amrToCQualityBits)
-		if !ok {
-			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: frame quality is truncated")
-		}
-		frameType := int(ft)
-		frameBits, err := amrFrameBitLen(codec, frameType)
+		frameBits, err := amrFrameBitLen(codec, toc.FrameType)
 		if err != nil {
-			return AMRPayload{}, fmt.Errorf("parsing AMR bandwidth-efficient payload: %w", err)
+			return AMRPayload{}, fmt.Errorf("unmarshaling AMR bandwidth-efficient payload: %w", err)
 		}
 		result.Frames = append(result.Frames, AMRFrame{
-			FrameType: frameType,
-			Quality:   q != 0,
+			FrameType: toc.FrameType,
+			Quality:   toc.Quality,
 			Data:      make([]byte, bytesForBits(frameBits)),
 		})
-		more = f != 0
+		more = toc.Follow
 	}
 	for i := range result.Frames {
 		frameBits, _ := amrFrameBitLen(codec, result.Frames[i].FrameType)
 		if !reader.readBytes(result.Frames[i].Data, frameBits) {
-			return AMRPayload{}, errors.New("parsing AMR bandwidth-efficient payload: speech data is truncated")
+			return AMRPayload{}, errors.New("unmarshaling AMR bandwidth-efficient payload: speech data is truncated")
 		}
 	}
 	return result, nil
 }
 
-func BuildAMRBandwidthEfficientPayload(codec AudioCodec, frames []AMRFrame, cmr int) ([]byte, error) {
-	if len(frames) == 0 {
-		return nil, errors.New("building AMR bandwidth-efficient payload: at least one frame is required")
+func (c AMRPayloadCodec) appendBandwidthEfficient(dst []byte, codec AudioCodec, payload AMRPayload) ([]byte, error) {
+	cmr, err := validateAMRPayloadFrames(codec, payload, "marshaling AMR bandwidth-efficient payload")
+	if err != nil {
+		return nil, err
 	}
-	if cmr < 0 {
-		cmr = AMRNoModeRequest
-	}
-	if cmr > amrCMRMax {
-		return nil, fmt.Errorf("building AMR bandwidth-efficient payload: cmr %d is outside 0..%d", cmr, amrCMRMax)
-	}
-	writer := bitWriter{}
+	writer := bitWriter{data: dst, pos: len(dst) * bitsPerByte}
 	writer.writeBits(uint64(cmr), amrCMRBits)
-	for i, frame := range frames {
-		frameBits, err := amrFrameBitLen(codec, frame.FrameType)
-		if err != nil {
-			return nil, fmt.Errorf("building AMR bandwidth-efficient payload: %w", err)
+	for i, frame := range payload.Frames {
+		toc := AMRToCEntry{
+			Follow:    i < len(payload.Frames)-1,
+			FrameType: frame.FrameType,
+			Quality:   frame.Quality,
 		}
-		if len(frame.Data) != bytesForBits(frameBits) {
-			return nil, fmt.Errorf("building AMR bandwidth-efficient payload: frame type %d has %d bytes, want %d", frame.FrameType, len(frame.Data), bytesForBits(frameBits))
-		}
-		if i < len(frames)-1 {
-			writer.writeBits(1, amrToCFollowBits)
-		} else {
-			writer.writeBits(0, amrToCFollowBits)
-		}
-		writer.writeBits(uint64(frame.FrameType), amrToCFrameTypeBits)
-		if frame.Quality {
-			writer.writeBits(1, amrToCQualityBits)
-		} else {
-			writer.writeBits(0, amrToCQualityBits)
-		}
+		toc.writeBits(&writer)
 	}
-	for _, frame := range frames {
+	for _, frame := range payload.Frames {
 		frameBits, _ := amrFrameBitLen(codec, frame.FrameType)
 		writer.writeBytes(frame.Data, frameBits)
 	}
 	return writer.bytes(), nil
+}
+
+func validateAMRPayloadFrames(codec AudioCodec, payload AMRPayload, context string) (int, error) {
+	if len(payload.Frames) == 0 {
+		return 0, fmt.Errorf("%s: at least one frame is required", context)
+	}
+	cmr := payload.CMR
+	if cmr < 0 {
+		cmr = AMRNoModeRequest
+	}
+	if cmr > amrCMRMax {
+		return 0, fmt.Errorf("%s: cmr %d is outside 0..%d", context, cmr, amrCMRMax)
+	}
+	for _, frame := range payload.Frames {
+		frameBytes, err := amrFrameBytes(codec, frame.FrameType)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", context, err)
+		}
+		if len(frame.Data) != frameBytes {
+			return 0, fmt.Errorf("%s: frame type %d has %d bytes, want %d", context, frame.FrameType, len(frame.Data), frameBytes)
+		}
+	}
+	return cmr, nil
+}
+
+// AppendBinary appends one AMR RTP ToC byte to dst.
+func (e AMRToCEntry) AppendBinary(dst []byte) ([]byte, error) {
+	if e.FrameType < 0 || e.FrameType > amrToCFrameTypeMask {
+		return nil, fmt.Errorf("marshaling AMR ToC entry: frame type %d is outside 0..%d", e.FrameType, amrToCFrameTypeMask)
+	}
+	toc := byte((e.FrameType & amrToCFrameTypeMask) << amrToCFrameTypeShift)
+	if e.Follow {
+		toc |= amrToCFollowFlag
+	}
+	if e.Quality {
+		toc |= amrToCQualityFlag
+	}
+	return append(dst, toc), nil
+}
+
+// MarshalBinary returns one AMR RTP ToC byte.
+func (e AMRToCEntry) MarshalBinary() ([]byte, error) {
+	return e.AppendBinary(nil)
+}
+
+// UnmarshalBinary decodes one AMR RTP ToC byte.
+func (e *AMRToCEntry) UnmarshalBinary(data []byte) error {
+	if len(data) != 1 {
+		return fmt.Errorf("unmarshaling AMR ToC entry: byte count %d, want 1", len(data))
+	}
+	toc := data[0]
+	if toc&amrToCReservedBits != 0 {
+		return fmt.Errorf("unmarshaling AMR ToC entry: reserved bits are set")
+	}
+	e.Follow = toc&amrToCFollowFlag != 0
+	e.FrameType = int((toc >> amrToCFrameTypeShift) & amrToCFrameTypeMask)
+	e.Quality = toc&amrToCQualityFlag != 0
+	return nil
+}
+
+func (e AMRToCEntry) writeBits(w *bitWriter) {
+	if e.Follow {
+		w.writeBits(1, amrToCFollowBits)
+	} else {
+		w.writeBits(0, amrToCFollowBits)
+	}
+	w.writeBits(uint64(e.FrameType), amrToCFrameTypeBits)
+	if e.Quality {
+		w.writeBits(1, amrToCQualityBits)
+	} else {
+		w.writeBits(0, amrToCQualityBits)
+	}
+}
+
+func readAMRToCEntryBits(r *bitReader) (AMRToCEntry, bool) {
+	f, ok := r.readBits(amrToCFollowBits)
+	if !ok {
+		return AMRToCEntry{}, false
+	}
+	ft, ok := r.readBits(amrToCFrameTypeBits)
+	if !ok {
+		return AMRToCEntry{}, false
+	}
+	q, ok := r.readBits(amrToCQualityBits)
+	if !ok {
+		return AMRToCEntry{}, false
+	}
+	return AMRToCEntry{
+		Follow:    f != 0,
+		FrameType: int(ft),
+		Quality:   q != 0,
+	}, true
+}
+
+// MarshalBinary returns one native EVS RTP payload.
+func (p EVSPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+// AppendBinary appends one native EVS RTP payload to dst.
+func (p EVSPayload) AppendBinary(dst []byte) ([]byte, error) {
+	if len(p.Frames) != 1 {
+		return nil, fmt.Errorf("marshaling EVS payload: frame count %d, want 1", len(p.Frames))
+	}
+	frame := p.Frames[0]
+	frameBytes, err := evsFrameBytes(frame.FrameType)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling EVS payload: %w", err)
+	}
+	if len(frame.Data) != frameBytes {
+		return nil, fmt.Errorf("marshaling EVS payload: frame type %d has %d bytes, want %d", frame.FrameType, len(frame.Data), frameBytes)
+	}
+	if frame.Quality && frame.FrameType == evsSpeechLostType {
+		return nil, errors.New("marshaling EVS payload: speech-lost frames must have bad quality")
+	}
+	if !frame.Quality && frame.FrameType != evsSpeechLostType {
+		return nil, errors.New("marshaling EVS payload: native EVS does not carry a bad-frame quality bit")
+	}
+	dst = append(dst, byte(frame.FrameType&evsHeaderFrameMask))
+	return append(dst, frame.Data...), nil
+}
+
+// UnmarshalBinary decodes one native EVS RTP payload.
+func (p *EVSPayload) UnmarshalBinary(payload []byte) error {
+	if len(payload) == 0 {
+		return errors.New("unmarshaling EVS payload: payload is too short")
+	}
+	header := payload[0]
+	if header&(evsHeaderHFlag|evsHeaderFFlag) != 0 {
+		return fmt.Errorf("unmarshaling EVS payload: aggregation header %#02x is not supported", header)
+	}
+	if header&evsHeaderAMRWBIO != 0 {
+		return errors.New("unmarshaling EVS payload: AMR-WB IO mode is not supported")
+	}
+	if header&evsHeaderQuality != 0 {
+		return fmt.Errorf("unmarshaling EVS payload: native header %#02x has reserved quality bit set", header)
+	}
+	frameType := int(header & evsHeaderFrameMask)
+	frameBytes, err := evsFrameBytes(frameType)
+	if err != nil {
+		return fmt.Errorf("unmarshaling EVS payload: %w", err)
+	}
+	if len(payload)-1 != frameBytes {
+		return fmt.Errorf("unmarshaling EVS payload: frame type %d has %d bytes, want %d", frameType, len(payload)-1, frameBytes)
+	}
+	frame := EVSFrame{
+		FrameType: frameType,
+		Quality:   frameType != evsSpeechLostType,
+		Data:      append([]byte(nil), payload[1:]...),
+	}
+	p.Frames = append(p.Frames[:0], frame)
+	return nil
 }
 
 func amrFrameBytes(codec AudioCodec, frameType int) (int, error) {
@@ -390,6 +552,26 @@ func amrFrameBitLen(codec AudioCodec, frameType int) (int, error) {
 		return 0, fmt.Errorf("unsupported codec %q", codec)
 	}
 	return 0, fmt.Errorf("frame type %d is not supported for %s", frameType, codec)
+}
+
+func evsFrameBytes(frameType int) (int, error) {
+	bits, err := evsFrameBitLen(frameType)
+	if err != nil {
+		return 0, err
+	}
+	return bytesForBits(bits), nil
+}
+
+func evsFrameBitLen(frameType int) (int, error) {
+	if frameType < 0 || frameType >= len(evsFrameBits) {
+		return 0, fmt.Errorf("frame type %d is not defined for EVS", frameType)
+	}
+	switch frameType {
+	case 0, 1, 2, 3, 4, 12, evsSpeechLostType, evsNoDataType:
+		return evsFrameBits[frameType], nil
+	default:
+		return 0, fmt.Errorf("frame type %d is outside the EVS VoWiFi profile", frameType)
+	}
 }
 
 func normalizedAMRCodec(codec AudioCodec) AudioCodec {
@@ -435,7 +617,7 @@ func (r *bitReader) readBytes(dst []byte, bits int) bool {
 	for i := range dst {
 		dst[i] = 0
 	}
-	for i := 0; i < bits; i++ {
+	for i := range bits {
 		bit, ok := r.readBits(1)
 		if !ok {
 			return false
@@ -459,7 +641,7 @@ func (w *bitWriter) writeBits(value uint64, n int) {
 }
 
 func (w *bitWriter) writeBytes(src []byte, bits int) {
-	for i := 0; i < bits; i++ {
+	for i := range bits {
 		bit := src[i/bitsPerByte]&(1<<(bitsPerByte-1-i%bitsPerByte)) != 0
 		w.writeBit(bit)
 	}

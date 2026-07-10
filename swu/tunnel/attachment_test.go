@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/packet"
+	"github.com/damonto/ims-go/swu/packet"
 )
 
 type attachmentClosingInnerHandler struct {

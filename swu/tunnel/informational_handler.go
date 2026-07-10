@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/vowifi-go/swu/ike"
+	"github.com/damonto/ims-go/swu/ike"
 )
 
 func (s *Session) handleInformationalResponse(state informationalState, packet ike.IKEPacket, data []byte, addr net.Addr) (bool, error) {

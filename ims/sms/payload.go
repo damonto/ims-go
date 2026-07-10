@@ -10,7 +10,7 @@ import (
 	"net/textproto"
 	"strings"
 
-	"github.com/damonto/vowifi-go/ims/sip"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 const (
