@@ -1,12 +1,14 @@
 package codec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/damonto/ims-go/ims/voice/codec/amr/amrnb"
 	"github.com/damonto/ims-go/ims/voice/codec/amr/amrwb"
+	"github.com/damonto/ims-go/ims/voice/codec/evs"
 )
 
 // Name identifies a speech codec family.
@@ -17,6 +19,8 @@ const (
 	AMR Name = "AMR"
 	// AMRWB identifies AMR wideband, 16 kHz, 20 ms frames.
 	AMRWB Name = "AMR-WB"
+	// EVS identifies EVS Native and AMR-WB IO, 20 ms frames.
+	EVS Name = "EVS"
 	// AVS is reserved for a future AVS implementation.
 	AVS Name = "AVS"
 )
@@ -45,6 +49,24 @@ const (
 	AMRModeDTX Mode = Mode(amrnb.ModeDTX)
 	// AMRModeNoData marks an AMR-NB no-data frame.
 	AMRModeNoData Mode = Mode(amrnb.ModeNoData)
+)
+
+const (
+	EVSMode2800       Mode = 0
+	EVSMode7200       Mode = 1
+	EVSMode8000       Mode = 2
+	EVSMode9600       Mode = 3
+	EVSMode13200      Mode = 4
+	EVSMode16400      Mode = 5
+	EVSMode24400      Mode = 6
+	EVSMode32000      Mode = 7
+	EVSMode48000      Mode = 8
+	EVSMode64000      Mode = 9
+	EVSMode96000      Mode = 10
+	EVSMode128000     Mode = 11
+	EVSModeSID        Mode = 12
+	EVSModeSpeechLost Mode = 14
+	EVSModeNoData     Mode = 15
 )
 
 const (
@@ -77,30 +99,26 @@ const (
 // ErrUnsupportedCodec reports a codec name that this package does not implement.
 var ErrUnsupportedCodec = errors.New("unsupported codec")
 
+// ErrSessionRequired reports codecs whose encoder and decoder state must share
+// one call-scoped Session.
+var ErrSessionRequired = errors.New("codec session is required")
+
 // Config describes one codec instance.
 type Config struct {
 	Name Name
 	Mode Mode
 	DTX  bool
+	EVS  EVSConfig
 }
 
-// DecoderConfig is accepted by NewDecoder.
-//
-// Use a Name for legacy AMR callers, or Config when the decoder needs
-// codec-specific setup.
-type DecoderConfig interface {
-	decoderConfig()
-}
-
-func (Name) decoderConfig()   {}
-func (Config) decoderConfig() {}
-
-// Frame contains one encoded speech frame without RTP CMR or ToC bytes.
+// Frame contains one encoded speech frame without RTP CMR or ToC bytes. EVS
+// data is an access unit extracted from an EVS RTP payload, not a G.192 frame.
 type Frame struct {
 	Name    Name
 	Mode    Mode
 	Quality bool
 	Data    []byte
+	EVS     EVSFrame
 }
 
 // Encoder converts exactly one 20 ms PCM16 frame into one encoded speech frame.
@@ -108,8 +126,9 @@ type Encoder interface {
 	Name() Name
 	SampleRate() int
 	FrameSamples() int
-	Encode(dst []byte, pcm []int16) (Frame, error)
-	Reset()
+	Encode(ctx context.Context, dst []byte, pcm []int16) (Frame, error)
+	Reset(ctx context.Context) error
+	Close(ctx context.Context) error
 }
 
 // Decoder converts exactly one encoded speech frame into one 20 ms PCM16 frame.
@@ -117,16 +136,15 @@ type Decoder interface {
 	Name() Name
 	SampleRate() int
 	FrameSamples() int
-	Decode(dst []int16, frame Frame) ([]int16, error)
-	DecodeLost(dst []int16) ([]int16, error)
-	Reset()
+	Decode(ctx context.Context, dst []int16, frame Frame) ([]int16, error)
+	DecodeLost(ctx context.Context, dst []int16) ([]int16, error)
+	Reset(ctx context.Context) error
+	Close(ctx context.Context) error
 }
 
-// NewEncoder creates an encoder for cfg.
-//
-// The API is stable across codec families so AVS can be added later without
-// changing frame-level callers.
-func NewEncoder(cfg Config) (Encoder, error) {
+// NewEncoder creates an AMR or AMR-WB encoder. EVS requires a call-scoped
+// Session so both directions preserve one continuous codec state.
+func NewEncoder(ctx context.Context, cfg Config) (Encoder, error) {
 	name := NormalizeName(cfg.Name)
 	switch name {
 	case AMR:
@@ -141,6 +159,8 @@ func NewEncoder(cfg Config) (Encoder, error) {
 			return nil, err
 		}
 		return wbEncoder{enc: enc}, nil
+	case EVS:
+		return nil, fmt.Errorf("%w: %s", ErrSessionRequired, EVS)
 	case AVS:
 		return nil, fmt.Errorf("%w: %s implementation is not available", ErrUnsupportedCodec, AVS)
 	default:
@@ -148,29 +168,20 @@ func NewEncoder(cfg Config) (Encoder, error) {
 	}
 }
 
-// NewDecoder creates a decoder from a Name or Config.
-//
-// Passing a Name preserves the original AMR call pattern. Passing Config keeps
-// decoder setup symmetrical with NewEncoder.
-func NewDecoder(cfgOrName DecoderConfig) (Decoder, error) {
-	cfg := Config{}
-	switch value := cfgOrName.(type) {
-	case Config:
-		cfg = value
-	case Name:
-		cfg.Name = value
-	default:
-		return nil, fmt.Errorf("%w: %T", ErrUnsupportedCodec, cfgOrName)
-	}
-	switch NormalizeName(cfg.Name) {
+// NewDecoder creates an AMR or AMR-WB decoder. EVS requires a call-scoped
+// Session so both directions preserve one continuous codec state.
+func NewDecoder(_ context.Context, name Name) (Decoder, error) {
+	switch NormalizeName(name) {
 	case AMR:
 		return nbDecoder{dec: amrnb.NewDecoder()}, nil
 	case AMRWB:
 		return wbDecoder{dec: amrwb.NewDecoder()}, nil
+	case EVS:
+		return nil, fmt.Errorf("%w: %s", ErrSessionRequired, EVS)
 	case AVS:
 		return nil, fmt.Errorf("%w: %s implementation is not available", ErrUnsupportedCodec, AVS)
 	default:
-		return nil, fmt.Errorf("%w: %q", ErrUnsupportedCodec, cfg.Name)
+		return nil, fmt.Errorf("%w: %q", ErrUnsupportedCodec, name)
 	}
 }
 
@@ -181,6 +192,8 @@ func NormalizeName(name Name) Name {
 		return AMR
 	case "AMR-WB", "AMRWB":
 		return AMRWB
+	case "EVS":
+		return EVS
 	case "AVS":
 		return AVS
 	default:
@@ -188,13 +201,16 @@ func NormalizeName(name Name) Name {
 	}
 }
 
-// FrameBytes returns the encoded speech byte count for one frame mode.
+// FrameBytes returns the encoded speech byte count for one frame mode. EVS
+// modes are interpreted as EVS Native; use EVSFrameBytes for AMR-WB IO.
 func FrameBytes(name Name, mode Mode) (int, error) {
 	switch NormalizeName(name) {
 	case AMR:
 		return amrnb.FrameBytes(amrnb.Mode(mode))
 	case AMRWB:
 		return amrwb.FrameBytes(amrwb.Mode(mode))
+	case EVS:
+		return evs.FrameBytes(evs.Native, int(mode))
 	default:
 		return 0, fmt.Errorf("%w: %q", ErrUnsupportedCodec, name)
 	}
@@ -210,7 +226,7 @@ func (e nbEncoder) SampleRate() int { return amrnb.SampleRate }
 
 func (e nbEncoder) FrameSamples() int { return amrnb.FrameSamples }
 
-func (e nbEncoder) Encode(dst []byte, pcm []int16) (Frame, error) {
+func (e nbEncoder) Encode(_ context.Context, dst []byte, pcm []int16) (Frame, error) {
 	frame, err := e.enc.Encode(dst, pcm)
 	if err != nil {
 		return Frame{}, err
@@ -218,7 +234,12 @@ func (e nbEncoder) Encode(dst []byte, pcm []int16) (Frame, error) {
 	return Frame{Name: AMR, Mode: Mode(frame.Mode), Quality: frame.Quality, Data: frame.Data}, nil
 }
 
-func (e nbEncoder) Reset() { e.enc.Reset() }
+func (e nbEncoder) Reset(context.Context) error {
+	e.enc.Reset()
+	return nil
+}
+
+func (nbEncoder) Close(context.Context) error { return nil }
 
 type nbDecoder struct {
 	dec *amrnb.Decoder
@@ -230,7 +251,7 @@ func (d nbDecoder) SampleRate() int { return amrnb.SampleRate }
 
 func (d nbDecoder) FrameSamples() int { return amrnb.FrameSamples }
 
-func (d nbDecoder) Decode(dst []int16, frame Frame) ([]int16, error) {
+func (d nbDecoder) Decode(_ context.Context, dst []int16, frame Frame) ([]int16, error) {
 	if name := NormalizeName(frame.Name); name != "" && name != AMR {
 		return nil, fmt.Errorf("decoding AMR frame: frame codec is %s", frame.Name)
 	}
@@ -245,7 +266,7 @@ func (d nbDecoder) Decode(dst []int16, frame Frame) ([]int16, error) {
 	return pcm, nil
 }
 
-func (d nbDecoder) DecodeLost(dst []int16) ([]int16, error) {
+func (d nbDecoder) DecodeLost(_ context.Context, dst []int16) ([]int16, error) {
 	pcm, err := d.dec.DecodeLost(dst)
 	if err != nil {
 		return nil, err
@@ -253,7 +274,12 @@ func (d nbDecoder) DecodeLost(dst []int16) ([]int16, error) {
 	return pcm, nil
 }
 
-func (d nbDecoder) Reset() { d.dec.Reset() }
+func (d nbDecoder) Reset(context.Context) error {
+	d.dec.Reset()
+	return nil
+}
+
+func (nbDecoder) Close(context.Context) error { return nil }
 
 type wbEncoder struct {
 	enc *amrwb.Encoder
@@ -265,7 +291,7 @@ func (e wbEncoder) SampleRate() int { return amrwb.SampleRate }
 
 func (e wbEncoder) FrameSamples() int { return amrwb.FrameSamples }
 
-func (e wbEncoder) Encode(dst []byte, pcm []int16) (Frame, error) {
+func (e wbEncoder) Encode(_ context.Context, dst []byte, pcm []int16) (Frame, error) {
 	frame, err := e.enc.Encode(dst, pcm)
 	if err != nil {
 		return Frame{}, err
@@ -273,7 +299,12 @@ func (e wbEncoder) Encode(dst []byte, pcm []int16) (Frame, error) {
 	return Frame{Name: AMRWB, Mode: Mode(frame.Mode), Quality: frame.Quality, Data: frame.Data}, nil
 }
 
-func (e wbEncoder) Reset() { e.enc.Reset() }
+func (e wbEncoder) Reset(context.Context) error {
+	e.enc.Reset()
+	return nil
+}
+
+func (wbEncoder) Close(context.Context) error { return nil }
 
 type wbDecoder struct {
 	dec *amrwb.Decoder
@@ -285,7 +316,7 @@ func (d wbDecoder) SampleRate() int { return amrwb.SampleRate }
 
 func (d wbDecoder) FrameSamples() int { return amrwb.FrameSamples }
 
-func (d wbDecoder) Decode(dst []int16, frame Frame) ([]int16, error) {
+func (d wbDecoder) Decode(_ context.Context, dst []int16, frame Frame) ([]int16, error) {
 	if name := NormalizeName(frame.Name); name != "" && name != AMRWB {
 		return nil, fmt.Errorf("decoding AMR-WB frame: frame codec is %s", frame.Name)
 	}
@@ -300,7 +331,7 @@ func (d wbDecoder) Decode(dst []int16, frame Frame) ([]int16, error) {
 	return pcm, nil
 }
 
-func (d wbDecoder) DecodeLost(dst []int16) ([]int16, error) {
+func (d wbDecoder) DecodeLost(_ context.Context, dst []int16) ([]int16, error) {
 	pcm, err := d.dec.DecodeLost(dst)
 	if err != nil {
 		return nil, err
@@ -308,4 +339,9 @@ func (d wbDecoder) DecodeLost(dst []int16) ([]int16, error) {
 	return pcm, nil
 }
 
-func (d wbDecoder) Reset() { d.dec.Reset() }
+func (d wbDecoder) Reset(context.Context) error {
+	d.dec.Reset()
+	return nil
+}
+
+func (wbDecoder) Close(context.Context) error { return nil }

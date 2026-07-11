@@ -47,6 +47,10 @@ func TestFrameBytes(t *testing.T) {
 		{name: codec.AMRWB, mode: codec.AMRWBModeSID, bytes: 5},
 		{name: codec.AMRWB, mode: codec.AMRWBModeSpeechLost, bytes: 0},
 		{name: codec.AMRWB, mode: codec.AMRWBModeNoData, bytes: 0},
+		{name: codec.EVS, mode: codec.EVSMode13200, bytes: 33},
+		{name: codec.EVS, mode: codec.EVSMode128000, bytes: 320},
+		{name: codec.EVS, mode: codec.EVSModeSID, bytes: 6},
+		{name: codec.EVS, mode: codec.EVSModeNoData, bytes: 0},
 	}
 	for _, tt := range tests {
 		got, err := codec.FrameBytes(tt.name, tt.mode)
@@ -56,6 +60,39 @@ func TestFrameBytes(t *testing.T) {
 		if got != tt.bytes {
 			t.Fatalf("FrameBytes(%s, %d) = %d, want %d", tt.name, tt.mode, got, tt.bytes)
 		}
+	}
+}
+
+func TestEVSFrameBytes(t *testing.T) {
+	tests := []struct {
+		name   string
+		format codec.EVSFormat
+		mode   codec.Mode
+		bits   int
+		bytes  int
+	}{
+		{name: "native", format: codec.EVSNative, mode: codec.EVSMode13200, bits: 264, bytes: 33},
+		{name: "amr-wb-io", format: codec.EVSAMRWBIO, mode: codec.AMRWBMode1265, bits: 253, bytes: 32},
+		{name: "amr-wb-io-sid", format: codec.EVSAMRWBIO, mode: codec.AMRWBModeSID, bits: 35, bytes: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bits, err := codec.EVSFrameBits(tt.format, tt.mode)
+			if err != nil {
+				t.Fatalf("EVSFrameBits() error = %v", err)
+			}
+			if bits != tt.bits {
+				t.Errorf("EVSFrameBits() = %d, want %d", bits, tt.bits)
+			}
+			bytes, err := codec.EVSFrameBytes(tt.format, tt.mode)
+			if err != nil {
+				t.Fatalf("EVSFrameBytes() error = %v", err)
+			}
+			if bytes != tt.bytes {
+				t.Errorf("EVSFrameBytes() = %d, want %d", bytes, tt.bytes)
+			}
+		})
 	}
 }
 
@@ -269,20 +306,49 @@ func TestFactoriesExposeMetadata(t *testing.T) {
 	}
 	for _, tt := range tests {
 		cfg := codec.Config{Name: tt.name, Mode: tt.mode}
-		enc, err := codec.NewEncoder(cfg)
+		enc, err := codec.NewEncoder(t.Context(), cfg)
 		if err != nil {
 			t.Fatalf("NewEncoder(%s) error = %v", tt.name, err)
 		}
 		if enc.Name() != tt.name || enc.SampleRate() != tt.sampleRate || enc.FrameSamples() != tt.frameSamples {
 			t.Fatalf("encoder metadata = %s/%d/%d", enc.Name(), enc.SampleRate(), enc.FrameSamples())
 		}
-		dec, err := codec.NewDecoder(tt.name)
+		dec, err := codec.NewDecoder(t.Context(), tt.name)
 		if err != nil {
 			t.Fatalf("NewDecoder(%s) error = %v", tt.name, err)
 		}
 		if dec.Name() != tt.name || dec.SampleRate() != tt.sampleRate || dec.FrameSamples() != tt.frameSamples {
 			t.Fatalf("decoder metadata = %s/%d/%d", dec.Name(), dec.SampleRate(), dec.FrameSamples())
 		}
+	}
+}
+
+func TestEVSRequiresSession(t *testing.T) {
+	tests := []struct {
+		name string
+		open func() error
+	}{
+		{
+			name: "encoder",
+			open: func() error {
+				_, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.EVS, Mode: codec.EVSMode13200})
+				return err
+			},
+		},
+		{
+			name: "decoder",
+			open: func() error {
+				_, err := codec.NewDecoder(t.Context(), codec.EVS)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.open(); !errors.Is(err, codec.ErrSessionRequired) {
+				t.Fatalf("factory error = %v, want ErrSessionRequired", err)
+			}
+		})
 	}
 }
 
@@ -329,7 +395,7 @@ func TestAMRSpeechModesEncodeDecodeThroughPublicAPI(t *testing.T) {
 	for _, tt := range tests {
 		for _, mode := range tt.modes {
 			t.Run(fmt.Sprintf("%s/mode-%d", tt.name, mode), func(t *testing.T) {
-				enc, err := codec.NewEncoder(codec.Config{Name: tt.name, Mode: mode})
+				enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: tt.name, Mode: mode})
 				if err != nil {
 					t.Fatalf("NewEncoder() error = %v", err)
 				}
@@ -340,7 +406,7 @@ func TestAMRSpeechModesEncodeDecodeThroughPublicAPI(t *testing.T) {
 						enc.Name(), enc.SampleRate(), enc.FrameSamples())
 				}
 
-				frame, err := enc.Encode(nil, publicAPISpeechPCM(enc.FrameSamples(), int(mode)))
+				frame, err := enc.Encode(t.Context(), nil, publicAPISpeechPCM(enc.FrameSamples(), int(mode)))
 				if err != nil {
 					t.Fatalf("Encode() error = %v", err)
 				}
@@ -355,11 +421,11 @@ func TestAMRSpeechModesEncodeDecodeThroughPublicAPI(t *testing.T) {
 					t.Fatalf("encoded bytes = %d, want %d", len(frame.Data), wantBytes)
 				}
 
-				dec, err := codec.NewDecoder(tt.name)
+				dec, err := codec.NewDecoder(t.Context(), tt.name)
 				if err != nil {
 					t.Fatalf("NewDecoder() error = %v", err)
 				}
-				pcm, err := dec.Decode(nil, frame)
+				pcm, err := dec.Decode(t.Context(), nil, frame)
 				if err != nil {
 					t.Fatalf("Decode() error = %v", err)
 				}
@@ -368,6 +434,156 @@ func TestAMRSpeechModesEncodeDecodeThroughPublicAPI(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestEVSEncodeDecodeThroughPublicAPI(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     codec.Config
+		format     codec.EVSFormat
+		frameType  codec.Mode
+		frameBytes int
+	}{
+		{
+			name: "native",
+			config: codec.Config{
+				Name: codec.EVS,
+				Mode: codec.EVSMode13200,
+				EVS: codec.EVSConfig{
+					Bandwidth: codec.EVSBandwidthWB,
+				},
+			},
+			format:     codec.EVSNative,
+			frameType:  codec.EVSMode13200,
+			frameBytes: 33,
+		},
+		{
+			name: "amr-wb-io",
+			config: codec.Config{
+				Name: codec.EVS,
+				Mode: codec.AMRWBMode1265,
+				EVS: codec.EVSConfig{
+					Format:    codec.EVSAMRWBIO,
+					Bandwidth: codec.EVSBandwidthWB,
+				},
+			},
+			format:     codec.EVSAMRWBIO,
+			frameType:  codec.AMRWBMode1265,
+			frameBytes: 32,
+		},
+	}
+
+	ctx := t.Context()
+	engine, err := codec.NewEngine(ctx)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	defer func() {
+		if err := engine.Close(ctx); err != nil {
+			t.Errorf("Engine.Close() error = %v", err)
+		}
+	}()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			session, err := engine.NewSession(ctx, tt.config)
+			if err != nil {
+				t.Fatalf("Engine.NewSession() error = %v", err)
+			}
+			defer func() {
+				if err := session.Close(ctx); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			}()
+
+			frame, err := session.Encode(ctx, nil, publicAPISpeechPCM(session.FrameSamples(), int(tt.frameType)))
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if frame.Name != codec.EVS || frame.Mode != tt.frameType || frame.EVS.Format != tt.format {
+				t.Fatalf("encoded frame = %+v", frame)
+			}
+			if len(frame.Data) != tt.frameBytes {
+				t.Fatalf("encoded bytes = %d, want %d", len(frame.Data), tt.frameBytes)
+			}
+
+			pcm, err := session.Decode(ctx, nil, frame)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if len(pcm) != session.FrameSamples() {
+				t.Fatalf("decoded samples = %d, want %d", len(pcm), session.FrameSamples())
+			}
+			if err := session.Reset(ctx); err != nil {
+				t.Fatalf("Session.Reset() error = %v", err)
+			}
+		})
+	}
+
+	session, err := engine.NewSession(ctx, tests[0].config)
+	if err != nil {
+		t.Fatalf("Engine.NewSession(mode switch) error = %v", err)
+	}
+	if err := session.Configure(ctx, tests[1].config); err != nil {
+		t.Fatalf("Session.Configure() error = %v", err)
+	}
+	frame, err := session.Encode(ctx, nil, make([]int16, session.FrameSamples()))
+	if err != nil {
+		t.Fatalf("Encode(after Configure) error = %v", err)
+	}
+	if frame.EVS.Format != codec.EVSAMRWBIO || frame.Mode != codec.AMRWBMode1265 {
+		t.Fatalf("configured frame = %+v", frame)
+	}
+	if err := session.Close(ctx); err != nil {
+		t.Fatalf("Session.Close(mode switch) error = %v", err)
+	}
+
+	if err := engine.Close(ctx); err != nil {
+		t.Fatalf("Engine.Close() error = %v", err)
+	}
+	if _, err := engine.NewSession(ctx, tests[0].config); !errors.Is(err, codec.ErrEngineClosed) {
+		t.Fatalf("Engine.NewSession() error = %v, want ErrEngineClosed", err)
+	}
+}
+
+func TestPureGoSession(t *testing.T) {
+	tests := []struct {
+		name   string
+		config codec.Config
+	}{
+		{name: "amr", config: codec.Config{Name: codec.AMR, Mode: codec.AMRMode1220}},
+		{name: "amr-wb", config: codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode2385}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			session, err := codec.NewSession(ctx, tt.config)
+			if err != nil {
+				t.Fatalf("NewSession() error = %v", err)
+			}
+			defer func() {
+				if err := session.Close(ctx); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			}()
+			frame, err := session.Encode(ctx, nil, publicAPISpeechPCM(session.FrameSamples(), int(tt.config.Mode)))
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			pcm, err := session.Decode(ctx, nil, frame)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if len(pcm) != session.FrameSamples() {
+				t.Fatalf("decoded samples = %d, want %d", len(pcm), session.FrameSamples())
+			}
+			if err := session.Configure(ctx, tt.config); !errors.Is(err, codec.ErrUnsupportedReconfiguration) {
+				t.Fatalf("Session.Configure() error = %v, want ErrUnsupportedReconfiguration", err)
+			}
+		})
 	}
 }
 
@@ -381,15 +597,15 @@ func publicAPISpeechPCM(samples int, seed int) []int16 {
 }
 
 func TestAMRNBEncoderProducesFrame(t *testing.T) {
-	enc, err := codec.NewEncoder(codec.Config{Name: codec.AMR, Mode: codec.AMRMode1220})
+	enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AMR, Mode: codec.AMRMode1220})
 	if err != nil {
 		t.Fatalf("NewEncoder(AMR) error = %v", err)
 	}
-	if _, err := enc.Encode(nil, make([]int16, enc.FrameSamples()-1)); err == nil {
+	if _, err := enc.Encode(t.Context(), nil, make([]int16, enc.FrameSamples()-1)); err == nil {
 		t.Fatal("AMR Encode() error = nil, want bad sample count")
 	}
 
-	frame, err := enc.Encode(nil, make([]int16, enc.FrameSamples()))
+	frame, err := enc.Encode(t.Context(), nil, make([]int16, enc.FrameSamples()))
 
 	if err != nil {
 		t.Fatalf("AMR Encode() error = %v", err)
@@ -403,12 +619,12 @@ func TestAMRNBEncoderProducesFrame(t *testing.T) {
 }
 
 func TestAMRNBEncoderProducesDTXFrame(t *testing.T) {
-	enc, err := codec.NewEncoder(codec.Config{Name: codec.AMR, Mode: codec.AMRModeDTX})
+	enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AMR, Mode: codec.AMRModeDTX})
 	if err != nil {
 		t.Fatalf("NewEncoder(AMR DTX) error = %v", err)
 	}
 
-	frame, err := enc.Encode(nil, make([]int16, enc.FrameSamples()))
+	frame, err := enc.Encode(t.Context(), nil, make([]int16, enc.FrameSamples()))
 
 	if err != nil {
 		t.Fatalf("AMR DTX Encode() error = %v", err)
@@ -419,11 +635,11 @@ func TestAMRNBEncoderProducesDTXFrame(t *testing.T) {
 	if len(frame.Data) != 5 {
 		t.Fatalf("AMR DTX frame byte count = %d, want 5", len(frame.Data))
 	}
-	dec, err := codec.NewDecoder(codec.AMR)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMR)
 	if err != nil {
 		t.Fatalf("NewDecoder(AMR) error = %v", err)
 	}
-	pcm, err := dec.Decode(nil, frame)
+	pcm, err := dec.Decode(t.Context(), nil, frame)
 	if err != nil {
 		t.Fatalf("Decode(AMR DTX frame) error = %v", err)
 	}
@@ -433,22 +649,22 @@ func TestAMRNBEncoderProducesDTXFrame(t *testing.T) {
 }
 
 func TestAMRNBEncoderDTXSequence(t *testing.T) {
-	enc, err := codec.NewEncoder(codec.Config{Name: codec.AMR, Mode: codec.AMRMode1220, DTX: true})
+	enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AMR, Mode: codec.AMRMode1220, DTX: true})
 	if err != nil {
 		t.Fatalf("NewEncoder(AMR DTX) error = %v", err)
 	}
-	dec, err := codec.NewDecoder(codec.AMR)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMR)
 	if err != nil {
 		t.Fatalf("NewDecoder(AMR) error = %v", err)
 	}
 	silence := make([]int16, enc.FrameSamples())
 	var frames []codec.Frame
 	for range 13 {
-		frame, err := enc.Encode(nil, silence)
+		frame, err := enc.Encode(t.Context(), nil, silence)
 		if err != nil {
 			t.Fatalf("Encode(DTX silence) error = %v", err)
 		}
-		if _, err := dec.Decode(nil, frame); err != nil {
+		if _, err := dec.Decode(t.Context(), nil, frame); err != nil {
 			t.Fatalf("Decode(DTX frame mode %d) error = %v", frame.Mode, err)
 		}
 		frames = append(frames, frame)
@@ -470,7 +686,7 @@ func TestAMRNBEncoderDTXSequence(t *testing.T) {
 }
 
 func TestAMRWBEncoderProducesDecodableFrame(t *testing.T) {
-	enc, err := codec.NewEncoder(codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode2385})
+	enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode2385})
 	if err != nil {
 		t.Fatalf("NewEncoder(AMR-WB) error = %v", err)
 	}
@@ -478,11 +694,11 @@ func TestAMRWBEncoderProducesDecodableFrame(t *testing.T) {
 	for i := range pcm {
 		pcm[i] = int16((i%113 - 56) * 96)
 	}
-	if _, err := enc.Encode(nil, pcm[:enc.FrameSamples()-1]); err == nil {
+	if _, err := enc.Encode(t.Context(), nil, pcm[:enc.FrameSamples()-1]); err == nil {
 		t.Fatal("AMR-WB Encode() error = nil, want bad sample count")
 	}
 
-	frame, err := enc.Encode(nil, pcm)
+	frame, err := enc.Encode(t.Context(), nil, pcm)
 
 	if err != nil {
 		t.Fatalf("AMR-WB Encode() error = %v", err)
@@ -493,11 +709,11 @@ func TestAMRWBEncoderProducesDecodableFrame(t *testing.T) {
 	if len(frame.Data) != 60 {
 		t.Fatalf("AMR-WB frame byte count = %d, want 60", len(frame.Data))
 	}
-	dec, err := codec.NewDecoder(codec.AMRWB)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMRWB)
 	if err != nil {
 		t.Fatalf("NewDecoder(AMR-WB) error = %v", err)
 	}
-	out, err := dec.Decode(nil, frame)
+	out, err := dec.Decode(t.Context(), nil, frame)
 	if err != nil {
 		t.Fatalf("Decode(AMR-WB encoded frame) error = %v", err)
 	}
@@ -507,7 +723,7 @@ func TestAMRWBEncoderProducesDecodableFrame(t *testing.T) {
 }
 
 func TestAMRWBEncoderHomingFrame(t *testing.T) {
-	enc, err := codec.NewEncoder(codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode660})
+	enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode660})
 	if err != nil {
 		t.Fatalf("NewEncoder(AMR-WB) error = %v", err)
 	}
@@ -516,7 +732,7 @@ func TestAMRWBEncoderHomingFrame(t *testing.T) {
 		pcm[i] = 0x0008
 	}
 
-	frame, err := enc.Encode(nil, pcm)
+	frame, err := enc.Encode(t.Context(), nil, pcm)
 
 	if err != nil {
 		t.Fatalf("AMR-WB Encode(homing) error = %v", err)
@@ -524,11 +740,11 @@ func TestAMRWBEncoderHomingFrame(t *testing.T) {
 	if frame.Name != codec.AMRWB || frame.Mode != codec.AMRWBMode660 || len(frame.Data) != 17 {
 		t.Fatalf("AMR-WB homing frame = %s/%d/%d bytes", frame.Name, frame.Mode, len(frame.Data))
 	}
-	dec, err := codec.NewDecoder(codec.AMRWB)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMRWB)
 	if err != nil {
 		t.Fatalf("NewDecoder(AMR-WB) error = %v", err)
 	}
-	out, err := dec.Decode(nil, frame)
+	out, err := dec.Decode(t.Context(), nil, frame)
 	if err != nil {
 		t.Fatalf("Decode(AMR-WB homing frame) error = %v", err)
 	}
@@ -540,16 +756,16 @@ func TestAMRWBEncoderHomingFrame(t *testing.T) {
 }
 
 func TestDecoderValidatesFrameSize(t *testing.T) {
-	dec, err := codec.NewDecoder(codec.AMRWB)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMRWB)
 	if err != nil {
 		t.Fatalf("NewDecoder() error = %v", err)
 	}
 	frame := codec.Frame{Name: codec.AMRWB, Mode: codec.AMRWBMode2385, Quality: true, Data: make([]byte, 59)}
-	if _, err := dec.Decode(nil, frame); err == nil {
+	if _, err := dec.Decode(t.Context(), nil, frame); err == nil {
 		t.Fatal("Decode() error = nil, want bad frame size")
 	}
 	frame.Data = append(frame.Data, 0)
-	pcm, err := dec.Decode(nil, frame)
+	pcm, err := dec.Decode(t.Context(), nil, frame)
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -559,22 +775,22 @@ func TestDecoderValidatesFrameSize(t *testing.T) {
 }
 
 func TestAMRWBEncoderDTXSequence(t *testing.T) {
-	enc, err := codec.NewEncoder(codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode2385, DTX: true})
+	enc, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AMRWB, Mode: codec.AMRWBMode2385, DTX: true})
 	if err != nil {
 		t.Fatalf("NewEncoder(AMR-WB DTX) error = %v", err)
 	}
-	dec, err := codec.NewDecoder(codec.AMRWB)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMRWB)
 	if err != nil {
 		t.Fatalf("NewDecoder(AMR-WB) error = %v", err)
 	}
 	silence := make([]int16, enc.FrameSamples())
 	var frames []codec.Frame
 	for range 13 {
-		frame, err := enc.Encode(nil, silence)
+		frame, err := enc.Encode(t.Context(), nil, silence)
 		if err != nil {
 			t.Fatalf("Encode(AMR-WB DTX silence) error = %v", err)
 		}
-		if _, err := dec.Decode(nil, frame); err != nil {
+		if _, err := dec.Decode(t.Context(), nil, frame); err != nil {
 			t.Fatalf("Decode(AMR-WB DTX mode %d) error = %v", frame.Mode, err)
 		}
 		frames = append(frames, frame)
@@ -597,7 +813,7 @@ func TestAMRWBEncoderDTXSequence(t *testing.T) {
 }
 
 func TestAMRWBDecoderHandlesSIDAndNoData(t *testing.T) {
-	dec, err := codec.NewDecoder(codec.AMRWB)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMRWB)
 	if err != nil {
 		t.Fatalf("NewDecoder(AMR-WB) error = %v", err)
 	}
@@ -607,7 +823,7 @@ func TestAMRWBDecoderHandlesSIDAndNoData(t *testing.T) {
 		Quality: true,
 		Data:    []byte{0, 0, 0, 0, 0x10},
 	}
-	pcm, err := dec.Decode(nil, frame)
+	pcm, err := dec.Decode(t.Context(), nil, frame)
 	if err != nil {
 		t.Fatalf("Decode(AMR-WB SID) error = %v", err)
 	}
@@ -616,7 +832,7 @@ func TestAMRWBDecoderHandlesSIDAndNoData(t *testing.T) {
 	}
 
 	frame = codec.Frame{Name: codec.AMRWB, Mode: codec.AMRWBModeNoData, Quality: false}
-	pcm, err = dec.Decode(nil, frame)
+	pcm, err = dec.Decode(t.Context(), nil, frame)
 	if err != nil {
 		t.Fatalf("Decode(AMR-WB no-data) error = %v", err)
 	}
@@ -626,7 +842,7 @@ func TestAMRWBDecoderHandlesSIDAndNoData(t *testing.T) {
 }
 
 func TestDecoderDecodesAMRGoodSpeechFrame(t *testing.T) {
-	dec, err := codec.NewDecoder(codec.AMR)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMR)
 	if err != nil {
 		t.Fatalf("NewDecoder() error = %v", err)
 	}
@@ -634,7 +850,7 @@ func TestDecoderDecodesAMRGoodSpeechFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FrameBytes() error = %v", err)
 	}
-	pcm, err := dec.Decode(nil, codec.Frame{
+	pcm, err := dec.Decode(t.Context(), nil, codec.Frame{
 		Name:    codec.AMR,
 		Mode:    codec.AMRMode475,
 		Quality: true,
@@ -649,7 +865,7 @@ func TestDecoderDecodesAMRGoodSpeechFrame(t *testing.T) {
 }
 
 func TestDecoderConcealsAMRLostFrame(t *testing.T) {
-	dec, err := codec.NewDecoder(codec.AMR)
+	dec, err := codec.NewDecoder(t.Context(), codec.AMR)
 	if err != nil {
 		t.Fatalf("NewDecoder() error = %v", err)
 	}
@@ -657,7 +873,7 @@ func TestDecoderConcealsAMRLostFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FrameBytes() error = %v", err)
 	}
-	if _, err := dec.Decode(nil, codec.Frame{
+	if _, err := dec.Decode(t.Context(), nil, codec.Frame{
 		Name:    codec.AMR,
 		Mode:    codec.AMRMode590,
 		Quality: true,
@@ -666,7 +882,7 @@ func TestDecoderConcealsAMRLostFrame(t *testing.T) {
 		t.Fatalf("Decode(AMR good speech) error = %v", err)
 	}
 
-	pcm, err := dec.DecodeLost(nil)
+	pcm, err := dec.DecodeLost(t.Context(), nil)
 
 	if err != nil {
 		t.Fatalf("DecodeLost() error = %v", err)
@@ -677,10 +893,10 @@ func TestDecoderConcealsAMRLostFrame(t *testing.T) {
 }
 
 func TestUnsupportedCodec(t *testing.T) {
-	if _, err := codec.NewEncoder(codec.Config{Name: codec.AVS}); !errors.Is(err, codec.ErrUnsupportedCodec) {
+	if _, err := codec.NewEncoder(t.Context(), codec.Config{Name: codec.AVS}); !errors.Is(err, codec.ErrUnsupportedCodec) {
 		t.Fatalf("NewEncoder(AVS) error = %v, want ErrUnsupportedCodec", err)
 	}
-	if _, err := codec.NewDecoder(codec.Name("bogus")); !errors.Is(err, codec.ErrUnsupportedCodec) {
+	if _, err := codec.NewDecoder(t.Context(), codec.Name("bogus")); !errors.Is(err, codec.ErrUnsupportedCodec) {
 		t.Fatalf("NewDecoder(bogus) error = %v, want ErrUnsupportedCodec", err)
 	}
 }

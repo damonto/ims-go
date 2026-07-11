@@ -103,6 +103,7 @@ func chooseCodec(remote sdpOffer, local []AudioCodecConfig) (AudioCodecConfig, b
 			selected.ModeSet = remoteCodec.ModeSet
 			selected.Bitrate = remoteCodec.Bitrate
 			selected.Bandwidth = remoteCodec.Bandwidth
+			selected.HFOnly = selected.HFOnly || remoteCodec.HFOnly
 		}
 		if selected.ModeSet == "" {
 			selected.ModeSet = remoteCodec.ModeSet
@@ -216,6 +217,9 @@ func offerCodecFMTP(codec AudioCodecConfig) string {
 		if codec.ChAwRecv != nil {
 			params = append(params, "ch-aw-recv="+strconv.Itoa(*codec.ChAwRecv))
 		}
+		if codec.HFOnly {
+			params = append(params, "hf-only=1")
+		}
 		return strings.Join(params, ";")
 	default:
 		return answerCodecFMTP(codec)
@@ -245,6 +249,9 @@ func answerCodecFMTP(codec AudioCodecConfig) string {
 		}
 		if codec.ChAwRecv != nil {
 			params = append(params, "ch-aw-recv="+strconv.Itoa(*codec.ChAwRecv))
+		}
+		if codec.HFOnly {
+			params = append(params, "hf-only=1")
 		}
 		if codec.ModeSet != "" {
 			params = append(params, "mode-set="+codec.ModeSet)

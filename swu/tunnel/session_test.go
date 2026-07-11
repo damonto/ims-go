@@ -114,6 +114,24 @@ func (c *fakePacketConn) SetDeadline(time.Time) error      { return nil }
 func (c *fakePacketConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *fakePacketConn) SetWriteDeadline(time.Time) error { return nil }
 
+type serializedWritePacketConn struct {
+	*fakePacketConn
+
+	mu             sync.Mutex
+	deadlineCalls  int
+	secondDeadline chan struct{}
+}
+
+func (c *serializedWritePacketConn) SetWriteDeadline(time.Time) error {
+	c.mu.Lock()
+	c.deadlineCalls++
+	if c.deadlineCalls == 2 {
+		close(c.secondDeadline)
+	}
+	c.mu.Unlock()
+	return nil
+}
+
 type recordingInnerHandler struct {
 	errCh chan error
 }
@@ -142,6 +160,62 @@ func mustDialSession(t *testing.T, conn net.PacketConn) *Session {
 		t.Fatalf("Dial() error = %v", err)
 	}
 	return session
+}
+
+func TestWriteOuterSerializesDeadlineAndWrite(t *testing.T) {
+	releaseWrite := make(chan struct{})
+	writeStarted := make(chan struct{})
+	conn := &serializedWritePacketConn{
+		fakePacketConn: &fakePacketConn{
+			local:        &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+			writeBlock:   releaseWrite,
+			writeStarted: writeStarted,
+		},
+		secondDeadline: make(chan struct{}),
+	}
+	sess := newSession(
+		Config{Logger: testLogger()},
+		conn,
+		false,
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	errs := make(chan error, 2)
+	go func() {
+		errs <- sess.writeOuter(ctx, []byte("first"), sess.outerRemote)
+	}()
+
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first WriteTo did not start")
+	}
+
+	go func() {
+		errs <- sess.writeOuter(ctx, []byte("second"), sess.outerRemote)
+	}()
+
+	select {
+	case <-conn.secondDeadline:
+		t.Fatal("second SetWriteDeadline ran while first WriteTo was blocked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseWrite)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("writeOuter() error = %v", err)
+		}
+	}
+
+	select {
+	case <-conn.secondDeadline:
+	case <-time.After(time.Second):
+		t.Fatal("second SetWriteDeadline did not run after first WriteTo completed")
+	}
 }
 
 func TestConnectRejectsConcurrentConnect(t *testing.T) {

@@ -32,6 +32,7 @@ go.work.sum
 refs/
 scripts/
 testdata/
+ims/voice/codec/evs/c/build/
 
 # AI
 AGENTS.md

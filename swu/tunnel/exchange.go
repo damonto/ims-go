@@ -330,6 +330,9 @@ func sameUDPAddr(a, b *net.UDPAddr) bool {
 }
 
 func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) error {
+	s.outerWriteMu.Lock()
+	defer s.outerWriteMu.Unlock()
+
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := s.conn.SetWriteDeadline(deadline); err != nil {
 			return fmt.Errorf("setting write deadline: %w", err)

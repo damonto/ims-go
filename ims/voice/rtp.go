@@ -65,7 +65,7 @@ const (
 var (
 	amrFrameBits   = []int{95, 103, 118, 134, 148, 159, 204, 244, 39}
 	amrWBFrameBits = []int{132, 177, 253, 285, 317, 365, 397, 461, 477, 40}
-	evsFrameBits   = []int{56, 144, 160, 192, 264, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0}
+	evsFrameBits   = []int{56, 144, 160, 192, 264, 328, 488, 640, 960, 1280, 1920, 2560, 48, 0, 0, 0}
 )
 
 type RTPPacket struct {
@@ -100,15 +100,29 @@ type AMRToCEntry struct {
 	Quality   bool
 }
 
-// EVSPayload contains the EVS frames carried by one RTP payload.
-type EVSPayload struct {
-	Frames []EVSFrame
+// EVSPayloadCodec marshals EVS payloads using the negotiated hf-only setting.
+type EVSPayloadCodec struct {
+	HeaderFullOnly bool
 }
 
-// EVSFrame contains one native EVS access unit without the RTP payload header.
+// EVSCMR is one Header-Full codec mode request.
+type EVSCMR struct {
+	Type int
+	Mode int
+}
+
+// EVSPayload contains the EVS frames carried by one RTP payload.
+type EVSPayload struct {
+	CMR        *EVSCMR
+	HeaderFull bool
+	Frames     []EVSFrame
+}
+
+// EVSFrame contains one EVS Native or AMR-WB IO access unit without RTP headers.
 type EVSFrame struct {
 	FrameType int
 	Quality   bool
+	AMRWBIO   bool
 	Data      []byte
 }
 
@@ -464,63 +478,23 @@ func readAMRToCEntryBits(r *bitReader) (AMRToCEntry, bool) {
 	}, true
 }
 
-// MarshalBinary returns one native EVS RTP payload.
+// MarshalBinary returns one EVS RTP payload using the default compact/header-full rules.
 func (p EVSPayload) MarshalBinary() ([]byte, error) {
-	return p.AppendBinary(nil)
+	return (EVSPayloadCodec{}).Marshal(p)
 }
 
-// AppendBinary appends one native EVS RTP payload to dst.
+// AppendBinary appends one EVS RTP payload using the default compact/header-full rules.
 func (p EVSPayload) AppendBinary(dst []byte) ([]byte, error) {
-	if len(p.Frames) != 1 {
-		return nil, fmt.Errorf("marshaling EVS payload: frame count %d, want 1", len(p.Frames))
-	}
-	frame := p.Frames[0]
-	frameBytes, err := evsFrameBytes(frame.FrameType)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling EVS payload: %w", err)
-	}
-	if len(frame.Data) != frameBytes {
-		return nil, fmt.Errorf("marshaling EVS payload: frame type %d has %d bytes, want %d", frame.FrameType, len(frame.Data), frameBytes)
-	}
-	if frame.Quality && frame.FrameType == evsSpeechLostType {
-		return nil, errors.New("marshaling EVS payload: speech-lost frames must have bad quality")
-	}
-	if !frame.Quality && frame.FrameType != evsSpeechLostType {
-		return nil, errors.New("marshaling EVS payload: native EVS does not carry a bad-frame quality bit")
-	}
-	dst = append(dst, byte(frame.FrameType&evsHeaderFrameMask))
-	return append(dst, frame.Data...), nil
+	return (EVSPayloadCodec{}).Append(dst, p)
 }
 
-// UnmarshalBinary decodes one native EVS RTP payload.
+// UnmarshalBinary decodes one EVS RTP payload using the default compact/header-full rules.
 func (p *EVSPayload) UnmarshalBinary(payload []byte) error {
-	if len(payload) == 0 {
-		return errors.New("unmarshaling EVS payload: payload is too short")
-	}
-	header := payload[0]
-	if header&(evsHeaderHFlag|evsHeaderFFlag) != 0 {
-		return fmt.Errorf("unmarshaling EVS payload: aggregation header %#02x is not supported", header)
-	}
-	if header&evsHeaderAMRWBIO != 0 {
-		return errors.New("unmarshaling EVS payload: AMR-WB IO mode is not supported")
-	}
-	if header&evsHeaderQuality != 0 {
-		return fmt.Errorf("unmarshaling EVS payload: native header %#02x has reserved quality bit set", header)
-	}
-	frameType := int(header & evsHeaderFrameMask)
-	frameBytes, err := evsFrameBytes(frameType)
+	decoded, err := (EVSPayloadCodec{}).Unmarshal(payload)
 	if err != nil {
-		return fmt.Errorf("unmarshaling EVS payload: %w", err)
+		return err
 	}
-	if len(payload)-1 != frameBytes {
-		return fmt.Errorf("unmarshaling EVS payload: frame type %d has %d bytes, want %d", frameType, len(payload)-1, frameBytes)
-	}
-	frame := EVSFrame{
-		FrameType: frameType,
-		Quality:   frameType != evsSpeechLostType,
-		Data:      append([]byte(nil), payload[1:]...),
-	}
-	p.Frames = append(p.Frames[:0], frame)
+	*p = decoded
 	return nil
 }
 
@@ -566,12 +540,10 @@ func evsFrameBitLen(frameType int) (int, error) {
 	if frameType < 0 || frameType >= len(evsFrameBits) {
 		return 0, fmt.Errorf("frame type %d is not defined for EVS", frameType)
 	}
-	switch frameType {
-	case 0, 1, 2, 3, 4, 12, evsSpeechLostType, evsNoDataType:
-		return evsFrameBits[frameType], nil
-	default:
-		return 0, fmt.Errorf("frame type %d is outside the EVS VoWiFi profile", frameType)
+	if frameType == 13 {
+		return 0, fmt.Errorf("frame type %d is reserved for EVS", frameType)
 	}
+	return evsFrameBits[frameType], nil
 }
 
 func normalizedAMRCodec(codec AudioCodec) AudioCodec {

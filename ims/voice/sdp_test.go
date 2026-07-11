@@ -449,6 +449,41 @@ func TestBuildSDPAnswerEchoesEVSChannelAwareReceive(t *testing.T) {
 	}
 }
 
+func TestEVSHeaderFullOnlyNegotiation(t *testing.T) {
+	tests := []struct {
+		name        string
+		localHFOnly bool
+		remoteFMTP  string
+	}{
+		{"local requires header-full", true, "br=5.9-13.2;bw=nb-swb"},
+		{"remote requires header-full", false, "br=5.9-13.2;bw=nb-swb;hf-only=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := (Config{Codecs: []AudioCodecConfig{
+				{Name: CodecEVS, PayloadTypes: []int{127}, ClockRate: 16000, Bitrate: "5.9-13.2", Bandwidth: "nb-swb", HFOnly: tt.localHFOnly},
+			}}).Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			remote, err := parseSDP([]byte("v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 127\r\na=rtpmap:127 EVS/16000\r\na=fmtp:127 " + tt.remoteFMTP + "\r\n"))
+			if err != nil {
+				t.Fatalf("parseSDP() error = %v", err)
+			}
+			body, media, err := buildSDPAnswer(cfg, net.IPv4(10, 0, 0, 2), 40000, remote, MediaOffer{})
+			if err != nil {
+				t.Fatalf("buildSDPAnswer() error = %v", err)
+			}
+			if !strings.Contains(string(body), "hf-only=1") {
+				t.Fatalf("SDP answer missing hf-only=1:\n%s", body)
+			}
+			if !media.HFOnly {
+				t.Fatal("NegotiatedMedia.HFOnly = false, want true")
+			}
+		})
+	}
+}
+
 func TestBuildSDPAnswerSelectsCompatibleCodec(t *testing.T) {
 	cfg, err := (Config{}).Normalized()
 	if err != nil {

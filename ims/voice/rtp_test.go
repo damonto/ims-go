@@ -530,59 +530,93 @@ func TestAMRPayloadRejectsWrongFrameSize(t *testing.T) {
 func TestEVSPayloadRoundTrip(t *testing.T) {
 	tests := []struct {
 		name  string
-		frame EVSFrame
+		codec EVSPayloadCodec
+		input EVSPayload
 	}{
 		{
-			name:  "13.2 kbit",
-			frame: EVSFrame{FrameType: 4, Quality: true, Data: bytes.Repeat([]byte{0x5a}, 33)},
+			name:  "compact native 13.2 kbit",
+			input: EVSPayload{Frames: []EVSFrame{{FrameType: 4, Quality: true, Data: bytes.Repeat([]byte{0x5a}, 33)}}},
 		},
 		{
-			name:  "sid",
-			frame: EVSFrame{FrameType: 12, Quality: true, Data: bytes.Repeat([]byte{0xa5}, 6)},
+			name:  "compact native sid",
+			input: EVSPayload{Frames: []EVSFrame{{FrameType: 12, Quality: true, Data: bytes.Repeat([]byte{0xa5}, 6)}}},
+		},
+		{
+			name: "compact AMR-WB IO",
+			input: EVSPayload{
+				CMR:    &EVSCMR{Mode: 5},
+				Frames: []EVSFrame{{FrameType: 2, Quality: true, AMRWBIO: true, Data: append(bytes.Repeat([]byte{0x5a}, 31), 0x58)}},
+			},
+		},
+		{
+			name:  "header-full AMR-WB IO sid",
+			input: EVSPayload{Frames: []EVSFrame{{FrameType: 9, Quality: true, AMRWBIO: true, Data: []byte{1, 2, 3, 4, 5}}}},
+		},
+		{
+			name: "header-full aggregation and CMR",
+			input: EVSPayload{
+				CMR: &EVSCMR{Type: 1, Mode: 4},
+				Frames: []EVSFrame{
+					{FrameType: 4, Quality: true, Data: bytes.Repeat([]byte{0x5a}, 33)},
+					{FrameType: 0, Quality: false, AMRWBIO: true, Data: bytes.Repeat([]byte{0xa5}, 17)},
+				},
+			},
+		},
+		{
+			name:  "header-full-only native sid collision",
+			codec: EVSPayloadCodec{HeaderFullOnly: true},
+			input: EVSPayload{Frames: []EVSFrame{{FrameType: 12, Quality: true, Data: bytes.Repeat([]byte{0xa5}, 6)}}},
 		},
 		{
 			name:  "speech lost",
-			frame: EVSFrame{FrameType: 14, Quality: false, Data: nil},
+			input: EVSPayload{Frames: []EVSFrame{{FrameType: 14, Quality: false}}},
 		},
 		{
 			name:  "no data",
-			frame: EVSFrame{FrameType: 15, Quality: true, Data: nil},
+			input: EVSPayload{Frames: []EVSFrame{{FrameType: 15, Quality: true}}},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wire, err := (EVSPayload{Frames: []EVSFrame{tt.frame}}).MarshalBinary()
+			wire, err := tt.codec.Marshal(tt.input)
 			if err != nil {
-				t.Fatalf("EVSPayload.MarshalBinary() error = %v", err)
+				t.Fatalf("EVSPayloadCodec.Marshal() error = %v", err)
 			}
-			var got EVSPayload
-			if err := got.UnmarshalBinary(wire); err != nil {
-				t.Fatalf("EVSPayload.UnmarshalBinary() error = %v", err)
+			got, err := tt.codec.Unmarshal(wire)
+			if err != nil {
+				t.Fatalf("EVSPayloadCodec.Unmarshal() error = %v", err)
 			}
-			if len(got.Frames) != 1 {
-				t.Fatalf("frames = %d, want 1", len(got.Frames))
+			if len(got.Frames) != len(tt.input.Frames) {
+				t.Fatalf("frames = %d, want %d", len(got.Frames), len(tt.input.Frames))
 			}
-			if got.Frames[0].FrameType != tt.frame.FrameType ||
-				got.Frames[0].Quality != tt.frame.Quality ||
-				!bytes.Equal(got.Frames[0].Data, tt.frame.Data) {
-				t.Fatalf("frame = %+v, want %+v", got.Frames[0], tt.frame)
+			for i := range got.Frames {
+				if got.Frames[i].FrameType != tt.input.Frames[i].FrameType ||
+					got.Frames[i].Quality != tt.input.Frames[i].Quality ||
+					got.Frames[i].AMRWBIO != tt.input.Frames[i].AMRWBIO ||
+					!bytes.Equal(got.Frames[i].Data, tt.input.Frames[i].Data) {
+					t.Fatalf("frame[%d] = %+v, want %+v", i, got.Frames[i], tt.input.Frames[i])
+				}
+			}
+			if tt.input.CMR != nil {
+				if got.CMR == nil || got.CMR.Type != tt.input.CMR.Type || got.CMR.Mode != tt.input.CMR.Mode {
+					t.Fatalf("CMR = %+v, want %+v", got.CMR, tt.input.CMR)
+				}
 			}
 		})
 	}
 }
 
-func TestEVSPayloadRejectsUnsupportedShapes(t *testing.T) {
+func TestEVSPayloadRejectsInvalidShapes(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload []byte
 	}{
 		{name: "empty", payload: nil},
-		{name: "header h bit", payload: []byte{0x80}},
-		{name: "header f bit", payload: []byte{0x40}},
-		{name: "amr-wb io", payload: []byte{0x20}},
-		{name: "reserved quality bit", payload: []byte{0x10}},
-		{name: "truncated speech", payload: append([]byte{0x04}, bytes.Repeat([]byte{0x00}, 32)...)},
-		{name: "unsupported native type", payload: []byte{0x05}},
+		{name: "cmr only", payload: []byte{0x80}},
+		{name: "truncated aggregation", payload: []byte{0x40}},
+		{name: "reserved native quality", payload: []byte{0x10}},
+		{name: "reserved native type", payload: []byte{0x0d}},
+		{name: "non-zero padding", payload: []byte{0x0f, 0x01}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -595,12 +629,6 @@ func TestEVSPayloadRejectsUnsupportedShapes(t *testing.T) {
 
 	if _, err := (EVSPayload{}).MarshalBinary(); err == nil {
 		t.Fatal("EVSPayload.MarshalBinary() error = nil, want frame count error")
-	}
-	if _, err := (EVSPayload{Frames: []EVSFrame{
-		{FrameType: 15, Quality: true},
-		{FrameType: 15, Quality: true},
-	}}).MarshalBinary(); err == nil {
-		t.Fatal("EVSPayload.MarshalBinary() error = nil, want multi-frame error")
 	}
 	if _, err := (EVSPayload{Frames: []EVSFrame{{FrameType: 4, Quality: true, Data: make([]byte, 32)}}}).MarshalBinary(); err == nil {
 		t.Fatal("EVSPayload.MarshalBinary() error = nil, want frame size error")

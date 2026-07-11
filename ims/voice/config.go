@@ -67,6 +67,7 @@ type AudioCodecConfig struct {
 	Bitrate       string
 	Bandwidth     string
 	ChAwRecv      *int
+	HFOnly        bool
 }
 
 type AudioInactivityCallEndReason int

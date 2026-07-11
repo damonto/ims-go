@@ -16,6 +16,7 @@ type NegotiatedMedia struct {
 	ClockRate       int
 	Channels        int
 	OctetAlign      bool
+	HFOnly          bool
 	HasDTMF         bool
 	DTMFPayloadType int
 	DTMFClockRate   int

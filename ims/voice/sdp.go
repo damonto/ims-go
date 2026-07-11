@@ -68,6 +68,7 @@ func buildSDPOfferWithDirection(cfg Config, localIP net.IP, localPort int, offer
 		ClockRate:   speech.ClockRate,
 		Channels:    speech.Channels,
 		OctetAlign:  speech.OctetAlign,
+		HFOnly:      speech.HFOnly,
 		PTime:       ptime,
 		Direction:   direction,
 	}
@@ -278,6 +279,7 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime time.Dura
 		ClockRate:      selected.ClockRate,
 		Channels:       selected.Channels,
 		OctetAlign:     selected.OctetAlign,
+		HFOnly:         selected.HFOnly,
 		PTime:          ptime,
 		Direction:      answerDirection(remote.Direction, false),
 		RemoteIP:       append(net.IP(nil), remote.RemoteIP...),

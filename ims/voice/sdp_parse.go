@@ -79,6 +79,7 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			codec.ModeSet = fmtpParam(fmtp, "mode-set")
 			codec.Bitrate = fmtpParam(fmtp, "br")
 			codec.Bandwidth = fmtpParam(fmtp, "bw")
+			codec.HFOnly = fmtpFlag(fmtp, "hf-only")
 			if codec.Name == CodecTelephoneEvent {
 				codec.DTMFEventMask = parseTelephoneEventMask(fmtp)
 			}

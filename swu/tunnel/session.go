@@ -24,6 +24,7 @@ type Session struct {
 	ikeFragmentationSupported bool
 	cfg                       Config
 	logger                    *slog.Logger
+	outerWriteMu              sync.Mutex
 
 	mu sync.RWMutex
 	tunnelConnection
