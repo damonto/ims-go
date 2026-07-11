@@ -44,7 +44,15 @@ func (s *gainPredState) reset() {
 	}
 }
 
-func (s *gainPredState) predict(mode Mode, code []int16) (expGCode0, fracGCode0, expEn, fracEn int16) {
+type gainPrediction struct {
+	exponent       int16
+	fraction       int16
+	energyExponent int16
+	energyFraction int16
+}
+
+func (s *gainPredState) predict(mode Mode, code []int16) gainPrediction {
+	var out gainPrediction
 	energy := innovationEnergy(code)
 	if mode == Mode1220 {
 		energy = int32(fxp.Round(energy)) * 26214 << 1
@@ -57,8 +65,8 @@ func (s *gainPredState) predict(mode Mode, code []int16) (expGCode0, fracGCode0,
 		}
 
 		diff := fxp.Shr32(fxp.Sub32(predicted, logEnergy), 1)
-		expGCode0, fracGCode0 = fxp.LExtract(diff)
-		return expGCode0, fracGCode0, 0, 0
+		out.exponent, out.fraction = fxp.LExtract(diff)
+		return out
 	}
 
 	expCode := fxp.NormL(energy)
@@ -70,8 +78,8 @@ func (s *gainPredState) predict(mode Mode, code []int16) (expGCode0, fracGCode0,
 	case Mode1020:
 		level = fxp.Add32(level, int32(codeGainMeanLow)<<7)
 	case Mode795:
-		fracEn = fxp.ExtractH(energy)
-		expEn = -11 - expCode
+		out.energyFraction = fxp.ExtractH(energy)
+		out.energyExponent = -11 - expCode
 		level = fxp.Add32(level, int32(codeGainMeanMR795)<<7)
 	case Mode740:
 		level = fxp.Add32(level, int32(codeGainMeanMR74)<<6)
@@ -92,8 +100,8 @@ func (s *gainPredState) predict(mode Mode, code []int16) (expGCode0, fracGCode0,
 		factor = codeGainFactorMR74
 	}
 	level = fxp.Shr32(fxp.LMult(gcode0, factor), 8)
-	expGCode0, fracGCode0 = fxp.LExtract(level)
-	return expGCode0, fracGCode0, expEn, fracEn
+	out.exponent, out.fraction = fxp.LExtract(level)
+	return out
 }
 
 func (s *gainPredState) update(quaEnerMR122, quaEner int16) {

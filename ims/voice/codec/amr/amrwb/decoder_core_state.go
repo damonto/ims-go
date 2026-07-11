@@ -60,7 +60,7 @@ type decoderCoreState struct {
 	oldT0      int16
 	oldT0Frac  int16
 	lagHist    [5]int16
-	decGain    [23]int16
+	decGain    gainDecoderState
 	dispMem    [8]int16
 	prevBFI    bool
 	state      int16

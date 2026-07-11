@@ -254,7 +254,7 @@ func (s *decoderCoreState) decodeSubframePitch(ctx decoderSubframeContext) (deco
 	ctx.frame.lagState = nextLagState
 	if ctx.frame.badFrame {
 		var gainHistory [lagHistCount]int16
-		copy(gainHistory[:], s.decGain[17:22])
+		copy(gainHistory[:], s.decGain.pitchHistory2[:])
 		t0, s.seed3 = concealLag(gainHistory, s.lagHist, t0, s.oldT0, s.seed3, ctx.frame.unusableFrame)
 		t0Frac = 0
 	}

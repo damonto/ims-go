@@ -127,20 +127,29 @@ type decodedGains struct {
 
 type gainDecodeResult struct {
 	gains  decodedGains
-	memory [23]int16
+	memory gainDecoderState
 }
 
-func resetGainDecoder() [23]int16 {
-	var mem [23]int16
-	for i := range gainPredOrder {
-		mem[i] = -14336
+type gainDecoderState struct {
+	pastQuantizedEnergy [gainPredOrder]int16
+	pastPitchGain       int16
+	pastCodeGain        int16
+	previousCodeGain    int16
+	pitchHistory        [5]int16
+	codeHistory         [5]int16
+	pitchHistory2       [5]int16
+	randomSeed          int16
+}
+
+func resetGainDecoder() gainDecoderState {
+	memory := gainDecoderState{randomSeed: randomInitialSeed}
+	for i := range memory.pastQuantizedEnergy {
+		memory.pastQuantizedEnergy[i] = -14336
 	}
-	clear(mem[gainPredOrder:23])
-	mem[22] = randomInitialSeed
-	return mem
+	return memory
 }
 
-func decodeGain(memory [23]int16, input gainDecodeInput) (gainDecodeResult, error) {
+func decodeGain(memory gainDecoderState, input gainDecodeInput) (gainDecodeResult, error) {
 	out := gainDecodeResult{memory: memory}
 	if input.subframeLength == 0 {
 		input.subframeLength = subframeSamples
@@ -160,15 +169,13 @@ func decodeGain(memory [23]int16, input gainDecodeInput) (gainDecodeResult, erro
 		return out, fmt.Errorf("decode gain: invalid index width %d", input.nbits)
 	}
 
-	mem := out.memory[:]
-
-	pastQuaEn := mem[0:4]
-	pastGainPit := &mem[4]
-	pastGainCode := &mem[5]
-	prevGC := &mem[6]
-	pbuf := mem[7:12]
-	gbuf := mem[12:17]
-	pbuf2 := mem[17:22]
+	pastQuaEn := out.memory.pastQuantizedEnergy[:]
+	pastGainPit := &out.memory.pastPitchGain
+	pastGainCode := &out.memory.pastCodeGain
+	prevGC := &out.memory.previousCodeGain
+	pbuf := out.memory.pitchHistory[:]
+	gbuf := out.memory.codeHistory[:]
+	pbuf2 := out.memory.pitchHistory2[:]
 
 	predicted := int32(gainMeanEnergy) << 24
 	for i := range gainPredOrder {
@@ -202,11 +209,9 @@ func decodeGain(memory [23]int16, input gainDecodeInput) (gainDecodeResult, erro
 	*pastGainCode = fxp.Round(fxp.Shl32(gainCode, 3))
 	*pastGainPit = gainPit
 	*prevGC = *pastGainCode
-	for i := 1; i < 5; i++ {
-		gbuf[i-1] = gbuf[i]
-		pbuf[i-1] = pbuf[i]
-		pbuf2[i-1] = pbuf2[i]
-	}
+	copy(gbuf, gbuf[1:])
+	copy(pbuf, pbuf[1:])
+	copy(pbuf2, pbuf2[1:])
 	gbuf[4] = *pastGainCode
 	pbuf[4] = *pastGainPit
 	pbuf2[4] = *pastGainPit
@@ -214,9 +219,7 @@ func decodeGain(memory [23]int16, input gainDecodeInput) (gainDecodeResult, erro
 	exp, frac = fxp.LExtract(gainCode)
 	gainCode = fxp.Shl32(fxp.Mpy32By16(exp, frac, gcodeInov), 3)
 
-	pastQuaEn[3] = pastQuaEn[2]
-	pastQuaEn[2] = pastQuaEn[1]
-	pastQuaEn[1] = pastQuaEn[0]
+	copy(pastQuaEn[1:], pastQuaEn)
 	exp, frac = log2WB(int32(gCode))
 	exp -= 11
 	pastQuaEn[0] = int16(fxp.Mpy32By16(exp, frac, 24660) >> 3)
@@ -225,14 +228,13 @@ func decodeGain(memory [23]int16, input gainDecodeInput) (gainDecodeResult, erro
 	return out, nil
 }
 
-func decodeErasedGain(memory [23]int16, input gainDecodeInput, gcodeInov int16) gainDecodeResult {
+func decodeErasedGain(memory gainDecoderState, input gainDecodeInput, gcodeInov int16) gainDecodeResult {
 	out := gainDecodeResult{memory: memory}
-	mem := out.memory[:]
-	pastQuaEn := mem[0:4]
-	pastGainPit := &mem[4]
-	pastGainCode := &mem[5]
-	pbuf := mem[7:12]
-	gbuf := mem[12:17]
+	pastQuaEn := out.memory.pastQuantizedEnergy[:]
+	pastGainPit := &out.memory.pastPitchGain
+	pastGainCode := &out.memory.pastCodeGain
+	pbuf := out.memory.pitchHistory[:]
+	gbuf := out.memory.codeHistory[:]
 
 	state := int(input.state)
 	if state < 0 {
@@ -260,19 +262,15 @@ func decodeErasedGain(memory [23]int16, input gainDecodeInput, gcodeInov int16) 
 	}
 
 	sum := int32(pastQuaEn[3]) + int32(pastQuaEn[2]) + int32(pastQuaEn[1]) + int32(pastQuaEn[0])
-	pastQuaEn[3] = pastQuaEn[2]
-	pastQuaEn[2] = pastQuaEn[1]
-	pastQuaEn[1] = pastQuaEn[0]
+	copy(pastQuaEn[1:], pastQuaEn)
 	quaEner := int16(sum >> 3)
 	quaEner -= 3072
 	quaEner = max(quaEner, -14336)
 
 	pastQuaEn[0] = quaEner
 
-	for i := 1; i < 5; i++ {
-		gbuf[i-1] = gbuf[i]
-		pbuf[i-1] = pbuf[i]
-	}
+	copy(gbuf, gbuf[1:])
+	copy(pbuf, pbuf[1:])
 	gbuf[4] = *pastGainCode
 	pbuf[4] = *pastGainPit
 

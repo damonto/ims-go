@@ -109,7 +109,8 @@ func (s *encoderGainState) quantizeMR122(code []int16, xn2 []int16, y2 []int16) 
 			subframeSamples,
 		)
 	}
-	expGCode0, fracGCode0, _, _ := s.pred.predict(Mode1220, code)
+	prediction := s.pred.predict(Mode1220, code)
+	expGCode0, fracGCode0 := prediction.exponent, prediction.fraction
 	gainCode, err := gCode(xn2, y2)
 	if err != nil {
 		return out, err
@@ -120,7 +121,8 @@ func (s *encoderGainState) quantizeMR122(code []int16, xn2 []int16, y2 []int16) 
 }
 
 func (s *encoderGainState) quantizeJoint(in jointGainInput) encoderCodeGainAnalysis {
-	expGCode0, fracGCode0, _, _ := s.pred.predict(in.mode, in.code)
+	prediction := s.pred.predict(in.mode, in.code)
+	expGCode0, fracGCode0 := prediction.exponent, prediction.fraction
 	energies := calcFilteredGainEnergies(in.mode, in.xn, in.xn2, in.y1, in.y2, in.gCoeff)
 	result := quaGain(
 		in.mode,
@@ -156,7 +158,9 @@ func (s *encoderGainState) quantizeMR795(in mr795GainInput) encoderCodeGainAnaly
 }
 
 func (s *encoderGainState) predictMR795CodeGain(code []int16) mr795CodeGainPrediction {
-	expGCode0, fracGCode0, expCodeEn, fracCodeEn := s.pred.predict(Mode795, code)
+	gainPrediction := s.pred.predict(Mode795, code)
+	expGCode0, fracGCode0 := gainPrediction.exponent, gainPrediction.fraction
+	expCodeEn, fracCodeEn := gainPrediction.energyExponent, gainPrediction.energyFraction
 	return mr795CodeGainPrediction{
 		expGCode0:  expGCode0,
 		expCodeEn:  expCodeEn,
@@ -179,19 +183,19 @@ func (s *encoderGainState) refineMR795CodeGain(
 	energies filteredGainEnergies,
 	result mr795GainQuant3Result,
 ) mr795GainQuant3Result {
-	fracEn, expEn, ltpg := calcUnfiltEnergies(in.res, in.exc, in.code, result.pitchGain)
-	alpha := s.adapt.adapt(ltpg, result.analysis.gain)
-	if fracEn[0] != 0 && alpha > 0 {
-		fracEn[3] = prediction.fracCodeEn
-		expEn[3] = prediction.expCodeEn
+	unfiltered := calcUnfilteredEnergies(in.res, in.exc, in.code, result.pitchGain)
+	alpha := s.adapt.adapt(unfiltered.ltpGain, result.analysis.gain)
+	if unfiltered.fraction[0] != 0 && alpha > 0 {
+		unfiltered.fraction[3] = prediction.fracCodeEn
+		unfiltered.exponent[3] = prediction.expCodeEn
 		exp := energies.codGainExp - prediction.expGCode0 + 10
 		gainCodUnq := fxp.Shl16(energies.codGainFrac, exp)
 		index, quaEnerMR122, quaEner, gainCode := mr795GainCodeQuantMod(
 			result.pitchGain,
 			prediction.expGCode0,
 			prediction.gcode0,
-			fracEn,
-			expEn,
+			unfiltered.fraction,
+			unfiltered.exponent,
 			alpha,
 			gainCodUnq,
 			result.analysis.gain,
@@ -235,7 +239,8 @@ func (s *encoderGainState) quantizeMR475Odd(in mr475SubframeGainInput, gpLimit i
 }
 
 func (in mr475SubframeGainInput) analyzeMR475Subframe(pred *gainPredState) (mr475PairState, int16, int16) {
-	expGCode0, fracGCode0, _, _ := pred.predict(Mode475, in.code)
+	prediction := pred.predict(Mode475, in.code)
+	expGCode0, fracGCode0 := prediction.exponent, prediction.fraction
 	energies := calcFilteredGainEnergies(Mode475, in.xn, in.xn2, in.y1, in.y2, in.gCoeff)
 	expTargetEn, fracTargetEn := calcTargetEnergy(in.xn)
 	return mr475PairState{
@@ -346,80 +351,6 @@ func qGainCodeScalar(mode Mode, expGCode0 int16, fracGCode0 int16, gain int16) s
 	}
 }
 
-func calcFiltEnergies(
-	mode Mode,
-	xn []int16,
-	xn2 []int16,
-	y1 []int16,
-	y2 []int16,
-	gCoeff []int16,
-) ([5]int16, [5]int16, int16, int16) {
-	var fracCoeff [5]int16
-	var expCoeff [5]int16
-	var codGainFrac int16
-	var codGainExp int16
-	if len(gCoeff) >= 4 {
-		fracCoeff[0] = gCoeff[0]
-		expCoeff[0] = gCoeff[1]
-		fracCoeff[1] = fxp.Neg16(gCoeff[2])
-		expCoeff[1] = fxp.Add16(gCoeff[3], 1)
-	}
-
-	enerInit := int32(1)
-	if mode == Mode795 || mode == Mode475 {
-		enerInit = 0
-	}
-
-	var scaledY2 [subframeSamples]int16
-	s1 := enerInit
-	s2 := enerInit
-	s3 := enerInit
-	for i := range subframeSamples {
-		tmp := int16(0)
-		if i < len(y2) {
-			tmp = fxp.Shr16(y2[i], 3)
-		}
-		scaledY2[i] = tmp
-
-		s1 = fxp.Add32(s1, fxp.LMult(tmp, tmp))
-		if i < len(xn) {
-			s2 = fxp.Add32(s2, fxp.LMult(xn[i], tmp))
-		}
-		if i < len(y1) {
-			s3 = fxp.Add32(s3, fxp.LMult(y1[i], tmp))
-		}
-	}
-
-	exp := fxp.NormL(s1)
-	fracCoeff[2] = fxp.ExtractH(fxp.Shl32(s1, exp))
-	expCoeff[2] = -3 - exp
-
-	exp = fxp.NormL(s2)
-	fracCoeff[3] = fxp.Neg16(fxp.ExtractH(fxp.Shl32(s2, exp)))
-	expCoeff[3] = 7 - exp
-
-	exp = fxp.NormL(s3)
-	fracCoeff[4] = fxp.ExtractH(fxp.Shl32(s3, exp))
-	expCoeff[4] = 7 - exp
-
-	if mode == Mode795 || mode == Mode475 {
-		sum := int32(0)
-		for i := range subframeSamples {
-			if i < len(xn2) {
-				sum = fxp.Add32(sum, fxp.LMult(xn2[i], scaledY2[i]))
-			}
-		}
-		exp = fxp.NormL(sum)
-		frac := fxp.ExtractH(fxp.Shl32(sum, exp))
-		exp = 6 - exp
-		if frac > 0 && fracCoeff[2] > 0 {
-			codGainFrac = fxp.DivS(fxp.Shr16(frac, 1), fracCoeff[2])
-			codGainExp = exp - expCoeff[2] - 14
-		}
-	}
-	return fracCoeff, expCoeff, codGainFrac, codGainExp
-}
-
 func calcFilteredGainEnergies(
 	mode Mode,
 	xn []int16,
@@ -428,22 +359,62 @@ func calcFilteredGainEnergies(
 	y2 []int16,
 	gCoeff []int16,
 ) filteredGainEnergies {
-	fracCoeff, expCoeff, codGainFrac, codGainExp := calcFiltEnergies(mode, xn, xn2, y1, y2, gCoeff)
-	return filteredGainEnergies{
-		fracCoeff:   fracCoeff,
-		expCoeff:    expCoeff,
-		codGainFrac: codGainFrac,
-		codGainExp:  codGainExp,
+	var out filteredGainEnergies
+	out.fracCoeff[0] = gCoeff[0]
+	out.expCoeff[0] = gCoeff[1]
+	out.fracCoeff[1] = fxp.Neg16(gCoeff[2])
+	out.expCoeff[1] = fxp.Add16(gCoeff[3], 1)
+
+	enerInit := int32(1)
+	if mode == Mode795 || mode == Mode475 {
+		enerInit = 0
 	}
+
+	var scaledY2 [subframeSamples]int16
+	filteredCodeEnergy := enerInit
+	targetCodeCorrelation := enerInit
+	adaptiveCodeCorrelation := enerInit
+	for i := range subframeSamples {
+		tmp := fxp.Shr16(y2[i], 3)
+		scaledY2[i] = tmp
+
+		filteredCodeEnergy = fxp.Add32(filteredCodeEnergy, fxp.LMult(tmp, tmp))
+		targetCodeCorrelation = fxp.Add32(targetCodeCorrelation, fxp.LMult(xn[i], tmp))
+		adaptiveCodeCorrelation = fxp.Add32(adaptiveCodeCorrelation, fxp.LMult(y1[i], tmp))
+	}
+
+	exp := fxp.NormL(filteredCodeEnergy)
+	out.fracCoeff[2] = fxp.ExtractH(fxp.Shl32(filteredCodeEnergy, exp))
+	out.expCoeff[2] = -3 - exp
+
+	exp = fxp.NormL(targetCodeCorrelation)
+	out.fracCoeff[3] = fxp.Neg16(fxp.ExtractH(fxp.Shl32(targetCodeCorrelation, exp)))
+	out.expCoeff[3] = 7 - exp
+
+	exp = fxp.NormL(adaptiveCodeCorrelation)
+	out.fracCoeff[4] = fxp.ExtractH(fxp.Shl32(adaptiveCodeCorrelation, exp))
+	out.expCoeff[4] = 7 - exp
+
+	if mode == Mode795 || mode == Mode475 {
+		sum := int32(0)
+		for i := range subframeSamples {
+			sum = fxp.Add32(sum, fxp.LMult(xn2[i], scaledY2[i]))
+		}
+		exp = fxp.NormL(sum)
+		frac := fxp.ExtractH(fxp.Shl32(sum, exp))
+		exp = 6 - exp
+		if frac > 0 && out.fracCoeff[2] > 0 {
+			out.codGainFrac = fxp.DivS(fxp.Shr16(frac, 1), out.fracCoeff[2])
+			out.codGainExp = exp - out.expCoeff[2] - 14
+		}
+	}
+	return out
 }
 
 func calcTargetEnergy(xn []int16) (expEn, fracEn int16) {
 	sum := int32(0)
 	for i := range subframeSamples {
-		var sample int16
-		if i < len(xn) {
-			sample = xn[i]
-		}
+		sample := xn[i]
 		sum = fxp.Add32(sum, fxp.LMult(sample, sample))
 	}
 	exp := fxp.NormL(sum)
@@ -653,7 +624,8 @@ func mr475GainQuant(
 		sf0GCode0,
 		sf0.expGCode0,
 	)
-	sf1ExpGCode0, sf1FracGCode0, _, _ := pred.predict(Mode475, sf1CodeNoSharp)
+	prediction := pred.predict(Mode475, sf1CodeNoSharp)
+	sf1ExpGCode0, sf1FracGCode0 := prediction.exponent, prediction.fraction
 	sf1GCode0 = int16(pow2Value(14, sf1FracGCode0))
 	sf1Pitch, sf1Code := mr475StoreResults(
 		pred,
@@ -877,70 +849,67 @@ func median5(values [ltpgMemSize]int16) int16 {
 	return sorted[len(sorted)/2]
 }
 
-func calcUnfiltEnergies(res []int16, exc []int16, code []int16, gainPit int16) ([4]int16, [4]int16, int16) {
-	var fracEn [4]int16
-	var expEn [4]int16
+type unfilteredEnergies struct {
+	fraction [4]int16
+	exponent [4]int16
+	ltpGain  int16
+}
 
-	s1 := int32(0)
-	s2 := int32(0)
-	s3 := int32(0)
-	s4 := int32(0)
+func calcUnfilteredEnergies(res []int16, exc []int16, code []int16, gainPit int16) unfilteredEnergies {
+	var out unfilteredEnergies
+
+	residualEnergy := int32(0)
+	excitationEnergy := int32(0)
+	excitationCodeCorrelation := int32(0)
+	ltpResidualEnergy := int32(0)
 	for i := range subframeSamples {
-		var residual, excitation, innovation int16
-		if i < len(res) {
-			residual = res[i]
-		}
-		if i < len(exc) {
-			excitation = exc[i]
-		}
-		if i < len(code) {
-			innovation = code[i]
-		}
+		residual := res[i]
+		excitation := exc[i]
+		innovation := code[i]
 
-		s1 = fxp.Add32(s1, int32(residual)*int32(residual))
-		s2 = fxp.Add32(s2, int32(excitation)*int32(excitation))
-		s3 = fxp.Add32(s3, int32(excitation)*int32(innovation))
+		residualEnergy = fxp.Add32(residualEnergy, int32(residual)*int32(residual))
+		excitationEnergy = fxp.Add32(excitationEnergy, int32(excitation)*int32(excitation))
+		excitationCodeCorrelation = fxp.Add32(excitationCodeCorrelation, int32(excitation)*int32(innovation))
 		pitch := fxp.Round(fxp.Shl32(fxp.LMult(excitation, gainPit), 1))
 		ltpResidual := fxp.Sub16(residual, pitch)
-		s4 = fxp.Add32(s4, fxp.LMult(ltpResidual, ltpResidual))
+		ltpResidualEnergy = fxp.Add32(ltpResidualEnergy, fxp.LMult(ltpResidual, ltpResidual))
 	}
-	s1 = fxp.Shl32(s1, 1)
-	s2 = fxp.Shl32(s2, 1)
-	s3 = fxp.Shl32(s3, 1)
+	residualEnergy = fxp.Shl32(residualEnergy, 1)
+	excitationEnergy = fxp.Shl32(excitationEnergy, 1)
+	excitationCodeCorrelation = fxp.Shl32(excitationCodeCorrelation, 1)
 
-	if s1 < 400 {
-		fracEn[0] = 0
-		expEn[0] = -15
+	if residualEnergy < 400 {
+		out.fraction[0] = 0
+		out.exponent[0] = -15
 	} else {
-		exp := fxp.NormL(s1)
-		fracEn[0] = fxp.ExtractH(fxp.Shl32(s1, exp))
-		expEn[0] = 15 - exp
+		exp := fxp.NormL(residualEnergy)
+		out.fraction[0] = fxp.ExtractH(fxp.Shl32(residualEnergy, exp))
+		out.exponent[0] = 15 - exp
 	}
 
-	exp := fxp.NormL(s2)
-	fracEn[1] = fxp.ExtractH(fxp.Shl32(s2, exp))
-	expEn[1] = 15 - exp
+	exp := fxp.NormL(excitationEnergy)
+	out.fraction[1] = fxp.ExtractH(fxp.Shl32(excitationEnergy, exp))
+	out.exponent[1] = 15 - exp
 
-	exp = fxp.NormL(s3)
-	fracEn[2] = fxp.ExtractH(fxp.Shl32(s3, exp))
-	expEn[2] = 2 - exp
+	exp = fxp.NormL(excitationCodeCorrelation)
+	out.fraction[2] = fxp.ExtractH(fxp.Shl32(excitationCodeCorrelation, exp))
+	out.exponent[2] = 2 - exp
 
-	exp = fxp.NormL(s4)
-	ltpResEn := fxp.ExtractH(fxp.Shl32(s4, exp))
+	exp = fxp.NormL(ltpResidualEnergy)
+	ltpResEn := fxp.ExtractH(fxp.Shl32(ltpResidualEnergy, exp))
 	exp = 15 - exp
-	fracEn[3] = ltpResEn
-	expEn[3] = exp
+	out.fraction[3] = ltpResEn
+	out.exponent[3] = exp
 
-	ltpg := int16(0)
-	if ltpResEn > 0 && fracEn[0] != 0 {
-		predGain := fxp.DivS(fxp.Shr16(fracEn[0], 1), ltpResEn)
-		expDiff := exp - expEn[0]
+	if ltpResEn > 0 && out.fraction[0] != 0 {
+		predGain := fxp.DivS(fxp.Shr16(out.fraction[0], 1), ltpResEn)
+		expDiff := exp - out.exponent[0]
 		value := fxp.Shr32(int32(predGain)<<16, expDiff+3)
 		ltpgExp, ltpgFrac := log2Value(value)
 		level := fxp.LComp(ltpgExp-27, ltpgFrac)
-		ltpg = fxp.Round(fxp.Shl32(level, 13))
+		out.ltpGain = fxp.Round(fxp.Shl32(level, 13))
 	}
-	return fracEn, expEn, ltpg
+	return out
 }
 
 func mr795GainCodeQuantMod(

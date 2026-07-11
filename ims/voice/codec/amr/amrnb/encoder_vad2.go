@@ -464,28 +464,27 @@ func vad2BlockNorm(input []int16, headroom int16) ([vad2FrameLen]int16, int16) {
 }
 
 func vad2CFFT(data []int16) {
-	for i, j := int16(0), int16(0); i < vad2FFTLen-2; i += 2 {
+	for i, j := 0, 0; i < vad2FFTLen-2; i += 2 {
 		if j > i {
 			data[i], data[j] = data[j], data[i]
 			data[i+1], data[j+1] = data[j+1], data[i+1]
 		}
-		k := int16(vad2FFTLen / 2)
+		k := vad2FFTLen / 2
 		for j >= k {
-			j = fxp.Sub16(j, k)
-			k = fxp.Shr16(k, 1)
+			j -= k
+			k >>= 1
 		}
-		j = fxp.Add16(j, k)
+		j += k
 	}
 
-	for stage := int16(0); stage < 6; stage++ {
-		jj := fxp.Shl16(2, stage)
-		kk := fxp.Shl16(jj, 1)
-		ii := vad2IITable[stage]
-		ii2 := fxp.Shl16(ii, 1)
-		phase := int16(0)
-		for j := int16(0); j < jj; j += 2 {
-			for k := j; k < vad2FFTLen; k = fxp.Add16(k, kk) {
-				bottom := fxp.Add16(k, jj)
+	for stage := range 6 {
+		jj := 2 << stage
+		kk := jj << 1
+		phaseStep := int(vad2IITable[stage]) << 1
+		phase := 0
+		for j := 0; j < jj; j += 2 {
+			for k := j; k < vad2FFTLen; k += kk {
+				bottom := k + jj
 				real := fxp.LMult(data[bottom], vad2PhaseTable[phase])
 				real = fxp.LMsu(real, data[bottom+1], vad2PhaseTable[phase+1])
 				imag := fxp.LMult(data[bottom+1], vad2PhaseTable[phase])
@@ -502,7 +501,7 @@ func vad2CFFT(data []int16) {
 				tmp = fxp.Add16(data[k+1], tmpImag)
 				data[k+1] = fxp.Shr16(tmp, 1)
 			}
-			phase = fxp.Add16(phase, ii2)
+			phase += phaseStep
 		}
 	}
 }
@@ -515,7 +514,7 @@ func vad2RFFT(data []int16) {
 	data[0] = fxp.Add16(firstReal, secondReal)
 	data[1] = fxp.Sub16(firstReal, secondReal)
 
-	for i, j := int16(2), int16(vad2FFTLen-2); i <= vad2FFTLen/2; i, j = i+2, vad2FFTLen-(i+2) {
+	for i, j := 2, vad2FFTLen-2; i <= vad2FFTLen/2; i, j = i+2, vad2FFTLen-(i+2) {
 		real1 := fxp.Add16(data[i], data[j])
 		imag1 := fxp.Sub16(data[i+1], data[j+1])
 		real2 := fxp.Add16(data[i+1], data[j+1])

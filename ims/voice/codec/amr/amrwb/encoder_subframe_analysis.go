@@ -300,7 +300,10 @@ func (e *Encoder) analyzeSubframePitch(
 	if err != nil {
 		return out, fmt.Errorf("analyze subframe pitch: %w", err)
 	}
-	pitchParam := encodeSubframePitchLag(e.mode, ctx.subframe, ctx.analysis.tOp2, t0, t0Frac, lagState)
+	pitchParam := encodeSubframePitchLag(subframePitchLagInput{
+		mode: e.mode, subframe: ctx.subframe, openLoop: ctx.analysis.tOp2,
+		lag: t0, fraction: t0Frac, state: lagState,
+	})
 	out.lagState = pitchParam.state
 	params[paramIndex] = pitchParam.index
 

@@ -179,7 +179,7 @@ func lowRateCodebookSearch(h []int16, x []int16, signKeep int16) lowRateSearch {
 	var out lowRateSearch
 	corHX(h, x, out.dn[:], 1)
 	setSign(out.dn[:], out.sign[:], out.dn2[:], signKeep)
-	corH(h, out.sign[:], &out.rr)
+	out.rr = impulseResponseCorrelations(h, out.sign[:])
 	return out
 }
 
@@ -187,7 +187,7 @@ func mr102CodebookSearch(x []int16, cn []int16, h []int16) highRateSearch {
 	var out highRateSearch
 	corHXTracks(h, x, out.dn[:], 2, mr102Tracks, mr102Step)
 	setSign12k2(out.dn[:], cn, out.sign[:], out.posMax[:mr102Tracks], out.ipos[:pulseCount8], mr102Tracks, mr102Step)
-	corH(h, out.sign[:], &out.rr)
+	out.rr = impulseResponseCorrelations(h, out.sign[:])
 	return out
 }
 
@@ -195,7 +195,7 @@ func mr122CodebookSearch(x []int16, cn []int16, h []int16) highRateSearch {
 	var out highRateSearch
 	corHX(h, x, out.dn[:], 2)
 	setSign12k2(out.dn[:], cn, out.sign[:], out.posMax[:], out.ipos[:], codebookTracks, codebookStep)
-	corH(h, out.sign[:], &out.rr)
+	out.rr = impulseResponseCorrelations(h, out.sign[:])
 	return out
 }
 
@@ -230,11 +230,8 @@ func impulseTargetCorrelation(h []int16, x []int16, tracks int, step int) target
 
 func targetCorrelationAt(h []int16, x []int16, pos int) int32 {
 	sum := int32(0)
-	for j := pos; j < subframeSamples && j < len(x); j++ {
+	for j := pos; j < subframeSamples; j++ {
 		hIndex := j - pos
-		if hIndex >= len(h) {
-			break
-		}
 		sum = fxp.LMac(sum, x[j], h[hIndex])
 	}
 	return sum
@@ -242,7 +239,7 @@ func targetCorrelationAt(h []int16, x []int16, pos int) int32 {
 
 func writeScaledCorrelation(corr targetCorrelation, dn []int16, sf int16) {
 	shift := fxp.Sub16(fxp.NormL(corr.energy), sf)
-	for i := 0; i < subframeSamples && i < len(dn); i++ {
+	for i := range subframeSamples {
 		dn[i] = fxp.Round(fxp.Shl32(corr.values[i], shift))
 	}
 }
@@ -258,7 +255,7 @@ func setSign12k2(
 ) {
 	weights := normalizedCorrelationWeights(cn, dn)
 	en := signedCorrelation(dn, cn, sign, weights)
-	startTrack := trackMaxPositions(&en, posMax, tracks, step)
+	startTrack := trackMaxPositions(en, posMax, tracks, step)
 	initialPulseTracks(ipos, tracks, startTrack)
 }
 
@@ -271,12 +268,8 @@ func normalizedCorrelationWeights(cn []int16, dn []int16) correlationWeights {
 	cnEnergy := int32(256)
 	dnEnergy := int32(256)
 	for i := range subframeSamples {
-		if i < len(cn) {
-			cnEnergy = fxp.LMac(cnEnergy, cn[i], cn[i])
-		}
-		if i < len(dn) {
-			dnEnergy = fxp.LMac(dnEnergy, dn[i], dn[i])
-		}
+		cnEnergy = fxp.LMac(cnEnergy, cn[i], cn[i])
+		dnEnergy = fxp.LMac(dnEnergy, dn[i], dn[i])
 	}
 
 	return correlationWeights{
@@ -287,16 +280,10 @@ func normalizedCorrelationWeights(cn []int16, dn []int16) correlationWeights {
 
 func signedCorrelation(dn []int16, cn []int16, sign []int16, weights correlationWeights) [subframeSamples]int16 {
 	var en [subframeSamples]int16
-	limit := min(subframeSamples, len(dn), len(sign))
-	for i := limit - 1; i >= 0; i-- {
-		cnValue := int16(0)
-		if i < len(cn) {
-			cnValue = cn[i]
-		}
-
+	for i := subframeSamples - 1; i >= 0; i-- {
 		val := dn[i]
 		cor := fxp.Round(fxp.Shl32(
-			fxp.Add32(fxp.LMult(weights.cn, cnValue), fxp.LMult(weights.dn, val)),
+			fxp.Add32(fxp.LMult(weights.cn, cn[i]), fxp.LMult(weights.dn, val)),
 			10,
 		))
 		if cor >= 0 {
@@ -311,10 +298,10 @@ func signedCorrelation(dn []int16, cn []int16, sign []int16, weights correlation
 	return en
 }
 
-func trackMaxPositions(en *[subframeSamples]int16, posMax []int16, tracks int, step int) int {
+func trackMaxPositions(en [subframeSamples]int16, posMax []int16, tracks int, step int) int {
 	maxOfAll := int16(-1)
 	startTrack := 0
-	for track := 0; track < tracks && track < len(posMax); track++ {
+	for track := range tracks {
 		maxCorr := int16(-1)
 		pos := int16(track)
 		for j := track; j < subframeSamples; j += step {
@@ -334,21 +321,15 @@ func trackMaxPositions(en *[subframeSamples]int16, posMax []int16, tracks int, s
 
 func initialPulseTracks(ipos []int16, tracks int, startTrack int) {
 	pos := startTrack
-	if len(ipos) > tracks {
-		ipos[0] = int16(pos)
-		ipos[tracks] = int16(pos)
-	}
+	ipos[0] = int16(pos)
+	ipos[tracks] = int16(pos)
 	for i := 1; i < tracks; i++ {
 		pos++
 		if pos >= tracks {
 			pos = 0
 		}
-		if i < len(ipos) {
-			ipos[i] = int16(pos)
-		}
-		if i+tracks < len(ipos) {
-			ipos[i+tracks] = int16(pos)
-		}
+		ipos[i] = int16(pos)
+		ipos[i+tracks] = int16(pos)
 	}
 }
 
@@ -358,8 +339,7 @@ func setSign(dn []int16, sign []int16, dn2 []int16, n int16) {
 }
 
 func signedLowRateCorrelation(dn []int16, sign []int16, dn2 []int16) int {
-	limit := min(subframeSamples, len(dn), len(sign), len(dn2))
-	for i := limit - 1; i >= 0; i-- {
+	for i := subframeSamples - 1; i >= 0; i-- {
 		value := dn[i]
 		if value >= 0 {
 			sign[i] = fxp.Max16
@@ -370,7 +350,7 @@ func signedLowRateCorrelation(dn []int16, sign []int16, dn2 []int16) int {
 		}
 		dn2[i] = value
 	}
-	return limit
+	return subframeSamples
 }
 
 func pruneWeakTrackPositions(dn2 []int16, n int16, limit int) {
@@ -389,21 +369,21 @@ func pruneWeakTrackPositions(dn2 []int16, n int16, limit int) {
 	}
 }
 
-func corH(h []int16, sign []int16, rr *[subframeSamples][subframeSamples]int16) {
+func impulseResponseCorrelations(h []int16, sign []int16) [subframeSamples][subframeSamples]int16 {
 	h2 := normalizedImpulseResponse(h)
-	writeDiagonalCorrelations(h2, rr)
-	writeSignedCorrelations(h2, sign, rr)
+	correlations := diagonalCorrelations(h2)
+	return signedCorrelations(h2, sign, correlations)
 }
 
 func normalizedImpulseResponse(h []int16) [subframeSamples]int16 {
 	var out [subframeSamples]int16
 	energy := int32(2)
-	for i := 0; i < subframeSamples && i < len(h); i++ {
+	for i := range subframeSamples {
 		energy = fxp.LMac(energy, h[i], h[i])
 	}
 
 	if fxp.Sub16(fxp.ExtractH(energy), fxp.Max16) == 0 {
-		for i := 0; i < subframeSamples && i < len(h); i++ {
+		for i := range subframeSamples {
 			out[i] = fxp.Shr16(h[i], 1)
 		}
 		return out
@@ -412,22 +392,24 @@ func normalizedImpulseResponse(h []int16) [subframeSamples]int16 {
 	scale := invSqrt(fxp.Shr32(energy, 1))
 	k := fxp.ExtractH(fxp.Shl32(scale, 7))
 	k = fxp.Mult(k, 32440)
-	for i := 0; i < subframeSamples && i < len(h); i++ {
+	for i := range subframeSamples {
 		out[i] = fxp.Round(fxp.Shl32(fxp.LMult(h[i], k), 9))
 	}
 	return out
 }
 
-func writeDiagonalCorrelations(h [subframeSamples]int16, rr *[subframeSamples][subframeSamples]int16) {
+func diagonalCorrelations(h [subframeSamples]int16) [subframeSamples][subframeSamples]int16 {
+	var correlations [subframeSamples][subframeSamples]int16
 	sum := int32(0)
 	for k := range subframeSamples {
 		sum = fxp.LMac(sum, h[k], h[k])
 		i := subframeSamples - 1 - k
-		rr[i][i] = fxp.Round(sum)
+		correlations[i][i] = fxp.Round(sum)
 	}
+	return correlations
 }
 
-func writeSignedCorrelations(h [subframeSamples]int16, sign []int16, rr *[subframeSamples][subframeSamples]int16) {
+func signedCorrelations(h [subframeSamples]int16, sign []int16, correlations [subframeSamples][subframeSamples]int16) [subframeSamples][subframeSamples]int16 {
 	for dec := 1; dec < subframeSamples; dec++ {
 		sum := int32(0)
 		j := subframeSamples - 1
@@ -437,12 +419,13 @@ func writeSignedCorrelations(h [subframeSamples]int16, sign []int16, rr *[subfra
 			corr := fxp.Round(sum)
 			signProduct := fxp.Mult(sign[i], sign[j])
 			signed := fxp.Mult(corr, signProduct)
-			rr[j][i] = signed
-			rr[i][j] = signed
+			correlations[j][i] = signed
+			correlations[i][j] = signed
 			i--
 			j--
 		}
 	}
+	return correlations
 }
 
 func search2i40(
@@ -963,17 +946,15 @@ func search10i40(
 
 func resetCodebookOutput(code []int16, y []int16) {
 	clearCodeVector(code)
-	for i := 0; i < subframeSamples && i < len(y); i++ {
-		y[i] = 0
-	}
+	clear(y[:subframeSamples])
 }
 
 func synthesizeCodebookTarget(codvec []int16, signs []int16, h []int16, y []int16) {
-	for i := 0; i < subframeSamples && i < len(y); i++ {
+	for i := range subframeSamples {
 		sum := int32(0)
 		for k, pos := range codvec {
 			hIndex := i - int(pos)
-			if hIndex >= 0 && hIndex < len(h) {
+			if hIndex >= 0 {
 				sum = fxp.Add32(sum, fxp.LMult(h[hIndex], signs[k]))
 			}
 		}
@@ -982,11 +963,11 @@ func synthesizeCodebookTarget(codvec []int16, signs []int16, h []int16, y []int1
 }
 
 func synthesizeMR122CodebookTarget(codvec []int16, signs []int16, h []int16, y []int16) {
-	for i := 0; i < subframeSamples && i < len(y); i++ {
+	for i := range subframeSamples {
 		sum := int32(0)
 		for k, pos := range codvec {
 			hIndex := i - int(pos)
-			if hIndex >= 0 && hIndex < len(h) {
+			if hIndex >= 0 {
 				sum = fxp.Add32(sum, (int32(h[hIndex])*int32(signs[k]))>>7)
 			}
 		}
@@ -1207,7 +1188,7 @@ func buildCode8i40(
 		track := pos & 3
 		position := pos >> 2
 		pulseSign := int16(0)
-		if int(pos) < len(dnSign) && dnSign[pos] > 0 {
+		if dnSign[pos] > 0 {
 			code[pos] = fxp.Add16(code[pos], 8191)
 			signs[k] = fxp.Max16
 		} else {
@@ -1267,7 +1248,7 @@ func buildCode10i40(
 		position := int16((int32(pos) * 6554) >> 15)
 		track := pos - 5*position
 		index := position
-		if int(pos) < len(dnSign) && dnSign[pos] > 0 {
+		if dnSign[pos] > 0 {
 			code[pos] = fxp.Add16(code[pos], 4096)
 			signs[k] = 8192
 		} else {

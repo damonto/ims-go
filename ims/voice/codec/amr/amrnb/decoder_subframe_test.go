@@ -91,7 +91,7 @@ func TestDecodeSubframeGainMR102KeepsPitchGainForSynthesis(t *testing.T) {
 	state := newDecoderCoreState()
 	state.oldT0 = subframeSamples + 6
 
-	gainPit, _, used, err := state.decodeSubframeGain(decodeSubframeGainInput{
+	gain, err := state.decodeSubframeGain(decodeSubframeGainInput{
 		mode:     Mode1020,
 		even:     1,
 		params:   []int16{0},
@@ -102,11 +102,11 @@ func TestDecodeSubframeGainMR102KeepsPitchGainForSynthesis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeSubframeGain(MR102) error = %v", err)
 	}
-	if used != 1 {
-		t.Fatalf("used = %d, want 1", used)
+	if gain.consumed != 1 {
+		t.Fatalf("used = %d, want 1", gain.consumed)
 	}
-	if gainPit != 577 {
-		t.Fatalf("gainPit = %d, want full decoded gain 577", gainPit)
+	if gain.pitch != 577 {
+		t.Fatalf("gainPit = %d, want full decoded gain 577", gain.pitch)
 	}
 }
 

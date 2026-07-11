@@ -211,7 +211,7 @@ func (e *Encoder) encodeParams(pcm []int16) error {
 	}
 	if e.dtx {
 		if e.vadOption != VAD2 {
-			e.vad.pitchDetection(analysis.tOp[:])
+			e.vad.pitchDetection(analysis.tOp)
 		}
 		e.dtxState.buffer(analysis.lspNew[:], analysis.speech[:])
 	}

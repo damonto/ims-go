@@ -4,18 +4,17 @@ import "testing"
 
 func TestResetGainDecoder(t *testing.T) {
 	mem := resetGainDecoder()
-	for i := range gainPredOrder {
-		if mem[i] != -14336 {
-			t.Fatalf("mem[%d] = %d, want -14336", i, mem[i])
+	for i, energy := range mem.pastQuantizedEnergy {
+		if energy != -14336 {
+			t.Fatalf("past quantized energy[%d] = %d, want -14336", i, energy)
 		}
 	}
-	for i := gainPredOrder; i < len(mem)-1; i++ {
-		if mem[i] != 0 {
-			t.Fatalf("mem[%d] = %d, want 0", i, mem[i])
-		}
+	want := gainDecoderState{pastQuantizedEnergy: [gainPredOrder]int16{-14336, -14336, -14336, -14336}, randomSeed: randomInitialSeed}
+	if mem != want {
+		t.Fatalf("reset state = %+v, want %+v", mem, want)
 	}
-	if mem[22] != randomInitialSeed {
-		t.Fatalf("mem[22] = %d, want %d", mem[22], randomInitialSeed)
+	if mem.randomSeed != randomInitialSeed {
+		t.Fatalf("random seed = %d, want %d", mem.randomSeed, randomInitialSeed)
 	}
 }
 
@@ -42,11 +41,11 @@ func TestDecodeGainUsesSelectedQuantizerEntry(t *testing.T) {
 	if gain.code == 0 {
 		t.Fatal("code gain = 0, want non-zero")
 	}
-	if mem[4] != gain.pitch {
-		t.Fatalf("past pitch gain = %d, want %d", mem[4], gain.pitch)
+	if mem.pastPitchGain != gain.pitch {
+		t.Fatalf("past pitch gain = %d, want %d", mem.pastPitchGain, gain.pitch)
 	}
-	if mem[12+4] != mem[5] {
-		t.Fatalf("gbuf tail = %d, want past code gain %d", mem[12+4], mem[5])
+	if mem.codeHistory[4] != mem.pastCodeGain {
+		t.Fatalf("code history tail = %d, want past code gain %d", mem.codeHistory[4], mem.pastCodeGain)
 	}
 }
 
@@ -98,8 +97,8 @@ func TestDecodeGainRejectsInvalidInputWithoutStateChange(t *testing.T) {
 
 func TestDecodeErasedGainUsesMedianHistory(t *testing.T) {
 	mem := resetGainDecoder()
-	copy(mem[7:12], []int16{100, 400, 300, 500, 200})
-	copy(mem[12:17], []int16{50, 90, 70, 110, 60})
+	copy(mem.pitchHistory[:], []int16{100, 400, 300, 500, 200})
+	copy(mem.codeHistory[:], []int16{50, 90, 70, 110, 60})
 
 	decoded, err := decodeGain(mem, gainDecodeInput{
 		badFrame:       true,
@@ -116,10 +115,10 @@ func TestDecodeErasedGainUsesMedianHistory(t *testing.T) {
 	if gain.pitch == 0 {
 		t.Fatal("pitch gain = 0, want concealed gain from history")
 	}
-	if mem[11] != mem[4] {
-		t.Fatalf("pbuf tail = %d, want past pitch gain %d", mem[11], mem[4])
+	if mem.pitchHistory[4] != mem.pastPitchGain {
+		t.Fatalf("pitch history tail = %d, want past pitch gain %d", mem.pitchHistory[4], mem.pastPitchGain)
 	}
-	if mem[16] != mem[5] {
-		t.Fatalf("gbuf tail = %d, want past code gain %d", mem[16], mem[5])
+	if mem.codeHistory[4] != mem.pastCodeGain {
+		t.Fatalf("code history tail = %d, want past code gain %d", mem.codeHistory[4], mem.pastCodeGain)
 	}
 }

@@ -186,7 +186,7 @@ func (e *Encoder) finishDTXFrame(az [azFrameCount]int16) error {
 	if vad2 != nil {
 		e.vad2.updateLTPFlag(e.mode)
 	} else {
-		e.vad.pitchDetection(tOp[:])
+		e.vad.pitchDetection(tOp)
 	}
 
 	e.shiftSIDHistory()

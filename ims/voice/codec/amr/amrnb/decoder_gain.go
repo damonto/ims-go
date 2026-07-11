@@ -60,7 +60,8 @@ func dGainPitch(mode Mode, index int16) int16 {
 }
 
 func dGainCode(state *gainPredState, mode Mode, index int16, code []int16) int16 {
-	exp, frac, _, _ := state.predict(mode, code)
+	prediction := state.predict(mode, code)
+	exp, frac := prediction.exponent, prediction.fraction
 	index &= 31
 	offset := index * 3
 	gainFactor := quaGainCode[offset]
@@ -86,7 +87,8 @@ func decGain(state *gainPredState, mode Mode, index int16, code []int16, evenSub
 
 	switch mode {
 	case Mode1020, Mode740, Mode670:
-		gainPit, gCode, quaEnerMR122, quaEner = readGainTuple(tableGainHighrates[:], offset)
+		entry := readGainEntry(tableGainHighrates[:], offset)
+		gainPit, gCode, quaEnerMR122, quaEner = entry.pitch, entry.code, entry.energyMR122, entry.energy
 	case Mode475:
 		offset += int((1 ^ evenSubfr) << 1)
 		offset = min(offset, len(tableGainMR475)-2)
@@ -98,10 +100,12 @@ func decGain(state *gainPredState, mode Mode, index int16, code []int16, evenSub
 		quaEnerMR122 = fxp.Add16(fxp.ShrRound16(frac, 5), fxp.Shl16(exp, 10))
 		quaEner = fxp.Round(fxp.Shl32(fxp.Mpy32By16(exp, frac, 24660), 13))
 	default:
-		gainPit, gCode, quaEnerMR122, quaEner = readGainTuple(tableGainLowrates[:], offset)
+		entry := readGainEntry(tableGainLowrates[:], offset)
+		gainPit, gCode, quaEnerMR122, quaEner = entry.pitch, entry.code, entry.energyMR122, entry.energy
 	}
 
-	exp, frac, _, _ := state.predict(mode, code)
+	prediction := state.predict(mode, code)
+	exp, frac := prediction.exponent, prediction.fraction
 	gcode0 := int16(pow2Value(14, frac))
 	product := fxp.LMult(gCode, gcode0)
 	product = fxp.Shr32(product, 10-exp)
@@ -111,6 +115,18 @@ func decGain(state *gainPredState, mode Mode, index int16, code []int16, evenSub
 	return gainPit, gainCode
 }
 
-func readGainTuple(table []int16, offset int) (gainPit, gCode, quaEnerMR122, quaEner int16) {
-	return table[offset], table[offset+1], table[offset+2], table[offset+3]
+type gainTableEntry struct {
+	pitch       int16
+	code        int16
+	energyMR122 int16
+	energy      int16
+}
+
+func readGainEntry(table []int16, offset int) gainTableEntry {
+	return gainTableEntry{
+		pitch:       table[offset],
+		code:        table[offset+1],
+		energyMR122: table[offset+2],
+		energy:      table[offset+3],
+	}
 }

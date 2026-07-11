@@ -42,22 +42,22 @@ func (s *decoderCoreState) decodeGoodSubframe(in decodeGoodSubframeInput) (int, 
 		return 0, decodedSubframe{}, err
 	}
 
-	pitSharp, gainPit, consumedFixed, err := s.decodeSubframeFixed(in.mode, in.subframe, in.params[consumed:], in.badFrame)
+	fixed, err := s.decodeSubframeFixed(in.mode, in.subframe, in.params[consumed:], in.badFrame)
 	if err != nil {
 		return 0, decodedSubframe{}, err
 	}
-	consumed += consumedFixed
+	consumed += fixed.consumed
 
-	addPitchContribution(s.code[:], t0, pitSharp)
+	addPitchContribution(s.code[:], t0, fixed.pitchSharpness)
 
 	evenSubfr := int16(0)
 	if in.subframe%2 == 0 {
 		evenSubfr = 1
 	}
-	gainPit, gainCode, consumedGain, err := s.decodeSubframeGain(decodeSubframeGainInput{
+	gain, err := s.decodeSubframeGain(decodeSubframeGainInput{
 		mode:     in.mode,
 		even:     evenSubfr,
-		gainPit:  gainPit,
+		gainPit:  fixed.pitchGain,
 		params:   in.params[consumed:],
 		badFrame: in.badFrame,
 		code:     s.code[:],
@@ -65,7 +65,8 @@ func (s *decoderCoreState) decodeGoodSubframe(in decodeGoodSubframeInput) (int, 
 	if err != nil {
 		return 0, decodedSubframe{}, err
 	}
-	consumed += consumedGain
+	consumed += gain.consumed
+	gainPit, gainCode := gain.pitch, gain.code
 
 	gainPit, gainCode = s.updateSubframeGains(in.badFrame, gainPit, gainCode)
 	gainPit = s.limitBackgroundPitchGain(in.mode, gainPit, in.badFrame)
@@ -140,51 +141,58 @@ func (s *decoderCoreState) decodeSubframePitch(mode Mode, subframe int, index in
 	return t0, t0Frac, err
 }
 
-func (s *decoderCoreState) decodeSubframeFixed(mode Mode, subframe int, params []int16, badFrame bool) (pitSharp int16, gainPit int16, consumed int, err error) {
+type decodedFixedCodebook struct {
+	pitchSharpness int16
+	pitchGain      int16
+	consumed       int
+}
+
+func (s *decoderCoreState) decodeSubframeFixed(mode Mode, subframe int, params []int16, badFrame bool) (decodedFixedCodebook, error) {
 	switch mode {
 	case Mode475, Mode515:
 		if len(params) < 2 {
-			return 0, 0, 0, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
+			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
 		s.decodeFixed2i40_9bits(int16(subframe), params[1], params[0])
-		return fxp.Shl16(s.sharp, 1), 0, 2, nil
+		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode590:
 		if len(params) < 2 {
-			return 0, 0, 0, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
+			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
 		s.decodeFixed2i40_11bits(params[1], params[0])
-		return fxp.Shl16(s.sharp, 1), 0, 2, nil
+		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode670:
 		if len(params) < 2 {
-			return 0, 0, 0, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
+			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
 		s.decodeFixed3i40_14bits(params[1], params[0])
-		return fxp.Shl16(s.sharp, 1), 0, 2, nil
+		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode740, Mode795:
 		if len(params) < 2 {
-			return 0, 0, 0, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
+			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
 		s.decodeFixed4i40_17bits(params[1], params[0])
-		return fxp.Shl16(s.sharp, 1), 0, 2, nil
+		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode1020:
 		if len(params) < 7 {
-			return 0, 0, 0, errors.New("AMR-NB MR102 fixed codebook needs 7 params")
+			return decodedFixedCodebook{}, errors.New("AMR-NB MR102 fixed codebook needs 7 params")
 		}
 		s.decodeFixed8i40_31bits(params[:7])
-		return fxp.Shl16(s.sharp, 1), 0, 7, nil
+		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 7}, nil
 	case Mode1220:
 		if len(params) < 11 {
-			return 0, 0, 0, errors.New("AMR-NB MR122 fixed codebook needs 11 params")
+			return decodedFixedCodebook{}, errors.New("AMR-NB MR122 fixed codebook needs 11 params")
 		}
+		var gainPit int16
 		if badFrame {
 			gainPit = s.ecGainPitch.conceal(s.state)
 		} else {
 			gainPit = dGainPitch(mode, params[0])
 		}
 		s.decodeFixed10i40_35bits(params[1:11])
-		return fxp.Shl16(gainPit, 1), gainPit, 11, nil
+		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(gainPit, 1), pitchGain: gainPit, consumed: 11}, nil
 	default:
-		return 0, 0, 0, fmt.Errorf("AMR-NB fixed codebook mode %d is not supported", mode)
+		return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook mode %d is not supported", mode)
 	}
 }
 
@@ -197,52 +205,58 @@ type decodeSubframeGainInput struct {
 	code     []int16
 }
 
-func (s *decoderCoreState) decodeSubframeGain(in decodeSubframeGainInput) (int16, int16, int, error) {
+type decodedSubframeGain struct {
+	pitch    int16
+	code     int16
+	consumed int
+}
+
+func (s *decoderCoreState) decodeSubframeGain(in decodeSubframeGainInput) (decodedSubframeGain, error) {
 	switch {
 	case in.mode == Mode475:
 		consumed := 0
 		if in.even != 0 {
 			if len(in.params) < 1 {
-				return 0, 0, 0, errors.New("AMR-NB MR475 gain needs index on even subframe")
+				return decodedSubframeGain{}, errors.New("AMR-NB MR475 gain needs index on even subframe")
 			}
 			s.gainIndexMR475 = in.params[0]
 			consumed = 1
 		}
 		if in.badFrame {
-			return s.ecGainPitch.conceal(s.state), s.ecGainCode.conceal(&s.predState, s.state), consumed, nil
+			return decodedSubframeGain{pitch: s.ecGainPitch.conceal(s.state), code: s.ecGainCode.conceal(&s.predState, s.state), consumed: consumed}, nil
 		}
 		gp, gc := decGain(&s.predState, in.mode, s.gainIndexMR475, in.code, in.even)
-		return gp, gc, consumed, nil
+		return decodedSubframeGain{pitch: gp, code: gc, consumed: consumed}, nil
 	case in.mode <= Mode740 || in.mode == Mode1020:
 		if len(in.params) < 1 {
-			return 0, 0, 0, fmt.Errorf("AMR-NB gain needs 1 param for mode %d", in.mode)
+			return decodedSubframeGain{}, fmt.Errorf("AMR-NB gain needs 1 param for mode %d", in.mode)
 		}
 		if in.badFrame {
-			return s.ecGainPitch.conceal(s.state), s.ecGainCode.conceal(&s.predState, s.state), 1, nil
+			return decodedSubframeGain{pitch: s.ecGainPitch.conceal(s.state), code: s.ecGainCode.conceal(&s.predState, s.state), consumed: 1}, nil
 		}
 		gp, gc := decGain(&s.predState, in.mode, in.params[0], in.code, in.even)
-		return gp, gc, 1, nil
+		return decodedSubframeGain{pitch: gp, code: gc, consumed: 1}, nil
 	case in.mode == Mode795:
 		if len(in.params) < 2 {
-			return 0, 0, 0, errors.New("AMR-NB MR795 gain needs 2 params")
+			return decodedSubframeGain{}, errors.New("AMR-NB MR795 gain needs 2 params")
 		}
 		if in.badFrame {
-			return s.ecGainPitch.conceal(s.state), s.ecGainCode.conceal(&s.predState, s.state), 2, nil
+			return decodedSubframeGain{pitch: s.ecGainPitch.conceal(s.state), code: s.ecGainCode.conceal(&s.predState, s.state), consumed: 2}, nil
 		}
 		gp := dGainPitch(in.mode, in.params[0])
 		gc := dGainCode(&s.predState, in.mode, in.params[1], in.code)
-		return gp, gc, 2, nil
+		return decodedSubframeGain{pitch: gp, code: gc, consumed: 2}, nil
 	case in.mode == Mode1220:
 		if len(in.params) < 1 {
-			return 0, 0, 0, errors.New("AMR-NB MR122 code gain needs 1 param")
+			return decodedSubframeGain{}, errors.New("AMR-NB MR122 code gain needs 1 param")
 		}
 		if in.badFrame {
-			return in.gainPit, s.ecGainCode.conceal(&s.predState, s.state), 1, nil
+			return decodedSubframeGain{pitch: in.gainPit, code: s.ecGainCode.conceal(&s.predState, s.state), consumed: 1}, nil
 		}
 		gc := dGainCode(&s.predState, in.mode, in.params[0], in.code)
-		return in.gainPit, gc, 1, nil
+		return decodedSubframeGain{pitch: in.gainPit, code: gc, consumed: 1}, nil
 	default:
-		return 0, 0, 0, fmt.Errorf("AMR-NB gain mode %d is not supported", in.mode)
+		return decodedSubframeGain{}, fmt.Errorf("AMR-NB gain mode %d is not supported", in.mode)
 	}
 }
 

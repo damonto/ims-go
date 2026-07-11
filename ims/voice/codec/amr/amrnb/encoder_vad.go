@@ -341,9 +341,9 @@ func (s *encoderVADState) hangoverAddition(noiseLevel int16, lowPower bool) bool
 	return false
 }
 
-func (s *encoderVADState) pitchDetection(lags []int16) {
+func (s *encoderVADState) pitchDetection(lags [2]int16) {
 	var lagCount int16
-	for i := 0; i < 2 && i < len(lags); i++ {
+	for i := range lags {
 		if fxp.Abs16(fxp.Sub16(s.oldLag, lags[i])) < 4 {
 			lagCount++
 		}

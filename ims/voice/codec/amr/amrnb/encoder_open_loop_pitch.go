@@ -219,11 +219,14 @@ func pitchOlWithVAD(in pitchOLSearchInput) (int16, error) {
 		vad:      in.vad,
 	}
 	lagIn.lagMaxValue, lagIn.lagMinValue = in.pitMax, lag1Max
-	maxLag1, corr1, rawCorr1, rawEnergy1 := lagMax(lagIn)
+	first := lagMax(lagIn)
 	lagIn.lagMaxValue, lagIn.lagMinValue = lag1Max-1, in.pitMin<<1
-	maxLag2, corr2, rawCorr2, rawEnergy2 := lagMax(lagIn)
+	second := lagMax(lagIn)
 	lagIn.lagMaxValue, lagIn.lagMinValue = (in.pitMin<<1)-1, in.pitMin
-	maxLag3, corr3, rawCorr3, rawEnergy3 := lagMax(lagIn)
+	third := lagMax(lagIn)
+	maxLag1, corr1, rawCorr1, rawEnergy1 := first.lag, first.correlation, first.rawCorrelation, first.energy
+	maxLag2, corr2, rawCorr2, rawEnergy2 := second.lag, second.correlation, second.rawCorrelation, second.energy
+	maxLag3, corr3, rawCorr3, rawEnergy3 := third.lag, third.correlation, third.rawCorrelation, third.energy
 
 	if fxp.Mult(corr1, pitchThreshold) < corr2 {
 		corr1 = corr2
@@ -309,7 +312,14 @@ type lagMaxInput struct {
 	vad         *encoderVADState
 }
 
-func lagMax(in lagMaxInput) (int16, int16, int32, int32) {
+type lagSearchResult struct {
+	lag            int16
+	correlation    int16
+	rawCorrelation int32
+	energy         int32
+}
+
+func lagMax(in lagMaxInput) lagSearchResult {
 	maxCorr := fxp.Min32
 	bestLag := in.lagMaxValue
 	for lag := in.lagMaxValue; lag >= in.lagMinValue; lag-- {
@@ -343,13 +353,13 @@ func lagMax(in lagMaxInput) (int16, int16, int32, int32) {
 	if in.scalFlag {
 		normalized = fxp.Shr32(normalized, in.scalFac)
 		if normalized > 0x0000ffff {
-			return int16(bestLag), fxp.Max16, maxCorr, energy
+			return lagSearchResult{int16(bestLag), fxp.Max16, maxCorr, energy}
 		}
 		if normalized < -65536 {
-			return int16(bestLag), fxp.Min16, maxCorr, energy
+			return lagSearchResult{int16(bestLag), fxp.Min16, maxCorr, energy}
 		}
-		return int16(bestLag), int16(normalized >> 1), maxCorr, energy
+		return lagSearchResult{int16(bestLag), int16(normalized >> 1), maxCorr, energy}
 	}
 
-	return int16(bestLag), int16(normalized), maxCorr, energy
+	return lagSearchResult{int16(bestLag), int16(normalized), maxCorr, energy}
 }

@@ -63,7 +63,9 @@ func TestGainPredPredictKnownVectors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			state := newGainPredState()
 
-			gotExp, gotFrac, gotExpEn, gotFracEn := state.predict(tt.mode, code)
+			got := state.predict(tt.mode, code)
+			gotExp, gotFrac := got.exponent, got.fraction
+			gotExpEn, gotFracEn := got.energyExponent, got.energyFraction
 
 			if gotExp != tt.wantExp || gotFrac != tt.wantFrac ||
 				gotExpEn != tt.wantExpEn || gotFracEn != tt.wantFracEn {
