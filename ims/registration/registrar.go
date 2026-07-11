@@ -420,7 +420,7 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 }
 
 func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip.Message) error {
-	parsed, err := parseRegisterChallenge(challengeResp)
+	parsed, err := parseRegisterChallenge(challengeResp, s.CurrentFlow().SecurityClients)
 	if err != nil {
 		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
@@ -444,7 +444,7 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		if resynchronized {
 			return errors.New("refreshing IMS registration: repeated AKA synchronization failure")
 		}
-		parsed, err = parseRegisterChallenge(resp)
+		parsed, err = parseRegisterChallenge(resp, s.CurrentFlow().SecurityClients)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}

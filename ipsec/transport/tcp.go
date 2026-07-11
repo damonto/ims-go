@@ -9,9 +9,8 @@ import (
 	"time"
 
 	imssession "github.com/damonto/ims-go/ims/session"
-	"github.com/damonto/ims-go/swu/esp"
-	"github.com/damonto/ims-go/swu/packet"
-	"github.com/damonto/ims-go/swu/tunnel"
+	"github.com/damonto/ims-go/ipsec/esp"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
 
 const (
@@ -86,8 +85,8 @@ type SecureTCPConfig struct {
 }
 
 type TCPConn struct {
-	session    *tunnel.Session
-	attachment tunnel.Attachment
+	session    PacketSession
+	attachment Attachment
 	local      *net.TCPAddr
 	remote     *net.TCPAddr
 	secure     bool
@@ -141,15 +140,15 @@ type tcpSegmentResponse struct {
 	retransmit bool
 }
 
-func DialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig) (*TCPConn, error) {
+func DialTCP(ctx context.Context, s PacketSession, cfg TCPConfig) (*TCPConn, error) {
 	return dialTCP(ctx, s, cfg, nil)
 }
 
-func DialSecureTCP(ctx context.Context, s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
+func DialSecureTCP(ctx context.Context, s PacketSession, cfg SecureTCPConfig) (*TCPConn, error) {
 	return dialTCP(ctx, s, cfg.TCPConfig, &cfg)
 }
 
-func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
+func ListenSecureTCP(s PacketSession, cfg SecureTCPConfig) (*TCPConn, error) {
 	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
@@ -207,7 +206,7 @@ func ListenSecureTCP(s *tunnel.Session, cfg SecureTCPConfig) (*TCPConn, error) {
 	return conn, nil
 }
 
-func dialTCP(ctx context.Context, s *tunnel.Session, cfg TCPConfig, secure *SecureTCPConfig) (*TCPConn, error) {
+func dialTCP(ctx context.Context, s PacketSession, cfg TCPConfig, secure *SecureTCPConfig) (*TCPConn, error) {
 	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("dialing tcp transport: %w", err)

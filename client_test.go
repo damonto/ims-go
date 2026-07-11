@@ -125,6 +125,28 @@ type clientTestPacketConn struct {
 	local net.Addr
 }
 
+type pcscfReselectingAccessStub struct {
+	openErrors  []error
+	openCalls   int
+	selectCalls int
+	selectErr   error
+}
+
+func (s *pcscfReselectingAccessStub) OpenIMS(context.Context, accessIMSConfig) (imsAccess, error) {
+	err := s.openErrors[s.openCalls]
+	s.openCalls++
+	return imsAccess{}, err
+}
+
+func (s *pcscfReselectingAccessStub) Close() error { return nil }
+
+func (s *pcscfReselectingAccessStub) PCSCFCandidateCount() int { return len(s.openErrors) }
+
+func (s *pcscfReselectingAccessStub) SelectNextPCSCF() error {
+	s.selectCalls++
+	return s.selectErr
+}
+
 func (c *clientTestPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
 	return 0, nil, errors.New("ReadFrom was not expected")
 }
@@ -188,6 +210,77 @@ func (r *readerStub) SMSPPDownload(ctx context.Context, req usimcard.SMSPPDownlo
 func (r *readerStub) Close() error {
 	r.closeCalls++
 	return r.closeErr
+}
+
+func TestOpenIMSWithPCSCFFailover(t *testing.T) {
+	tests := []struct {
+		name            string
+		firstErr        error
+		secondErr       error
+		selectErr       error
+		wantOpenCalls   int
+		wantSelectCalls int
+		wantSecondErr   bool
+	}{
+		{
+			name:            "Timer F selects next P-CSCF",
+			firstErr:        &imssession.TransactionTimeoutError{Method: "REGISTER", Timer: "F"},
+			wantOpenCalls:   2,
+			wantSelectCalls: 1,
+			wantSecondErr:   true,
+		},
+		{
+			name:          "ordinary error keeps current P-CSCF",
+			firstErr:      errors.New("opening SIP transport"),
+			wantOpenCalls: 1,
+		},
+		{
+			name:            "last candidate timeout does not wrap to first P-CSCF",
+			firstErr:        &imssession.TransactionTimeoutError{Method: "REGISTER", Timer: "F"},
+			secondErr:       &imssession.TransactionTimeoutError{Method: "REGISTER", Timer: "F"},
+			wantOpenCalls:   2,
+			wantSelectCalls: 1,
+			wantSecondErr:   true,
+		},
+		{
+			name:            "P-CSCF selection error stops retry",
+			firstErr:        &imssession.TransactionTimeoutError{Method: "REGISTER", Timer: "F"},
+			selectErr:       errors.New("closing previous LTE IPsec session"),
+			wantOpenCalls:   1,
+			wantSelectCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lastErr := tt.secondErr
+			if lastErr == nil {
+				lastErr = errors.New("second P-CSCF rejected registration")
+			}
+			access := &pcscfReselectingAccessStub{
+				openErrors: []error{tt.firstErr, lastErr},
+				selectErr:  tt.selectErr,
+			}
+			setup := &connectSetup{access: access}
+
+			err := (&Client{}).openIMSWithPCSCFFailover(context.Background(), setup)
+			if tt.wantSecondErr && !errors.Is(err, lastErr) {
+				t.Fatalf("openIMSWithPCSCFFailover() error = %v, want second P-CSCF error", err)
+			}
+			if tt.selectErr != nil && !errors.Is(err, tt.selectErr) {
+				t.Fatalf("openIMSWithPCSCFFailover() error = %v, want selection error", err)
+			}
+			if !errors.Is(err, tt.firstErr) {
+				t.Fatalf("openIMSWithPCSCFFailover() error = %v, want first error", err)
+			}
+			if access.openCalls != tt.wantOpenCalls {
+				t.Fatalf("OpenIMS() calls = %d, want %d", access.openCalls, tt.wantOpenCalls)
+			}
+			if access.selectCalls != tt.wantSelectCalls {
+				t.Fatalf("SelectNextPCSCF() calls = %d, want %d", access.selectCalls, tt.wantSelectCalls)
+			}
+		})
+	}
 }
 
 func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
@@ -2773,14 +2866,14 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	notify := imssip.NewRequest("NOTIFY", "sip:user@example.com")
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Content-Type", "application/reginfo+xml")
-	notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+	notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="terminated" event="deactivated">
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, state.PublicIdentity, contactURI))
+</reginfo>`, state.PublicIdentity, contactURI)
 	transport.queueRead(notify)
 
 	select {

@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"sync"
 
 	imssession "github.com/damonto/ims-go/ims/session"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
+	ipsectransport "github.com/damonto/ims-go/ipsec/transport"
 	"github.com/damonto/ims-go/lte"
+	lteipsec "github.com/damonto/ims-go/lte/ipsec"
 	"github.com/damonto/uicc-go/usim"
 )
 
@@ -17,8 +21,11 @@ type imsPDNReader interface {
 }
 
 type voLTEAccess struct {
-	info lte.Info
-	pdn  *usim.IMSPDNSession
+	mu     sync.Mutex
+	info   lte.Info
+	pdn    *usim.IMSPDNSession
+	ipsec  *lteipsec.Session
+	logger *slog.Logger
 }
 
 func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voLTEAccess, error) {
@@ -27,8 +34,9 @@ func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voL
 		return nil, errors.New("opening VoLTE access: USIM reader does not support IMS PDN")
 	}
 	pdn, err := reader.OpenIMSPDN(ctx, usim.IMSPDNConfig{
-		APN:     c.cfg.Access.VoLTE.APN,
-		PDNType: c.cfg.Access.VoLTE.PDNType,
+		APN:          c.cfg.Access.VoLTE.APN,
+		PDNType:      c.cfg.Access.VoLTE.PDNType,
+		ProfileIndex: c.cfg.Access.VoLTE.ProfileIndex,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opening VoLTE IMS PDN: %w", err)
@@ -37,9 +45,6 @@ func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voL
 	if c.cfg.Access.VoLTE.RequireVoPS && !info.VoPSSupported {
 		_ = pdn.Close()
 		return nil, errors.New("opening VoLTE access: LTE IMS voice over PS is unavailable")
-	}
-	if info.AccessNetworkInfo == "" {
-		info.AccessNetworkInfo = lte.DefaultAccessNetworkInfo
 	}
 	if len(info.LocalIPv4) == 0 && len(info.LocalIPv6) == 0 {
 		_ = pdn.Close()
@@ -51,30 +56,43 @@ func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voL
 	}
 	setup.tunnel = nil
 	return &voLTEAccess{
-		info: info,
-		pdn:  pdn,
+		info:   info,
+		pdn:    pdn,
+		logger: c.cfg.Logger,
 	}, nil
 }
 
 func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAccess, error) {
-	transport, err := a.openSIPTransport(ctx, cfg)
+	a.mu.Lock()
+	route, ok := a.info.RouteToPCSCF()
+	accessNetworkInfo := a.info.AccessNetworkInfo
+	a.mu.Unlock()
+	if !ok {
+		return imsAccess{}, errors.New("opening IMS over VoLTE: IMS PDN route to P-CSCF is unavailable")
+	}
+	transport, err := a.openSIPTransportTo(ctx, cfg, route)
 	if err != nil {
 		return imsAccess{}, err
 	}
+	ipsecSession, err := lteipsec.NewSession(route.LocalIP, route.RemoteIP, a.logger)
+	if err != nil {
+		_ = transport.Close()
+		return imsAccess{}, err
+	}
+	a.mu.Lock()
+	a.ipsec = ipsecSession
+	a.mu.Unlock()
 	return imsAccess{
-		AccessNetworkInfo: a.info.AccessNetworkInfo,
+		AccessNetworkInfo: accessNetworkInfo,
 		SIP:               transport,
+		Security:          a.openSecurity(route.RemoteIP, cfg, ipsecSession),
 		OpenMedia: func(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 			return a.openMedia(ctx, cfg)
 		},
 	}, nil
 }
 
-func (a *voLTEAccess) openSIPTransport(ctx context.Context, cfg accessIMSConfig) (imssession.Transport, error) {
-	route, ok := a.info.RouteToPCSCF()
-	if !ok {
-		return nil, errors.New("opening sip transport: IMS PDN route to P-CSCF is unavailable")
-	}
+func (a *voLTEAccess) openSIPTransportTo(ctx context.Context, cfg accessIMSConfig, route lte.Route) (imssession.Transport, error) {
 	remotePort := cfg.SIPServerPort
 	if remotePort == 0 {
 		remotePort = defaultSIPServerPort
@@ -89,6 +107,66 @@ func (a *voLTEAccess) openSIPTransport(ctx context.Context, cfg accessIMSConfig)
 	}
 }
 
+func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session *lteipsec.Session) imsSecurity {
+	associations := ipsectransport.NewSecurityAssociations()
+	enable := func(ctx context.Context, mode string) error {
+		if err := session.Enable(ctx, mode); err != nil {
+			return fmt.Errorf("opening VoLTE IPsec transport: %w", err)
+		}
+		return nil
+	}
+	return imsSecurity{
+		DialSecureUDP: func(ctx context.Context, secure imssession.SecureUDPConfig) (imssession.Transport, error) {
+			if err := enable(ctx, secure.Mode); err != nil {
+				return nil, err
+			}
+			return ipsectransport.DialSecureUDP(ctx, session, ipsectransport.SecureUDPConfig{
+				UDPConfig:   ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
+				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
+				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
+				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+			})
+		},
+		ListenSecureUDP: func(ctx context.Context, secure imssession.SecureUDPConfig) (imssession.Transport, error) {
+			if err := enable(ctx, secure.Mode); err != nil {
+				return nil, err
+			}
+			return ipsectransport.ListenSecureUDP(session, ipsectransport.SecureUDPConfig{
+				UDPConfig:   ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
+				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
+				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
+				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+			})
+		},
+		DialSecureTCP: func(ctx context.Context, secure imssession.SecureTCPConfig) (imssession.Transport, error) {
+			if err := enable(ctx, secure.Mode); err != nil {
+				return nil, err
+			}
+			return ipsectransport.DialSecureTCP(ctx, session, ipsectransport.SecureTCPConfig{
+				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP, DataACKTimeouts: configuredTCPDataACKTimeouts(secure.DataACKTimeouts, cfg.TCPDataACKTimeouts)},
+				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
+				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
+				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+			})
+		},
+		ListenSecureTCP: func(ctx context.Context, secure imssession.SecureTCPConfig) (imssession.Transport, error) {
+			if err := enable(ctx, secure.Mode); err != nil {
+				return nil, err
+			}
+			return ipsectransport.ListenSecureTCP(session, ipsectransport.SecureTCPConfig{
+				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP, DataACKTimeouts: configuredTCPDataACKTimeouts(secure.DataACKTimeouts, cfg.TCPDataACKTimeouts)},
+				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
+				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
+				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+			})
+		},
+	}
+}
+
 func (a *voLTEAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 	route, ok := a.info.RouteTo(cfg.RemoteIP)
 	if !ok {
@@ -98,10 +176,48 @@ func (a *voLTEAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (
 }
 
 func (a *voLTEAccess) Close() error {
-	if a.pdn == nil {
-		return nil
+	a.mu.Lock()
+	ipsecSession := a.ipsec
+	a.ipsec = nil
+	pdn := a.pdn
+	a.pdn = nil
+	a.mu.Unlock()
+
+	var err error
+	if ipsecSession != nil {
+		err = errors.Join(err, ipsecSession.Close())
 	}
-	return a.pdn.Close()
+	if pdn != nil {
+		err = errors.Join(err, pdn.Close())
+	}
+	return err
+}
+
+func (a *voLTEAccess) PCSCFCandidateCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.info.PCSCFCandidateCount()
+}
+
+func (a *voLTEAccess) SelectNextPCSCF() error {
+	a.mu.Lock()
+	next, ok := a.info.WithNextPCSCF()
+	if !ok {
+		a.mu.Unlock()
+		return errors.New("selecting next P-CSCF: no alternate P-CSCF")
+	}
+	ipsecSession := a.ipsec
+	a.ipsec = nil
+	a.mu.Unlock()
+	if ipsecSession != nil {
+		if err := ipsecSession.Close(); err != nil {
+			return fmt.Errorf("selecting next P-CSCF: closing previous LTE IPsec session: %w", err)
+		}
+	}
+	a.mu.Lock()
+	a.info = next
+	a.mu.Unlock()
+	return nil
 }
 
 func lteInfoFromIMSPDN(cfg lte.Config, pdn usim.IMSPDNInfo) lte.Info {

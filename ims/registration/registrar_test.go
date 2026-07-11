@@ -3393,6 +3393,65 @@ func TestSubscribeStoresExpires(t *testing.T) {
 	}
 }
 
+func TestSubscribeAndNotifyUseProtectedServerFlows(t *testing.T) {
+	clientUDP := newUDPTransport(5062, 4060)
+	serverUDP := newUDPTransport(5063, 4061)
+	serverTCP := newTCPTransport(5063, 4061)
+	svc := newTestService(t, Config{}, clientUDP, stubCard{})
+
+	serverUDPAttachment, err := svc.sess.AddTransport(serverUDP)
+	if err != nil {
+		t.Fatalf("AddTransport(serverUDP) error = %v", err)
+	}
+	serverTCPAttachment, err := svc.sess.AddTransport(serverTCP)
+	if err != nil {
+		t.Fatalf("AddTransport(serverTCP) error = %v", err)
+	}
+	svc.replaceSecureServerAttachments([]session.Attachment{serverUDPAttachment, serverTCPAttachment})
+
+	clientUDP.onWrite = func(data []byte) {
+		req := mustParseMessage(t, data)
+		if req.Method() != "SUBSCRIBE" {
+			t.Fatalf("client flow method = %q, want SUBSCRIBE", req.Method())
+		}
+		serverUDP.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
+	}
+	if err := svc.Subscribe(context.Background()); err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if countWrites(serverUDP) != 0 {
+		t.Fatalf("server UDP writes = %d before NOTIFY, want 0", countWrites(serverUDP))
+	}
+
+	subscription := svc.currentSubscription()
+	notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+	notify.Headers.Add("Via", "SIP/2.0/TCP 127.0.0.1:4061;branch=z9hG4bK-protected-notify")
+	notify.Headers.Add("From", subscription.remoteHeader)
+	notify.Headers.Add("To", subscription.localHeader)
+	notify.Headers.Add("Call-ID", subscription.callID)
+	notify.Headers.Add("CSeq", "1 NOTIFY")
+	notify.Headers.Add("Event", "reg")
+	notify.Headers.Add("Subscription-State", "active;expires=90")
+
+	handled, err := svc.HandleRequest(context.Background(), session.Request{
+		Message:   notify,
+		Transport: serverTCP,
+		PeerAddr:  serverTCP.RemoteAddr(),
+	})
+	if err != nil {
+		t.Fatalf("HandleRequest(NOTIFY) error = %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleRequest(NOTIFY) handled = false, want true")
+	}
+	if got := lastWrite(t, serverTCP).StatusCode(); got != 200 {
+		t.Fatalf("NOTIFY response status = %d, want 200", got)
+	}
+	if countWrites(clientUDP) != 1 {
+		t.Fatalf("client UDP writes = %d, want only SUBSCRIBE", countWrites(clientUDP))
+	}
+}
+
 func TestSubscribeServiceUnavailableCarriesRetryAfter(t *testing.T) {
 	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})

@@ -1,9 +1,13 @@
 package registration
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/damonto/ims-go/ims/security"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func TestESPSaltDerivation(t *testing.T) {
@@ -112,6 +116,101 @@ func TestSecurityClientSPIsAreUnique(t *testing.T) {
 			got := tt.next()
 			if got.SPIC == got.SPIS {
 				t.Fatalf("SPIC = SPIS = %d, want unique SPIs", got.SPIC)
+			}
+		})
+	}
+}
+
+func TestIPsecSecurityAssociationsFollowTS33203Flows(t *testing.T) {
+	verify := security.Param{
+		Alg:   "hmac-sha-1-96",
+		EAlg:  "aes-cbc",
+		Mod:   "trans",
+		PortC: 4061,
+		PortS: 4060,
+		SPIC:  0x11111111,
+		SPIS:  0x22222222,
+	}
+	flow := Flow{SecurityClient: security.Param{
+		PortC: 5062,
+		PortS: 5063,
+		SPIC:  0x33333333,
+		SPIS:  0x44444444,
+	}}
+	var clientCfg session.SecureUDPConfig
+	var serverCfg session.SecureUDPConfig
+	primary := newUDPTransport(5060, 5060)
+	svc := newTestService(t, Config{
+		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			clientCfg = cfg
+			return newUDPTransport(cfg.LocalPort, cfg.RemotePort), nil
+		},
+		ListenSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
+			serverCfg = cfg
+			return newUDPTransport(cfg.LocalPort, cfg.RemotePort), nil
+		},
+	}, primary, stubCard{})
+
+	if _, err := svc.dialSecureTransport(context.Background(), &verify, flow, []byte("ck"), []byte("ik")); err != nil {
+		t.Fatalf("dialSecureTransport() error = %v", err)
+	}
+	_, attachments, err := svc.startSecureServerTransportsWithKeys(context.Background(), &verify, flow, []byte("ck"), []byte("ik"))
+	if err != nil {
+		t.Fatalf("startSecureServerTransportsWithKeys() error = %v", err)
+	}
+	defer closeAttachments(attachments)
+
+	tests := []struct {
+		name string
+		got  uint32
+		want uint32
+	}{
+		{name: "client flow outbound uses Security-Server spi-s", got: clientCfg.OutboundSPI, want: verify.SPIS},
+		{name: "client flow inbound uses Security-Client spi-c", got: clientCfg.InboundSPI, want: flow.SecurityClient.SPIC},
+		{name: "server flow outbound uses Security-Server spi-c", got: serverCfg.OutboundSPI, want: verify.SPIC},
+		{name: "server flow inbound uses Security-Client spi-s", got: serverCfg.InboundSPI, want: flow.SecurityClient.SPIS},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("SPI = %#x, want %#x", tt.got, tt.want)
+			}
+		})
+	}
+	if clientCfg.LocalPort != flow.SecurityClient.PortC || clientCfg.RemotePort != verify.PortS {
+		t.Fatalf("client flow ports = %d/%d, want %d/%d", clientCfg.LocalPort, clientCfg.RemotePort, flow.SecurityClient.PortC, verify.PortS)
+	}
+	if serverCfg.LocalPort != flow.SecurityClient.PortS || serverCfg.RemotePort != verify.PortC {
+		t.Fatalf("server flow ports = %d/%d, want %d/%d", serverCfg.LocalPort, serverCfg.RemotePort, flow.SecurityClient.PortS, verify.PortC)
+	}
+}
+
+func TestSecurityServerMustMatchSecurityClientOffer(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+	req := svc.buildRegister(nil, nil)
+	tests := []struct {
+		name   string
+		server string
+	}{
+		{
+			name:   "unoffered UDP encapsulation",
+			server: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=UDP-enc-tun;port-c=4061;port-s=4060;prot=esp;spi-c=1111;spi-s=2222",
+		},
+		{
+			name:   "unoffered AES GCM",
+			server: "ipsec-3gpp;alg=null;ealg=aes-gcm;mod=trans;port-c=4061;port-s=4060;prot=esp;spi-c=1111;spi-s=2222",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := newResponse(req, 401, "Unauthorized",
+				sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.example",nonce="` + testNonce + `",algorithm=AKAv1-MD5`},
+				sip.Header{Name: "Security-Server", Value: tt.server},
+			)
+			if _, err := svc.applyRegisterChallenge(resp); !errors.Is(err, errSecurityAgreementInvalid) {
+				t.Fatalf("applyRegisterChallenge() error = %v, want invalid security agreement", err)
 			}
 		})
 	}

@@ -12,7 +12,7 @@ import (
 
 	"log/slog"
 
-	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/ipsec/packet"
 	"github.com/damonto/ims-go/swu/tunnel"
 )
 

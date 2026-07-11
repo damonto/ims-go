@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
 )
 
 var (

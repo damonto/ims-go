@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
+	"github.com/damonto/ims-go/ipsec/packet"
 	"github.com/damonto/ims-go/swu/ike"
-	"github.com/damonto/ims-go/swu/packet"
 	"github.com/damonto/uicc-go/usim"
 )
 

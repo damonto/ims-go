@@ -10,9 +10,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
+	"github.com/damonto/ims-go/ipsec/packet"
 	"github.com/damonto/ims-go/swu/ike"
-	"github.com/damonto/ims-go/swu/packet"
 )
 
 type innerWriteState struct {

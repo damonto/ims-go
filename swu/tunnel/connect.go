@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
 	"github.com/damonto/ims-go/swu/handshake"
 	"github.com/damonto/ims-go/swu/ike"
 	"github.com/damonto/uicc-go/usim"

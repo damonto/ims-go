@@ -13,7 +13,11 @@ const (
 	DefaultAPN = "ims"
 	// DefaultPDNType requests dual-stack IMS PDN when the modem and network support it.
 	DefaultPDNType = "ipv4v6"
-	// DefaultAccessNetworkInfo is the baseline LTE P-Access-Network-Info value.
+	// DefaultAccessNetworkInfo is retained for callers that explicitly know the
+	// access is E-UTRAN FDD. It is not applied automatically because the modem
+	// can be attached to TDD or another radio access type.
+	//
+	// Deprecated: populate Config.AccessNetworkInfo from lower-layer access data.
 	DefaultAccessNetworkInfo = "3GPP-E-UTRAN-FDD"
 )
 
@@ -26,6 +30,7 @@ type Config struct {
 	AccessNetworkInfo string
 	APN               string
 	PDNType           string
+	ProfileIndex      uint8
 	RequireVoPS       bool
 }
 
@@ -125,6 +130,39 @@ func (info Info) RouteToPCSCF() (Route, bool) {
 		}
 	}
 	return Route{}, false
+}
+
+// PCSCFCandidateCount reports how many P-CSCF addresses have a matching local
+// IMS PDN address.
+func (info Info) PCSCFCandidateCount() int {
+	count := 0
+	for _, pcscf := range info.pcscfCandidateIPs() {
+		if _, ok := info.RouteTo(pcscf); ok {
+			count++
+		}
+	}
+	return count
+}
+
+// WithNextPCSCF rotates the P-CSCF list to the next address usable on this IMS
+// PDN. The receiver is not modified.
+func (info Info) WithNextPCSCF() (Info, bool) {
+	candidates := info.pcscfCandidateIPs()
+	current, ok := info.RouteToPCSCF()
+	if !ok || info.PCSCFCandidateCount() < 2 {
+		return info, false
+	}
+	currentIndex := slices.IndexFunc(candidates, current.RemoteIP.Equal)
+	for offset := 1; offset < len(candidates); offset++ {
+		next := (currentIndex + offset) % len(candidates)
+		if _, ok := info.RouteTo(candidates[next]); !ok {
+			continue
+		}
+		rotated := append(append(make([]net.IP, 0, len(candidates)), candidates[next:]...), candidates[:next]...)
+		info.PCSCFIPs = cloneIPs(rotated)
+		return info, true
+	}
+	return info, false
 }
 
 // PCSCFAddresses returns the configured or modem-provided P-CSCF addresses.

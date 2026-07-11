@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
 
 type attachmentClosingInnerHandler struct {

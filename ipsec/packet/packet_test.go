@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
 )
 
 func TestIPPacketRoundTrip(t *testing.T) {

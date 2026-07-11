@@ -6,7 +6,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
 )
 
 type SecurityAssociations struct {

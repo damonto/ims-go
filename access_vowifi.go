@@ -9,7 +9,7 @@ import (
 
 	imssession "github.com/damonto/ims-go/ims/session"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
-	swutransport "github.com/damonto/ims-go/swu/transport"
+	ipsectransport "github.com/damonto/ims-go/ipsec/transport"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 
@@ -57,7 +57,7 @@ func (c *Client) openVoWiFiAccess(ctx context.Context, setup *connectSetup) (*vo
 
 func (a *voWiFiAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAccess, error) {
 	pcscfIPs := pcscfCandidateIPs(a.info)
-	associations := swutransport.NewSecurityAssociations()
+	associations := ipsectransport.NewSecurityAssociations()
 	transport, selectedPCSCF, err := a.openSIPTransport(ctx, cfg, pcscfIPs)
 	if err != nil {
 		return imsAccess{}, err
@@ -80,11 +80,11 @@ func (a *voWiFiAccess) openSIPTransport(ctx context.Context, cfg accessIMSConfig
 	return tcpTransport, selectedIP, nil
 }
 
-func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, associations *swutransport.SecurityAssociations) imsSecurity {
+func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, associations *ipsectransport.SecurityAssociations) imsSecurity {
 	security := imsSecurity{
 		DialSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-			return swutransport.DialSecureUDP(ctx, a.session, swutransport.SecureUDPConfig{
-				UDPConfig: swutransport.UDPConfig{
+			return ipsectransport.DialSecureUDP(ctx, a.session, ipsectransport.SecureUDPConfig{
+				UDPConfig: ipsectransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
 					RemoteIP:   selectedPCSCF,
@@ -102,8 +102,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 		},
 		ListenSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			_ = ctx
-			return swutransport.ListenSecureUDP(a.session, swutransport.SecureUDPConfig{
-				UDPConfig: swutransport.UDPConfig{
+			return ipsectransport.ListenSecureUDP(a.session, ipsectransport.SecureUDPConfig{
+				UDPConfig: ipsectransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
 					RemoteIP:   selectedPCSCF,
@@ -122,8 +122,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 	}
 	if cfg.Transport == "tcp" {
 		security.DialSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
-			return swutransport.DialSecureTCP(ctx, a.session, swutransport.SecureTCPConfig{
-				TCPConfig: swutransport.TCPConfig{
+			return ipsectransport.DialSecureTCP(ctx, a.session, ipsectransport.SecureTCPConfig{
+				TCPConfig: ipsectransport.TCPConfig{
 					LocalPort:       secureCfg.LocalPort,
 					RemotePort:      secureCfg.RemotePort,
 					RemoteIP:        selectedPCSCF,
@@ -142,8 +142,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 		}
 		security.ListenSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
 			_ = ctx
-			return swutransport.ListenSecureTCP(a.session, swutransport.SecureTCPConfig{
-				TCPConfig: swutransport.TCPConfig{
+			return ipsectransport.ListenSecureTCP(a.session, ipsectransport.SecureTCPConfig{
+				TCPConfig: ipsectransport.TCPConfig{
 					LocalPort:       secureCfg.LocalPort,
 					RemotePort:      secureCfg.RemotePort,
 					RemoteIP:        selectedPCSCF,
@@ -175,14 +175,14 @@ func (a *voWiFiAccess) Close() error {
 	return a.session.Close()
 }
 
-func (a *voWiFiAccess) dialPCSCFTCP(ctx context.Context, pcscfIPs []net.IP, dataACKTimeouts []time.Duration) (*swutransport.TCPConn, net.IP, error) {
+func (a *voWiFiAccess) dialPCSCFTCP(ctx context.Context, pcscfIPs []net.IP, dataACKTimeouts []time.Duration) (*ipsectransport.TCPConn, net.IP, error) {
 	candidates := pcscfIPs
 	if len(candidates) == 0 {
 		candidates = []net.IP{nil}
 	}
 	var errs error
 	for _, ip := range candidates {
-		tcpTransport, err := swutransport.DialTCP(ctx, a.session, swutransport.TCPConfig{
+		tcpTransport, err := ipsectransport.DialTCP(ctx, a.session, ipsectransport.TCPConfig{
 			RemotePort:      a.tunnelCfg.SIPPort,
 			RemoteIP:        ip,
 			DataACKTimeouts: dataACKTimeouts,
@@ -195,7 +195,7 @@ func (a *voWiFiAccess) dialPCSCFTCP(ctx context.Context, pcscfIPs []net.IP, data
 	return nil, nil, errs
 }
 
-func tcpRemoteIP(conn *swutransport.TCPConn) net.IP {
+func tcpRemoteIP(conn *ipsectransport.TCPConn) net.IP {
 	remote := conn.RemoteAddr().(*net.TCPAddr)
 	return append(net.IP(nil), remote.IP...)
 }

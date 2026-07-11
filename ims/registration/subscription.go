@@ -43,7 +43,7 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 	}
 	subscription := s.currentSubscription()
 	msg := s.buildSubscribeWithDialog(subscription)
-	resp, err := s.sess.Exchange(ctx, msg)
+	resp, err := s.sess.ExchangeWithOptions(ctx, msg, s.protectedRegisterExchangeOptions())
 	if err != nil {
 		if subscription.active {
 			s.resetSubscription()

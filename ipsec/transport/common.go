@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
@@ -10,10 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/ims-go/swu/esp"
-	"github.com/damonto/ims-go/swu/packet"
-	"github.com/damonto/ims-go/swu/tunnel"
+	ipsecbase "github.com/damonto/ims-go/ipsec"
+	"github.com/damonto/ims-go/ipsec/esp"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
+
+func packetStartLine(data []byte) string {
+	line, _, _ := bytes.Cut(data, []byte("\n"))
+	return strings.TrimSpace(string(line))
+}
 
 const (
 	SecureModeTransport    = "trans"
@@ -184,7 +190,11 @@ func udpEncTunnelKeepalivePacket(localIP, remoteIP net.IP) (packet.InnerPacket, 
 	return secureInnerPacket(localIP, remoteIP, SecureModeUDPEncTunnel, []byte{udpEncapsulatedESPKeepalivePayload})
 }
 
-func writeUDPEncTunnelKeepalive(ctx context.Context, session *tunnel.Session, localIP, remoteIP net.IP) error {
+type PacketSession = ipsecbase.PacketSession
+
+type Attachment = ipsecbase.Attachment
+
+func writeUDPEncTunnelKeepalive(ctx context.Context, session PacketSession, localIP, remoteIP net.IP) error {
 	if session == nil {
 		return errors.New("writing UDP-enc-tun keepalive: session is nil")
 	}
@@ -224,7 +234,7 @@ func startUDPEncTunnelKeepalive(done <-chan struct{}, write func(context.Context
 	}()
 }
 
-func connectedUDPAddrs(s *tunnel.Session, remoteIP net.IP) (*net.UDPAddr, *net.UDPAddr, error) {
+func connectedUDPAddrs(s PacketSession, remoteIP net.IP) (*net.UDPAddr, *net.UDPAddr, error) {
 	if s == nil {
 		return nil, nil, errors.New("session is nil")
 	}

@@ -8,9 +8,8 @@ import (
 	"sync"
 
 	imssession "github.com/damonto/ims-go/ims/session"
-	"github.com/damonto/ims-go/swu/esp"
-	"github.com/damonto/ims-go/swu/packet"
-	"github.com/damonto/ims-go/swu/tunnel"
+	"github.com/damonto/ims-go/ipsec/esp"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
 
 var _ imssession.Transport = (*UDPConn)(nil)
@@ -38,8 +37,8 @@ type SecureUDPConfig struct {
 }
 
 type UDPConn struct {
-	session    *tunnel.Session
-	attachment tunnel.Attachment
+	session    PacketSession
+	attachment Attachment
 	local      *net.UDPAddr
 	remote     *net.UDPAddr
 
@@ -61,7 +60,7 @@ type inboundPacket struct {
 	err  error
 }
 
-func DialSecureUDP(ctx context.Context, s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
+func DialSecureUDP(ctx context.Context, s PacketSession, cfg SecureUDPConfig) (*UDPConn, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -70,11 +69,11 @@ func DialSecureUDP(ctx context.Context, s *tunnel.Session, cfg SecureUDPConfig) 
 	return newSecureUDPConn(s, cfg, transportActionDialSecureUDP)
 }
 
-func ListenSecureUDP(s *tunnel.Session, cfg SecureUDPConfig) (*UDPConn, error) {
+func ListenSecureUDP(s PacketSession, cfg SecureUDPConfig) (*UDPConn, error) {
 	return newSecureUDPConn(s, cfg, transportActionListenSecureUDP)
 }
 
-func newSecureUDPConn(s *tunnel.Session, cfg SecureUDPConfig, action transportAction) (*UDPConn, error) {
+func newSecureUDPConn(s PacketSession, cfg SecureUDPConfig, action transportAction) (*UDPConn, error) {
 	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
@@ -287,7 +286,7 @@ func (t *UDPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		t.session.Logger().Debug("dropping replayed secure UDP packet", "spi", spi, "esp_sequence", espPacket.Sequence)
 		return false
 	}
-	t.session.Logger().Debug("received secure UDP packet", "peer_addr", inner.UDP.Src, "local_addr", t.local, "payload_len", len(inner.UDP.Payload))
+	t.session.Logger().Debug("received secure UDP packet", "peer_addr", inner.UDP.Src, "local_addr", t.local, "payload_len", len(inner.UDP.Payload), "start_line", packetStartLine(inner.UDP.Payload))
 	t.deliver(inner.UDP.Payload, inner.UDP.Src)
 	return true
 }

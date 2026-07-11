@@ -127,6 +127,7 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 		pdn       usim.IMSPDNInfo
 		wantIPv4  net.IP
 		wantPCSCF []net.IP
+		wantPANI  string
 	}{
 		{
 			name: "uses modem info",
@@ -139,6 +140,7 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 			},
 			wantIPv4:  net.IPv4(10, 0, 0, 2),
 			wantPCSCF: []net.IP{net.IPv4(198, 51, 100, 10)},
+			wantPANI:  "3GPP-E-UTRAN-FDD",
 		},
 		{
 			name: "configured values override modem info",
@@ -175,6 +177,9 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 			}
 			if got.VoiceBearerReady != tt.pdn.PacketDataReady {
 				t.Fatalf("VoiceBearerReady = %v, want %v", got.VoiceBearerReady, tt.pdn.PacketDataReady)
+			}
+			if got.AccessNetworkInfo != tt.wantPANI {
+				t.Fatalf("AccessNetworkInfo = %q, want %q", got.AccessNetworkInfo, tt.wantPANI)
 			}
 		})
 	}

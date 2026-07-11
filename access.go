@@ -37,6 +37,12 @@ type accessSession interface {
 	Close() error
 }
 
+type pcscfReselectingAccess interface {
+	accessSession
+	PCSCFCandidateCount() int
+	SelectNextPCSCF() error
+}
+
 type accessIMSConfig struct {
 	Transport          string
 	SIPServerPort      int

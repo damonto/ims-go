@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/damonto/ts43-go v0.0.0-20260629075047-0221e7e08753
-	github.com/damonto/uicc-go v0.0.0-20260707110955-212607e2edf2
+	github.com/damonto/uicc-go v0.0.0-20260711153759-48a6d3deb241
 	github.com/tetratelabs/wazero v1.12.0
 )
 

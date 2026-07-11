@@ -10,7 +10,7 @@ import (
 	"time"
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
-	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/ipsec/packet"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 

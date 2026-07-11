@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
 	"github.com/damonto/ims-go/swu/handshake"
 	"github.com/damonto/ims-go/swu/ike"
 )

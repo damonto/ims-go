@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/damonto/ims-go/swu/esp"
+	"github.com/damonto/ims-go/ipsec/esp"
 	"github.com/damonto/ims-go/swu/ike"
 )
 

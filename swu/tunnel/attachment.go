@@ -4,19 +4,15 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/damonto/ims-go/swu/packet"
+	ipsecbase "github.com/damonto/ims-go/ipsec"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
 
 var errSessionClosed = errors.New("session is closed")
 
-type InnerHandler interface {
-	HandleInnerPacket(pkt packet.InnerPacket) bool
-	HandleError(err error)
-}
+type InnerHandler = ipsecbase.InnerHandler
 
-type Attachment interface {
-	Close() error
-}
+type Attachment = ipsecbase.Attachment
 
 type sessionAttachment struct {
 	session *Session

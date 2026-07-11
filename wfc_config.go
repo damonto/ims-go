@@ -45,7 +45,6 @@ type wfcProfile struct {
 	AddKEToChildSARekey        *bool            `json:"addKEToChildSARekey"`
 	IMSTransport               string           `json:"imsTransport"`
 	IMSHomeDomain              string           `json:"imsHomeDomain"`
-	IMSPrivateIdentity         string           `json:"imsPrivateIdentity"`
 	IMSPublicIdentity          string           `json:"imsPublicIdentity"`
 	IMSPhoneContextDomain      string           `json:"imsPhoneContextDomain"`
 	IMSAccessNetworkInfo       string           `json:"imsAccessNetworkInfo"`
@@ -311,9 +310,6 @@ func (cfg Config) withWFCProfile(profile wfcProfile, card Card) Config {
 	}
 	if strings.TrimSpace(cfg.IMS.HomeDomain) == "" {
 		cfg.IMS.HomeDomain = profile.IMSHomeDomain
-	}
-	if strings.TrimSpace(cfg.IMS.PrivateIdentity) == "" {
-		cfg.IMS.PrivateIdentity = renderWFCIdentity(profile.IMSPrivateIdentity, cfg, card)
 	}
 	if strings.TrimSpace(cfg.IMS.PublicIdentity) == "" {
 		cfg.IMS.PublicIdentity = renderWFCIdentity(profile.IMSPublicIdentity, cfg, card)

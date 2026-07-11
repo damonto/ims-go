@@ -5,7 +5,7 @@ import (
 	"slices"
 
 	imssession "github.com/damonto/ims-go/ims/session"
-	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
 
 // Keep the out-of-order queue below the advertised window so retransmitted
@@ -52,6 +52,11 @@ func (t *TCPConn) consumeSegment(seq uint32, flags byte, payload []byte) error {
 
 	stream := append(append([]byte(nil), t.stream...), payload...)
 	messages, rest, err := imssession.StageSIPMessages(stream)
+	startLine := ""
+	if len(messages) > 0 {
+		startLine = packetStartLine(messages[0])
+	}
+	t.session.Logger().Debug("staged TCP SIP stream", "payload_len", len(payload), "stream_len", len(stream), "messages", len(messages), "rest_len", len(rest), "start_line", startLine, "err", err)
 	if err != nil && len(messages) > cap(t.msgCh)-len(t.msgCh) {
 		return errTCPReceiveQueueFull
 	}

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
-	"github.com/damonto/ims-go/swu/packet"
+	"github.com/damonto/ims-go/ipsec/packet"
 )
 
 func TestTunnelMediaTransportHandlesRTPAndRTCPPorts(t *testing.T) {

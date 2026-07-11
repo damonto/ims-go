@@ -158,7 +158,7 @@ func (s *Registrar) storeDigestCredential(algorithm, nonce, password string, ck,
 }
 
 func (s *Registrar) applyRegisterChallenge(resp sip.Message) (security.Challenge, error) {
-	parsed, err := parseRegisterChallenge(resp)
+	parsed, err := parseRegisterChallenge(resp, s.CurrentFlow().SecurityClients)
 	if err != nil {
 		return security.Challenge{}, err
 	}
@@ -167,7 +167,7 @@ func (s *Registrar) applyRegisterChallenge(resp sip.Message) (security.Challenge
 	return parsed.challenge, nil
 }
 
-func parseRegisterChallenge(resp sip.Message) (registerAuthChallenge, error) {
+func parseRegisterChallenge(resp sip.Message, offered security.Params) (registerAuthChallenge, error) {
 	parsed, err := selectRegisterChallengeForResponse(resp)
 	if err != nil {
 		return registerAuthChallenge{}, err
@@ -179,7 +179,7 @@ func parseRegisterChallenge(resp sip.Message) (registerAuthChallenge, error) {
 		}
 		return registerAuthChallenge{}, errors.New("applying Security-Server: AKAv2-SHA-256 over TLS is not supported by this SIP transport")
 	}
-	verify, raw, err := selectSecurityServer(resp.HeadersByName("Security-Server"))
+	verify, raw, err := selectSecurityServer(resp.HeadersByName("Security-Server"), offered)
 	if err != nil {
 		return registerAuthChallenge{}, fmt.Errorf("%w: %w", errSecurityAgreementInvalid, err)
 	}

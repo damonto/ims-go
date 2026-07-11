@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -156,7 +157,7 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		c.clearCurrentSWUBackoff()
 	}
 
-	if err := c.openIMS(setupCtx, setup); err != nil {
+	if err := c.openIMSWithPCSCFFailover(setupCtx, setup); err != nil {
 		if !internal {
 			c.emitConnectFailure(ctx, err)
 		}
@@ -176,6 +177,45 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		c.emitStatus(StatusRegistered)
 	}
 	return active, nil
+}
+
+func (c *Client) openIMSWithPCSCFFailover(ctx context.Context, setup *connectSetup) error {
+	reselector, ok := setup.access.(pcscfReselectingAccess)
+	if !ok {
+		return c.openIMS(ctx, setup)
+	}
+	return c.openIMSWithPCSCFFailoverAttempts(ctx, setup, reselector, max(reselector.PCSCFCandidateCount(), 1))
+}
+
+func (c *Client) openIMSWithPCSCFFailoverAttempts(ctx context.Context, setup *connectSetup, reselector pcscfReselectingAccess, attempts int) error {
+	var errs error
+	for attempt := range attempts {
+		err := c.openIMS(ctx, setup)
+		if err == nil {
+			return nil
+		}
+		errs = errors.Join(errs, err)
+		if closeErr := setup.closeIMS(); closeErr != nil {
+			return errors.Join(errs, fmt.Errorf("closing failed IMS attempt: %w", closeErr))
+		}
+		if attempt+1 == attempts || ctx.Err() != nil || !pcscfFailoverRequired(err) {
+			return errs
+		}
+		if err := reselector.SelectNextPCSCF(); err != nil {
+			return errors.Join(errs, err)
+		}
+	}
+	return errs
+}
+
+func pcscfFailoverRequired(err error) bool {
+	if registration.PCSCFReselectionRequired(err) ||
+		imssession.TransactionTimerExpired(err, "B") ||
+		imssession.TransactionTimerExpired(err, "F") {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSetup, context.Context, error) {
@@ -724,19 +764,59 @@ func (r *connectionRunner) restoreIMSAfterSWUPCSCF(cause error) (bool, error) {
 }
 
 func (r *connectionRunner) restoreIMSAfterRegistrationPCSCF(cause error) (bool, error) {
-	if r.active == nil || r.active.tunnel == nil {
+	if r.active == nil || !pcscfFailoverRequired(cause) {
 		return false, cause
 	}
-	if !registration.PCSCFReselectionRequired(cause) {
+	if r.active.tunnel != nil {
+		next, err := r.client.restoreIMSAfterRegistrationPCSCFReselection(r.active)
+		if err != nil {
+			return false, fmt.Errorf("restoring IMS after registration P-CSCF reselection: %w", err)
+		}
+		r.client.logger.Info("IMS restored after registration P-CSCF reselection")
+		r.active = next
+		return true, nil
+	}
+	reselector, ok := r.active.access.(pcscfReselectingAccess)
+	if !ok {
 		return false, cause
 	}
-	next, err := r.client.restoreIMSAfterRegistrationPCSCFReselection(r.active)
+	next, err := r.client.restoreIMSWithNextLTEPCSCF(r.active, reselector)
 	if err != nil {
 		return false, fmt.Errorf("restoring IMS after registration P-CSCF reselection: %w", err)
 	}
 	r.client.logger.Info("IMS restored after registration P-CSCF reselection")
 	r.active = next
 	return true, nil
+}
+
+func (c *Client) restoreIMSWithNextLTEPCSCF(active *activeConn, access pcscfReselectingAccess) (*activeConn, error) {
+	if err := c.closeIMS(active); err != nil {
+		return nil, err
+	}
+	if err := access.SelectNextPCSCF(); err != nil {
+		return nil, err
+	}
+
+	setupCtx, setupStop := c.newIMSRestoreContext(active.scope)
+	defer setupStop()
+	setup := &connectSetup{
+		setupStop: setupStop,
+		scope:     active.scope,
+		access:    access,
+		imsCfg:    c.cfg.IMS,
+		tunnel:    active.tunnel,
+	}
+	remainingCandidates := max(access.PCSCFCandidateCount()-1, 1)
+	if err := c.openIMSWithPCSCFFailoverAttempts(setupCtx, setup, access, remainingCandidates); err != nil {
+		_ = setup.closeIMS()
+		return nil, err
+	}
+	if err := c.commitIMSRestore(active, setup); err != nil {
+		_ = setup.closeIMS()
+		return nil, err
+	}
+	c.emitStatus(StatusRegistered)
+	return active, nil
 }
 
 func (r *connectionRunner) reconnectAfterIMSFailure(cause error) bool {

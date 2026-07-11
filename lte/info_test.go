@@ -95,3 +95,60 @@ func TestInfoRouteToPCSCF(t *testing.T) {
 		})
 	}
 }
+
+func TestInfoWithNextPCSCF(t *testing.T) {
+	tests := []struct {
+		name       string
+		info       Info
+		wantOK     bool
+		wantRemote net.IP
+	}{
+		{
+			name: "rotates to next usable address",
+			info: Info{
+				LocalIPv4: net.IPv4(192, 0, 2, 10),
+				LocalIPv6: net.ParseIP("2001:db8::10"),
+				PCSCFIPs: []net.IP{
+					net.ParseIP("2001:db8::20"),
+					net.IPv4(192, 0, 2, 20),
+				},
+			},
+			wantOK:     true,
+			wantRemote: net.IPv4(192, 0, 2, 20),
+		},
+		{
+			name: "skips address without matching local family",
+			info: Info{
+				LocalIPv4: net.IPv4(192, 0, 2, 10),
+				PCSCFIPs: []net.IP{
+					net.IPv4(192, 0, 2, 20),
+					net.ParseIP("2001:db8::20"),
+					net.IPv4(192, 0, 2, 30),
+				},
+			},
+			wantOK:     true,
+			wantRemote: net.IPv4(192, 0, 2, 30),
+		},
+		{
+			name: "single usable address",
+			info: Info{
+				LocalIPv4: net.IPv4(192, 0, 2, 10),
+				PCSCFIPs:  []net.IP{net.IPv4(192, 0, 2, 20)},
+			},
+			wantRemote: net.IPv4(192, 0, 2, 20),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tt.info.WithNextPCSCF()
+			if ok != tt.wantOK {
+				t.Fatalf("WithNextPCSCF() ok = %v, want %v", ok, tt.wantOK)
+			}
+			route, routeOK := got.RouteToPCSCF()
+			if !routeOK || !route.RemoteIP.Equal(tt.wantRemote) {
+				t.Fatalf("RouteToPCSCF() = %v, %v; want remote %v", route, routeOK, tt.wantRemote)
+			}
+		})
+	}
+}

@@ -712,7 +712,7 @@ func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, v
 	return []session.Attachment{attachment, route}, nil
 }
 
-func selectSecurityServer(values []string) (*security.Param, []string, error) {
+func selectSecurityServer(values []string, offered security.Params) (*security.Param, []string, error) {
 	raw := make([]string, 0, len(values))
 	bestQ := -1
 	var best *security.Param
@@ -728,7 +728,7 @@ func selectSecurityServer(values []string) (*security.Param, []string, error) {
 		}
 		for _, param := range params {
 			normalized, ok := security.NormalizeParam(param)
-			if !ok {
+			if !ok || !securityMechanismOffered(normalized, offered) {
 				continue
 			}
 			q, err := securityQValue(param.Q)
@@ -750,6 +750,20 @@ func selectSecurityServer(values []string) (*security.Param, []string, error) {
 		return nil, nil, errors.New("applying Security-Server: no compatible ipsec-3gpp security mechanism")
 	}
 	return best, raw, nil
+}
+
+func securityMechanismOffered(selected security.Param, offered security.Params) bool {
+	return slices.ContainsFunc(offered, func(candidate security.Param) bool {
+		normalized, ok := security.NormalizeParam(candidate)
+		if !ok {
+			return false
+		}
+		return strings.EqualFold(normalized.Mechanism, selected.Mechanism) &&
+			strings.EqualFold(normalized.Alg, selected.Alg) &&
+			strings.EqualFold(normalized.EAlg, selected.EAlg) &&
+			strings.EqualFold(normalized.Mod, selected.Mod) &&
+			strings.EqualFold(normalized.Prot, selected.Prot)
+	})
 }
 
 func securityQValue(value string) (int, error) {
