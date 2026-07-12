@@ -14,8 +14,8 @@ import (
 	imsussd "github.com/damonto/ims-go/ims/ussd"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
-	"github.com/damonto/uicc-go/usim"
-	usimcard "github.com/damonto/uicc-go/usim/card"
+	usim "github.com/damonto/wwan-go/sim"
+	usimcard "github.com/damonto/wwan-go/sim/card"
 )
 
 type connectionScope struct {

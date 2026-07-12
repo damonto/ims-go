@@ -10,7 +10,7 @@ import (
 	"github.com/damonto/ims-go/ims/identity"
 	"github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/ims/sip"
-	usimcard "github.com/damonto/uicc-go/usim/card"
+	usimcard "github.com/damonto/wwan-go/sim/card"
 )
 
 func (s *Endpoint) handleMessageRequest(ctx context.Context, req session.Request) error {

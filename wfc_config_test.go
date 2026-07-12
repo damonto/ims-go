@@ -10,7 +10,7 @@ import (
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 type wfcTestCard struct{}

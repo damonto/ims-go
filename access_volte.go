@@ -13,17 +13,35 @@ import (
 	ipsectransport "github.com/damonto/ims-go/ipsec/transport"
 	"github.com/damonto/ims-go/lte"
 	lteipsec "github.com/damonto/ims-go/lte/ipsec"
-	"github.com/damonto/uicc-go/usim"
 )
 
 type imsPDNReader interface {
-	OpenIMSPDN(context.Context, usim.IMSPDNConfig) (*usim.IMSPDNSession, error)
+	OpenIMSPDN(context.Context, imsPDNConfig) (imsPDNSession, error)
+}
+
+type imsPDNConfig struct {
+	APN          string
+	PDNType      string
+	ProfileIndex uint8
+}
+
+type imsPDNInfo struct {
+	LocalIPv4       net.IP
+	LocalIPv6       net.IP
+	PCSCFIPs        []net.IP
+	VoPSSupported   bool
+	PacketDataReady bool
+}
+
+type imsPDNSession interface {
+	Info() imsPDNInfo
+	Close() error
 }
 
 type voLTEAccess struct {
 	mu     sync.Mutex
 	info   lte.Info
-	pdn    *usim.IMSPDNSession
+	pdn    imsPDNSession
 	ipsec  *lteipsec.Session
 	logger *slog.Logger
 }
@@ -31,9 +49,9 @@ type voLTEAccess struct {
 func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voLTEAccess, error) {
 	reader, ok := c.reader.(imsPDNReader)
 	if !ok {
-		return nil, errors.New("opening VoLTE access: USIM reader does not support IMS PDN")
+		return nil, errors.New("opening VoLTE access: SIM reader does not support IMS PDN")
 	}
-	pdn, err := reader.OpenIMSPDN(ctx, usim.IMSPDNConfig{
+	pdn, err := reader.OpenIMSPDN(ctx, imsPDNConfig{
 		APN:          c.cfg.Access.VoLTE.APN,
 		PDNType:      c.cfg.Access.VoLTE.PDNType,
 		ProfileIndex: c.cfg.Access.VoLTE.ProfileIndex,
@@ -220,7 +238,7 @@ func (a *voLTEAccess) SelectNextPCSCF() error {
 	return nil
 }
 
-func lteInfoFromIMSPDN(cfg lte.Config, pdn usim.IMSPDNInfo) lte.Info {
+func lteInfoFromIMSPDN(cfg lte.Config, pdn imsPDNInfo) lte.Info {
 	info := lte.Info{
 		InterfaceName:     cfg.InterfaceName,
 		LocalIPv4:         append(net.IP(nil), pdn.LocalIPv4...),

@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 
 	imsussd "github.com/damonto/ims-go/ims/ussd"
-	"github.com/damonto/uicc-go/usim"
-	usimcard "github.com/damonto/uicc-go/usim/card"
+	usim "github.com/damonto/wwan-go/sim"
+	usimcard "github.com/damonto/wwan-go/sim/card"
 )
 
 type Card interface {
@@ -54,7 +54,7 @@ func New(reader usimcard.Reader, cfg *Config) (*Client, error) {
 	}
 	raw = raw.trimmed()
 	if err := raw.validate(); err != nil {
-	raw.Terminal = raw.Terminal.trimmed()
+		raw.Terminal = raw.Terminal.trimmed()
 		return nil, errors.Join(fmt.Errorf("creating client: %w", err), wrapCloseError(closeActionReader, reader.Close()))
 	}
 	if raw.Terminal.ID == "" {

@@ -22,13 +22,13 @@ import (
 	imssession "github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/swu/tunnel"
 	"github.com/damonto/ims-go/wfcsetup"
-	uiccat "github.com/damonto/uicc-go/at"
-	uiccccid "github.com/damonto/uicc-go/ccid"
-	uiccqmi "github.com/damonto/uicc-go/qcom/qmi"
-	uiccqrtr "github.com/damonto/uicc-go/qcom/qrtr"
-	uiccuim "github.com/damonto/uicc-go/qcom/uim"
-	"github.com/damonto/uicc-go/usim"
-	usimcard "github.com/damonto/uicc-go/usim/card"
+	wwanat "github.com/damonto/wwan-go/at"
+	wwanccid "github.com/damonto/wwan-go/ccid"
+	qcom "github.com/damonto/wwan-go/qcom"
+	wwanqmi "github.com/damonto/wwan-go/qcom/qmi"
+	wwanqrtr "github.com/damonto/wwan-go/qcom/qrtr"
+	usim "github.com/damonto/wwan-go/sim"
+	usimcard "github.com/damonto/wwan-go/sim/card"
 )
 
 const (
@@ -564,7 +564,7 @@ func listCCIDReaders(ctx context.Context) error {
 }
 
 func availableCCIDReaders(ctx context.Context) ([]string, error) {
-	readers, err := uiccccid.ListReaders(ctx)
+	readers, err := wwanccid.ListReaders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing pcsc readers: %w", err)
 	}
@@ -575,7 +575,7 @@ func openDriver(ctx context.Context, opt options) (usimcard.Reader, error) {
 	switch strings.ToLower(strings.TrimSpace(opt.driverKind)) {
 	case "pcsc":
 		if opt.readerName == "" {
-			readers, err := uiccccid.ListReaders(ctx)
+			readers, err := wwanccid.ListReaders(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("listing pcsc readers: %w", err)
 			}
@@ -584,7 +584,7 @@ func openDriver(ctx context.Context, opt options) (usimcard.Reader, error) {
 			}
 			return nil, fmt.Errorf("opening pcsc driver: -reader is required; available readers: %s", strings.Join(readers, ", "))
 		}
-		tx, err := uiccccid.Open(ctx, opt.readerName)
+		tx, err := wwanccid.Open(ctx, opt.readerName)
 		if err != nil {
 			return nil, fmt.Errorf("opening pcsc driver: %w", err)
 		}
@@ -593,7 +593,7 @@ func openDriver(ctx context.Context, opt options) (usimcard.Reader, error) {
 		if opt.device == "" {
 			return nil, errors.New("opening AT driver: -device is required")
 		}
-		tx, err := uiccat.Open(opt.device, 0)
+		tx, err := wwanat.Open(opt.device, 0)
 		if err != nil {
 			return nil, fmt.Errorf("opening AT driver: %w", err)
 		}
@@ -640,13 +640,13 @@ func openQCOMQMIReader(ctx context.Context, device string, slot int) (usimcard.R
 	if err != nil {
 		return nil, err
 	}
-	transport, err := uiccqmi.Open(ctx, uiccqmi.WithProxy(device))
+	transport, err := wwanqmi.Open(ctx, wwanqmi.WithProxy(device))
 	if err != nil {
 		return nil, err
 	}
-	reader, err := uiccuim.New(ctx, transport, uiccuim.WithSlot(qmiSlot))
+	reader, err := qcom.NewClient(transport, qcom.WithSlot(qmiSlot))
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, transport.Close())
 	}
 	if err := reader.ActivateSlot(ctx); err != nil {
 		return nil, errors.Join(err, reader.Close())
@@ -659,13 +659,13 @@ func openQCOMQRTRReader(ctx context.Context, slot int) (usimcard.Reader, error) 
 	if err != nil {
 		return nil, err
 	}
-	transport, err := uiccqrtr.Open(ctx)
+	transport, err := wwanqrtr.Open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	reader, err := uiccuim.New(ctx, transport, uiccuim.WithSlot(qmiSlot))
+	reader, err := qcom.NewClient(transport, qcom.WithSlot(qmiSlot))
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, transport.Close())
 	}
 	if err := reader.ActivateSlot(ctx); err != nil {
 		return nil, errors.Join(err, reader.Close())
@@ -673,8 +673,8 @@ func openQCOMQRTRReader(ctx context.Context, slot int) (usimcard.Reader, error) 
 	return openQCOMAdapter(reader)
 }
 
-func openQCOMAdapter(reader *uiccuim.Reader) (usimcard.Reader, error) {
-	adapter, err := usim.NewQCOM(reader)
+func openQCOMAdapter(reader *qcom.Client) (usimcard.Reader, error) {
+	adapter, err := ims.NewQCOMClient(reader)
 	if err != nil {
 		return nil, errors.Join(err, reader.Close())
 	}
@@ -837,7 +837,7 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 		return fmt.Errorf("serving CCID TCP: -reader is required; available readers: %s", strings.Join(readers, ", "))
 	}
 
-	tx, err := uiccccid.Open(ctx, opt.readerName)
+	tx, err := wwanccid.Open(ctx, opt.readerName)
 	if err != nil {
 		return fmt.Errorf("opening server pcsc reader: %w", err)
 	}

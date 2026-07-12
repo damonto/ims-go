@@ -11,7 +11,7 @@ import (
 	"github.com/damonto/ims-go/ims/security"
 	"github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/ims/sip"
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 const (

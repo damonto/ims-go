@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 func (s *Endpoint) resolveServiceCenter() (serviceCenter, error) {

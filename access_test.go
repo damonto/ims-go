@@ -6,7 +6,6 @@ import (
 
 	"github.com/damonto/ims-go/lte"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
-	"github.com/damonto/uicc-go/usim"
 )
 
 func TestConfigNormalizedAccess(t *testing.T) {
@@ -124,7 +123,7 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 	tests := []struct {
 		name      string
 		cfg       lte.Config
-		pdn       usim.IMSPDNInfo
+		pdn       imsPDNInfo
 		wantIPv4  net.IP
 		wantPCSCF []net.IP
 		wantPANI  string
@@ -132,7 +131,7 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 		{
 			name: "uses modem info",
 			cfg:  lte.Config{InterfaceName: "wwan0", AccessNetworkInfo: "3GPP-E-UTRAN-FDD"},
-			pdn: usim.IMSPDNInfo{
+			pdn: imsPDNInfo{
 				LocalIPv4:       net.IPv4(10, 0, 0, 2),
 				PCSCFIPs:        []net.IP{net.IPv4(198, 51, 100, 10)},
 				VoPSSupported:   true,
@@ -148,7 +147,7 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 				LocalIPv4: net.IPv4(10, 1, 0, 2),
 				PCSCFIPs:  []net.IP{net.ParseIP("2001:db8::1")},
 			},
-			pdn: usim.IMSPDNInfo{
+			pdn: imsPDNInfo{
 				LocalIPv4:       net.IPv4(10, 0, 0, 2),
 				PCSCFIPs:        []net.IP{net.IPv4(198, 51, 100, 10)},
 				PacketDataReady: true,

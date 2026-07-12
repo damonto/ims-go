@@ -10,7 +10,7 @@ import (
 	"hash"
 	"testing"
 
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 type stubAKAProvider struct{}

@@ -4,9 +4,11 @@ go 1.26.3
 
 require (
 	github.com/damonto/ts43-go v0.0.0-20260629075047-0221e7e08753
-	github.com/damonto/uicc-go v0.0.0-20260712015150-f12b90990d1f
+	github.com/damonto/wwan-go v0.0.0-20260712111944-804e974bca78
 	github.com/tetratelabs/wazero v1.12.0
 )
+
+require github.com/damonto/uicc-go v0.0.0-20260629073618-7ddada6bb13e // indirect
 
 require (
 	github.com/ElMostafaIdrassi/goscard v1.0.0 // indirect

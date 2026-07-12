@@ -10,7 +10,7 @@ import (
 	"fmt"
 
 	"github.com/damonto/ims-go/ims/pidf"
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 
 	"github.com/damonto/ims-go/ims/security"
 	"github.com/damonto/ims-go/ims/session"

@@ -20,8 +20,8 @@ import (
 	"github.com/damonto/ims-go/ims/registration"
 	"github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/ims/sip"
-	"github.com/damonto/uicc-go/usim"
-	usimcard "github.com/damonto/uicc-go/usim/card"
+	usim "github.com/damonto/wwan-go/sim"
+	usimcard "github.com/damonto/wwan-go/sim/card"
 )
 
 type serviceStubTransport struct {

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/damonto/ims-go/eapaka"
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 type akaIdentityStateProvider interface {

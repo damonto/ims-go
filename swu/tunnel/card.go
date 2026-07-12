@@ -3,7 +3,7 @@ package tunnel
 import (
 	"context"
 
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 type Card interface {

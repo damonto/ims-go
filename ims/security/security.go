@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 const AlgorithmAKAv1MD5 = "AKAv1-MD5"

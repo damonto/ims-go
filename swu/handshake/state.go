@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/damonto/ims-go/swu/ike"
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 var ErrIKETimeout = errors.New("ike timeout")

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 const defaultTimeout = 30 * time.Second

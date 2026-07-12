@@ -11,7 +11,7 @@ import (
 	"time"
 
 	ts43 "github.com/damonto/ts43-go"
-	"github.com/damonto/uicc-go/usim"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 const ts43ActivationRecheckMaxAttempts = 6
