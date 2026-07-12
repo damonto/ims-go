@@ -674,7 +674,7 @@ func openQCOMQRTRReader(ctx context.Context, slot int) (usimcard.Reader, error) 
 }
 
 func openQCOMAdapter(reader *qcom.Client) (usimcard.Reader, error) {
-	adapter, err := ims.NewQCOMClient(reader)
+	adapter, err := ims.NewQCOMClient(reader, ims.QCOMClientConfig{})
 	if err != nil {
 		return nil, errors.Join(err, reader.Close())
 	}
