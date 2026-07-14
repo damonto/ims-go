@@ -15,7 +15,7 @@ import (
 	lteipsec "github.com/damonto/ims-go/lte/ipsec"
 )
 
-type imsPDNReader interface {
+type imsPDNClient interface {
 	OpenIMSPDN(context.Context, imsPDNConfig) (imsPDNSession, error)
 }
 
@@ -47,11 +47,11 @@ type voLTEAccess struct {
 }
 
 func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voLTEAccess, error) {
-	reader, ok := c.reader.(imsPDNReader)
+	client, ok := c.reader.(imsPDNClient)
 	if !ok {
-		return nil, errors.New("opening VoLTE access: SIM reader does not support IMS PDN")
+		return nil, errors.New("opening VoLTE access: WWAN client does not support IMS PDN")
 	}
-	pdn, err := reader.OpenIMSPDN(ctx, imsPDNConfig{
+	pdn, err := client.OpenIMSPDN(ctx, imsPDNConfig{
 		APN:          c.cfg.Access.VoLTE.APN,
 		PDNType:      c.cfg.Access.VoLTE.PDNType,
 		ProfileIndex: c.cfg.Access.VoLTE.ProfileIndex,
