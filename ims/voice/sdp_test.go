@@ -22,7 +22,7 @@ func TestBuildSDPOffer(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		"m=audio 40000 RTP/AVP 104 102 0 101 110",
-		"b=AS:14",
+		"b=AS:80",
 		"b=RS:0",
 		"b=RR:2500",
 		"a=rtpmap:104 AMR-WB/16000",
@@ -501,7 +501,7 @@ func TestBuildSDPAnswerSelectsCompatibleCodec(t *testing.T) {
 	text := string(body)
 	for _, want := range []string{
 		"m=audio 40000 RTP/AVP 104 110",
-		"b=AS:14",
+		"b=AS:42",
 		"b=RS:0",
 		"b=RR:2500",
 		"a=fmtp:104 octet-align=1;mode-change-capability=2;max-red=220",

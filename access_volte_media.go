@@ -30,7 +30,6 @@ type volteMediaTransport struct {
 	done   chan struct{}
 
 	mu          sync.Mutex
-	readMu      sync.Mutex
 	writeMu     sync.Mutex
 	closeOnce   sync.Once
 	closed      bool
@@ -45,7 +44,7 @@ type volteMediaPacket struct {
 	err  error
 }
 
-func openVoLTEMediaTransport(ctx context.Context, localIP net.IP, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
+func openVoLTEMediaTransport(ctx context.Context, interfaceName string, localIP net.IP, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -61,11 +60,11 @@ func openVoLTEMediaTransport(ctx context.Context, localIP net.IP, cfg imsvoice.M
 		return nil, errors.New("opening voice media transport: local rtcp port would exceed 65535")
 	}
 	local := &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: cfg.LocalPort}
-	rtp, err := net.ListenUDP("udp", local)
+	rtp, err := listenVoLTEUDP(ctx, interfaceName, local)
 	if err != nil {
 		return nil, fmt.Errorf("opening voice media transport: %w", err)
 	}
-	rtcp, err := net.ListenUDP("udp", imsvoice.RTCPAddr(local))
+	rtcp, err := listenVoLTEUDP(ctx, interfaceName, imsvoice.RTCPAddr(local))
 	if err != nil {
 		_ = rtp.Close()
 		return nil, fmt.Errorf("opening voice media rtcp transport: %w", err)
@@ -85,6 +84,8 @@ func openVoLTEMediaTransport(ctx context.Context, localIP net.IP, cfg imsvoice.M
 			return nil, err
 		}
 	}
+	go transport.readLoop(rtp, false)
+	go transport.readLoop(rtcp, true)
 	return transport, nil
 }
 
@@ -179,99 +180,57 @@ func (t *volteMediaTransport) ReadRTCP(ctx context.Context) ([]byte, net.Addr, e
 }
 
 func (t *volteMediaTransport) readUDP(ctx context.Context, rtcp bool) ([]byte, net.Addr, error) {
-	for {
-		if packet, ok := t.nextQueuedPacket(rtcp); ok {
-			return packet.data, packet.addr, packet.err
-		}
-		t.mu.Lock()
-		mux := t.remote.RTCPMux
-		t.mu.Unlock()
-		if !mux {
-			conn := t.rtp
-			if rtcp {
-				conn = t.rtcp
-			}
-			return t.readFromConn(ctx, conn, rtcp)
-		}
-		packet, packetRTCP, err := t.readMuxPacket(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		if packetRTCP == rtcp {
-			return packet.data, packet.addr, nil
-		}
-		t.queuePacket(packetRTCP, packet)
-	}
-}
-
-func (t *volteMediaTransport) readFromConn(ctx context.Context, conn *net.UDPConn, rtcp bool) ([]byte, net.Addr, error) {
-	buf := make([]byte, maxVolteMediaPacketBytes)
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		select {
-		case <-t.done:
-			return nil, nil, t.closedErr("reading voice media packet: transport is closed")
-		default:
-		}
-		if err := conn.SetReadDeadline(volteMediaReadDeadline(ctx)); err != nil {
-			return nil, nil, fmt.Errorf("reading voice media packet: %w", err)
-		}
-		n, addr, err := conn.ReadFromUDP(buf)
-		if err == nil {
-			data := append([]byte(nil), buf[:n]...)
-			t.notifyPacket(rtcp, data)
-			return data, imsvoice.CloneUDPAddr(addr), nil
-		}
-		if isVolteMediaTimeout(err) {
-			continue
-		}
-		return nil, nil, fmt.Errorf("reading voice media packet: %w", err)
-	}
-}
-
-func (t *volteMediaTransport) readMuxPacket(ctx context.Context) (volteMediaPacket, bool, error) {
-	t.readMu.Lock()
-	defer t.readMu.Unlock()
-
-	buf := make([]byte, maxVolteMediaPacketBytes)
-	for {
-		if err := ctx.Err(); err != nil {
-			return volteMediaPacket{}, false, err
-		}
-		select {
-		case <-t.done:
-			return volteMediaPacket{}, false, t.closedErr("reading voice media packet: transport is closed")
-		default:
-		}
-		if err := t.rtp.SetReadDeadline(volteMediaReadDeadline(ctx)); err != nil {
-			return volteMediaPacket{}, false, fmt.Errorf("reading voice media packet: %w", err)
-		}
-		n, addr, err := t.rtp.ReadFromUDP(buf)
-		if err == nil {
-			data := append([]byte(nil), buf[:n]...)
-			rtcp := imsvoice.IsRTCPPacket(data)
-			t.notifyPacket(rtcp, data)
-			return volteMediaPacket{data: data, addr: imsvoice.CloneUDPAddr(addr)}, rtcp, nil
-		}
-		if isVolteMediaTimeout(err) {
-			continue
-		}
-		return volteMediaPacket{}, false, fmt.Errorf("reading voice media packet: %w", err)
-	}
-}
-
-func (t *volteMediaTransport) nextQueuedPacket(rtcp bool) (volteMediaPacket, bool) {
 	ch := t.rtpCh
 	if rtcp {
 		ch = t.rtcpCh
 	}
 	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-t.done:
+		return nil, nil, t.closedErr("reading voice media packet: transport is closed")
 	case packet := <-ch:
-		return packet, true
-	default:
-		return volteMediaPacket{}, false
+		return packet.data, packet.addr, packet.err
+	}
+}
+
+func (t *volteMediaTransport) readLoop(conn *net.UDPConn, rtcpSocket bool) {
+	buf := make([]byte, maxVolteMediaPacketBytes)
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(volteMediaReadPoll)); err != nil {
+			t.queuePacket(rtcpSocket, volteMediaPacket{err: fmt.Errorf("reading voice media packet: %w", err)})
+			return
+		}
+		n, addr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			if isVolteMediaTimeout(err) {
+				select {
+				case <-t.done:
+					return
+				default:
+					continue
+				}
+			}
+			select {
+			case <-t.done:
+				return
+			default:
+				t.queuePacket(rtcpSocket, volteMediaPacket{err: fmt.Errorf("reading voice media packet: %w", err)})
+				return
+			}
+		}
+		data := append([]byte(nil), buf[:n]...)
+		rtcp := rtcpSocket
+		if !rtcpSocket {
+			t.mu.Lock()
+			mux := t.remote.RTCPMux
+			t.mu.Unlock()
+			if mux {
+				rtcp = imsvoice.IsRTCPPacket(data)
+			}
+		}
+		t.notifyPacket(rtcp, data)
+		t.queuePacket(rtcp, volteMediaPacket{data: data, addr: imsvoice.CloneUDPAddr(addr)})
 	}
 }
 
@@ -316,13 +275,6 @@ func (t *volteMediaTransport) closedErr(fallback string) error {
 		return t.terminalErr
 	}
 	return errors.New(fallback)
-}
-
-func volteMediaReadDeadline(ctx context.Context) time.Time {
-	if deadline, ok := ctx.Deadline(); ok {
-		return deadline
-	}
-	return time.Now().Add(volteMediaReadPoll)
 }
 
 func volteMediaContextDeadline(ctx context.Context) (time.Time, bool) {

@@ -43,7 +43,7 @@ func buildSDPOfferWithDirection(cfg Config, localIP net.IP, localPort int, offer
 	fmt.Fprintf(&b, "c=IN %s %s\r\n", ipType, localIP.String())
 	fmt.Fprintf(&b, "t=0 0\r\n")
 	fmt.Fprintf(&b, "m=audio %d %s %s\r\n", localPort, cfg.RTPProfile, strings.Join(payloads, " "))
-	if bandwidth := audioBandwidthAS(cfg, firstSpeechCodec(codecs)); bandwidth > 0 {
+	if bandwidth := audioOfferBandwidthAS(cfg, codecs, localIP, ptime); bandwidth > 0 {
 		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
 	}
 	appendRTCPBandwidth(&b, rtcpSenderBandwidth, rtcpReceiverBandwidth)
@@ -129,7 +129,7 @@ func buildSDPAnswerWithDirection(cfg Config, localIP net.IP, localPort int, remo
 		answerPayloads = append(answerPayloads, strconv.Itoa(dtmf.PayloadTypes[0]))
 	}
 	fmt.Fprintf(&b, "m=audio %d %s %s\r\n", localPort, cfg.RTPProfile, strings.Join(answerPayloads, " "))
-	if bandwidth := audioBandwidthAS(cfg, selected); bandwidth > 0 {
+	if bandwidth := audioBandwidthAS(cfg, selected, localIP, ptime); bandwidth > 0 {
 		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
 	}
 	rs, rr := rtcpAnswerBandwidth(remote)
@@ -183,7 +183,7 @@ func buildSDPPreconditionUpdate(cfg Config, localIP net.IP, localPort int, answe
 	fmt.Fprintf(&b, "c=IN %s %s\r\n", ipType, localIP.String())
 	fmt.Fprintf(&b, "t=0 0\r\n")
 	fmt.Fprintf(&b, "m=audio %d %s %s\r\n", localPort, cfg.RTPProfile, strings.Join(payloads, " "))
-	if bandwidth := audioBandwidthAS(cfg, selected); bandwidth > 0 {
+	if bandwidth := audioBandwidthAS(cfg, selected, localIP, ptime); bandwidth > 0 {
 		fmt.Fprintf(&b, "b=AS:%d\r\n", bandwidth)
 	}
 	appendRTCPBandwidth(&b, rtcpSenderBandwidth, rtcpReceiverBandwidth)

@@ -186,11 +186,14 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session
 }
 
 func (a *voLTEAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
-	route, ok := a.info.RouteTo(cfg.RemoteIP)
+	a.mu.Lock()
+	info := a.info.Clone()
+	a.mu.Unlock()
+	route, ok := info.RouteTo(cfg.RemoteIP)
 	if !ok {
 		return nil, errors.New("opening voice media transport: local IMS PDN address is unavailable")
 	}
-	return openVoLTEMediaTransport(ctx, route.LocalIP, cfg)
+	return openVoLTEMediaTransport(ctx, info.InterfaceName, route.LocalIP, cfg)
 }
 
 func (a *voLTEAccess) Close() error {

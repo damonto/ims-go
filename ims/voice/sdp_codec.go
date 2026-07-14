@@ -2,6 +2,8 @@ package voice
 
 import (
 	"fmt"
+	"math"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -262,39 +264,76 @@ func answerCodecFMTP(codec AudioCodecConfig) string {
 	return strings.Join(params, ";")
 }
 
-func audioBandwidthAS(cfg Config, codec AudioCodecConfig) int {
+func audioOfferBandwidthAS(cfg Config, codecs []AudioCodecConfig, localIP net.IP, ptime time.Duration) int {
 	if cfg.AudioASBandwidthKbps > 0 {
 		return cfg.AudioASBandwidthKbps
 	}
-	return codecBandwidthAS(codec)
+	bandwidth := 0
+	for _, codec := range codecs {
+		bandwidth = max(bandwidth, codecBandwidthAS(codec, localIP, ptime))
+	}
+	return bandwidth
 }
 
-func codecBandwidthAS(codec AudioCodecConfig) int {
+func audioBandwidthAS(cfg Config, codec AudioCodecConfig, localIP net.IP, ptime time.Duration) int {
+	if cfg.AudioASBandwidthKbps > 0 {
+		return cfg.AudioASBandwidthKbps
+	}
+	return codecBandwidthAS(codec, localIP, ptime)
+}
+
+func codecBandwidthAS(codec AudioCodecConfig, localIP net.IP, ptime time.Duration) int {
+	bitrate, payloadHeaderBytes := codecBandwidthParameters(codec)
+	if bitrate == 0 {
+		return 0
+	}
+	if ptime <= 0 {
+		ptime = 20 * time.Millisecond
+	}
+	ipHeaderBytes := 20
+	if localIP.To4() == nil {
+		ipHeaderBytes = 40
+	}
+	const udpRTPHeaderBytes = 8 + 12
+	overheadKbps := float64((ipHeaderBytes+udpRTPHeaderBytes+payloadHeaderBytes)*8) / ptime.Seconds() / 1000
+	return int(math.Ceil(bitrate + overheadKbps))
+}
+
+func codecBandwidthParameters(codec AudioCodecConfig) (float64, int) {
+	channels := max(codec.Channels, 1)
 	switch codec.Name {
 	case CodecAMR:
-		return 13
+		if codec.OctetAlign {
+			return 12.2, 4
+		}
+		return 12.2, 2
 	case CodecAMRWB:
-		return 14
+		if codec.OctetAlign {
+			return 23.85, 4
+		}
+		return 23.85, 2
 	case CodecEVS:
-		return evsBandwidthAS(codec.Bitrate)
+		return evsMaximumBitrate(codec.Bitrate) * float64(channels), 2
+	case CodecPCMU:
+		return 64 * float64(channels), 0
 	default:
-		return 0
+		return 0, 0
 	}
 }
 
-func evsBandwidthAS(bitrate string) int {
+func evsMaximumBitrate(bitrate string) float64 {
 	bitrate = strings.TrimSpace(bitrate)
 	if bitrate == "" {
-		return 25
+		return 128
 	}
 	if _, right, ok := strings.Cut(bitrate, "-"); ok {
 		bitrate = right
 	}
 	value, err := strconv.ParseFloat(bitrate, 64)
 	if err != nil || value <= 0 {
-		return 25
+		return 128
 	}
-	return int(value + 0.999)
+	return value
 }
 
 func parseRTPMap(line string) (int, AudioCodecConfig, error) {
