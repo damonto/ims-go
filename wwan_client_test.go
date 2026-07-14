@@ -3,11 +3,39 @@ package ims
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/damonto/wwan-go/mbim"
 	"github.com/damonto/wwan-go/qcom"
 )
+
+func TestQCOMIMSPDNNetworkInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info qcom.IMSPDNInfo
+	}{
+		{
+			name: "preserves point-to-point gateways",
+			info: qcom.IMSPDNInfo{PDNInfo: qcom.PDNInfo{
+				LocalIPv4:   net.ParseIP("10.0.0.2"),
+				LocalIPv6:   net.ParseIP("2001:db8::2"),
+				IPv4Gateway: net.ParseIP("10.0.0.1"),
+				IPv6Gateway: net.ParseIP("2001:db8::1"),
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := qcomIMSPDNNetworkInfo(tt.info)
+			if !got.LocalIPv4.Equal(tt.info.LocalIPv4) || !got.LocalIPv6.Equal(tt.info.LocalIPv6) ||
+				!got.IPv4Gateway.Equal(tt.info.IPv4Gateway) || !got.IPv6Gateway.Equal(tt.info.IPv6Gateway) {
+				t.Fatalf("qcomIMSPDNNetworkInfo() = %+v, want local addresses and gateways from %+v", got, tt.info)
+			}
+		})
+	}
+}
 
 func TestQCOMClientIPPreference(t *testing.T) {
 	tests := []struct {

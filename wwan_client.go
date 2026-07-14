@@ -14,10 +14,12 @@ import (
 
 // IMSPDNNetworkInfo contains the host-side network state negotiated for an IMS PDN.
 type IMSPDNNetworkInfo struct {
-	SessionID uint32
-	LocalIPv4 net.IP
-	LocalIPv6 net.IP
-	PCSCFIPs  []net.IP
+	SessionID   uint32
+	LocalIPv4   net.IP
+	LocalIPv6   net.IP
+	IPv4Gateway net.IP
+	IPv6Gateway net.IP
+	PCSCFIPs    []net.IP
 }
 
 // IMSPDNNetwork applies and removes host-side interface addresses and P-CSCF routes.
@@ -68,12 +70,7 @@ func (c *QCOMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 		session, err = c.client.OpenIMSPDN(ctx, pdnCfg)
 		if err == nil {
 			adapted := qcomIMSPDNSession{session}
-			info := session.Info()
-			return configureIMSPDNNetwork(ctx, adapted, c.network, IMSPDNNetworkInfo{
-				LocalIPv4: info.LocalIPv4,
-				LocalIPv6: info.LocalIPv6,
-				PCSCFIPs:  info.PCSCFIPs,
-			})
+			return configureIMSPDNNetwork(ctx, adapted, c.network, qcomIMSPDNNetworkInfo(session.Info()))
 		}
 		if i == 0 && len(pdnConfigs) > 1 && errors.Is(err, qcom.QMIErrorNotSupported) {
 			continue
@@ -81,6 +78,16 @@ func (c *QCOMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 		return nil, err
 	}
 	return nil, err
+}
+
+func qcomIMSPDNNetworkInfo(info qcom.IMSPDNInfo) IMSPDNNetworkInfo {
+	return IMSPDNNetworkInfo{
+		LocalIPv4:   info.LocalIPv4,
+		LocalIPv6:   info.LocalIPv6,
+		IPv4Gateway: info.IPv4Gateway,
+		IPv6Gateway: info.IPv6Gateway,
+		PCSCFIPs:    info.PCSCFIPs,
+	}
 }
 
 func qcomIMSPDNConfigs(cfg imsPDNConfig, muxDataPort *qcom.WDSMuxDataPort, legacyMuxDataPort qcom.WDSSIOPort) ([]qcom.IMSPDNConfig, error) {
