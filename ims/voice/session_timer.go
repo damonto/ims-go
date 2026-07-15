@@ -290,18 +290,21 @@ func (c *Call) applySessionRefreshINVITEAnswer(resp sip.Message) error {
 	if !ok {
 		return errors.New("refreshing session timer: missing re-INVITE SDP answer")
 	}
-	answer, err := parseSDP(body)
-	if err != nil {
+	var answer sdpOffer
+	if err := answer.UnmarshalBinary(body); err != nil {
 		return fmt.Errorf("refreshing session timer: parsing re-INVITE SDP answer: %w", err)
 	}
 	negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
 	if !ok {
 		return errors.New("refreshing session timer: no compatible re-INVITE answer codec")
 	}
+	if err := c.acceptRemotePayloadMappings(answer); err != nil {
+		return fmt.Errorf("refreshing session timer: invalid re-INVITE SDP answer: %w", err)
+	}
 	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
 	c.mu.Lock()
 	current := c.media
-	c.media = negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), dtmf, hasDTMF)
+	c.media = negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), nonZeroDuration(answer.MaxPTime, current.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
 	c.mu.Unlock()
 
 	ctx, cancel := c.endpoint.timeoutContext(callReleaseTimeout)
@@ -503,8 +506,8 @@ func (c *Call) sessionRefreshAnswer(msg sip.Message) ([]byte, NegotiatedMedia, C
 	if !ok {
 		return nil, NegotiatedMedia{}, "", false, errors.New("handling re-INVITE: missing SDP offer")
 	}
-	offer, err := parseSDP(body)
-	if err != nil {
+	var offer sdpOffer
+	if err := offer.UnmarshalBinary(body); err != nil {
 		return nil, NegotiatedMedia{}, "", false, err
 	}
 	c.mu.Lock()
@@ -514,6 +517,9 @@ func (c *Call) sessionRefreshAnswer(msg sip.Message) ([]byte, NegotiatedMedia, C
 	answer, media, err := buildSDPAnswerWithLocalHold(c.endpoint.cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{}, holdHasLocal(currentHold))
 	if err != nil {
 		return nil, NegotiatedMedia{}, "", false, err
+	}
+	if err := c.acceptRemotePayloadMappings(offer); err != nil {
+		return nil, NegotiatedMedia{}, "", false, fmt.Errorf("handling re-INVITE: %w", err)
 	}
 	return answer, media, setRemoteHold(currentHold, remoteHoldFromDirection(offer.Direction)), true, nil
 }

@@ -18,21 +18,29 @@ import (
 	"time"
 )
 
-func mediaOfferFromSDP(offer sdpOffer) MediaOffer {
-	seen := make(map[AudioCodec]struct{}, len(offer.Codecs))
-	codecs := make([]AudioCodec, 0, len(offer.Codecs))
+func mediaDescriptionFromSDP(offer sdpOffer) MediaDescription {
+	formats := make([]AudioFormat, 0, len(offer.Codecs))
 	for _, payload := range offer.Payloads {
-		codec := offer.Codecs[payload]
-		if codec.Name == "" {
+		codec, ok := offer.Codecs[payload]
+		if !ok || codec.Name == "" {
 			continue
 		}
-		if _, ok := seen[codec.Name]; ok {
-			continue
-		}
-		seen[codec.Name] = struct{}{}
-		codecs = append(codecs, codec.Name)
+		formats = append(formats, audioFormat(codec, payload, offer.FMTP[payload]))
 	}
-	return MediaOffer{Codecs: codecs, PTime: offer.PTime}
+	return MediaDescription{
+		Formats:      formats,
+		Profile:      offer.Profile,
+		PTime:        offer.PTime,
+		MaxPTime:     offer.MaxPTime,
+		Direction:    offer.Direction,
+		IP:           append(net.IP(nil), offer.RemoteIP...),
+		Port:         offer.RemotePort,
+		RTCPIP:       append(net.IP(nil), offer.RemoteRTCPIP...),
+		RTCPPort:     offer.RemoteRTCPPort,
+		RTCPMux:      offer.RTCPMux,
+		RTCPDisabled: rtcpDisabled(offer),
+		RawSDP:       append([]byte(nil), offer.RawSDP...),
+	}
 }
 
 func callAcceptHeader(includePIDF bool, includeCurrentLocation bool) string {

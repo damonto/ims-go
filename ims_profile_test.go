@@ -9,6 +9,7 @@ import (
 	"time"
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
+	"github.com/damonto/ims-go/lte"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 	usim "github.com/damonto/wwan-go/sim"
 )
@@ -28,6 +29,7 @@ type plmnWFCCard struct {
 	mnc       string
 	mncLength int
 	gid1      string
+	imsi      string
 }
 
 func (wfcTestCard) ICCID() string { return "" }
@@ -43,8 +45,13 @@ func (c gid1WFCCard) GID1() string { return c.gid1 }
 func (c paddedTwoDigitGID1Card) GID1() string {
 	return c.gid1
 }
-func (c plmnWFCCard) ICCID() string  { return "" }
-func (c plmnWFCCard) IMSI() string   { return c.mcc + c.mnc + "0123456789" }
+func (c plmnWFCCard) ICCID() string { return "" }
+func (c plmnWFCCard) IMSI() string {
+	if c.imsi != "" {
+		return c.imsi
+	}
+	return c.mcc + c.mnc + "0123456789"
+}
 func (c plmnWFCCard) MCC() string    { return c.mcc }
 func (c plmnWFCCard) MNC() string    { return c.mnc }
 func (c plmnWFCCard) MNCLength() int { return c.mncLength }
@@ -153,12 +160,12 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     }
   }
 ]`)
-	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	profile, ok, err := parseIMSProfile(data, wfcTestCard{})
 	if err != nil {
-		t.Fatalf("parseWFCProfile() error = %v", err)
+		t.Fatalf("parseIMSProfile() error = %v", err)
 	}
 	if !ok {
-		t.Fatal("parseWFCProfile() ok = false, want true")
+		t.Fatal("parseIMSProfile() ok = false, want true")
 	}
 
 	tests := []struct {
@@ -178,6 +185,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 					Type:            "Smartphone",
 					HardwareSKU:     "Pixel 10 Pro",
 				},
+				Access: VoWiFi(VoWiFiConfig{}),
 			},
 			check: func(t *testing.T, got Config) {
 				t.Helper()
@@ -243,8 +251,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.PTime != 20*time.Millisecond || got.IMS.Voice.MaxPTime != 240*time.Millisecond {
 					t.Fatalf("IMS voice ptime/maxptime = %v/%v, want profile values", got.IMS.Voice.PTime, got.IMS.Voice.MaxPTime)
 				}
-				if got.IMS.Voice.Preconditions {
-					t.Fatalf("IMS voice preconditions = true, want disabled")
+				if !got.IMS.Voice.Preconditions {
+					t.Fatalf("IMS voice preconditions = false, want profile value")
 				}
 				if !got.IMS.Voice.ReliableProvisional {
 					t.Fatal("IMS voice reliable provisional = false, want profile value")
@@ -357,7 +365,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.cfg.withWFCProfile(profile, wfcTestCard{})
+			got := tt.cfg.withIMSProfile(profile, wfcTestCard{})
 			imsCfg, err := got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
@@ -406,15 +414,15 @@ func TestConfigNormalizedWFCProfileMapsIMSRegistrationRetryTimers(t *testing.T) 
     "epdg": "epdg.ims.2degrees.net.nz",` + tt.body + `
   }
 ]`)
-			profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+			profile, ok, err := parseIMSProfile(data, wfcTestCard{})
 			if err != nil {
-				t.Fatalf("parseWFCProfile() error = %v", err)
+				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
 			if !ok {
-				t.Fatal("parseWFCProfile() ok = false, want true")
+				t.Fatal("parseIMSProfile() ok = false, want true")
 			}
 
-			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, wfcTestCard{})
 			imsCfg, err := got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
@@ -442,8 +450,8 @@ func TestConfigNormalizedWFCProfileMapsSMSDeliveryReports(t *testing.T) {
 			body: `"enableSMSDeliveryReports": false`,
 		},
 		{
-			name:     "missing carrier setting defaults status reports on",
-			wantFlag: true,
+			name:     "missing carrier setting uses explicit zero value",
+			wantFlag: false,
 		},
 	}
 	for _, tt := range tests {
@@ -459,15 +467,15 @@ func TestConfigNormalizedWFCProfileMapsSMSDeliveryReports(t *testing.T) {
     "epdg": "epdg.ims.2degrees.net.nz"` + body + `
   }
 ]`)
-			profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+			profile, ok, err := parseIMSProfile(data, wfcTestCard{})
 			if err != nil {
-				t.Fatalf("parseWFCProfile() error = %v", err)
+				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
 			if !ok {
-				t.Fatal("parseWFCProfile() ok = false, want true")
+				t.Fatal("parseIMSProfile() ok = false, want true")
 			}
 
-			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, wfcTestCard{})
 			_, err = got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
@@ -494,15 +502,15 @@ func TestConfigNormalizedWFCProfileUsesTunnelTimers(t *testing.T) {
     "addKEToChildSARekey": true
   }
 ]`)
-	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	profile, ok, err := parseIMSProfile(data, wfcTestCard{})
 	if err != nil {
-		t.Fatalf("parseWFCProfile() error = %v", err)
+		t.Fatalf("parseIMSProfile() error = %v", err)
 	}
 	if !ok {
-		t.Fatal("parseWFCProfile() ok = false, want true")
+		t.Fatal("parseIMSProfile() ok = false, want true")
 	}
 
-	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+	got := Config{Terminal: TerminalInfo{ID: testIMEI}, Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, wfcTestCard{})
 	tunnelCfg, err := got.normalizedTunnel()
 	if err != nil {
 		t.Fatalf("normalizedTunnel() error = %v", err)
@@ -524,22 +532,22 @@ func TestConfigNormalizedWFCProfileUsesTunnelTimers(t *testing.T) {
 	}
 }
 
-func TestSALifetimeFromWFCProfile(t *testing.T) {
-	duration := func(value string) *wfcDuration {
+func TestSALifetimeFromIMSProfile(t *testing.T) {
+	duration := func(value string) imsProfileDuration {
 		t.Helper()
 		got, err := time.ParseDuration(value)
 		if err != nil {
 			t.Fatalf("time.ParseDuration(%q) error = %v", value, err)
 		}
-		return &wfcDuration{Duration: got}
+		return imsProfileDuration{Duration: got}
 	}
 
 	tests := []struct {
 		name       string
-		lifetime   *wfcDuration
-		soft       *wfcDuration
-		hard       *wfcDuration
-		legacySoft *wfcDuration
+		lifetime   imsProfileDuration
+		soft       imsProfileDuration
+		hard       imsProfileDuration
+		legacySoft imsProfileDuration
 		wantLife   time.Duration
 		wantMargin time.Duration
 	}{
@@ -601,9 +609,9 @@ func TestSALifetimeFromWFCProfile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotLife, gotMargin := saLifetimeFromWFCProfile(tt.lifetime, tt.soft, tt.hard, tt.legacySoft)
+			gotLife, gotMargin := saLifetimeFromIMSProfile(tt.lifetime, tt.soft, tt.hard, tt.legacySoft)
 			if gotLife != tt.wantLife || gotMargin != tt.wantMargin {
-				t.Fatalf("saLifetimeFromWFCProfile() = %v/%v, want %v/%v", gotLife, gotMargin, tt.wantLife, tt.wantMargin)
+				t.Fatalf("saLifetimeFromIMSProfile() = %v/%v, want %v/%v", gotLife, gotMargin, tt.wantLife, tt.wantMargin)
 			}
 		})
 	}
@@ -617,15 +625,15 @@ func TestConfigNormalizedWFCProfileUsesDefaultTunnelTimersWhenAbsent(t *testing.
     "epdg": "epdg.ims.2degrees.net.nz"
   }
 ]`)
-	profile, ok, err := parseWFCProfile(data, wfcTestCard{})
+	profile, ok, err := parseIMSProfile(data, wfcTestCard{})
 	if err != nil {
-		t.Fatalf("parseWFCProfile() error = %v", err)
+		t.Fatalf("parseIMSProfile() error = %v", err)
 	}
 	if !ok {
-		t.Fatal("parseWFCProfile() ok = false, want true")
+		t.Fatal("parseIMSProfile() ok = false, want true")
 	}
 
-	got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, wfcTestCard{})
+	got := Config{Terminal: TerminalInfo{ID: testIMEI}, Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, wfcTestCard{})
 	tunnelCfg, err := got.normalizedTunnel()
 	if err != nil {
 		t.Fatalf("normalizedTunnel() error = %v", err)
@@ -683,12 +691,50 @@ func TestParseWFCProfileGID1(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseWFCProfile(data, tt.card)
+			profile, ok, err := parseIMSProfile(data, tt.card)
 			if err != nil {
-				t.Fatalf("parseWFCProfile() error = %v", err)
+				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
 			if !ok {
-				t.Fatal("parseWFCProfile() ok = false, want true")
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			if profile.EPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", profile.EPDG, tt.wantEPDG)
+			}
+		})
+	}
+}
+
+func TestParseIMSProfileSelectorSpecificity(t *testing.T) {
+	data := []byte(`[
+  {"mcc":"310","mnc":"260","epdg":"base"},
+  {"mcc":"310","mnc":"260","imsiPrefix":"31026012","epdg":"imsi-short"},
+  {"mcc":"310","mnc":"260","imsiPrefix":"3102601234","epdg":"imsi-long"},
+  {"mcc":"310","mnc":"260","imsiPrefix":"310260x7","epdg":"imsi-wildcard"},
+  {"mcc":"310","mnc":"260","imsiPrefix":"31026097","epdg":"imsi-exact"},
+  {"mcc":"310","mnc":"260","gid1":"ABCD","epdg":"gid"},
+  {"mcc":"310","mnc":"260","imsiPrefix":"31026012","gid1":"ABCD","epdg":"imsi-gid"}
+]`)
+	tests := []struct {
+		name     string
+		card     plmnWFCCard
+		wantEPDG string
+	}{
+		{name: "base", card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, imsi: "310260999999999"}, wantEPDG: "base"},
+		{name: "longest IMSI prefix", card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, imsi: "310260123456789"}, wantEPDG: "imsi-long"},
+		{name: "IMSI wildcard", card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, imsi: "310260877654321"}, wantEPDG: "imsi-wildcard"},
+		{name: "exact IMSI beats wildcard", card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, imsi: "310260977654321"}, wantEPDG: "imsi-exact"},
+		{name: "GID", card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, imsi: "310260999999999", gid1: "abcdffff"}, wantEPDG: "gid"},
+		{name: "IMSI and GID", card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, imsi: "310260123456789", gid1: "abcdffff"}, wantEPDG: "imsi-gid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(data, tt.card)
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
 			}
 			if profile.EPDG != tt.wantEPDG {
 				t.Fatalf("EPDG = %q, want %q", profile.EPDG, tt.wantEPDG)
@@ -770,19 +816,19 @@ func TestConfigNormalizedUsesEmbeddedLivenessTimeout(t *testing.T) {
 }
 
 func TestEmbeddedWFCProfilesDeclareLivenessTimeout(t *testing.T) {
-	var profiles []wfcProfile
-	if err := json.Unmarshal(embeddedWFCConfig, &profiles); err != nil {
+	var profiles []imsProfile
+	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
 	tests := make([]struct {
 		name    string
-		profile wfcProfile
+		profile imsProfile
 	}, 0, len(profiles))
 	for _, profile := range profiles {
 		tests = append(tests, struct {
 			name    string
-			profile wfcProfile
+			profile imsProfile
 		}{
 			name:    profile.MCC + "-" + profile.MNC + "-" + profile.GID1,
 			profile: profile,
@@ -791,7 +837,7 @@ func TestEmbeddedWFCProfilesDeclareLivenessTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.profile.LivenessTimeout == nil {
+			if tt.profile.LivenessTimeout.Duration == 0 {
 				t.Fatal("livenessTimeout is missing")
 			}
 		})
@@ -878,55 +924,200 @@ func TestEmbeddedWFCConfigATTUsesConfiguredPublicIdentity(t *testing.T) {
 	}
 }
 
-func TestEmbeddedWFCVoiceProfilesMatchPixelPRACKDefault(t *testing.T) {
-	for _, tt := range embeddedWFCVoiceProfileTests(t) {
+func TestEmbeddedIMSVoiceCarrierCapabilities(t *testing.T) {
+	tests := []struct {
+		name             string
+		card             plmnWFCCard
+		wantPrecondition bool
+		wantReliable     bool
+	}{
+		{name: "Samsung WIND Greece", card: plmnWFCCard{mcc: "202", mnc: "09", mncLength: 2}, wantPrecondition: true},
+		{name: "Samsung Monaco Telecom GID", card: plmnWFCCard{mcc: "208", mnc: "01", mncLength: 2, gid1: "4d433031"}, wantPrecondition: true},
+		{name: "China Telecom", card: plmnWFCCard{mcc: "460", mnc: "11", mncLength: 2}, wantPrecondition: true, wantReliable: true},
+	}
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.profile.IMSVoice.ReliableProvisionalSupported == nil || !*tt.profile.IMSVoice.ReliableProvisionalSupported {
-				t.Fatal("reliableProvisionalSupported = false, want true for MMTEL voice profile")
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			if profile.IMSVoice.QoSPreconditionsSupported != tt.wantPrecondition || profile.IMSVoice.ReliableProvisionalSupported != tt.wantReliable {
+				t.Fatalf("carrier capabilities = %t/%t, want %t/%t", profile.IMSVoice.QoSPreconditionsSupported, profile.IMSVoice.ReliableProvisionalSupported, tt.wantPrecondition, tt.wantReliable)
 			}
 		})
 	}
 }
 
-func TestEmbeddedWFCVoiceProfilesDoNotEnableQoSPreconditions(t *testing.T) {
-	for _, tt := range embeddedWFCVoiceProfileTests(t) {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.profile.IMSVoice.QoSPreconditionsSupported != nil && *tt.profile.IMSVoice.QoSPreconditionsSupported {
-				t.Fatal("qosPreconditionsSupported = true, want false unless a carrier explicitly requires preconditions")
-			}
-		})
-	}
-}
-
-func embeddedWFCVoiceProfileTests(t *testing.T) []struct {
-	name    string
-	profile wfcProfile
-} {
-	t.Helper()
-
-	var profiles []wfcProfile
-	if err := json.Unmarshal(embeddedWFCConfig, &profiles); err != nil {
+func TestEmbeddedIMSProfileCatalogSizeAndKeys(t *testing.T) {
+	var profiles []imsProfile
+	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-
-	tests := []struct {
-		name    string
-		profile wfcProfile
-	}{}
+	if len(profiles) != 1516 {
+		t.Fatalf("profile count = %d, want 1516", len(profiles))
+	}
+	keys := make(map[string]struct{}, len(profiles))
 	for _, profile := range profiles {
-		if profile.IMSVoice == nil {
-			continue
+		key := profile.MCC + profile.MNC + "|" + strings.TrimSpace(profile.IMSIPrefix) + "|" + normalizeGID1(profile.GID1)
+		if _, exists := keys[key]; exists {
+			t.Fatalf("duplicate profile key %q", key)
 		}
-		tests = append(tests, struct {
-			name    string
-			profile wfcProfile
-		}{
-			name:    profile.MCC + "-" + profile.MNC + "-" + profile.GID1 + "-" + profile.IMSHomeDomain,
-			profile: profile,
+		keys[key] = struct{}{}
+	}
+}
+
+func TestEmbeddedPixelIMSIPrefixProfiles(t *testing.T) {
+	tests := []struct {
+		name     string
+		imsi     string
+		wantEPDG string
+	}{
+		{name: "Truphone", imsi: "204047941234567", wantEPDG: "epdg.eps.truphone.net"},
+		{name: "Enreach", imsi: "204047960123456", wantEPDG: "wo.vzwwo.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, plmnWFCCard{mcc: "204", mnc: "04", mncLength: 2, imsi: tt.imsi})
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			if profile.IMSIPrefix == "" || profile.EPDG != tt.wantEPDG {
+				t.Fatalf("profile = IMSI %q EPDG %q, want IMSI selector and EPDG %q", profile.IMSIPrefix, profile.EPDG, tt.wantEPDG)
+			}
 		})
 	}
+}
 
-	return tests
+func TestEmbeddedRequestURIFormatSourcePriority(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want imsvoice.RequestURIFormat
+	}{
+		{name: "Truphone Netherlands GID", key: "20404|547275554B3030656E", want: imsvoice.RequestURIFormatTEL},
+		{name: "Truphone Netherlands alternate PLMN", key: "20433|547275554B3030656E", want: imsvoice.RequestURIFormatTEL},
+		{name: "Lowi Spain", key: "21406|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Truphone Spain GID", key: "21427|547275554B3030656E", want: imsvoice.RequestURIFormatTEL},
+		{name: "BT UK", key: "23408|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Truphone UK GID", key: "23425|547275554B3030656E", want: imsvoice.RequestURIFormatTEL},
+		{name: "Truphone Poland GID", key: "26033|547275554B3030656E", want: imsvoice.RequestURIFormatTEL},
+		{name: "Truphone Germany GID", key: "26242|547275554B3030656E", want: imsvoice.RequestURIFormatTEL},
+		{name: "Vivacom Bulgaria", key: "28403|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Tricom Dominican Republic", key: "37001|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Rakuten Japan", key: "44011|", want: imsvoice.RequestURIFormatTEL},
+		{name: "T Star Taiwan", key: "46689|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Smartfren Indonesia", key: "51009|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Smartfren alternate Indonesia", key: "51028|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Entel Peru", key: "71617|", want: imsvoice.RequestURIFormatTEL},
+		{name: "WOM Chile", key: "73009|", want: imsvoice.RequestURIFormatTEL},
+		{name: "Pixel and Samsung conflict uses Pixel", key: "310300|", want: imsvoice.RequestURIFormatSIP},
+	}
+	var profiles []imsProfile
+	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	formats := make(map[string]imsvoice.RequestURIFormat, len(profiles))
+	for _, profile := range profiles {
+		if profile.IMSIPrefix == "" {
+			formats[profile.MCC+profile.MNC+"|"+normalizeGID1(profile.GID1)] = profile.IMSRequestURIFormat
+		}
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formats[tt.key]; got != tt.want {
+				t.Fatalf("Request URI format for %s = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEmbeddedChinaCarrierVoiceTimers(t *testing.T) {
+	tests := []struct {
+		name         string
+		mnc          string
+		wantRingback time.Duration
+		wantRinging  time.Duration
+	}{
+		{name: "China Mobile", mnc: "00", wantRingback: 80 * time.Second, wantRinging: 80 * time.Second},
+		{name: "China Unicom", mnc: "01", wantRingback: 80 * time.Second, wantRinging: 80 * time.Second},
+		{name: "China Telecom", mnc: "11", wantRingback: 125 * time.Second, wantRinging: 120 * time.Second},
+		{name: "China Broadnet", mnc: "15", wantRingback: 125 * time.Second, wantRinging: 125 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, plmnWFCCard{mcc: "460", mnc: tt.mnc, mncLength: 2})
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			if profile.IMSVoice.RingbackTimer.Duration != tt.wantRingback || profile.IMSVoice.RingingTimer.Duration != tt.wantRinging {
+				t.Fatalf("voice timers = %v/%v, want %v/%v", profile.IMSVoice.RingbackTimer.Duration, profile.IMSVoice.RingingTimer.Duration, tt.wantRingback, tt.wantRinging)
+			}
+		})
+	}
+}
+
+func TestIMSProfileAccessNetworkInfoFollowsAccessType(t *testing.T) {
+	profile := imsProfile{IMSAccessNetworkInfo: "IEEE-802.11"}
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{name: "vowifi uses profile value", cfg: Config{Access: VoWiFi(VoWiFiConfig{})}, want: "IEEE-802.11"},
+		{name: "volte keeps radio value", cfg: Config{Access: VoLTE(lte.Config{AccessNetworkInfo: "3GPP-E-UTRAN-FDD"})}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.withIMSProfile(profile, wfcTestCard{})
+			if got.IMS.AccessNetworkInfo != tt.want {
+				t.Fatalf("AccessNetworkInfo = %q, want %q", got.IMS.AccessNetworkInfo, tt.want)
+			}
+		})
+	}
+}
+
+func TestIMSVoiceProfileOwnsCarrierCapabilities(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile imsVoiceProfile
+	}{
+		{name: "profile enables capabilities", profile: imsVoiceProfile{QoSPreconditionsSupported: true, ReliableProvisionalSupported: true, SessionTimer: true}},
+		{name: "profile disables capabilities"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{IMS: IMSConfig{Voice: imsvoice.Config{Preconditions: true, ReliableProvisional: true, SessionTimer: true}}}
+			got := cfg.withIMSVoiceProfile(tt.profile).IMS.Voice
+			if got.Preconditions != tt.profile.QoSPreconditionsSupported || got.ReliableProvisional != tt.profile.ReliableProvisionalSupported || got.SessionTimer != tt.profile.SessionTimer {
+				t.Fatalf("carrier capabilities = %t/%t/%t, want %t/%t/%t", got.Preconditions, got.ReliableProvisional, got.SessionTimer, tt.profile.QoSPreconditionsSupported, tt.profile.ReliableProvisionalSupported, tt.profile.SessionTimer)
+			}
+		})
+	}
+}
+
+func TestIMSProfileRejectsUnknownFields(t *testing.T) {
+	unknown := append([]byte(nil), embeddedIMSConfig...)
+	var profiles []map[string]json.RawMessage
+	if err := json.Unmarshal(unknown, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	profiles[0]["unknownField"] = json.RawMessage(`true`)
+	unknown, err := json.Marshal(profiles)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if _, _, err := parseIMSProfile(unknown, wfcTestCard{}); err == nil {
+		t.Fatal("parseIMSProfile() error = nil, want unknown-field error")
+	}
 }
 
 func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
@@ -943,12 +1134,12 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
     }
   }
 ]`)
-	profile, ok, err := parseWFCProfile(data, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	profile, ok, err := parseIMSProfile(data, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
 	if err != nil {
-		t.Fatalf("parseWFCProfile() error = %v", err)
+		t.Fatalf("parseIMSProfile() error = %v", err)
 	}
 	if !ok {
-		t.Fatal("parseWFCProfile() ok = false, want true")
+		t.Fatal("parseIMSProfile() ok = false, want true")
 	}
 
 	cfg := Config{
@@ -962,7 +1153,7 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 			},
 		},
 	}
-	got := cfg.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	got := cfg.withIMSProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
 	if len(got.IMS.Voice.Codecs) != 2 {
 		t.Fatalf("Voice codecs = %+v, want explicit codecs preserved", got.IMS.Voice.Codecs)
 	}
@@ -973,7 +1164,7 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 		t.Fatalf("Voice PCMU codec = %+v, want explicit static payload 0", got.IMS.Voice.Codecs[1])
 	}
 
-	got = Config{Terminal: TerminalInfo{ID: testIMEI}}.withWFCProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
+	got = Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, plmnWFCCard{mcc: "310", mnc: "410", mncLength: 3})
 	if len(got.IMS.Voice.Codecs) != 1 || got.IMS.Voice.Codecs[0].Name != imsvoice.CodecAMR || got.IMS.Voice.Codecs[0].PayloadTypes[0] != 102 {
 		t.Fatalf("Voice codecs = %+v, want profile JSON codecs without carrier fallback", got.IMS.Voice.Codecs)
 	}
@@ -982,29 +1173,29 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 	tests := []struct {
 		name     string
-		desc     wfcEVSPayloadDescription
-		codec    wfcVoiceCodecProfile
+		desc     imsEVSPayloadDescription
+		codec    imsVoiceCodecProfile
 		wantBR   string
 		wantBW   string
 		wantChAw *int
 	}{
 		{
 			name:     "direct payload description",
-			desc:     wfcEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb", ChannelAwareReceive: new(2)},
+			desc:     imsEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb", ChannelAwareReceive: 2},
 			wantBR:   "5.9-13.2",
 			wantBW:   "nb-swb",
 			wantChAw: new(2),
 		},
 		{
 			name:   "codec fields override payload description",
-			codec:  wfcVoiceCodecProfile{Bitrate: "13.2", Bandwidth: "swb"},
-			desc:   wfcEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb"},
+			codec:  imsVoiceCodecProfile{Bitrate: "13.2", Bandwidth: "swb"},
+			desc:   imsEVSPayloadDescription{Bitrate: "5.9-13.2", Bandwidth: "nb-swb"},
 			wantBR: "13.2",
 			wantBW: "swb",
 		},
 		{
 			name:   "invalid channel aware sentinel",
-			desc:   wfcEVSPayloadDescription{Bitrate: "5.9-24.4", Bandwidth: "nb-swb", ChannelAwareReceive: new(255)},
+			desc:   imsEVSPayloadDescription{Bitrate: "5.9-24.4", Bandwidth: "nb-swb", ChannelAwareReceive: 255},
 			wantBR: "5.9-24.4",
 			wantBW: "nb-swb",
 		},
@@ -1015,14 +1206,14 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 			codec.Name = imsvoice.CodecEVS
 			codec.PayloadTypes = []int{127}
 			codec.ClockRate = 16000
-			codecs := wfcVoiceCodecs(&wfcVoiceProfile{
-				Codecs: []wfcVoiceCodecProfile{codec},
-				EVSPayloadDescriptions: map[string]wfcEVSPayloadDescription{
+			codecs := imsProfileVoiceCodecs(imsVoiceProfile{
+				Codecs: []imsVoiceCodecProfile{codec},
+				EVSPayloadDescriptions: map[string]imsEVSPayloadDescription{
 					"127": tt.desc,
 				},
 			})
 			if len(codecs) != 1 {
-				t.Fatalf("wfcVoiceCodecs() length = %d, want 1", len(codecs))
+				t.Fatalf("imsProfileVoiceCodecs() length = %d, want 1", len(codecs))
 			}
 			got := codecs[0]
 			if got.Bitrate != tt.wantBR || got.Bandwidth != tt.wantBW {

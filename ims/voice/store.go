@@ -3,9 +3,11 @@ package voice
 import (
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-go/ims/sip"
 	"net"
 	"strings"
+	"time"
+
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) storeCall(call *Call) error {
@@ -98,10 +100,20 @@ func (s *Endpoint) targetURI(to string) string {
 		return to
 	}
 	realm := strings.TrimPrefix(s.reg.State().RegisterURI, "sip:")
+	phoneContext := s.cfg.PhoneContextDomain
+	if phoneContext == "" {
+		phoneContext = realm
+	}
+	if s.cfg.RequestURIFormat == RequestURIFormatTEL {
+		if strings.HasPrefix(to, "+") {
+			return "tel:" + to
+		}
+		return fmt.Sprintf("tel:%s;phone-context=%s", to, phoneContext)
+	}
 	if strings.HasPrefix(to, "+") {
 		return fmt.Sprintf("sip:%s@%s;user=phone", to, realm)
 	}
-	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=phone", to, realm, realm)
+	return fmt.Sprintf("sip:%s;phone-context=%s@%s;user=phone", to, phoneContext, realm)
 }
 
 func (s *Endpoint) reserveRTPPort() int {
@@ -130,6 +142,18 @@ func (s *Endpoint) emit(event CallEvent) {
 	if s.cfg.OnCallEvent != nil {
 		s.cfg.OnCallEvent(event)
 	}
+}
+
+func (s *Endpoint) emitMedia(call *Call, media NegotiatedMedia) {
+	if s.cfg.OnMedia == nil || !media.Negotiated {
+		return
+	}
+	s.cfg.OnMedia(MediaEvent{
+		Call:   call,
+		CallID: call.ID(),
+		Media:  cloneNegotiatedMedia(media),
+		At:     time.Now(),
+	})
 }
 
 func (s *Endpoint) emitError(err error) {

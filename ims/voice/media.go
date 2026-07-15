@@ -14,11 +14,14 @@ func (c *Call) openEarlyMedia(ctx context.Context, answer sdpOffer) error {
 	if !ok {
 		return errors.New("handling provisional call answer: no compatible codec")
 	}
+	if err := c.acceptRemotePayloadMappings(answer); err != nil {
+		return fmt.Errorf("handling provisional call answer: %w", err)
+	}
 	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
 	c.mu.Lock()
 	current := c.media
 	c.mu.Unlock()
-	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), dtmf, hasDTMF)
+	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), nonZeroDuration(answer.MaxPTime, current.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
 	c.mu.Lock()
 	c.media = answerMedia
 	c.mu.Unlock()
@@ -62,14 +65,16 @@ func (c *Call) prepareMedia(ctx context.Context) error {
 	}
 	localPort := c.localPort
 	media := c.media
+	localSDP := append([]byte(nil), c.localSDP...)
 	c.mu.Unlock()
 
 	if c.endpoint.cfg.PrepareMedia == nil {
 		return nil
 	}
 	transport, err := c.endpoint.cfg.PrepareMedia(ctx, MediaConfig{
-		LocalPort: localPort,
-		Media:     media,
+		LocalPort:        localPort,
+		LocalDescription: descriptionFromLocalSDP(localSDP),
+		Media:            cloneNegotiatedMedia(media),
 	})
 	if err != nil {
 		return fmt.Errorf("preparing call media: %w", err)
@@ -95,20 +100,23 @@ func (c *Call) openMedia(ctx context.Context) error {
 	transport := c.transport
 	localPort := c.localPort
 	media := c.media
+	localSDP := append([]byte(nil), c.localSDP...)
 	c.mu.Unlock()
 
 	cfg := MediaConfig{
-		LocalPort:      localPort,
-		RemoteIP:       append(net.IP(nil), media.RemoteIP...),
-		RemotePort:     media.RemotePort,
-		RemoteRTCPIP:   append(net.IP(nil), media.RemoteRTCPIP...),
-		RemoteRTCPPort: media.RemoteRTCPPort,
-		RTCPMux:        media.RTCPMux,
-		Media:          media,
-		OnPacket:       c.recordMediaPacket,
+		LocalPort:        localPort,
+		LocalDescription: descriptionFromLocalSDP(localSDP),
+		RemoteIP:         append(net.IP(nil), media.RemoteIP...),
+		RemotePort:       media.RemotePort,
+		RemoteRTCPIP:     append(net.IP(nil), media.RemoteRTCPIP...),
+		RemoteRTCPPort:   media.RemoteRTCPPort,
+		RTCPMux:          media.RTCPMux,
+		Media:            cloneNegotiatedMedia(media),
+		OnPacket:         c.recordMediaPacket,
 	}
+	c.endpoint.emitMedia(c, media)
 	if transport != nil {
-		if configurable, ok := transport.(mediaConfigurator); ok {
+		if configurable, ok := transport.(MediaTransportConfigurer); ok {
 			if err := configurable.ConfigureRemote(ctx, cfg); err != nil {
 				return fmt.Errorf("configuring voice media remote: %w", err)
 			}
@@ -148,6 +156,17 @@ func (c *Call) openMedia(ctx context.Context) error {
 	c.transport = transport
 	c.mu.Unlock()
 	return nil
+}
+
+func descriptionFromLocalSDP(body []byte) MediaDescription {
+	if len(body) == 0 {
+		return MediaDescription{}
+	}
+	var description MediaDescription
+	if err := description.UnmarshalBinary(body); err != nil {
+		return MediaDescription{RawSDP: append([]byte(nil), body...)}
+	}
+	return description
 }
 
 func (c *Call) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {

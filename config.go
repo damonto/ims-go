@@ -127,14 +127,16 @@ func (cfg Config) normalized(card Card) (Config, error) {
 	}
 	cfg.Access = accessCfg
 
+	profile, ok, err := loadIMSProfile(card)
+	if err != nil {
+		return Config{}, err
+	}
+	if ok {
+		cfg = cfg.withIMSProfile(profile, card)
+		cfg.Logger.Debug("IMS carrier profile selected", "mcc", profile.MCC, "mnc", profile.MNC, "gid1", profile.GID1)
+	}
+
 	if cfg.usesVoWiFi() {
-		profile, ok, err := loadWFCProfile(card)
-		if err != nil {
-			return Config{}, err
-		}
-		if ok {
-			cfg = cfg.withWFCProfile(profile, card)
-		}
 		if cfg.Access.VoWiFi.EPDG == "" {
 			epdg, err := defaultEPDGAddress(card)
 			if err != nil {
@@ -391,7 +393,7 @@ func defaultEPDGAddress(card Card) (string, error) {
 	return fmt.Sprintf("epdg.epc.mnc%s.mcc%s.pub.3gppnetwork.org", mnc, mcc), nil
 }
 
-func renderWFCUserAgent(template string, cfg Config, profile wfcProfile) string {
+func renderIMSUserAgent(template string, cfg Config, profile imsProfile) string {
 	terminal := cfg.Terminal.trimmed()
 	replacer := strings.NewReplacer(
 		"#MANUFACTURE#", terminal.Vendor,

@@ -14,12 +14,19 @@ import (
 
 type AudioCodec string
 
+type RequestURIFormat string
+
 const (
 	CodecAMR            AudioCodec = "AMR"
 	CodecAMRWB          AudioCodec = "AMR-WB"
 	CodecEVS            AudioCodec = "EVS"
 	CodecPCMU           AudioCodec = "PCMU"
 	CodecTelephoneEvent AudioCodec = "telephone-event"
+)
+
+const (
+	RequestURIFormatSIP RequestURIFormat = "sip"
+	RequestURIFormatTEL RequestURIFormat = "tel"
 )
 
 type Config struct {
@@ -31,6 +38,8 @@ type Config struct {
 	GeolocationCountry            string
 	PIDFShortCodes                []string
 	UseTelURIForPIDFXML           bool
+	RequestURIFormat              RequestURIFormat
+	PhoneContextDomain            string
 	Preconditions                 bool
 	ReliableProvisional           bool
 	SessionTimer                  bool
@@ -52,6 +61,7 @@ type Config struct {
 	OpenMedia                     func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
 	OnIncomingCall                func(IncomingCall)
 	OnCallEvent                   func(CallEvent)
+	OnMedia                       func(MediaEvent)
 	OnError                       func(error)
 	Logger                        *slog.Logger
 }
@@ -81,14 +91,15 @@ const (
 )
 
 type MediaConfig struct {
-	LocalPort      int
-	RemoteIP       net.IP
-	RemotePort     int
-	RemoteRTCPIP   net.IP
-	RemoteRTCPPort int
-	RTCPMux        bool
-	Media          NegotiatedMedia
-	OnPacket       func(MediaPacket)
+	LocalPort        int
+	LocalDescription MediaDescription
+	RemoteIP         net.IP
+	RemotePort       int
+	RemoteRTCPIP     net.IP
+	RemoteRTCPPort   int
+	RTCPMux          bool
+	Media            NegotiatedMedia
+	OnPacket         func(MediaPacket)
 }
 
 type MediaPacket struct {
@@ -117,7 +128,9 @@ type rtcpWriter interface {
 	WriteRTCP(ctx context.Context, data []byte) error
 }
 
-type mediaConfigurator interface {
+// MediaTransportConfigurer updates an existing transport after SDP negotiation
+// or renegotiation changes the remote media description.
+type MediaTransportConfigurer interface {
 	ConfigureRemote(ctx context.Context, cfg MediaConfig) error
 }
 
@@ -148,6 +161,16 @@ const (
 )
 
 func (cfg Config) Normalized() (Config, error) {
+	cfg.RequestURIFormat = RequestURIFormat(strings.ToLower(strings.TrimSpace(string(cfg.RequestURIFormat))))
+	cfg.PhoneContextDomain = strings.TrimSpace(cfg.PhoneContextDomain)
+	if cfg.RequestURIFormat == "" {
+		cfg.RequestURIFormat = RequestURIFormatSIP
+	}
+	switch cfg.RequestURIFormat {
+	case RequestURIFormatSIP, RequestURIFormatTEL:
+	default:
+		return Config{}, fmt.Errorf("normalizing voice config: unsupported request URI format %q", cfg.RequestURIFormat)
+	}
 	cfg.RTPProfile = strings.TrimSpace(cfg.RTPProfile)
 	if cfg.RTPProfile == "" {
 		cfg.RTPProfile = defaultRTPProfile

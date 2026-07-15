@@ -25,8 +25,8 @@ func (s *Endpoint) usesPreconditions(msg sip.Message) bool {
 }
 
 func sdpUsesPreconditions(body []byte) bool {
-	offer, err := parseSDP(body)
-	return err == nil && offer.Preconditions
+	var offer sdpOffer
+	return offer.UnmarshalBinary(body) == nil && offer.Preconditions
 }
 
 func (s *Endpoint) unsupportedRequiredReliableProvisional(msg sip.Message) bool {
@@ -89,7 +89,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 			return s.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
 		var err error
-		offer, err = parseSDP(body)
+		err = offer.UnmarshalBinary(body)
 		if err != nil {
 			return s.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
@@ -123,6 +123,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 		localPort:       localPort,
 		incomingRequest: &req,
 		remoteOffer:     offer,
+		remotePayloads:  remotePayloadMappings(offer),
 		delayedOffer:    delayedOffer,
 		media:           media,
 		rtcpSSRC:        randomRTCPSSRC(),
@@ -165,7 +166,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 						From:       call.remoteURI,
 						FromURI:    call.remoteURI,
 						FromNumber: incomingCallerNumber(req.Message),
-						Offer:      mediaOfferFromSDP(offer),
+						Offer:      mediaDescriptionFromSDP(offer),
 						Received:   time.Now(),
 					})
 				}
@@ -185,9 +186,9 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 	}
 	call.setState(CallStateRinging, "")
 	if s.cfg.OnIncomingCall != nil {
-		var incomingOffer MediaOffer
+		var incomingOffer MediaDescription
 		if !delayedOffer {
-			incomingOffer = mediaOfferFromSDP(offer)
+			incomingOffer = mediaDescriptionFromSDP(offer)
 		}
 		s.cfg.OnIncomingCall(IncomingCall{
 			Call:       call,

@@ -106,8 +106,14 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 		call.setState(CallStateFailed, err.Error())
 		return nil, err
 	}
+	if err := call.acceptRemotePayloadMappings(answer); err != nil {
+		_ = call.closeMedia()
+		s.removeCall(start.callID)
+		call.setState(CallStateFailed, err.Error())
+		return nil, fmt.Errorf("dialing call: %w", err)
+	}
 	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, s.cfg.Codecs, negotiated.ClockRate)
-	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, start.media.PTime), dtmf, hasDTMF)
+	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, start.media.PTime), nonZeroDuration(answer.MaxPTime, start.media.MaxPTime, s.cfg.MaxPTime), dtmf, hasDTMF)
 
 	call.mu.Lock()
 	call.remoteTag = sip.HeaderTag(resp.Header("To"))

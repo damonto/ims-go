@@ -30,6 +30,9 @@ func (c *Call) handleRequest(ctx context.Context, req session.Request) error {
 		c.stopInviteOKRetransmit()
 		return nil
 	case "BYE":
+		if c.shouldRejectOutgoingEarlyBYE() {
+			return c.endpoint.writeStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
+		}
 		if err := c.endpoint.writeStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 			return err
 		}
@@ -48,6 +51,22 @@ func (c *Call) handleRequest(ctx context.Context, req session.Request) error {
 		return c.handleSessionRefresh(ctx, req)
 	default:
 		return nil
+	}
+}
+
+func (c *Call) shouldRejectOutgoingEarlyBYE() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.direction != CallDirectionOutgoing {
+		return false
+	}
+	switch c.state {
+	case CallStateDialing, CallStateRinging, CallStateEarlyMedia:
+		return true
+	case CallStateEnding:
+		return c.inviteACK.StartLine == ""
+	default:
+		return false
 	}
 }
 
@@ -97,8 +116,8 @@ func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 		c.finish(CallStateFailed, "missing delayed-offer sdp answer")
 		return nil
 	}
-	answer, err := parseSDP(body)
-	if err != nil {
+	var answer sdpOffer
+	if err := answer.UnmarshalBinary(body); err != nil {
 		c.finish(CallStateFailed, err.Error())
 		return nil
 	}
@@ -107,8 +126,12 @@ func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 		c.finish(CallStateFailed, "no compatible delayed-offer answer codec")
 		return nil
 	}
+	if err := c.acceptRemotePayloadMappings(answer); err != nil {
+		c.finish(CallStateFailed, err.Error())
+		return nil
+	}
 	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
-	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), dtmf, hasDTMF)
+	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), nonZeroDuration(answer.MaxPTime, media.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
 	c.mu.Lock()
 	c.media = answerMedia
 	c.mu.Unlock()
@@ -330,8 +353,8 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 		c.mu.Unlock()
 	}
 	if body, ok := sdpBody(msg); ok {
-		answer, err := parseSDP(body)
-		if err != nil {
+		var answer sdpOffer
+		if err := answer.UnmarshalBinary(body); err != nil {
 			return fmt.Errorf("handling provisional call answer: %w", err)
 		}
 		if authorized {
@@ -430,8 +453,8 @@ func (c *Call) handleEarlyDialogTerminated(msg sip.Message) {
 
 func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error) {
 	if answerBody, ok := sdpBody(resp); ok {
-		answer, err := parseSDP(answerBody)
-		if err != nil {
+		var answer sdpOffer
+		if err := answer.UnmarshalBinary(answerBody); err != nil {
 			return sdpOffer{}, false, err
 		}
 		return answer, true, nil

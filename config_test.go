@@ -462,12 +462,12 @@ func TestConfigNormalizedIMSUsesTerminalInfo(t *testing.T) {
 	}
 }
 
-func TestRenderWFCUserAgent(t *testing.T) {
+func TestRenderIMSUserAgent(t *testing.T) {
 	tests := []struct {
 		name     string
 		template string
 		cfg      Config
-		profile  wfcProfile
+		profile  imsProfile
 		want     string
 	}{
 		{
@@ -484,7 +484,7 @@ func TestRenderWFCUserAgent(t *testing.T) {
 					HardwareSKU:     "Pixel 10 Pro",
 				},
 			},
-			profile: wfcProfile{
+			profile: imsProfile{
 				MCC:    "530",
 				MNC:    "24",
 				WFCSPN: "2degrees",
@@ -510,15 +510,15 @@ func TestRenderWFCUserAgent(t *testing.T) {
 			name:     "plain user agent is unchanged",
 			template: "profile-agent",
 			cfg:      Config{Terminal: TerminalInfo{ID: "356789012345678"}},
-			profile:  wfcProfile{},
+			profile:  imsProfile{},
 			want:     "profile-agent",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := renderWFCUserAgent(tt.template, tt.cfg, tt.profile); got != tt.want {
-				t.Fatalf("renderWFCUserAgent() = %q, want %q", got, tt.want)
+			if got := renderIMSUserAgent(tt.template, tt.cfg, tt.profile); got != tt.want {
+				t.Fatalf("renderIMSUserAgent() = %q, want %q", got, tt.want)
 			}
 		})
 	}

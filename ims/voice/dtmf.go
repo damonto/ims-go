@@ -85,17 +85,18 @@ func (c *Call) SendDTMF(ctx context.Context, req DTMFRequest) error {
 		return errors.New("sending dtmf: call is on hold")
 	}
 	media := c.media
-	if !media.HasDTMF {
+	if media.DTMF == nil {
 		c.mu.Unlock()
 		return errors.New("sending dtmf: telephone-event was not negotiated")
 	}
-	if media.DTMFClockRate <= 0 {
+	dtmf := *media.DTMF
+	if dtmf.ClockRate <= 0 {
 		c.mu.Unlock()
 		return errors.New("sending dtmf: dtmf clock rate is not configured")
 	}
-	if media.ClockRate > 0 && media.DTMFClockRate != media.ClockRate {
+	if media.ClockRate > 0 && dtmf.ClockRate != media.ClockRate {
 		c.mu.Unlock()
-		return fmt.Errorf("sending dtmf: dtmf clock rate %d does not match speech clock rate %d", media.DTMFClockRate, media.ClockRate)
+		return fmt.Errorf("sending dtmf: dtmf clock rate %d does not match speech clock rate %d", dtmf.ClockRate, media.ClockRate)
 	}
 	transport := c.transport
 	rtp := c.rtpSend
@@ -117,7 +118,7 @@ func (c *Call) SendDTMF(ctx context.Context, req DTMFRequest) error {
 		c.rtpSend = rtp
 		c.mu.Unlock()
 	}()
-	eventMask := dtmfEventMaskOrDefault(media.DTMFEventMask)
+	eventMask := dtmfEventMaskOrDefault(dtmf.DTMFEventMask)
 	for _, event := range events {
 		if !dtmfEventMaskContains(eventMask, event) {
 			return fmt.Errorf("sending dtmf: event %d was not negotiated", event)
@@ -129,14 +130,14 @@ func (c *Call) SendDTMF(ctx context.Context, req DTMFRequest) error {
 	pause = normalizeDTMFInterval(pause, frameDuration)
 	frameTicks := mediaFrameTicks(media)
 	if frameTicks == 0 {
-		frameTicks = uint32(durationTicks(defaultPTime, media.DTMFClockRate))
+		frameTicks = uint32(durationTicks(defaultPTime, dtmf.ClockRate))
 	}
-	eventTicks := durationTicks(duration, media.DTMFClockRate)
+	eventTicks := durationTicks(duration, dtmf.ClockRate)
 	if eventTicks > 0xffff {
 		saveRTP = false
 		return errors.New("sending dtmf: duration exceeds one telephone-event segment")
 	}
-	pauseTicks := durationTicks(pause, media.DTMFClockRate)
+	pauseTicks := durationTicks(pause, dtmf.ClockRate)
 	for i, event := range events {
 		err := c.sendDTMFEvent(ctx, transport, media, &rtp, event, byte(volume), uint16(eventTicks), frameTicks)
 		rtp.nextTimestamp += uint32(eventTicks + pauseTicks)
@@ -182,9 +183,12 @@ func (c *Call) sendDTMFEvent(ctx context.Context, transport MediaTransport, medi
 }
 
 func (c *Call) writeDTMFRTPPacket(ctx context.Context, transport MediaTransport, media NegotiatedMedia, rtp *rtpSendState, timestamp uint32, event byte, volume byte, duration uint16, end bool, marker bool) error {
+	if media.DTMF == nil {
+		return errors.New("sending dtmf: telephone-event was not negotiated")
+	}
 	payload := buildDTMFPayload(event, volume, duration, end)
 	wire, err := (RTPPacket{
-		PayloadType:    media.DTMFPayloadType,
+		PayloadType:    media.DTMF.PayloadType,
 		SequenceNumber: rtp.nextSequence,
 		Timestamp:      timestamp,
 		SSRC:           rtp.ssrc,
@@ -242,8 +246,8 @@ func dtmfEventMaskContains(mask uint16, event byte) bool {
 
 func mediaFrameTicks(media NegotiatedMedia) uint32 {
 	rate := media.ClockRate
-	if rate <= 0 {
-		rate = media.DTMFClockRate
+	if rate <= 0 && media.DTMF != nil {
+		rate = media.DTMF.ClockRate
 	}
 	return uint32(durationTicks(mediaFrameDuration(media), rate))
 }

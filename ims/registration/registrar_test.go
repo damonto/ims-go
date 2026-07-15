@@ -4259,6 +4259,61 @@ func TestNotifyRegInfoFullStateWithoutOwnContactRequiresInitialRegistration(t *t
 	}
 }
 
+func TestNotifyRegInfoFullStateMatchesRegisterTransaction(t *testing.T) {
+	tests := []struct {
+		name           string
+		callID         string
+		cseq           string
+		wantRegistered bool
+	}{
+		{name: "matching transaction", callID: "register-call", cseq: "2", wantRegistered: true},
+		{name: "different call id", callID: "other-call", cseq: "2"},
+		{name: "call id is case sensitive", callID: "REGISTER-call", cseq: "2"},
+		{name: "different cseq", callID: "register-call", cseq: "1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			svc.setRegistered(true)
+
+			register := sip.NewResponse(sipStatusOK, "OK")
+			register.Headers.Add("Call-ID", "register-call")
+			register.Headers.Add("CSeq", "2 REGISTER")
+			svc.rememberRegisterTransaction(register)
+
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			notify.Headers.Add("Event", "reg")
+			notify.Headers.Add("Content-Type", "application/reginfo+xml")
+			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="3" state="full">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="created" callid="%s" cseq="%s" expires="300">
+      <uri>sip:tokenized@proxy.example.com</uri>
+    </contact>
+  </registration>
+</reginfo>`, svc.State().PublicIdentity, tt.callID, tt.cseq))
+			req := session.Request{Message: notify, Transport: transport}
+
+			handled, err := svc.HandleRequest(context.Background(), req)
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			if tt.wantRegistered {
+				expectNoRegistrationEvent(t, svc)
+			} else {
+				expectRegistrationEvent(t, svc, errInitialRegistrationNeeded)
+			}
+			if got := svc.State().Registered; got != tt.wantRegistered {
+				t.Fatalf("Registered = %t, want %t", got, tt.wantRegistered)
+			}
+		})
+	}
+}
+
 func TestNotifyRegInfoFullStateWithoutOwnRegistrationRequiresInitialRegistration(t *testing.T) {
 	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})

@@ -1,38 +1,60 @@
 package voice
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func selectOfferCodecs(configured []AudioCodecConfig, requested []AudioCodec) []AudioCodecConfig {
-	if len(requested) == 0 {
+func selectOfferCodecs(configured []AudioCodecConfig, offer MediaOffer) []AudioCodecConfig {
+	if len(offer.Codecs) == 0 && len(offer.PayloadTypes) == 0 {
 		return filterTelephoneEventsForSpeech(cloneCodecConfigs(configured))
 	}
-	wanted := make(map[AudioCodec]struct{}, len(requested))
-	for _, name := range requested {
+	wantedCodecs := make(map[AudioCodec]struct{}, len(offer.Codecs))
+	for _, name := range offer.Codecs {
 		switch strings.ToUpper(strings.TrimSpace(string(name))) {
 		case "AMR":
-			wanted[CodecAMR] = struct{}{}
+			wantedCodecs[CodecAMR] = struct{}{}
 		case "AMR-WB", "AMRWB":
-			wanted[CodecAMRWB] = struct{}{}
+			wantedCodecs[CodecAMRWB] = struct{}{}
 		case "EVS":
-			wanted[CodecEVS] = struct{}{}
+			wantedCodecs[CodecEVS] = struct{}{}
 		case "PCMU":
-			wanted[CodecPCMU] = struct{}{}
+			wantedCodecs[CodecPCMU] = struct{}{}
 		case "TELEPHONE-EVENT":
-			wanted[CodecTelephoneEvent] = struct{}{}
+			wantedCodecs[CodecTelephoneEvent] = struct{}{}
 		}
+	}
+	wantedPayloads := make(map[int]struct{}, len(offer.PayloadTypes))
+	for _, payloadType := range offer.PayloadTypes {
+		wantedPayloads[payloadType] = struct{}{}
 	}
 	codecs := make([]AudioCodecConfig, 0, len(configured))
 	for _, codec := range configured {
-		if _, ok := wanted[codec.Name]; ok {
-			codecs = append(codecs, cloneCodecConfig(codec))
+		if len(wantedCodecs) > 0 {
+			if _, ok := wantedCodecs[codec.Name]; !ok {
+				continue
+			}
 		}
+		codec = cloneCodecConfig(codec)
+		if len(wantedPayloads) > 0 && codec.Name != CodecTelephoneEvent {
+			payloads := codec.PayloadTypes[:0]
+			for _, payloadType := range codec.PayloadTypes {
+				if _, ok := wantedPayloads[payloadType]; ok {
+					payloads = append(payloads, payloadType)
+				}
+			}
+			codec.PayloadTypes = payloads
+			if len(codec.PayloadTypes) == 0 {
+				continue
+			}
+		}
+		codecs = append(codecs, codec)
 	}
 	for _, codec := range codecs {
 		if codec.Name == CodecTelephoneEvent {
@@ -77,55 +99,374 @@ func filterTelephoneEventsForSpeech(codecs []AudioCodecConfig) []AudioCodecConfi
 }
 
 func chooseCodec(remote sdpOffer, local []AudioCodecConfig) (AudioCodecConfig, bool) {
-	localByName := make(map[AudioCodec]AudioCodecConfig, len(local))
-	for _, codec := range local {
-		if codec.Name == CodecTelephoneEvent {
-			continue
-		}
-		localByName[codec.Name] = codec
+	return chooseCodecPayloads(remote, local, nil)
+}
+
+func chooseCodecPayloads(remote sdpOffer, local []AudioCodecConfig, payloadTypes []int) (AudioCodecConfig, bool) {
+	if !strings.EqualFold(remote.Profile, defaultRTPProfile) {
+		return AudioCodecConfig{}, false
+	}
+	wantedPayloads := make(map[int]struct{}, len(payloadTypes))
+	for _, payloadType := range payloadTypes {
+		wantedPayloads[payloadType] = struct{}{}
 	}
 	for _, payload := range remote.Payloads {
+		if len(wantedPayloads) > 0 {
+			if _, ok := wantedPayloads[payload]; !ok {
+				continue
+			}
+		}
 		remoteCodec, ok := remote.Codecs[payload]
 		if !ok || remoteCodec.Name == CodecTelephoneEvent {
 			continue
 		}
-		localCodec, ok := localByName[remoteCodec.Name]
-		if !ok {
-			continue
+		for _, localCodec := range local {
+			selected, ok := negotiateAudioCodec(localCodec, remoteCodec)
+			if !ok {
+				continue
+			}
+			selected.PayloadTypes = []int{payload}
+			return selected, true
 		}
-		selected := localCodec
-		selected.PayloadTypes = []int{payload}
-		if remoteCodec.ClockRate != 0 {
-			selected.ClockRate = remoteCodec.ClockRate
-		}
-		if remoteCodec.Channels != 0 {
-			selected.Channels = remoteCodec.Channels
-		}
-		if selected.Name == CodecEVS {
-			selected.ModeSet = remoteCodec.ModeSet
-			selected.Bitrate = remoteCodec.Bitrate
-			selected.Bandwidth = remoteCodec.Bandwidth
-			selected.HFOnly = selected.HFOnly || remoteCodec.HFOnly
-		}
-		if selected.ModeSet == "" {
-			selected.ModeSet = remoteCodec.ModeSet
-		}
-		if remoteCodec.OctetAlign {
-			selected.OctetAlign = true
-		}
-		if selected.Bitrate == "" {
-			selected.Bitrate = remoteCodec.Bitrate
-		}
-		if selected.Bandwidth == "" {
-			selected.Bandwidth = remoteCodec.Bandwidth
-		}
-		if remoteCodec.ChAwRecv != nil {
-			value := *remoteCodec.ChAwRecv
-			selected.ChAwRecv = &value
-		}
-		return selected, true
 	}
 	return AudioCodecConfig{}, false
+}
+
+// AudioFormatCompatible reports whether local can send and receive the remote RTP format.
+func AudioFormatCompatible(local AudioCodecConfig, remote AudioFormat) bool {
+	_, ok := negotiateAudioCodec(local, audioCodecConfig(remote))
+	return ok
+}
+
+func audioCodecConfig(format AudioFormat) AudioCodecConfig {
+	return AudioCodecConfig{
+		Name:          format.Codec,
+		PayloadTypes:  []int{format.PayloadType},
+		ClockRate:     format.ClockRate,
+		Channels:      format.Channels,
+		DTMFEventMask: format.DTMFEventMask,
+		OctetAlign:    format.OctetAlign,
+		ModeSet:       format.ModeSet,
+		Bitrate:       format.Bitrate,
+		Bandwidth:     format.Bandwidth,
+		ChAwRecv:      format.ChAwRecv,
+		HFOnly:        format.HFOnly,
+	}
+}
+
+func negotiateAudioCodec(local, remote AudioCodecConfig) (AudioCodecConfig, bool) {
+	if local.Name != remote.Name ||
+		local.ClockRate != remote.ClockRate ||
+		max(local.Channels, 1) != max(remote.Channels, 1) {
+		return AudioCodecConfig{}, false
+	}
+
+	selected := cloneCodecConfig(local)
+	selected.Channels = max(remote.Channels, 1)
+	selected.OctetAlign = local.OctetAlign || remote.OctetAlign
+	if remote.ChAwRecv != nil {
+		selected.ChAwRecv = new(*remote.ChAwRecv)
+	}
+
+	var ok bool
+	switch selected.Name {
+	case CodecAMR, CodecAMRWB:
+		selected.ModeSet, ok = intersectModeSets(local.ModeSet, remote.ModeSet)
+	case CodecEVS:
+		selected.ModeSet, ok = intersectModeSets(local.ModeSet, remote.ModeSet)
+		if !ok {
+			break
+		}
+		selected.Bitrate, ok = intersectNumericRanges(local.Bitrate, remote.Bitrate)
+		if !ok {
+			break
+		}
+		selected.Bandwidth, ok = intersectEVSBandwidths(local.Bandwidth, remote.Bandwidth)
+		selected.HFOnly = local.HFOnly || remote.HFOnly
+	default:
+		ok = true
+	}
+	if !ok {
+		return AudioCodecConfig{}, false
+	}
+	return selected, true
+}
+
+func intersectModeSets(local, remote string) (string, bool) {
+	local = strings.TrimSpace(local)
+	remote = strings.TrimSpace(remote)
+	if local == "" && remote == "" {
+		return "", true
+	}
+	if local == "" || remote == "" {
+		modes, ok := parseIntegerSet(local + remote)
+		if !ok {
+			return "", false
+		}
+		return formatIntegerSet(modes), true
+	}
+	localModes, ok := parseIntegerSet(local)
+	if !ok {
+		return "", false
+	}
+	remoteModes, ok := parseIntegerSet(remote)
+	if !ok {
+		return "", false
+	}
+	modes := make(map[int]bool, min(len(localModes), len(remoteModes)))
+	for mode := range localModes {
+		if remoteModes[mode] {
+			modes[mode] = true
+		}
+	}
+	if len(modes) == 0 {
+		return "", false
+	}
+	return formatIntegerSet(modes), true
+}
+
+func formatIntegerSet(set map[int]bool) string {
+	modes := make([]int, 0, len(set))
+	for mode := range set {
+		modes = append(modes, mode)
+	}
+	slices.Sort(modes)
+	values := make([]string, len(modes))
+	for i, mode := range modes {
+		values[i] = strconv.Itoa(mode)
+	}
+	return strings.Join(values, ",")
+}
+
+func parseIntegerSet(value string) (map[int]bool, bool) {
+	set := make(map[int]bool)
+	for part := range strings.SplitSeq(value, ",") {
+		left, right, hasRange := strings.Cut(strings.TrimSpace(part), "-")
+		start, ok := parseNonNegativeDecimal(left)
+		if !ok {
+			return nil, false
+		}
+		end := start
+		if hasRange {
+			end, ok = parseNonNegativeDecimal(right)
+			if !ok || end < start {
+				return nil, false
+			}
+		}
+		for mode := start; mode <= end; mode++ {
+			set[mode] = true
+		}
+	}
+	return set, len(set) > 0
+}
+
+type numericRange struct {
+	minimum float64
+	maximum float64
+}
+
+func intersectNumericRanges(local, remote string) (string, bool) {
+	local = strings.TrimSpace(local)
+	remote = strings.TrimSpace(remote)
+	if local == "" && remote == "" {
+		return "", true
+	}
+	if local == "" || remote == "" {
+		ranges, ok := parseNumericRanges(local + remote)
+		if !ok {
+			return "", false
+		}
+		return formatNumericRanges(ranges), true
+	}
+	localRanges, ok := parseNumericRanges(local)
+	if !ok {
+		return "", false
+	}
+	remoteRanges, ok := parseNumericRanges(remote)
+	if !ok {
+		return "", false
+	}
+	var intersections []numericRange
+	for _, localRange := range localRanges {
+		for _, remoteRange := range remoteRanges {
+			intersection := numericRange{
+				minimum: max(localRange.minimum, remoteRange.minimum),
+				maximum: min(localRange.maximum, remoteRange.maximum),
+			}
+			if intersection.minimum <= intersection.maximum {
+				intersections = append(intersections, intersection)
+			}
+		}
+	}
+	intersections = normalizeNumericRanges(intersections)
+	if len(intersections) == 0 {
+		return "", false
+	}
+	return formatNumericRanges(intersections), true
+}
+
+func formatNumericRanges(ranges []numericRange) string {
+	parts := make([]string, len(ranges))
+	for i, value := range ranges {
+		parts[i] = formatNumericRange(value)
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseNumericRanges(value string) ([]numericRange, bool) {
+	var ranges []numericRange
+	for part := range strings.SplitSeq(value, ",") {
+		left, right, hasRange := strings.Cut(strings.TrimSpace(part), "-")
+		minimum, err := strconv.ParseFloat(strings.TrimSpace(left), 64)
+		if err != nil || math.IsNaN(minimum) || math.IsInf(minimum, 0) || minimum <= 0 {
+			return nil, false
+		}
+		maximum := minimum
+		if hasRange {
+			maximum, err = strconv.ParseFloat(strings.TrimSpace(right), 64)
+			if err != nil || math.IsNaN(maximum) || math.IsInf(maximum, 0) || maximum < minimum {
+				return nil, false
+			}
+		}
+		ranges = append(ranges, numericRange{minimum: minimum, maximum: maximum})
+	}
+	return normalizeNumericRanges(ranges), len(ranges) > 0
+}
+
+func normalizeNumericRanges(ranges []numericRange) []numericRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	slices.SortFunc(ranges, func(a, b numericRange) int {
+		if order := cmp.Compare(a.minimum, b.minimum); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.maximum, b.maximum)
+	})
+	merged := ranges[:1]
+	for _, current := range ranges[1:] {
+		last := &merged[len(merged)-1]
+		if current.minimum <= last.maximum {
+			last.maximum = max(last.maximum, current.maximum)
+			continue
+		}
+		merged = append(merged, current)
+	}
+	return merged
+}
+
+func formatNumericRange(value numericRange) string {
+	minimum := strconv.FormatFloat(value.minimum, 'f', -1, 64)
+	if value.minimum == value.maximum {
+		return minimum
+	}
+	return minimum + "-" + strconv.FormatFloat(value.maximum, 'f', -1, 64)
+}
+
+func intersectEVSBandwidths(local, remote string) (string, bool) {
+	local = strings.TrimSpace(local)
+	remote = strings.TrimSpace(remote)
+	if local == "" && remote == "" {
+		return "", true
+	}
+	if local == "" || remote == "" {
+		bandwidths, ok := parseEVSBandwidths(local + remote)
+		if !ok {
+			return "", false
+		}
+		return formatEVSBandwidthSet(bandwidths), true
+	}
+	localBandwidths, ok := parseEVSBandwidths(local)
+	if !ok {
+		return "", false
+	}
+	remoteBandwidths, ok := parseEVSBandwidths(remote)
+	if !ok {
+		return "", false
+	}
+	var bandwidths []int
+	for bandwidth := range localBandwidths {
+		if remoteBandwidths[bandwidth] {
+			bandwidths = append(bandwidths, bandwidth)
+		}
+	}
+	if len(bandwidths) == 0 {
+		return "", false
+	}
+	slices.Sort(bandwidths)
+	return formatEVSBandwidths(bandwidths), true
+}
+
+func formatEVSBandwidthSet(set map[int]bool) string {
+	bandwidths := make([]int, 0, len(set))
+	for bandwidth := range set {
+		bandwidths = append(bandwidths, bandwidth)
+	}
+	slices.Sort(bandwidths)
+	return formatEVSBandwidths(bandwidths)
+}
+
+var evsBandwidthNames = []string{"nb", "wb", "swb", "fb"}
+
+func parseEVSBandwidths(value string) (map[int]bool, bool) {
+	bandwidths := make(map[int]bool)
+	for part := range strings.SplitSeq(strings.ToLower(value), ",") {
+		left, right, hasRange := strings.Cut(strings.TrimSpace(part), "-")
+		start := slices.Index(evsBandwidthNames, left)
+		if start < 0 {
+			return nil, false
+		}
+		end := start
+		if hasRange {
+			end = slices.Index(evsBandwidthNames, strings.TrimSpace(right))
+			if end < start {
+				return nil, false
+			}
+		}
+		for bandwidth := start; bandwidth <= end; bandwidth++ {
+			bandwidths[bandwidth] = true
+		}
+	}
+	return bandwidths, len(bandwidths) > 0
+}
+
+func formatEVSBandwidths(bandwidths []int) string {
+	parts := make([]string, 0, len(bandwidths))
+	for i := 0; i < len(bandwidths); {
+		start := bandwidths[i]
+		end := start
+		for i+1 < len(bandwidths) && bandwidths[i+1] == end+1 {
+			i++
+			end = bandwidths[i]
+		}
+		if start == end {
+			parts = append(parts, evsBandwidthNames[start])
+		} else {
+			parts = append(parts, evsBandwidthNames[start]+"-"+evsBandwidthNames[end])
+		}
+		i++
+	}
+	return strings.Join(parts, ",")
+}
+
+func audioFormat(codec AudioCodecConfig, payloadType int, fmtp string) AudioFormat {
+	format := AudioFormat{
+		Codec:         codec.Name,
+		PayloadType:   payloadType,
+		ClockRate:     codec.ClockRate,
+		Channels:      max(codec.Channels, 1),
+		FMTP:          strings.TrimSpace(fmtp),
+		DTMFEventMask: codec.DTMFEventMask,
+		OctetAlign:    codec.OctetAlign,
+		ModeSet:       codec.ModeSet,
+		Bitrate:       codec.Bitrate,
+		Bandwidth:     codec.Bandwidth,
+		HFOnly:        codec.HFOnly,
+	}
+	if codec.ChAwRecv != nil {
+		format.ChAwRecv = new(*codec.ChAwRecv)
+	}
+	return format
 }
 
 func chooseTelephoneEventForClock(remote sdpOffer, local []AudioCodecConfig, clockRate int) (AudioCodecConfig, bool) {
@@ -373,8 +714,6 @@ func parseRTPMap(line string) (int, AudioCodecConfig, error) {
 		codec = CodecPCMU
 	case "TELEPHONE-EVENT":
 		codec = CodecTelephoneEvent
-	default:
-		return payloadType, AudioCodecConfig{}, nil
 	}
 	config := AudioCodecConfig{Name: codec, PayloadTypes: []int{payloadType}, ClockRate: clock, Channels: channels}
 	if codec == CodecTelephoneEvent {
@@ -394,6 +733,21 @@ func parseFMTP(line string) (int, string) {
 		return 0, ""
 	}
 	return payloadType, right
+}
+
+func applyCodecFMTP(codec AudioCodecConfig, fmtp string) AudioCodecConfig {
+	codec.OctetAlign = fmtpFlag(fmtp, "octet-align")
+	codec.ModeSet = fmtpParam(fmtp, "mode-set")
+	codec.Bitrate = fmtpParam(fmtp, "br")
+	codec.Bandwidth = fmtpParam(fmtp, "bw")
+	codec.HFOnly = fmtpFlag(fmtp, "hf-only")
+	if codec.Name == CodecTelephoneEvent {
+		codec.DTMFEventMask = parseTelephoneEventMask(fmtp)
+	}
+	if value, ok := fmtpSignedParam(fmtp, "ch-aw-recv"); ok {
+		codec.ChAwRecv = &value
+	}
+	return codec
 }
 
 func fmtpParam(fmtp, want string) string {
@@ -520,14 +874,18 @@ func cloneCodecConfig(codec AudioCodecConfig) AudioCodecConfig {
 	return codec
 }
 
-func parseSDPDuration(value string) time.Duration {
-	ms, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || ms < 0 {
-		return 0
+func parseSDPDuration(value string) (time.Duration, error) {
+	ms, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil || math.IsNaN(ms) || math.IsInf(ms, 0) || ms <= 0 {
+		return 0, fmt.Errorf("duration %q must be a positive number", value)
 	}
-	return time.Duration(ms) * time.Millisecond
+	duration := time.Duration(ms * float64(time.Millisecond))
+	if duration <= 0 {
+		return 0, fmt.Errorf("duration %q is too small", value)
+	}
+	return duration, nil
 }
 
-func durationMillis(d time.Duration) int {
-	return int(d / time.Millisecond)
+func formatSDPDuration(d time.Duration) string {
+	return strconv.FormatFloat(float64(d)/float64(time.Millisecond), 'f', -1, 64)
 }

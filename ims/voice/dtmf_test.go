@@ -61,14 +61,10 @@ func TestSendDTMFWritesTelephoneEventRTP(t *testing.T) {
 		state:     CallStateActive,
 		transport: &voiceRTPOnlyMediaTransport{writeCh: writes},
 		media: NegotiatedMedia{
-			Codec:           CodecAMR,
-			PayloadType:     102,
-			ClockRate:       8000,
-			PTime:           20 * time.Millisecond,
-			Direction:       mediaDirectionSendRecv,
-			HasDTMF:         true,
-			DTMFPayloadType: 101,
-			DTMFClockRate:   8000,
+			AudioFormat: AudioFormat{Codec: CodecAMR, PayloadType: 102, ClockRate: 8000},
+			DTMF:        &AudioFormat{PayloadType: 101, ClockRate: 8000},
+			PTime:       20 * time.Millisecond,
+			Direction:   MediaDirectionSendRecv,
 		},
 		rtpSend: rtpSendState{
 			initialized:   true,
@@ -131,14 +127,10 @@ func TestWriteRTPRebasesSpeechAfterDTMF(t *testing.T) {
 		state:     CallStateActive,
 		transport: &voiceRTPOnlyMediaTransport{writeCh: writes},
 		media: NegotiatedMedia{
-			Codec:           CodecAMR,
-			PayloadType:     102,
-			ClockRate:       8000,
-			PTime:           20 * time.Millisecond,
-			Direction:       mediaDirectionSendRecv,
-			HasDTMF:         true,
-			DTMFPayloadType: 101,
-			DTMFClockRate:   8000,
+			AudioFormat: AudioFormat{Codec: CodecAMR, PayloadType: 102, ClockRate: 8000},
+			DTMF:        &AudioFormat{PayloadType: 101, ClockRate: 8000},
+			PTime:       20 * time.Millisecond,
+			Direction:   MediaDirectionSendRecv,
 		},
 		rtpSend: rtpSendState{
 			initialized:   true,
@@ -191,7 +183,7 @@ func TestSendDTMFRequiresNegotiatedTelephoneEvent(t *testing.T) {
 	call := &Call{
 		state:     CallStateActive,
 		transport: &voiceRTPOnlyMediaTransport{},
-		media:     NegotiatedMedia{Direction: mediaDirectionSendRecv},
+		media:     NegotiatedMedia{Direction: MediaDirectionSendRecv},
 	}
 	if err := call.SendDTMF(context.Background(), DTMFRequest{Digits: "1"}); err == nil {
 		t.Fatal("SendDTMF() error = nil, want missing telephone-event error")
@@ -207,23 +199,18 @@ func TestSendDTMFRejectsUnnegotiatedEvent(t *testing.T) {
 		{
 			name: "event mask",
 			media: NegotiatedMedia{
-				ClockRate:       8000,
-				Direction:       mediaDirectionSendRecv,
-				HasDTMF:         true,
-				DTMFPayloadType: 101,
-				DTMFClockRate:   8000,
-				DTMFEventMask:   1 << 1,
+				AudioFormat: AudioFormat{ClockRate: 8000},
+				Direction:   MediaDirectionSendRecv,
+				DTMF:        &AudioFormat{PayloadType: 101, ClockRate: 8000, DTMFEventMask: 1 << 1},
 			},
 			digit: "*",
 		},
 		{
 			name: "clock mismatch",
 			media: NegotiatedMedia{
-				ClockRate:       16000,
-				Direction:       mediaDirectionSendRecv,
-				HasDTMF:         true,
-				DTMFPayloadType: 101,
-				DTMFClockRate:   8000,
+				AudioFormat: AudioFormat{ClockRate: 16000},
+				Direction:   MediaDirectionSendRecv,
+				DTMF:        &AudioFormat{PayloadType: 101, ClockRate: 8000},
 			},
 			digit: "1",
 		},
@@ -249,14 +236,10 @@ func TestSendDTMFSavesRTPStateOnContextCancel(t *testing.T) {
 		state:     CallStateActive,
 		transport: transport,
 		media: NegotiatedMedia{
-			Codec:           CodecAMR,
-			PayloadType:     102,
-			ClockRate:       8000,
-			PTime:           20 * time.Millisecond,
-			Direction:       mediaDirectionSendRecv,
-			HasDTMF:         true,
-			DTMFPayloadType: 101,
-			DTMFClockRate:   8000,
+			AudioFormat: AudioFormat{Codec: CodecAMR, PayloadType: 102, ClockRate: 8000},
+			DTMF:        &AudioFormat{PayloadType: 101, ClockRate: 8000},
+			PTime:       20 * time.Millisecond,
+			Direction:   MediaDirectionSendRecv,
 		},
 		rtpSend: rtpSendState{
 			initialized:   true,

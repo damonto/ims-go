@@ -46,8 +46,8 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			c.finish(CallStateFailed, "missing PRACK SDP answer")
 			return nil
 		}
-		answer, err := parseSDP(body)
-		if err != nil {
+		var answer sdpOffer
+		if err := answer.UnmarshalBinary(body); err != nil {
 			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
 				return writeErr
 			}
@@ -62,8 +62,15 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			c.finish(CallStateFailed, "no compatible PRACK answer codec")
 			return nil
 		}
+		if err := c.acceptRemotePayloadMappings(answer); err != nil {
+			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
+				return writeErr
+			}
+			c.finish(CallStateFailed, err.Error())
+			return nil
+		}
 		dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
-		answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), dtmf, hasDTMF)
+		answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), nonZeroDuration(answer.MaxPTime, media.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
 		c.mu.Lock()
 		c.media = answerMedia
 		c.prackAnsweredOffer = true
@@ -89,8 +96,8 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		}
 		c.startMediaInactivityWatch()
 	} else if body, ok := sdpBody(req.Message); ok {
-		offer, err := parseSDP(body)
-		if err != nil {
+		var offer sdpOffer
+		if err := offer.UnmarshalBinary(body); err != nil {
 			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
 				return writeErr
 			}
@@ -98,6 +105,12 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		}
 		answer, answerMedia, err := buildSDPAnswer(c.endpoint.cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{})
 		if err != nil {
+			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
+				return writeErr
+			}
+			return nil
+		}
+		if err := c.acceptRemotePayloadMappings(offer); err != nil {
 			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
 				return writeErr
 			}
@@ -237,7 +250,7 @@ func (h rackHeader) MarshalText() ([]byte, error) {
 	if method == "" {
 		return nil, fmt.Errorf("building PRACK: invalid RAck method %q", h.method)
 	}
-	return []byte(fmt.Sprintf("%d %d %s", h.rseq, h.cseq, method)), nil
+	return fmt.Appendf(nil, "%d %d %s", h.rseq, h.cseq, method), nil
 }
 
 func (h *rackHeader) UnmarshalText(text []byte) error {

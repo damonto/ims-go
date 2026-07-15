@@ -578,9 +578,11 @@ func TestTargetURI(t *testing.T) {
 	svc := &Endpoint{reg: reg}
 
 	tests := []struct {
-		name string
-		to   string
-		want string
+		name         string
+		to           string
+		format       RequestURIFormat
+		phoneContext string
+		want         string
 	}{
 		{
 			name: "global number",
@@ -591,6 +593,25 @@ func TestTargetURI(t *testing.T) {
 			name: "local number",
 			to:   "55559",
 			want: "sip:55559;phone-context=ims.mnc001.mcc001.3gppnetwork.org@ims.mnc001.mcc001.3gppnetwork.org;user=phone",
+		},
+		{
+			name:   "local number as tel uri",
+			to:     "55559",
+			format: RequestURIFormatTEL,
+			want:   "tel:55559;phone-context=ims.mnc001.mcc001.3gppnetwork.org",
+		},
+		{
+			name:         "local number uses configured phone context",
+			to:           "55559",
+			format:       RequestURIFormatTEL,
+			phoneContext: "phone-context.example.net",
+			want:         "tel:55559;phone-context=phone-context.example.net",
+		},
+		{
+			name:   "global number as tel uri",
+			to:     "+15551234567",
+			format: RequestURIFormatTEL,
+			want:   "tel:+15551234567",
 		},
 		{
 			name: "sip uri",
@@ -605,6 +626,8 @@ func TestTargetURI(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			svc.cfg.RequestURIFormat = tt.format
+			svc.cfg.PhoneContextDomain = tt.phoneContext
 			if got := svc.targetURI(tt.to); got != tt.want {
 				t.Fatalf("targetURI() = %q, want %q", got, tt.want)
 			}
@@ -1374,8 +1397,8 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			media := call.Media()
-			if media.DTMFPayloadType != 110 || media.DTMFClockRate != 16000 {
-				t.Fatalf("Media() DTMF = %d/%d, want 110/16000", media.DTMFPayloadType, media.DTMFClockRate)
+			if media.DTMF == nil || media.DTMF.PayloadType != 110 || media.DTMF.ClockRate != 16000 {
+				t.Fatalf("Media() DTMF = %+v, want 110/16000", media.DTMF)
 			}
 			if !waitForCallTest(func() bool { return transport.countMethod("ACK") == 1 }) {
 				t.Fatalf("ACK count = %d, want 1", transport.countMethod("ACK"))
@@ -2384,6 +2407,84 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 	}
 }
 
+func TestOutgoingRemoteBYEBeforeFinalResponseGets481(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "early dialog bye"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := registration.New(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+				IMEI:            "123456789012345",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "INVITE" {
+					return
+				}
+				ringing := callStatus(msg, sipStatusRinging, "Ringing")
+				ringing.Headers = sip.UpsertHeader(ringing.Headers, "To", sip.WithTag(msg.Header("To"), "", "early-tag"))
+				ringing.Headers.Add("Contact", "<sip:remote@192.0.2.10:5060>")
+				transport.queue(ringing)
+				transport.queue(byeForConfirmedDialog(ringing))
+			}
+
+			dialCtx, cancelDial := context.WithCancel(context.Background())
+			dialErr := make(chan error, 1)
+			go func() {
+				_, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
+				dialErr <- err
+			}()
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusCallTransactionDoesNotExist, "BYE")) == 1
+			}) {
+				t.Fatal("early BYE did not receive 481")
+			}
+			select {
+			case err := <-dialErr:
+				t.Fatalf("Dial() returned after rejected early BYE: %v", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			cancelDial()
+			if err := <-dialErr; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Dial() error = %v, want context canceled", err)
+			}
+		})
+	}
+}
+
 func TestHangupAcceptsBYETerminationResponses(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -3324,9 +3425,26 @@ func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
 
 func TestIncomingReINVITESessionRefresh(t *testing.T) {
 	tests := []struct {
-		name string
+		name       string
+		updateBody func([]byte) []byte
+		wantStatus int
 	}{
-		{name: "existing dialog re-invite refreshes session"},
+		{name: "unchanged payload mapping", wantStatus: sipStatusOK},
+		{
+			name: "new payload for existing codec",
+			updateBody: func(body []byte) []byte {
+				body = bytes.Replace(body, []byte("m=audio 50000 RTP/AVP 104 110"), []byte("m=audio 50000 RTP/AVP 104 111 110"), 1)
+				return bytes.Replace(body, []byte("a=rtpmap:104 AMR-WB/16000\r\n"), []byte("a=rtpmap:104 AMR-WB/16000\r\na=rtpmap:111 AMR-WB/16000\r\n"), 1)
+			},
+			wantStatus: sipStatusOK,
+		},
+		{
+			name: "dynamic payload remapped to another codec",
+			updateBody: func(body []byte) []byte {
+				return bytes.Replace(body, []byte("a=rtpmap:104 AMR-WB/16000"), []byte("a=rtpmap:104 AMR/8000"), 1)
+			},
+			wantStatus: sipStatusNotAcceptableHere,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3352,21 +3470,26 @@ func TestIncomingReINVITESessionRefresh(t *testing.T) {
 				_ = sess.Close()
 			}()
 
+			initial, err := unmarshalSDP(inviteWithSDP().Body)
+			if err != nil {
+				t.Fatalf("unmarshalSDP() error = %v", err)
+			}
 			call := &Call{
-				endpoint:  svc,
-				id:        "reinvite-refresh-call",
-				sessionID: "reinvite-refresh-session",
-				direction: CallDirectionIncoming,
-				state:     CallStateActive,
-				localURI:  "sip:001010123456789@example.com",
-				localTag:  "local-tag",
-				remoteURI: "sip:caller@example.com",
-				remoteTag: "remote-tag",
-				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
-				targetURI: "sip:caller@192.0.2.10:5060",
-				inviteSeq: 1,
-				localPort: 40000,
-				rtcpSSRC:  randomRTCPSSRC(),
+				endpoint:       svc,
+				id:             "reinvite-refresh-call",
+				sessionID:      "reinvite-refresh-session",
+				direction:      CallDirectionIncoming,
+				state:          CallStateActive,
+				localURI:       "sip:001010123456789@example.com",
+				localTag:       "local-tag",
+				remoteURI:      "sip:caller@example.com",
+				remoteTag:      "remote-tag",
+				remoteTo:       "<sip:caller@example.com>;tag=remote-tag",
+				targetURI:      "sip:caller@192.0.2.10:5060",
+				inviteSeq:      1,
+				localPort:      40000,
+				remotePayloads: remotePayloadMappings(initial),
+				rtcpSSRC:       randomRTCPSSRC(),
 			}
 			if err := svc.storeCall(call); err != nil {
 				t.Fatalf("storeCall() error = %v", err)
@@ -3379,6 +3502,9 @@ func TestIncomingReINVITESessionRefresh(t *testing.T) {
 			reinvite.Headers.Set("CSeq", "2 INVITE")
 			reinvite.Headers.Add("Supported", "timer")
 			reinvite.Headers.Add("Session-Expires", "180;refresher=uac")
+			if tt.updateBody != nil {
+				reinvite.Body = tt.updateBody(reinvite.Body)
+			}
 
 			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
 			if err != nil {
@@ -3387,9 +3513,12 @@ func TestIncomingReINVITESessionRefresh(t *testing.T) {
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
-			responses := transport.messagesByStatus(sipStatusOK, "INVITE")
+			responses := transport.messagesByStatus(tt.wantStatus, "INVITE")
 			if len(responses) != 1 {
-				t.Fatalf("200 INVITE count = %d, want 1", len(responses))
+				t.Fatalf("%d INVITE count = %d, want 1", tt.wantStatus, len(responses))
+			}
+			if tt.wantStatus != sipStatusOK {
+				return
 			}
 			if got := responses[0].Header("Session-Expires"); got != "180;refresher=uac" {
 				t.Fatalf("200 re-INVITE Session-Expires = %q, want 180;refresher=uac", got)
@@ -4804,8 +4933,8 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("incoming call event timed out")
 			}
-			if len(got.Offer.Codecs) != 0 {
-				t.Fatalf("incoming offer codecs = %v, want empty delayed offer", got.Offer.Codecs)
+			if len(got.Offer.Formats) != 0 {
+				t.Fatalf("incoming offer formats = %v, want empty delayed offer", got.Offer.Formats)
 			}
 			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
@@ -5435,7 +5564,7 @@ func TestCallHoldAllowsEmergencyOverride(t *testing.T) {
 				emergency: true,
 				localSDP:  inviteWithSDP().Body,
 			}
-			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification(callActionHold, true, mediaDirectionSendOnly); err != nil {
+			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification(callActionHold, true, MediaDirectionSendOnly); err != nil {
 				t.Fatalf("beginLocalHoldModification() error = %v", err)
 			} else {
 				clearPending()
@@ -5459,7 +5588,7 @@ func TestCallHoldPreconditionReINVITEMarksQoSMet(t *testing.T) {
 			call := &Call{
 				endpoint: &Endpoint{cfg: cfg},
 				state:    CallStateActive,
-				media:    NegotiatedMedia{Codec: CodecAMRWB},
+				media:    NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB}},
 				localSDP: []byte("v=0\r\n" +
 					"o=- 1 1 IN IP4 10.0.0.1\r\n" +
 					"s=-\r\n" +
@@ -5473,7 +5602,7 @@ func TestCallHoldPreconditionReINVITEMarksQoSMet(t *testing.T) {
 					"a=des:qos mandatory local sendrecv\r\n" +
 					"a=des:qos optional remote sendrecv\r\n"),
 			}
-			body, err := call.localSDPWithDirection(mediaDirectionSendOnly)
+			body, err := call.localSDPWithDirection(MediaDirectionSendOnly)
 			if err != nil {
 				t.Fatalf("localSDPWithDirection() error = %v", err)
 			}
@@ -5657,12 +5786,12 @@ func TestCallHoldBlocksRTPButAllowsRTCP(t *testing.T) {
 	tests := []struct {
 		name      string
 		hold      CallHoldState
-		direction mediaDirection
+		direction MediaDirection
 		wantRTP   bool
 	}{
-		{name: "local hold", hold: CallHoldLocal, direction: mediaDirectionSendOnly},
-		{name: "inactive media", hold: CallHoldRemote, direction: mediaDirectionInactive},
-		{name: "remote hold sendonly answer allows rtp", hold: CallHoldRemote, direction: mediaDirectionSendOnly, wantRTP: true},
+		{name: "local hold", hold: CallHoldLocal, direction: MediaDirectionSendOnly},
+		{name: "inactive media", hold: CallHoldRemote, direction: MediaDirectionInactive},
+		{name: "remote hold sendonly answer allows rtp", hold: CallHoldRemote, direction: MediaDirectionSendOnly, wantRTP: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5793,6 +5922,56 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			}
 			if got := byes[0].Header("Reason"); got != reasonMediaTimeout {
 				t.Fatalf("BYE Reason = %q, want %q", got, reasonMediaTimeout)
+			}
+		})
+	}
+}
+
+func TestOpenMediaEmitsNegotiatedMedia(t *testing.T) {
+	tests := []struct {
+		name      string
+		media     NegotiatedMedia
+		wantEvent bool
+	}{
+		{
+			name: "negotiated media",
+			media: NegotiatedMedia{
+				AudioFormat: AudioFormat{Codec: CodecEVS, PayloadType: 127, ClockRate: 16000, FMTP: "br=13.2"},
+				Negotiated:  true,
+				Profile:     defaultRTPProfile,
+			},
+			wantEvent: true,
+		},
+		{
+			name:  "local offer is not negotiated",
+			media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, PayloadType: 104, ClockRate: 16000}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan MediaEvent, 1)
+			call := &Call{
+				id: "call-id",
+				endpoint: &Endpoint{cfg: Config{OnMedia: func(event MediaEvent) {
+					events <- event
+				}}},
+				media: tt.media,
+			}
+			if err := call.openMedia(context.Background()); err != nil {
+				t.Fatalf("openMedia() error = %v", err)
+			}
+			select {
+			case event := <-events:
+				if !tt.wantEvent {
+					t.Fatalf("unexpected MediaEvent = %+v", event)
+				}
+				if event.Call != call || event.CallID != "call-id" || event.Media.Codec != tt.media.Codec || !event.Media.Negotiated {
+					t.Fatalf("MediaEvent = %+v", event)
+				}
+			default:
+				if tt.wantEvent {
+					t.Fatal("MediaEvent was not emitted")
+				}
 			}
 		})
 	}

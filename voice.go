@@ -13,7 +13,7 @@ type IncomingCall struct {
 	From       string
 	FromURI    string
 	FromNumber string
-	Offer      imsvoice.MediaOffer
+	Offer      imsvoice.MediaDescription
 	ReceivedAt time.Time
 }
 

@@ -330,11 +330,11 @@ func TestAMRWBPayloadRoundTrip(t *testing.T) {
 	}{
 		{
 			name:  "octet aligned",
-			media: NegotiatedMedia{Codec: CodecAMRWB, OctetAlign: true},
+			media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, OctetAlign: true}},
 		},
 		{
 			name:  "bandwidth efficient",
-			media: NegotiatedMedia{Codec: CodecAMRWB},
+			media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB}},
 		},
 	}
 
@@ -378,12 +378,12 @@ func TestAMRPayloadUsesNegotiatedFormat(t *testing.T) {
 	}{
 		{
 			name:       "bandwidth efficient",
-			media:      NegotiatedMedia{Codec: CodecAMRWB, PayloadType: 104},
+			media:      NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, PayloadType: 104}},
 			wantLength: 7,
 		},
 		{
 			name:       "octet aligned",
-			media:      NegotiatedMedia{Codec: CodecAMRWB, PayloadType: 104, OctetAlign: true},
+			media:      NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, PayloadType: 104, OctetAlign: true}},
 			wantLength: 8,
 		},
 	}
@@ -421,7 +421,7 @@ func TestAMRPayloadCodecRoundTrip(t *testing.T) {
 	}{
 		{
 			name:  "amr bandwidth efficient",
-			media: NegotiatedMedia{Codec: CodecAMR, PayloadType: 102},
+			media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMR, PayloadType: 102}},
 			payload: AMRPayload{
 				CMR: AMRNoModeRequest,
 				Frames: []AMRFrame{
@@ -432,7 +432,7 @@ func TestAMRPayloadCodecRoundTrip(t *testing.T) {
 		},
 		{
 			name:  "amr-wb octet aligned",
-			media: NegotiatedMedia{Codec: CodecAMRWB, PayloadType: 104, OctetAlign: true},
+			media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, PayloadType: 104, OctetAlign: true}},
 			payload: AMRPayload{
 				CMR: AMRNoModeRequest,
 				Frames: []AMRFrame{
@@ -472,7 +472,7 @@ func TestAMRPayloadCodecRoundTrip(t *testing.T) {
 }
 
 func TestAMRPayloadCodecAppend(t *testing.T) {
-	codec := AMRPayloadCodec{Media: NegotiatedMedia{Codec: CodecAMRWB, OctetAlign: true}}
+	codec := AMRPayloadCodec{Media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, OctetAlign: true}}}
 	payload := AMRPayload{
 		CMR: AMRNoModeRequest,
 		Frames: []AMRFrame{
@@ -499,7 +499,7 @@ func TestAMRBandwidthEfficientPayloadPreservesSpeechBits(t *testing.T) {
 		Quality:   true,
 		Data:      []byte{0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xf0},
 	}
-	codec := AMRPayloadCodec{Media: NegotiatedMedia{Codec: CodecAMRWB}}
+	codec := AMRPayloadCodec{Media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB}}}
 	wire, err := codec.Marshal(AMRPayload{CMR: -1, Frames: []AMRFrame{frame}})
 	if err != nil {
 		t.Fatalf("AMRPayloadCodec.Marshal() error = %v", err)
@@ -517,7 +517,7 @@ func TestAMRBandwidthEfficientPayloadPreservesSpeechBits(t *testing.T) {
 }
 
 func TestAMRPayloadRejectsWrongFrameSize(t *testing.T) {
-	codec := AMRPayloadCodec{Media: NegotiatedMedia{Codec: CodecAMRWB, OctetAlign: true}}
+	codec := AMRPayloadCodec{Media: NegotiatedMedia{AudioFormat: AudioFormat{Codec: CodecAMRWB, OctetAlign: true}}}
 	_, err := codec.Marshal(AMRPayload{
 		CMR:    -1,
 		Frames: []AMRFrame{{FrameType: 9, Quality: true, Data: []byte{0x01}}},

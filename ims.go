@@ -85,6 +85,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	setup.ims.ussd = ussd
 
 	voiceCfg := setup.imsCfg.Voice
+	voiceCfg.PhoneContextDomain = setup.imsCfg.PhoneContextDomain
 	if voiceCfg.PrepareMedia == nil {
 		voiceCfg.PrepareMedia = accessIMS.OpenMedia
 	}

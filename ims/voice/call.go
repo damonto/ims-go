@@ -20,10 +20,26 @@ func (c *Call) ID() string {
 func (c *Call) Media() NegotiatedMedia {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	media := c.media
+	return cloneNegotiatedMedia(c.media)
+}
+
+func cloneNegotiatedMedia(media NegotiatedMedia) NegotiatedMedia {
+	media.AudioFormat = cloneAudioFormat(media.AudioFormat)
+	media.RemoteFormat = cloneAudioFormat(media.RemoteFormat)
+	if media.DTMF != nil {
+		format := cloneAudioFormat(*media.DTMF)
+		media.DTMF = &format
+	}
 	media.RemoteIP = append(net.IP(nil), media.RemoteIP...)
 	media.RemoteRTCPIP = append(net.IP(nil), media.RemoteRTCPIP...)
 	return media
+}
+
+func cloneAudioFormat(format AudioFormat) AudioFormat {
+	if format.ChAwRecv != nil {
+		format.ChAwRecv = new(*format.ChAwRecv)
+	}
+	return format
 }
 
 func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {

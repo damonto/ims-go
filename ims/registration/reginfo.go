@@ -52,6 +52,8 @@ type regInfoContact struct {
 	ID          string                `xml:"id,attr"`
 	State       string                `xml:"state,attr"`
 	Event       string                `xml:"event,attr"`
+	CallID      string                `xml:"callid,attr"`
+	CSeq        string                `xml:"cseq,attr"`
 	ExpiresAttr string                `xml:"expires,attr"`
 	URI         string                `xml:"urn:ietf:params:xml:ns:reginfo uri"`
 	Expires     string                `xml:"urn:ietf:params:xml:ns:reginfo expires"`

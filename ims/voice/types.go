@@ -86,7 +86,7 @@ type IncomingCall struct {
 	From       string
 	FromURI    string
 	FromNumber string
-	Offer      MediaOffer
+	Offer      MediaDescription
 	Received   time.Time
 }
 
@@ -96,6 +96,14 @@ type CallEvent struct {
 	State  CallState
 	Hold   CallHoldState
 	Cause  string
+	At     time.Time
+}
+
+// MediaEvent reports an initial or updated negotiated media description.
+type MediaEvent struct {
+	Call   *Call
+	CallID string
+	Media  NegotiatedMedia
 	At     time.Time
 }
 
@@ -148,6 +156,7 @@ type Call struct {
 	localPort           int
 	incomingRequest     *session.Request
 	remoteOffer         sdpOffer
+	remotePayloads      map[int]rtpPayloadMapping
 	earlyDialogs        map[string]earlyDialog
 	inviteOK            sip.Message
 	inviteOKStop        chan struct{}

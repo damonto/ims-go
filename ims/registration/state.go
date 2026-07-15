@@ -151,6 +151,7 @@ func (s *Registrar) applyRegisterExpires(msg sip.Message) {
 
 func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
 	s.resetRegInfoState()
+	s.rememberRegisterTransaction(msg)
 	s.applyAssociatedURI(msg)
 	s.applyServiceRoutes(msg)
 	s.applyAuthenticationInfo(msg)
@@ -158,6 +159,18 @@ func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
 	s.extendActiveSecureAssociationLifetime(s.secureAssociationExpiresAt(time.Now()))
 	s.setRegistered(true)
 	s.applyRegisterKeepAlive(msg)
+}
+
+func (s *Registrar) rememberRegisterTransaction(msg sip.Message) {
+	callID := strings.TrimSpace(msg.Header("Call-ID"))
+	cseq := sip.CSeqNumber(msg.Header("CSeq"))
+	if callID == "" || cseq <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.lastRegisterCallID = callID
+	s.lastRegisterCSeq = cseq
+	s.mu.Unlock()
 }
 
 func (s *Registrar) setRegistered(registered bool) {

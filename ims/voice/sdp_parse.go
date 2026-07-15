@@ -3,24 +3,41 @@ package voice
 import (
 	"encoding"
 	"errors"
+	"fmt"
+	"net"
 	"strings"
 )
 
-var _ encoding.TextUnmarshaler = (*sdpOffer)(nil)
+var (
+	_ encoding.BinaryUnmarshaler = (*sdpOffer)(nil)
+	_ encoding.BinaryUnmarshaler = (*MediaDescription)(nil)
+)
 
-func parseSDP(text []byte) (sdpOffer, error) {
+// UnmarshalBinary decodes an SDP body into its audio media description.
+func (description *MediaDescription) UnmarshalBinary(data []byte) error {
+	*description = MediaDescription{}
 	var offer sdpOffer
-	if err := offer.UnmarshalText(text); err != nil {
-		return sdpOffer{}, err
+	if err := offer.UnmarshalBinary(data); err != nil {
+		return err
 	}
-	return offer, nil
+	*description = mediaDescriptionFromSDP(offer)
+	return nil
 }
 
-func (offer *sdpOffer) UnmarshalText(text []byte) error {
-	*offer = sdpOffer{Codecs: make(map[int]AudioCodecConfig), Direction: mediaDirectionSendRecv}
+func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
+	*offer = sdpOffer{
+		RawSDP:     append([]byte(nil), data...),
+		Codecs:     make(map[int]AudioCodecConfig),
+		FMTP:       make(map[int]string),
+		Direction:  MediaDirectionSendRecv,
+		AudioIndex: -1,
+	}
 	var mediaPayloads map[int]struct{}
 	inAudio := false
-	lines := strings.FieldsFunc(string(text), func(r rune) bool { return r == '\n' || r == '\r' })
+	seenMedia := false
+	sessionDirection := MediaDirectionSendRecv
+	var sessionIP net.IP
+	lines := strings.FieldsFunc(string(data), func(r rune) bool { return r == '\n' || r == '\r' })
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" {
@@ -32,15 +49,31 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			if err != nil {
 				return err
 			}
-			if inAudio || offer.RemoteIP == nil {
+			if !seenMedia {
+				sessionIP = append(net.IP(nil), ip...)
+				offer.RemoteIP = append(net.IP(nil), ip...)
+			} else if inAudio {
 				offer.RemoteIP = ip
 			}
-		case strings.HasPrefix(line, "m=audio "):
+		case !seenMedia && (strings.HasPrefix(line, "t=") || strings.HasPrefix(line, "r=") || strings.HasPrefix(line, "z=")):
+			offer.TimeDescriptions = append(offer.TimeDescriptions, line)
+		case strings.HasPrefix(line, "m=audio ") && offer.AudioIndex < 0:
 			var audio sdpAudioLine
 			if err := audio.UnmarshalText([]byte(line)); err != nil {
 				return err
 			}
+			media, err := parseMediaLine(line)
+			if err != nil {
+				return err
+			}
+			offer.Media = append(offer.Media, media)
+			offer.AudioIndex = len(offer.Media) - 1
+			seenMedia = true
 			inAudio = true
+			offer.Direction = sessionDirection
+			if len(sessionIP) > 0 {
+				offer.RemoteIP = append(net.IP(nil), sessionIP...)
+			}
 			offer.RemotePort = audio.Port
 			offer.Profile = audio.Protocol
 			offer.Payloads = audio.Payloads
@@ -50,11 +83,12 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			}
 		case strings.HasPrefix(line, "m="):
 			inAudio = false
+			seenMedia = true
 			media, err := parseMediaLine(line)
 			if err != nil {
 				return err
 			}
-			offer.UnsupportedMedia = append(offer.UnsupportedMedia, media)
+			offer.Media = append(offer.Media, media)
 		case strings.HasPrefix(line, "a=rtpmap:"):
 			if !inAudio {
 				continue
@@ -74,24 +108,24 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 				continue
 			}
 			payloadType, fmtp := parseFMTP(line)
-			codec := offer.Codecs[payloadType]
-			codec.OctetAlign = fmtpFlag(fmtp, "octet-align")
-			codec.ModeSet = fmtpParam(fmtp, "mode-set")
-			codec.Bitrate = fmtpParam(fmtp, "br")
-			codec.Bandwidth = fmtpParam(fmtp, "bw")
-			codec.HFOnly = fmtpFlag(fmtp, "hf-only")
-			if codec.Name == CodecTelephoneEvent {
-				codec.DTMFEventMask = parseTelephoneEventMask(fmtp)
-			}
-			if value, ok := fmtpSignedParam(fmtp, "ch-aw-recv"); ok {
-				codec.ChAwRecv = &value
-			}
-			if codec.Name != "" {
-				offer.Codecs[payloadType] = codec
+			if _, ok := mediaPayloads[payloadType]; ok {
+				offer.FMTP[payloadType] = strings.TrimSpace(fmtp)
 			}
 		case strings.HasPrefix(line, "a=ptime:"):
 			if inAudio {
-				offer.PTime = parseSDPDuration(strings.TrimPrefix(line, "a=ptime:"))
+				ptime, err := parseSDPDuration(strings.TrimPrefix(line, "a=ptime:"))
+				if err != nil {
+					return fmt.Errorf("parsing voice SDP: invalid ptime: %w", err)
+				}
+				offer.PTime = ptime
+			}
+		case strings.HasPrefix(line, "a=maxptime:"):
+			if inAudio {
+				maxptime, err := parseSDPDuration(strings.TrimPrefix(line, "a=maxptime:"))
+				if err != nil {
+					return fmt.Errorf("parsing voice SDP: invalid maxptime: %w", err)
+				}
+				offer.MaxPTime = maxptime
 			}
 		case strings.HasPrefix(line, "a=rtcp:"):
 			if !inAudio {
@@ -108,8 +142,11 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 				offer.RTCPMux = true
 			}
 		case isSDPDirectionLine(line):
+			direction := MediaDirection(strings.TrimPrefix(strings.ToLower(line), "a="))
 			if inAudio {
-				offer.Direction = mediaDirection(strings.TrimPrefix(strings.ToLower(line), "a="))
+				offer.Direction = direction
+			} else if !seenMedia {
+				sessionDirection = direction
 			}
 		case strings.HasPrefix(line, "a=curr:qos") || strings.HasPrefix(line, "a=des:qos") || strings.HasPrefix(line, "a=conf:qos"):
 			if inAudio {
@@ -140,13 +177,23 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			}
 		}
 	}
-	if offer.RemotePort == 0 {
+	if offer.AudioIndex < 0 || offer.RemotePort == 0 {
 		return errors.New("parsing voice SDP: audio media line is missing")
 	}
 	if offer.RemoteIP == nil {
 		return errors.New("parsing voice SDP: connection line is missing")
 	}
+	if offer.PTime > 0 && offer.MaxPTime > 0 && offer.PTime > offer.MaxPTime {
+		return errors.New("parsing voice SDP: ptime exceeds maxptime")
+	}
 	applyStaticRTPPayloads(offer)
+	for payloadType, fmtp := range offer.FMTP {
+		codec, ok := offer.Codecs[payloadType]
+		if !ok {
+			continue
+		}
+		offer.Codecs[payloadType] = applyCodecFMTP(codec, fmtp)
+	}
 	return nil
 }
 

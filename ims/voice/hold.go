@@ -25,10 +25,10 @@ func (c *Call) Resume(ctx context.Context) error {
 }
 
 func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
-	direction := mediaDirectionSendRecv
+	direction := MediaDirectionSendRecv
 	action := callActionResume
 	if hold {
-		direction = mediaDirectionSendOnly
+		direction = MediaDirectionSendOnly
 		action = callActionHold
 	}
 
@@ -76,7 +76,7 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 	return nil
 }
 
-func (c *Call) beginLocalHoldModification(action callAction, hold bool, direction mediaDirection) (dialogSnapshot, sessionTimerState, []byte, CallHoldState, []byte, func(), error) {
+func (c *Call) beginLocalHoldModification(action callAction, hold bool, direction MediaDirection) (dialogSnapshot, sessionTimerState, []byte, CallHoldState, []byte, func(), error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -111,13 +111,14 @@ func (c *Call) beginLocalHoldModification(action callAction, hold bool, directio
 	return c.dialogSnapshot(), c.sessionTimer, body, c.hold, append([]byte(nil), c.localSDP...), clearPending, nil
 }
 
-func (c *Call) localSDPWithDirection(direction mediaDirection) ([]byte, error) {
+func (c *Call) localSDPWithDirection(direction MediaDirection) ([]byte, error) {
 	if len(c.localSDP) != 0 {
 		return sdpWithDirection(c.localSDP, direction, c.endpoint.cfg.Preconditions), nil
 	}
 	offer := MediaOffer{}
 	if c.media.Codec != "" {
 		offer.Codecs = []AudioCodec{c.media.Codec}
+		offer.PayloadTypes = []int{c.media.PayloadType}
 	}
 	body, _, err := buildSDPOfferWithDirection(c.endpoint.cfg, c.endpoint.localIP(), c.localPort, offer, direction)
 	if err != nil {
@@ -129,7 +130,7 @@ func (c *Call) localSDPWithDirection(direction mediaDirection) ([]byte, error) {
 	return body, nil
 }
 
-func sdpWithDirection(body []byte, direction mediaDirection, qosMet bool) []byte {
+func sdpWithDirection(body []byte, direction MediaDirection, qosMet bool) []byte {
 	lines := strings.FieldsFunc(string(body), func(r rune) bool { return r == '\r' || r == '\n' })
 	out := make([]string, 0, len(lines)+1)
 	inAudio := false
@@ -188,18 +189,21 @@ func (c *Call) applyMediaReINVITEAnswer(ctx context.Context, resp sip.Message) e
 	if !ok {
 		return errors.New("missing re-INVITE SDP answer")
 	}
-	answer, err := parseSDP(body)
-	if err != nil {
+	var answer sdpOffer
+	if err := answer.UnmarshalBinary(body); err != nil {
 		return fmt.Errorf("parsing re-INVITE SDP answer: %w", err)
 	}
 	negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
 	if !ok {
 		return errors.New("no compatible re-INVITE answer codec")
 	}
+	if err := c.acceptRemotePayloadMappings(answer); err != nil {
+		return fmt.Errorf("applying re-INVITE SDP answer: %w", err)
+	}
 	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
 	c.mu.Lock()
 	current := c.media
-	c.media = negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), dtmf, hasDTMF)
+	c.media = negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, current.PTime), nonZeroDuration(answer.MaxPTime, current.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
 	c.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(ctx, callReleaseTimeout)
@@ -258,8 +262,8 @@ func holdHasRemote(state CallHoldState) bool {
 	return state == CallHoldRemote || state == CallHoldLocalRemote
 }
 
-func remoteHoldFromDirection(direction mediaDirection) bool {
-	return direction == mediaDirectionRecvOnly || direction == mediaDirectionInactive
+func remoteHoldFromDirection(direction MediaDirection) bool {
+	return direction == MediaDirectionRecvOnly || direction == MediaDirectionInactive
 }
 
 func normalizeHoldState(state CallHoldState) CallHoldState {
@@ -275,6 +279,6 @@ func callIsHeld(state CallHoldState) bool {
 	return holdHasLocal(state) || holdHasRemote(state)
 }
 
-func localMediaSendBlocked(direction mediaDirection) bool {
-	return direction == mediaDirectionRecvOnly || direction == mediaDirectionInactive
+func localMediaSendBlocked(direction MediaDirection) bool {
+	return direction == MediaDirectionRecvOnly || direction == MediaDirectionInactive
 }

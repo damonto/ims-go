@@ -114,6 +114,8 @@ type Registrar struct {
 	sessionID           string
 	tag                 string
 	cseq                int64
+	lastRegisterCallID  string
+	lastRegisterCSeq    int64
 
 	subscribeExpires     time.Duration
 	subscribeUnsupported bool

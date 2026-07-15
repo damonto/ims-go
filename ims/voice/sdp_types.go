@@ -6,41 +6,72 @@ import (
 )
 
 type MediaOffer struct {
-	Codecs []AudioCodec
-	PTime  time.Duration
+	Codecs       []AudioCodec
+	PayloadTypes []int
+	PTime        time.Duration
 }
 
+// AudioFormat describes one RTP payload format.
+type AudioFormat struct {
+	Codec         AudioCodec
+	PayloadType   int
+	ClockRate     int
+	Channels      int
+	FMTP          string
+	DTMFEventMask uint16
+	OctetAlign    bool
+	ModeSet       string
+	Bitrate       string
+	Bandwidth     string
+	ChAwRecv      *int
+	HFOnly        bool
+}
+
+// MediaDescription is the audio media description carried by SDP.
+type MediaDescription struct {
+	Formats      []AudioFormat
+	Profile      string
+	PTime        time.Duration
+	MaxPTime     time.Duration
+	Direction    MediaDirection
+	IP           net.IP
+	Port         int
+	RTCPIP       net.IP
+	RTCPPort     int
+	RTCPMux      bool
+	RTCPDisabled bool
+	RawSDP       []byte
+}
+
+// NegotiatedMedia describes the selected local and remote RTP format.
 type NegotiatedMedia struct {
-	Codec           AudioCodec
-	PayloadType     int
-	ClockRate       int
-	Channels        int
-	OctetAlign      bool
-	HFOnly          bool
-	HasDTMF         bool
-	DTMFPayloadType int
-	DTMFClockRate   int
-	DTMFEventMask   uint16
-	PTime           time.Duration
-	Direction       mediaDirection
-	RemoteIP        net.IP
-	RemotePort      int
-	RemoteRTCPIP    net.IP
-	RemoteRTCPPort  int
-	RTCPMux         bool
-	RTCPDisabled    bool
+	AudioFormat
+	RemoteFormat   AudioFormat
+	DTMF           *AudioFormat
+	Negotiated     bool
+	Profile        string
+	PTime          time.Duration
+	MaxPTime       time.Duration
+	Direction      MediaDirection
+	RemoteIP       net.IP
+	RemotePort     int
+	RemoteRTCPIP   net.IP
+	RemoteRTCPPort int
+	RTCPMux        bool
+	RTCPDisabled   bool
 }
 
-type mediaDirection string
+type MediaDirection string
 
 const (
-	mediaDirectionSendRecv mediaDirection = "sendrecv"
-	mediaDirectionSendOnly mediaDirection = "sendonly"
-	mediaDirectionRecvOnly mediaDirection = "recvonly"
-	mediaDirectionInactive mediaDirection = "inactive"
+	MediaDirectionSendRecv MediaDirection = "sendrecv"
+	MediaDirectionSendOnly MediaDirection = "sendonly"
+	MediaDirectionRecvOnly MediaDirection = "recvonly"
+	MediaDirectionInactive MediaDirection = "inactive"
 )
 
 type sdpOffer struct {
+	RawSDP                []byte
 	RemoteIP              net.IP
 	RemotePort            int
 	RemoteRTCPIP          net.IP
@@ -49,26 +80,33 @@ type sdpOffer struct {
 	Preconditions         bool
 	LocalQoSStatus        string
 	RemoteQoSConfirmation bool
+	TimeDescriptions      []string
 	Profile               string
 	Payloads              []int
 	Codecs                map[int]AudioCodecConfig
+	FMTP                  map[int]string
 	PTime                 time.Duration
+	MaxPTime              time.Duration
 	RTCPSenderBandwidth   *int
 	RTCPReceiverBandwidth *int
-	Direction             mediaDirection
-	UnsupportedMedia      []sdpMediaLine
+	Direction             MediaDirection
+	Media                 []sdpMediaLine
+	AudioIndex            int
 }
 
 type sdpMediaLine struct {
-	Media    string
-	Protocol string
-	Formats  []string
+	Media     string
+	Port      int
+	PortCount int
+	Protocol  string
+	Formats   []string
 }
 
 type sdpAudioLine struct {
-	Port     int
-	Protocol string
-	Payloads []int
+	Port      int
+	PortCount int
+	Protocol  string
+	Payloads  []int
 }
 
 type sdpConnectionLine struct {
