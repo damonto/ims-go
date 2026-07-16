@@ -481,6 +481,26 @@ func TestExchangeBeforeRunCanReceiveFromResponseTransport(t *testing.T) {
 	}
 }
 
+func TestSameSIPSentBy(t *testing.T) {
+	tests := []struct {
+		name        string
+		left, right string
+		want        bool
+	}{
+		{name: "same hostname", left: "P-CSCF.EXAMPLE:5060", right: "p-cscf.example:5060", want: true},
+		{name: "equivalent IPv6", left: "[240e:546:8757:4724::1]:53768", right: "[240E:0546:8757:4724:0:0:0:1]:53768", want: true},
+		{name: "different port", left: "[240e:546:8757:4724::1]:53768", right: "[240e:546:8757:4724::1]:5060", want: false},
+		{name: "different address", left: "[240e:546:8757:4724::1]:53768", right: "[240e:546:8757:4724::2]:53768", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sameSIPSentBy(tt.left, tt.right); got != tt.want {
+				t.Errorf("sameSIPSentBy(%q, %q) = %v, want %v", tt.left, tt.right, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExchangeBeforeRunUsesClientTransactionRetransmission(t *testing.T) {
 	tests := []struct {
 		name   string

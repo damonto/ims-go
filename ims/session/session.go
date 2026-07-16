@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -582,9 +583,18 @@ func responseMatchesRequestTransaction(req, resp sip.Message) bool {
 	}
 	if want := strings.TrimSpace(sip.TopViaSentBy(req.Header("Via"))); want != "" {
 		got := strings.TrimSpace(sip.TopViaSentBy(resp.Header("Via")))
-		return strings.EqualFold(got, want)
+		return sameSIPSentBy(got, want)
 	}
 	return true
+}
+
+func sameSIPSentBy(left, right string) bool {
+	if strings.EqualFold(left, right) {
+		return true
+	}
+	leftAddr, leftErr := netip.ParseAddrPort(left)
+	rightAddr, rightErr := netip.ParseAddrPort(right)
+	return leftErr == nil && rightErr == nil && leftAddr == rightAddr
 }
 
 func exchangeReadTransports(requestTransport Transport, responseTransports []Transport) []Transport {
