@@ -15,6 +15,7 @@ import (
 
 type refreshRegisterState struct {
 	adjustedExpires bool
+	flow            Flow
 }
 
 type pcscfReselectionRequired struct {
@@ -84,6 +85,31 @@ func PCSCFReselectionRequired(err error) bool {
 	return errors.As(err, &reselection)
 }
 
+// PCSCFFailoverRequired reports whether a registration response makes the
+// current P-CSCF unavailable under TS 24.229 registration recovery rules.
+func PCSCFFailoverRequired(err error, timerF time.Duration) bool {
+	if PCSCFReselectionRequired(err) {
+		return true
+	}
+	var response *sip.ResponseError
+	if !errors.As(err, &response) {
+		return false
+	}
+	switch response.StatusCode {
+	case sipStatusServerTimeout:
+		return true
+	case sipStatusServiceUnavailable:
+		delay, ok := RetryAfterDelay(err)
+		return !ok || delay > timerF
+	default:
+		if statusClass(response.StatusCode) < 4 || statusClass(response.StatusCode) > 6 {
+			return false
+		}
+		_, hasRetryAfter := RetryAfterDelay(err)
+		return !hasRetryAfter
+	}
+}
+
 func (s *Registrar) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *bool) error {
 	if *adjusted {
 		return errors.New("repeated 423 response")
@@ -97,13 +123,12 @@ func (s *Registrar) adjustRegisterExpiresFrom423(resp sip.Message, adjusted *boo
 	return nil
 }
 
-func (s *Registrar) buildRefreshRegister(ctx context.Context) (sip.Message, *security.Authorization, error) {
-	realm, nonce, algorithm, qop := s.currentAuthState()
-	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, algorithm, qop)
+func (s *Registrar) buildRefreshRegister(ctx context.Context, flow Flow) (sip.Message, *security.Authorization, error) {
+	auth, err := s.buildRegisterAuthorization(ctx, s.currentAuthChallenge())
 	if err != nil {
 		return sip.Message{}, nil, err
 	}
-	return s.buildRegister(auth, s.currentSecurityVerify()), auth, nil
+	return s.buildRegisterForFlow(auth, flow.SecurityVerify, flow), auth, nil
 }
 
 func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Message, state *refreshRegisterState, auth *security.Authorization) (bool, error) {
@@ -115,7 +140,7 @@ func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Mess
 		s.applyRegisterSuccess(resp)
 		return true, nil
 	case sipStatusUnauthorized, sipStatusProxyAuthenticationRequired:
-		if err := s.reauthenticateRefresh(ctx, resp); err != nil {
+		if err := s.reauthenticateRefresh(ctx, resp, state.flow); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -149,7 +174,7 @@ func reregistrationInitialRequiredStatus(status int) bool {
 }
 
 func registrationTimeoutRequiresInitial(err error) bool {
-	return session.TransactionTimerExpired(err, "F")
+	return session.TransactionTimerExpired(err, "F") || session.TransactionTransportFailed(err)
 }
 
 func initialRegistrationRequiredError(resp sip.Message) error {

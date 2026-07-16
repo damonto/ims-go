@@ -185,6 +185,18 @@ func (s *Session) notifyHandlersOnce(handlers []*handlerEntry, err error) {
 	}
 }
 
+func (s *Session) notifyHandlers(err error) {
+	for _, entry := range s.handlerSnapshot() {
+		handler, ok := entry.handlerIfOpen()
+		if !ok {
+			continue
+		}
+		if errorHandler, ok := handler.(ErrorHandler); ok {
+			errorHandler.HandleError(err)
+		}
+	}
+}
+
 func (a *handlerEntry) Close() error {
 	a.session.mu.Lock()
 	defer a.session.mu.Unlock()
@@ -212,6 +224,7 @@ func (a *transportAttachment) Close() error {
 	a.session.removeResponseRoutesFor(a.transport)
 	a.session.aux = removeTransport(a.session.aux, a.transport)
 	a.session.mu.Unlock()
+	a.session.abortTransportKeepAlives(a.transport, errors.New("waiting for keepalive: transport was detached"))
 	return a.transport.Close()
 }
 

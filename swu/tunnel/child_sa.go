@@ -28,6 +28,9 @@ func tunnelInfoFromChildSA(payloads []ike.Payload, cfg handshake.Config, request
 	if err := applyTunnelAddresses(&tunnel, *config, cfg); err != nil {
 		return Info{}, err
 	}
+	if err := validateLivenessConfig(*config); err != nil {
+		return Info{}, err
+	}
 	if err := applyN1ModeInfo(&tunnel, payloads, cfg); err != nil {
 		return Info{}, err
 	}
@@ -224,6 +227,8 @@ func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16)
 		pcscfIPv6Attr = configAttrPCSCFIPv6Address
 	}
 	var addresses tunnelAddressSet
+	internalIPv4Count := 0
+	internalIPv6Count := 0
 	for _, attr := range attrs {
 		switch attr.Type {
 		case configAttrInternalIPv4Address:
@@ -233,6 +238,10 @@ func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16)
 			if len(attr.Value) != net.IPv4len {
 				return tunnelAddressSet{}, configAttributeLengthError("internal ipv4 address", len(attr.Value), net.IPv4len)
 			}
+			internalIPv4Count++
+			if internalIPv4Count > 1 {
+				return tunnelAddressSet{}, errors.New("parsing configuration attributes: multiple internal ipv4 addresses exceed request")
+			}
 			addresses.internalIPv4 = append(net.IP(nil), attr.Value...)
 		case configAttrInternalIPv6Address:
 			if len(attr.Value) == 0 {
@@ -241,6 +250,10 @@ func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16)
 			address, err := ipv6AddressAttribute(attr.Value, "internal ipv6 address")
 			if err != nil {
 				return tunnelAddressSet{}, err
+			}
+			internalIPv6Count++
+			if internalIPv6Count > 1 {
+				return tunnelAddressSet{}, errors.New("parsing configuration attributes: multiple internal ipv6 addresses exceed request")
 			}
 			addresses.internalIPv6 = address
 			addresses.internalIPv6Prefix = ipv6Prefix(address.IP, address.PrefixLen)
@@ -264,6 +277,18 @@ func tunnelAddresses(attrs []ike.Attribute, pcscfIPv4Attr, pcscfIPv6Attr uint16)
 		}
 	}
 	return addresses, nil
+}
+
+func validateLivenessConfig(config ike.ConfigPayload) error {
+	for _, attr := range config.Attributes {
+		if attr.Type != configAttrTimeoutPeriodForLivenessCheck {
+			continue
+		}
+		if attr.Format != attributeFormatTLV || len(attr.Value) != 4 {
+			return fmt.Errorf("parsing configuration attributes: liveness timeout length %d, want 4", len(attr.Value))
+		}
+	}
+	return nil
 }
 
 func appendPCSCFAddressAttribute(addresses *tunnelAddressSet, value []byte, matchesIPv4, matchesIPv6 bool) error {
@@ -414,7 +439,7 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 		return nil, errors.New("identity is empty")
 	}
 	apn := strings.TrimSpace(cfg.APN)
-	if apn == "" {
+	if !cfg.RequestDefaultAPN && apn == "" {
 		apn = DefaultAPN
 	}
 	childSA := &ike.SecurityAssociationPayload{Proposals: childSAProposals(cfg, espSPI)}
@@ -425,13 +450,17 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 	selectors := ike.TrafficSelectorsAny()
 	payloads := []ike.Payload{
 		&ike.IDPayload{Tag: payloadTypeIDi, IDType: idTypeRFC822Addr, Data: []byte(identity)},
-		&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte(apn)},
+	}
+	if !cfg.RequestDefaultAPN {
+		payloads = append(payloads, &ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte(apn)})
+	}
+	payloads = append(payloads,
 		config,
 		childSA,
 		&ike.TrafficSelectorPayload{Tag: payloadTypeTSi, Selectors: selectors},
 		&ike.TrafficSelectorPayload{Tag: payloadTypeTSr, Selectors: selectors},
 		&ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypeEAPOnlyAuthentication},
-	}
+	)
 	if cfg.PCSCFRestoration {
 		payloads = append(payloads, &ike.NotifyPayload{ProtocolID: protocolIDUnset, NotifyType: notifyTypePCSCFReselectionSupport})
 	}

@@ -1,8 +1,11 @@
 package sip
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
+	"io"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -170,6 +173,21 @@ func TestWarningValueText(t *testing.T) {
 			value:   `399 ims.example bad`,
 			wantErr: true,
 		},
+		{
+			name:    "unescaped inner quote",
+			value:   `399 ims.example "bad "quote""`,
+			wantErr: true,
+		},
+		{
+			name:    "dangling escape",
+			value:   "399 ims.example \"bad\\\"",
+			wantErr: true,
+		},
+		{
+			name:    "newline in text",
+			value:   "399 ims.example \"bad\ntext\"",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -194,6 +212,26 @@ func TestWarningValueText(t *testing.T) {
 			}
 			if string(out) != tt.wantOut {
 				t.Fatalf("MarshalText() = %q, want %q", out, tt.wantOut)
+			}
+		})
+	}
+}
+
+func TestWarningValueMarshalTextRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		warning WarningValue
+	}{
+		{name: "agent with whitespace", warning: WarningValue{Code: 399, Agent: "bad agent", Text: "text"}},
+		{name: "agent with quote", warning: WarningValue{Code: 399, Agent: `bad"agent`, Text: "text"}},
+		{name: "newline in text", warning: WarningValue{Code: 399, Agent: "ims.example", Text: "bad\ntext"}},
+		{name: "control in text", warning: WarningValue{Code: 399, Agent: "ims.example", Text: "bad\x00text"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.warning.MarshalText(); err == nil {
+				t.Fatal("MarshalText() error = nil, want non-nil")
 			}
 		})
 	}
@@ -312,6 +350,30 @@ func TestParseMessageUsesContentLengthForBody(t *testing.T) {
 	}
 }
 
+func TestParseMessagePartialPreservesHeadersOnBodyError(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"truncated body", "MESSAGE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060\r\nContent-Length: 5\r\n\r\nhi"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, err := ParseMessagePartial([]byte(tt.data))
+			if err == nil {
+				t.Fatal("ParseMessagePartial() error = nil, want body framing error")
+			}
+			if msg.Method() != "MESSAGE" || msg.Header("Via") == "" {
+				t.Fatalf("ParseMessagePartial() = %#v, want preserved start-line and headers", msg)
+			}
+			if len(msg.Body) != 0 {
+				t.Fatalf("ParseMessagePartial() body length = %d, want 0", len(msg.Body))
+			}
+		})
+	}
+}
+
 func TestMessageMarshalTextRecognizesCompactContentLength(t *testing.T) {
 	msg := Message{
 		StartLine: "MESSAGE sip:+123@example.com SIP/2.0",
@@ -355,6 +417,16 @@ func TestSplitHeaderList(t *testing.T) {
 			value: `<sip:a@example.com;note=one,two>, <sip:b@example.com>`,
 			want:  []string{"<sip:a@example.com;note=one,two>", "<sip:b@example.com>"},
 		},
+		{
+			name:  "escaped quote and comma",
+			value: `"Doe\", Jane" <sip:jane@example.com>, <sip:bob@example.com>`,
+			want:  []string{`"Doe\", Jane" <sip:jane@example.com>`, "<sip:bob@example.com>"},
+		},
+		{
+			name:  "comma inside comment",
+			value: `<sip:jane@example.com> (Doe, Jane), <sip:bob@example.com>`,
+			want:  []string{"<sip:jane@example.com> (Doe, Jane)", "<sip:bob@example.com>"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -386,9 +458,9 @@ func TestAddressURIAndParams(t *testing.T) {
 			wantParams: ";expires=120",
 		},
 		{
-			name:       "strips uri params inside brackets",
+			name:       "preserves uri params inside brackets",
 			value:      `<sip:alice@example.com;transport=tcp>;expires=120`,
-			wantURI:    "sip:alice@example.com",
+			wantURI:    "sip:alice@example.com;transport=tcp",
 			wantParams: ";expires=120",
 		},
 		{
@@ -396,6 +468,12 @@ func TestAddressURIAndParams(t *testing.T) {
 			value:      `sip:alice@example.com;expires=120`,
 			wantURI:    "sip:alice@example.com",
 			wantParams: ";expires=120",
+		},
+		{
+			name:       "angle bracket in quoted display name",
+			value:      `"Alice <Ops>" <sip:alice@example.com;transport=tcp>;tag=remote`,
+			wantURI:    "sip:alice@example.com;transport=tcp",
+			wantParams: ";tag=remote",
 		},
 	}
 
@@ -413,6 +491,7 @@ func TestHeaderParam(t *testing.T) {
 	tests := []struct {
 		name   string
 		params string
+		key    string
 		want   string
 	}{
 		{
@@ -429,11 +508,21 @@ func TestHeaderParam(t *testing.T) {
 			params: `;Expires="120"`,
 			want:   "120",
 		},
+		{
+			name:   "quoted semicolon",
+			params: `;purpose="one;two";expires=120`,
+			key:    "purpose",
+			want:   "one;two",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := HeaderParam(tt.params, "expires"); got != tt.want {
+			key := tt.key
+			if key == "" {
+				key = "expires"
+			}
+			if got := HeaderParam(tt.params, key); got != tt.want {
 				t.Fatalf("HeaderParam() = %q, want %q", got, tt.want)
 			}
 		})
@@ -461,12 +550,69 @@ func TestParseMessageErrors(t *testing.T) {
 			name: "lf line endings",
 			data: "SIP/2.0 200 OK\nVia: SIP/2.0/UDP 127.0.0.1:5060\nContent-Length: 0\n\n",
 		},
+		{
+			name: "invalid request version",
+			data: "MESSAGE sip:bob@example.com SIP/3.0\r\nContent-Length: 0\r\n\r\n",
+		},
+		{
+			name: "invalid response code",
+			data: "SIP/2.0 20 OK\r\nContent-Length: 0\r\n\r\n",
+		},
+		{
+			name: "invalid header name",
+			data: "SIP/2.0 200 OK\r\nBad@Name: value\r\nContent-Length: 0\r\n\r\n",
+		},
+		{
+			name: "mixed header line endings",
+			data: "SIP/2.0 200 OK\r\nVia: first\nVia: second\r\nContent-Length: 0\r\n\r\n",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := ParseMessage([]byte(tt.data)); err == nil {
 				t.Fatal("ParseMessage() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestMessageValidate(t *testing.T) {
+	valid := NewRequest("MESSAGE", "sip:bob@example.com")
+	valid.Headers = Headers{
+		{Name: "Via", Value: "SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK1"},
+		{Name: "From", Value: "<sip:alice@example.com>;tag=local"},
+		{Name: "To", Value: "<sip:bob@example.com>"},
+		{Name: "Call-ID", Value: "call-1"},
+		{Name: "CSeq", Value: "1 MESSAGE"},
+		{Name: "Max-Forwards", Value: "70"},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Message)
+		wantOK bool
+	}{
+		{name: "valid", mutate: func(*Message) {}, wantOK: true},
+		{name: "missing via", mutate: func(msg *Message) { msg.Headers.Del("Via") }},
+		{name: "missing from tag is accepted for rfc2543 compatibility", mutate: func(msg *Message) { msg.Headers.Set("From", "<sip:alice@example.com>") }, wantOK: true},
+		{name: "bad max forwards", mutate: func(msg *Message) { msg.Headers.Set("Max-Forwards", "many") }},
+		{name: "mismatched cseq method", mutate: func(msg *Message) { msg.Headers.Set("CSeq", "1 INVITE") }},
+		{name: "duplicate call id", mutate: func(msg *Message) { msg.Headers.Add("Call-ID", "call-2") }},
+		{name: "invalid cseq method", mutate: func(msg *Message) { msg.Headers.Set("CSeq", "1 BAD/METHOD") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := valid
+			msg.Headers = valid.Headers.Clone()
+			tt.mutate(&msg)
+			err := msg.Validate()
+			if tt.wantOK && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Fatal("Validate() error = nil, want non-nil")
 			}
 		})
 	}
@@ -495,6 +641,53 @@ func TestHeadersRoundTrip(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got[%d] = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestHeadersWriteToRejectsInjection(t *testing.T) {
+	tests := []struct {
+		name   string
+		header Header
+	}{
+		{name: "invalid name", header: Header{Name: "Bad Name", Value: "value"}},
+		{name: "carriage return in value", header: Header{Name: "Subject", Value: "safe\rInjected: yes"}},
+		{name: "line feed in value", header: Header{Name: "Subject", Value: "safe\nInjected: yes"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if _, err := (Headers{tt.header}).WriteTo(&buf); err == nil {
+				t.Fatal("WriteTo() error = nil, want non-nil")
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("WriteTo() wrote %d bytes before validation", buf.Len())
+			}
+		})
+	}
+}
+
+func TestMessageWriteToRejectsInvalidStartLine(t *testing.T) {
+	tests := []struct {
+		name      string
+		startLine string
+	}{
+		{name: "bad version", startLine: "MESSAGE sip:bob@example.com SIP/3.0"},
+		{name: "injected line", startLine: "MESSAGE sip:bob@example.com SIP/2.0\r\nInjected: yes"},
+		{name: "bad response code", startLine: "SIP/2.0 20 OK"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			msg := Message{StartLine: tt.startLine}
+			if _, err := msg.WriteTo(&buf); err == nil {
+				t.Fatal("WriteTo() error = nil, want non-nil")
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("WriteTo() wrote %d bytes before validation", buf.Len())
+			}
+		})
 	}
 }
 
@@ -604,35 +797,118 @@ func mustMarshalText(t *testing.T, msg Message) string {
 	return string(text)
 }
 
-func TestMessageReadFromWithoutContentLengthUsesRemainingBytes(t *testing.T) {
+func TestMessageReadFromRejectsMissingContentLength(t *testing.T) {
 	raw := "MESSAGE sip:+123@example.com SIP/2.0\r\nVia: SIP/2.0/TCP 127.0.0.1:5060\r\n\r\nhello"
 
 	var msg Message
 	read, err := msg.ReadFrom(strings.NewReader(raw))
-	if err != nil {
-		t.Fatalf("ReadFrom() error = %v", err)
+	if err == nil {
+		t.Fatal("ReadFrom() error = nil, want missing Content-Length error")
 	}
-	if read != int64(len(raw)) {
-		t.Fatalf("ReadFrom() bytes = %d, want %d", read, len(raw))
-	}
-	if got := string(msg.Body); got != "hello" {
-		t.Fatalf("Body = %q, want %q", got, "hello")
+	if read >= int64(len(raw)) {
+		t.Fatalf("ReadFrom() bytes = %d, want fewer than %d", read, len(raw))
 	}
 }
 
-func TestMessageReadFromCountsLFLineEndings(t *testing.T) {
+func TestMessageReadFromRejectsLFLineEndings(t *testing.T) {
 	raw := "MESSAGE sip:+123@example.com SIP/2.0\nVia: SIP/2.0/TCP 127.0.0.1:5060\nContent-Length: 5\n\nhello"
 
 	var msg Message
 	read, err := msg.ReadFrom(strings.NewReader(raw))
-	if err != nil {
-		t.Fatalf("ReadFrom() error = %v", err)
+	if err == nil {
+		t.Fatal("ReadFrom() error = nil, want invalid line ending error")
 	}
-	if read != int64(len(raw)) {
-		t.Fatalf("ReadFrom() bytes = %d, want %d", read, len(raw))
+	if read == 0 {
+		t.Fatal("ReadFrom() bytes = 0, want consumed bytes")
 	}
-	if got := string(msg.Body); got != "hello" {
-		t.Fatalf("Body = %q, want %q", got, "hello")
+}
+
+func TestMessageReadFromPreservesNextMessage(t *testing.T) {
+	first := "SIP/2.0 100 Trying\r\nContent-Length: 0\r\n\r\n"
+	second := "SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"
+	tests := []struct {
+		name string
+		new  func(string) io.Reader
+	}{
+		{name: "plain reader", new: func(value string) io.Reader { return strings.NewReader(value) }},
+		{name: "buffered reader", new: func(value string) io.Reader { return bufio.NewReader(strings.NewReader(value)) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := tt.new(first + second)
+			var firstMsg, secondMsg Message
+			if _, err := firstMsg.ReadFrom(r); err != nil {
+				t.Fatalf("first ReadFrom() error = %v", err)
+			}
+			if _, err := secondMsg.ReadFrom(r); err != nil {
+				t.Fatalf("second ReadFrom() error = %v", err)
+			}
+			if firstMsg.StatusCode() != 100 || secondMsg.StatusCode() != 200 {
+				t.Fatalf("status codes = %d, %d; want 100, 200", firstMsg.StatusCode(), secondMsg.StatusCode())
+			}
+		})
+	}
+}
+
+func TestMessageMarshalTextCorrectsContentLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers Headers
+		want    string
+	}{
+		{name: "stale long form", headers: Headers{{Name: "Content-Length", Value: "0"}}, want: "Content-Length: 5"},
+		{name: "stale compact form", headers: Headers{{Name: "l", Value: "99"}}, want: "l: 5"},
+		{name: "duplicate forms", headers: Headers{{Name: "Content-Length", Value: "0"}, {Name: "l", Value: "99"}}, want: "Content-Length: 5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := NewRequest("MESSAGE", "sip:bob@example.com")
+			msg.Headers = tt.headers
+			msg.Body = []byte("hello")
+			got := mustMarshalText(t, msg)
+			if !strings.Contains(got, "\r\n"+tt.want+"\r\n") {
+				t.Fatalf("MarshalText() = %q, want %q", got, tt.want)
+			}
+			count := strings.Count(strings.ToLower(got), "\r\ncontent-length:") + strings.Count(strings.ToLower(got), "\r\nl:")
+			if count != 1 {
+				t.Fatalf("MarshalText() Content-Length count = %d, want 1", count)
+			}
+		})
+	}
+}
+
+func TestSetResponseViaPeer(t *testing.T) {
+	tests := []struct {
+		name string
+		peer net.Addr
+		via  string
+		want string
+	}{
+		{
+			name: "udp nat fills received and rport",
+			peer: &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 45000},
+			via:  "SIP/2.0/UDP 192.168.1.5:5060;branch=z9hG4bK1;rport",
+			want: "SIP/2.0/UDP 192.168.1.5:5060;branch=z9hG4bK1;rport=45000;received=203.0.113.10",
+		},
+		{
+			name: "udp public address only fills rport",
+			peer: &net.UDPAddr{IP: net.ParseIP("203.0.113.10"), Port: 45000},
+			via:  "SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK1;rport",
+			want: "SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK1;rport=45000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := NewResponse(200, "OK")
+			resp.Headers.Add("Via", tt.via)
+			SetResponseViaPeer(&resp, tt.peer)
+			if got := resp.Header("Via"); got != tt.want {
+				t.Fatalf("Via = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -678,11 +954,32 @@ func TestHelpers(t *testing.T) {
 	if got := WithTag("<sip:bob@example.com>", "", "abc"); got != "<sip:bob@example.com>;tag=abc" {
 		t.Fatalf("WithTag() = %q", got)
 	}
+	if got := WithTag("<sip:bob@example.com;tag=uri>", "", "header"); got != "<sip:bob@example.com;tag=uri>;tag=header" {
+		t.Fatalf("WithTag() URI tag = %q", got)
+	}
+	if got := HeaderTag("<sip:bob@example.com;tag=uri>;tag=header"); got != "header" {
+		t.Fatalf("HeaderTag() = %q, want header", got)
+	}
 	if got := CSeqNumber(msg.Header("CSeq")); got != 42 {
 		t.Fatalf("CSeqNumber() = %d", got)
 	}
 	if !TokenListContains("path, sec-agree", "sec-agree") {
 		t.Fatal("TokenListContains() = false, want true")
+	}
+	msg.Headers.Add("Supported", "path")
+	msg.Headers.Add("Supported", "100rel,timer")
+	if !msg.HeaderHasToken("Supported", "timer") {
+		t.Fatal("HeaderHasToken() = false, want token from second field")
+	}
+	msg.Headers.Add("Record-Route", `<sip:p1.example.com;lr>, "Proxy, Two" <sip:p2.example.com;lr>`)
+	msg.Headers.Add("Record-Route", `<sip:p3.example.com;lr>`)
+	wantRoutes := []string{
+		"<sip:p1.example.com;lr>",
+		`"Proxy, Two" <sip:p2.example.com;lr>`,
+		"<sip:p3.example.com;lr>",
+	}
+	if got := msg.HeaderList("Record-Route"); !slices.Equal(got, wantRoutes) {
+		t.Fatalf("HeaderList() = %#v, want %#v", got, wantRoutes)
 	}
 }
 
@@ -771,6 +1068,12 @@ func TestTopViaHasKeepDistinguishesBareParameter(t *testing.T) {
 		{
 			name: "quoted keep",
 			via:  `SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1;keep="45"`,
+			want: "45",
+			has:  true,
+		},
+		{
+			name: "quoted extension before keep",
+			via:  `SIP/2.0/TCP 127.0.0.1:5060;extension="one;two";keep=45`,
 			want: "45",
 			has:  true,
 		},

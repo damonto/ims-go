@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -50,6 +51,15 @@ func ParseMessage(data []byte) (Message, error) {
 		return Message{}, err
 	}
 	return msg, nil
+}
+
+// ParseMessagePartial preserves a syntactically valid start-line and header
+// section when body framing fails. It is intended for protocol error responses;
+// callers must not dispatch a message returned with a non-nil error.
+func ParseMessagePartial(data []byte) (Message, error) {
+	var msg Message
+	err := msg.parseBytes(data)
+	return msg, err
 }
 
 func (hs Headers) Get(name string) string {
@@ -131,6 +141,9 @@ func (hs *Headers) UnmarshalText(text []byte) error {
 }
 
 func (hs Headers) WriteTo(w io.Writer) (int64, error) {
+	if err := hs.validate(); err != nil {
+		return 0, err
+	}
 	counter := writeCounter{w: w}
 	for _, header := range hs {
 		if err := counter.writeHeader(header); err != nil {
@@ -149,7 +162,8 @@ func (m Message) Method() string {
 }
 
 func (m Message) IsRequest() bool {
-	return !strings.HasPrefix(m.StartLine, "SIP/2.0")
+	version, _, _ := strings.Cut(m.StartLine, " ")
+	return !strings.EqualFold(version, "SIP/2.0")
 }
 
 func (m Message) StatusCode() int {
@@ -183,6 +197,68 @@ func (m Message) HeadersByName(name string) []string {
 	return m.Headers.Values(name)
 }
 
+// HeaderHasToken reports whether any occurrence of a comma-separated header
+// contains want. SIP permits list-valued fields to be split across lines.
+func (m Message) HeaderHasToken(name, want string) bool {
+	for _, value := range m.Headers.Values(name) {
+		if TokenListContains(value, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// HeaderList returns all comma-separated values for a list-valued field in
+// wire order, including values spread across repeated header lines.
+func (m Message) HeaderList(name string) []string {
+	values := make([]string, 0, len(m.Headers.Values(name)))
+	for _, value := range m.Headers.Values(name) {
+		values = append(values, SplitHeaderList(value)...)
+	}
+	return values
+}
+
+// Validate checks the core fields required before a SIP message enters
+// transaction processing. Parsing and validation stay separate so callers can
+// still inspect a syntactically readable malformed message.
+func (m Message) Validate() error {
+	if err := validateStartLine(m.StartLine); err != nil {
+		return err
+	}
+	required := []string{"Via", "From", "To", "Call-ID", "CSeq"}
+	if m.IsRequest() {
+		required = append(required, "Max-Forwards")
+	}
+	for _, name := range required {
+		values := m.Headers.Values(name)
+		if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+			return fmt.Errorf("validating SIP message: missing %s header", name)
+		}
+		if name != "Via" && len(values) != 1 {
+			return fmt.Errorf("validating SIP message: multiple %s headers", name)
+		}
+	}
+	if m.IsRequest() {
+		if _, err := strconv.ParseUint(strings.TrimSpace(m.Header("Max-Forwards")), 10, 32); err != nil {
+			return fmt.Errorf("validating SIP Max-Forwards %q: %w", m.Header("Max-Forwards"), err)
+		}
+		if !strings.EqualFold(CSeqMethod(m.Header("CSeq")), m.Method()) {
+			return fmt.Errorf("validating SIP message: CSeq method %q does not match %q", CSeqMethod(m.Header("CSeq")), m.Method())
+		}
+	}
+	cseqFields := strings.Fields(m.Header("CSeq"))
+	if len(cseqFields) != 2 {
+		return fmt.Errorf("validating SIP CSeq %q: expected number and method", m.Header("CSeq"))
+	}
+	if !isSIPToken(cseqFields[1]) {
+		return fmt.Errorf("validating SIP CSeq method %q: invalid method", cseqFields[1])
+	}
+	if _, err := strconv.ParseUint(cseqFields[0], 10, 31); err != nil {
+		return fmt.Errorf("validating SIP CSeq %q: %w", m.Header("CSeq"), err)
+	}
+	return nil
+}
+
 func (m Message) MarshalText() ([]byte, error) {
 	var buf bytes.Buffer
 	if _, err := m.WriteTo(&buf); err != nil {
@@ -196,6 +272,13 @@ func (m *Message) UnmarshalText(text []byte) error {
 }
 
 func (m Message) WriteTo(w io.Writer) (int64, error) {
+	if err := validateStartLine(m.StartLine); err != nil {
+		return 0, err
+	}
+	headers := m.serializedHeaders()
+	if err := headers.validate(); err != nil {
+		return 0, err
+	}
 	counter := writeCounter{w: w}
 	if err := counter.writeString(m.StartLine); err != nil {
 		return counter.n, err
@@ -203,7 +286,6 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 	if err := counter.writeString("\r\n"); err != nil {
 		return counter.n, err
 	}
-	headers := m.serializedHeaders()
 	if _, err := headers.WriteTo(&counter); err != nil {
 		return counter.n, err
 	}
@@ -217,7 +299,12 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (m *Message) ReadFrom(r io.Reader) (int64, error) {
-	br := bufio.NewReader(r)
+	br, ok := r.(*bufio.Reader)
+	if !ok {
+		// A temporary buffered reader must not read into the next SIP message.
+		// Limiting each underlying read keeps unread bytes with the caller.
+		br = bufio.NewReader(&singleByteReader{r: r})
+	}
 	startLine, headers, n, err := readHeaderSection(br)
 	if err != nil {
 		return n, err
@@ -295,11 +382,8 @@ func AddressURI(value string) string {
 	if value == "" {
 		return ""
 	}
-	if left := strings.IndexByte(value, '<'); left >= 0 {
-		right := strings.IndexByte(value[left+1:], '>')
-		if right >= 0 {
-			return strings.TrimSpace(value[left+1 : left+1+right])
-		}
+	if left, right, ok := nameAddrBounds(value); ok {
+		return strings.TrimSpace(value[left+1 : right])
 	}
 	if idx := strings.IndexByte(value, ';'); idx >= 0 {
 		return strings.TrimSpace(value[:idx])
@@ -314,15 +398,8 @@ func AddressURIAndParams(value string) (string, string) {
 	if value == "" {
 		return "", ""
 	}
-	if left := strings.IndexByte(value, '<'); left >= 0 {
-		right := strings.IndexByte(value[left+1:], '>')
-		if right >= 0 {
-			uri := strings.TrimSpace(value[left+1 : left+1+right])
-			if semi := strings.IndexByte(uri, ';'); semi >= 0 {
-				uri = strings.TrimSpace(uri[:semi])
-			}
-			return uri, value[left+1+right+1:]
-		}
+	if left, right, ok := nameAddrBounds(value); ok {
+		return strings.TrimSpace(value[left+1 : right]), value[right+1:]
 	}
 	if semi := strings.IndexByte(value, ';'); semi >= 0 {
 		return strings.TrimSpace(value[:semi]), value[semi:]
@@ -340,21 +417,41 @@ func SplitHeaderList(value string) []string {
 	parts := make([]string, 0, 1)
 	start := 0
 	inQuote := false
+	escaped := false
 	angleDepth := 0
+	commentDepth := 0
 	for i := range len(value) {
+		if escaped {
+			escaped = false
+			continue
+		}
 		switch value[i] {
+		case '\\':
+			if inQuote || commentDepth > 0 {
+				escaped = true
+			}
 		case '"':
-			inQuote = !inQuote
-		case '<':
+			if commentDepth == 0 {
+				inQuote = !inQuote
+			}
+		case '(':
 			if !inQuote {
+				commentDepth++
+			}
+		case ')':
+			if !inQuote && commentDepth > 0 {
+				commentDepth--
+			}
+		case '<':
+			if !inQuote && commentDepth == 0 {
 				angleDepth++
 			}
 		case '>':
-			if !inQuote && angleDepth > 0 {
+			if !inQuote && commentDepth == 0 && angleDepth > 0 {
 				angleDepth--
 			}
 		case ',':
-			if !inQuote && angleDepth == 0 {
+			if !inQuote && commentDepth == 0 && angleDepth == 0 {
 				part := strings.TrimSpace(value[start:i])
 				if part != "" {
 					parts = append(parts, part)
@@ -372,7 +469,12 @@ func SplitHeaderList(value string) []string {
 // HeaderParam returns a semicolon parameter value using SIP's case-insensitive
 // parameter names.
 func HeaderParam(params, name string) string {
-	for part := range strings.SplitSeq(params, ";") {
+	value, _ := headerParam(params, name)
+	return value
+}
+
+func headerParam(params, name string) (string, bool) {
+	for _, part := range splitSemicolonParams(params) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -381,23 +483,14 @@ func HeaderParam(params, name string) string {
 		if !ok || !strings.EqualFold(strings.TrimSpace(key), name) {
 			continue
 		}
-		return strings.Trim(strings.TrimSpace(value), `"`)
+		return unquoteSIPString(strings.TrimSpace(value)), true
 	}
-	return ""
+	return "", false
 }
 
 func HeaderTag(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	for part := range strings.SplitSeq(value, ";") {
-		name, val, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if ok && strings.EqualFold(name, "tag") {
-			return strings.Trim(strings.TrimSpace(val), `"`)
-		}
-	}
-	return ""
+	_, params := AddressURIAndParams(value)
+	return HeaderParam(params, "tag")
 }
 
 func WithTag(headerValue, fallbackURI, tag string) string {
@@ -405,7 +498,7 @@ func WithTag(headerValue, fallbackURI, tag string) string {
 	if base == "" {
 		base = fmt.Sprintf("<%s>", fallbackURI)
 	}
-	if strings.Contains(strings.ToLower(base), ";tag=") {
+	if _, ok := headerParam(addressHeaderParams(base), "tag"); ok {
 		return base
 	}
 	return base + ";tag=" + tag
@@ -482,6 +575,65 @@ func TokenListContains(value, want string) bool {
 	return false
 }
 
+// SetResponseViaPeer records the packet source in the response's top Via.
+// RFC 3261 uses received, and RFC 3581 uses rport, to route responses through
+// address and port translation without trusting the request's sent-by value.
+func SetResponseViaPeer(resp *Message, peer net.Addr) {
+	host, port, udp := sipPeerAddress(peer)
+	if host == "" {
+		return
+	}
+	for i := range resp.Headers {
+		if !strings.EqualFold(resp.Headers[i].Name, "Via") {
+			continue
+		}
+		top, rest, found := strings.Cut(resp.Headers[i].Value, ",")
+		if sentByHost(TopViaSentBy(top)) != host {
+			top = upsertViaParam(top, "received", host)
+		}
+		if udp && TopViaHasRPort(top) {
+			top = upsertViaParam(top, "rport", strconv.Itoa(port))
+		}
+		if found {
+			resp.Headers[i].Value = top + "," + rest
+		} else {
+			resp.Headers[i].Value = top
+		}
+		return
+	}
+}
+
+func sipPeerAddress(peer net.Addr) (host string, port int, udp bool) {
+	switch addr := peer.(type) {
+	case *net.UDPAddr:
+		return addr.IP.String(), addr.Port, true
+	case *net.TCPAddr:
+		return addr.IP.String(), addr.Port, false
+	default:
+		return "", 0, false
+	}
+}
+
+func sentByHost(sentBy string) string {
+	host, _, err := net.SplitHostPort(sentBy)
+	if err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(sentBy, "[]")
+}
+
+func upsertViaParam(via, name, value string) string {
+	fields := splitSemicolonParams(via)
+	for i := 1; i < len(fields); i++ {
+		key, _, _ := strings.Cut(strings.TrimSpace(fields[i]), "=")
+		if strings.EqualFold(key, name) {
+			fields[i] = name + "=" + value
+			return strings.Join(fields, ";")
+		}
+	}
+	return via + ";" + name + "=" + value
+}
+
 func topViaValue(value string) string {
 	value, _, _ = strings.Cut(value, ",")
 	return strings.TrimSpace(value)
@@ -497,7 +649,7 @@ func topViaParam(value, want string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	for field := range strings.SplitSeq(after, ";") {
+	for _, field := range splitSemicolonParams(after) {
 		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !strings.EqualFold(name, want) {
 			continue
@@ -505,7 +657,7 @@ func topViaParam(value, want string) (string, bool) {
 		if !ok {
 			return "", true
 		}
-		return strings.Trim(strings.TrimSpace(rawValue), `"`), true
+		return unquoteSIPString(strings.TrimSpace(rawValue)), true
 	}
 	return "", false
 }
@@ -520,12 +672,15 @@ func (m *Message) parseBytes(data []byte) error {
 	if err != nil {
 		return err
 	}
-	body, err = bodyFromContentLength(body, headers)
-	if err != nil {
+	if err := validateStartLine(startLine); err != nil {
 		return err
 	}
 	m.StartLine = startLine
 	m.Headers = headers
+	body, err = bodyFromContentLength(body, headers)
+	if err != nil {
+		return err
+	}
 	m.Body = append([]byte(nil), body...)
 	return nil
 }
@@ -539,6 +694,9 @@ func splitMessageSections(data []byte) ([]byte, []byte, error) {
 }
 
 func parseHeaderBlock(data []byte) (Headers, error) {
+	if err := validateCRLFBlock(data); err != nil {
+		return nil, err
+	}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 1024), max(64*1024, len(data)+1))
 	headers := make(Headers, 0, 8)
@@ -556,6 +714,9 @@ func parseHeaderBlock(data []byte) (Headers, error) {
 }
 
 func parseMessageHeaderBlock(data []byte) (string, Headers, error) {
+	if err := validateCRLFBlock(data); err != nil {
+		return "", nil, err
+	}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 1024), max(64*1024, len(data)+1))
 	if !scanner.Scan() {
@@ -591,7 +752,7 @@ func appendParsedHeader(headers Headers, line string) (Headers, error) {
 		return headers, nil
 	}
 	idx := strings.IndexByte(line, ':')
-	if idx <= 0 || strings.ContainsAny(line[:idx], " \t") {
+	if idx <= 0 || !isSIPToken(line[:idx]) {
 		return nil, fmt.Errorf("parsing SIP header %q: invalid header", line)
 	}
 	name := strings.TrimSpace(line[:idx])
@@ -656,6 +817,9 @@ func readHeaderSection(br *bufio.Reader) (string, Headers, int64, error) {
 		}
 		startLine = line
 	}
+	if err := validateStartLine(startLine); err != nil {
+		return "", nil, total, err
+	}
 	headers := make(Headers, 0, 8)
 	for {
 		line, lineN, err := readLine(br)
@@ -679,9 +843,10 @@ func readLine(br *bufio.Reader) (string, int64, error) {
 	if err != nil {
 		return "", consumed, err
 	}
-	line = strings.TrimSuffix(line, "\n")
-	line = strings.TrimSuffix(line, "\r")
-	return line, consumed, nil
+	if !strings.HasSuffix(line, "\r\n") {
+		return "", consumed, errors.New("parsing SIP message: line is not terminated by CRLF")
+	}
+	return strings.TrimSuffix(line, "\r\n"), consumed, nil
 }
 
 func readBody(br *bufio.Reader, headers Headers) ([]byte, int64, error) {
@@ -690,8 +855,7 @@ func readBody(br *bufio.Reader, headers Headers) ([]byte, int64, error) {
 		return nil, 0, err
 	}
 	if !ok {
-		body, err := io.ReadAll(br)
-		return body, int64(len(body)), err
+		return nil, 0, errors.New("parsing SIP stream: missing Content-Length")
 	}
 	body := make([]byte, length)
 	n, err := io.ReadFull(br, body)
@@ -738,13 +902,169 @@ func contentLength(headers Headers) (int, bool, error) {
 }
 
 func (m Message) serializedHeaders() Headers {
-	headers := m.Headers.Clone()
-	for _, header := range headers {
+	headers := make(Headers, 0, len(m.Headers)+1)
+	found := false
+	for _, header := range m.Headers {
 		if strings.EqualFold(expandedHeaderName(header.Name), "Content-Length") {
-			return headers
+			if found {
+				continue
+			}
+			header.Value = strconv.Itoa(len(m.Body))
+			found = true
 		}
+		headers = append(headers, header)
+	}
+	if found {
+		return headers
 	}
 	return append(headers, Header{Name: "Content-Length", Value: strconv.Itoa(len(m.Body))})
+}
+
+func validateStartLine(line string) error {
+	if strings.ContainsAny(line, "\r\n") {
+		return errors.New("parsing SIP message: invalid start line")
+	}
+	if strings.HasPrefix(strings.ToUpper(line), "SIP/2.0 ") {
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) != 3 {
+			return fmt.Errorf("parsing SIP status line %q: invalid status line", line)
+		}
+		if len(parts[1]) != 3 {
+			return fmt.Errorf("parsing SIP status code %q: expected three digits", parts[1])
+		}
+		if _, err := strconv.Atoi(parts[1]); err != nil {
+			return fmt.Errorf("parsing SIP status code %q: %w", parts[1], err)
+		}
+		return nil
+	}
+	parts := strings.Split(line, " ")
+	if len(parts) != 3 || !isSIPToken(parts[0]) || parts[1] == "" || strings.ContainsAny(parts[1], "\x00\r\n\t") || !strings.EqualFold(parts[2], "SIP/2.0") {
+		return fmt.Errorf("parsing SIP request line %q: invalid request line", line)
+	}
+	return nil
+}
+
+func validateCRLFBlock(data []byte) error {
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case '\r':
+			if i+1 >= len(data) || data[i+1] != '\n' {
+				return errors.New("parsing SIP headers: CR is not followed by LF")
+			}
+			i++
+		case '\n':
+			return errors.New("parsing SIP headers: LF is not preceded by CR")
+		}
+	}
+	return nil
+}
+
+func (hs Headers) validate() error {
+	for _, header := range hs {
+		if !isSIPToken(header.Name) {
+			return fmt.Errorf("marshaling SIP header %q: invalid name", header.Name)
+		}
+		if strings.ContainsAny(header.Value, "\r\n") {
+			return fmt.Errorf("marshaling SIP header %q: value contains CR or LF", header.Name)
+		}
+	}
+	return nil
+}
+
+func isSIPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := range len(value) {
+		b := value[i]
+		if b <= 0x20 || b >= 0x7f || strings.ContainsRune("()<>@,;:\\\"/[]?={} ", rune(b)) {
+			return false
+		}
+	}
+	return true
+}
+
+func addressHeaderParams(value string) string {
+	_, params := AddressURIAndParams(value)
+	return params
+}
+
+func nameAddrBounds(value string) (left, right int, ok bool) {
+	inQuote := false
+	escaped := false
+	commentDepth := 0
+	left = -1
+	for i := range len(value) {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch value[i] {
+		case '\\':
+			if inQuote || commentDepth > 0 {
+				escaped = true
+			}
+		case '"':
+			if commentDepth == 0 {
+				inQuote = !inQuote
+			}
+		case '(':
+			if !inQuote {
+				commentDepth++
+			}
+		case ')':
+			if !inQuote && commentDepth > 0 {
+				commentDepth--
+			}
+		case '<':
+			if !inQuote && commentDepth == 0 && left < 0 {
+				left = i
+			}
+		case '>':
+			if !inQuote && commentDepth == 0 && left >= 0 {
+				return left, i, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func splitSemicolonParams(value string) []string {
+	parts := make([]string, 0, 2)
+	start := 0
+	inQuote := false
+	escaped := false
+	for i := range len(value) {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch value[i] {
+		case '\\':
+			if inQuote {
+				escaped = true
+			}
+		case '"':
+			inQuote = !inQuote
+		case ';':
+			if !inQuote {
+				parts = append(parts, value[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, value[start:])
+}
+
+type singleByteReader struct {
+	r io.Reader
+}
+
+func (r *singleByteReader) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	return r.r.Read(p)
 }
 
 func trimLeadingCRLF(data []byte) []byte {

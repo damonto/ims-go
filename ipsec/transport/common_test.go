@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/binary"
 	"net"
 	"strings"
 	"testing"
@@ -165,6 +166,68 @@ func TestValidateSecureESPConfigRejectsAESGMACWithEncryption(t *testing.T) {
 	}
 }
 
+func TestValidateSecureESPConfigValidatesTS33203KeysAndAlgorithms(t *testing.T) {
+	tests := []struct {
+		name          string
+		encryption    string
+		integrity     string
+		encryptionKey []byte
+		integrityKey  []byte
+		wantErr       bool
+	}{
+		{
+			name:         "hmac sha1 key is 160 bits",
+			encryption:   esp.EncryptionNull,
+			integrity:    esp.IntegrityHMACSHA196RFC,
+			integrityKey: []byte("0123456789abcdef0123"),
+		},
+		{
+			name:         "short hmac sha1 key",
+			encryption:   esp.EncryptionNull,
+			integrity:    esp.IntegrityHMACSHA196RFC,
+			integrityKey: []byte("0123456789abcdef"),
+			wantErr:      true,
+		},
+		{
+			name:          "aes cbc key is 128 bits",
+			encryption:    esp.EncryptionAESCBC,
+			integrity:     esp.IntegrityHMACSHA196RFC,
+			encryptionKey: []byte("0123456789abcdef"),
+			integrityKey:  []byte("0123456789abcdef0123"),
+		},
+		{
+			name:          "aes cbc rejects 192 bit key",
+			encryption:    esp.EncryptionAESCBC,
+			integrity:     esp.IntegrityHMACSHA196RFC,
+			encryptionKey: []byte("0123456789abcdefghijklmn"),
+			integrityKey:  []byte("0123456789abcdef0123"),
+			wantErr:       true,
+		},
+		{
+			name:         "aes gmac key is 128 bits",
+			encryption:   esp.EncryptionNull,
+			integrity:    esp.IntegrityAESGMAC,
+			integrityKey: []byte("0123456789abcdef"),
+		},
+		{
+			name:         "unsupported hmac md5",
+			encryption:   esp.EncryptionNull,
+			integrity:    esp.IntegrityHMACMD596,
+			integrityKey: []byte("0123456789abcdef"),
+			wantErr:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSecureESPConfig(tt.encryption, tt.integrity, tt.encryptionKey, tt.integrityKey)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateSecureESPConfig() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSecureSPIsRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -189,6 +252,32 @@ func TestValidateSecureSPIsRejectsInvalidValues(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("validateSecureSPIs() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateSecureTransportPorts(t *testing.T) {
+	tests := []struct {
+		name   string
+		local  int
+		remote int
+		ok     bool
+	}{
+		{name: "negotiated protected ports", local: 4062, remote: 4060, ok: true},
+		{name: "local missing", remote: 4060},
+		{name: "remote missing", local: 4062},
+		{name: "local out of range", local: 65536, remote: 4060},
+		{name: "remote out of range", local: 4062, remote: 65536},
+		{name: "standard SIP local", local: standardSIPPort, remote: 4060},
+		{name: "standard SIPS remote", local: 4062, remote: standardSecureSIPPort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSecureTransportPorts(tt.local, tt.remote)
+			if (err == nil) != tt.ok {
+				t.Fatalf("validateSecureTransportPorts() error = %v, ok %t", err, tt.ok)
 			}
 		})
 	}
@@ -231,6 +320,13 @@ func TestSecureInnerPacketAndESPPayload(t *testing.T) {
 				if inner.UDP.Src.Port != udpEncapsulatedESPPort || inner.UDP.Dst.Port != udpEncapsulatedESPPort {
 					t.Fatalf("UDP-enc-tun ports = %d/%d, want 4500/4500", inner.UDP.Src.Port, inner.UDP.Dst.Port)
 				}
+				wire, err := inner.UDP.MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				if got := binary.BigEndian.Uint16(wire[6:8]); got != 0 {
+					t.Fatalf("UDP-enc-tun IPv4 checksum = %#04x, want zero", got)
+				}
 			}
 		})
 	}
@@ -262,6 +358,77 @@ func TestSecureESPPayloadDecodesUDPEncapsulatedIPPacket(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("secureESPPayload() = %q, want %q", got, payload)
+	}
+}
+
+func TestSecureESPPayloadRequiresTS33203UDPPorts(t *testing.T) {
+	tests := []struct {
+		name    string
+		srcPort int
+		dstPort int
+		want    bool
+	}{
+		{name: "both ports 4500", srcPort: udpEncapsulatedESPPort, dstPort: udpEncapsulatedESPPort, want: true},
+		{name: "wrong source port", srcPort: 4501, dstPort: udpEncapsulatedESPPort},
+		{name: "wrong destination port", srcPort: udpEncapsulatedESPPort, dstPort: 4501},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := packet.InnerPacket{UDP: &packet.UDPSegment{
+				Src:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: tt.srcPort},
+				Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: tt.dstPort},
+				Payload: []byte("esp-payload"),
+			}}
+			_, ok := secureESPPayload(inner, SecureModeUDPEncTunnel)
+			if ok != tt.want {
+				t.Fatalf("secureESPPayload() ok = %t, want %t", ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestSecureOuterDestinationMatches(t *testing.T) {
+	localIP := net.IPv4(10, 0, 0, 1)
+	tests := []struct {
+		name string
+		mode string
+		pkt  packet.InnerPacket
+		want bool
+	}{
+		{
+			name: "transport mode uses inner flow validation",
+			mode: SecureModeTransport,
+			want: true,
+		},
+		{
+			name: "matching IP packet destination",
+			mode: SecureModeUDPEncTunnel,
+			pkt:  packet.InnerPacket{IP: packet.IPPacket{DstIP: localIP}},
+			want: true,
+		},
+		{
+			name: "matching decoded UDP destination",
+			mode: SecureModeUDPEncTunnel,
+			pkt: packet.InnerPacket{UDP: &packet.UDPSegment{
+				Dst: &net.UDPAddr{IP: localIP, Port: udpEncapsulatedESPPort},
+			}},
+			want: true,
+		},
+		{
+			name: "wrong tunnel destination",
+			mode: SecureModeUDPEncTunnel,
+			pkt:  packet.InnerPacket{IP: packet.IPPacket{DstIP: net.IPv4(10, 0, 0, 2)}},
+		},
+		{name: "missing tunnel destination", mode: SecureModeUDPEncTunnel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := secureOuterDestinationMatches(tt.pkt, localIP, tt.mode); got != tt.want {
+				t.Fatalf("secureOuterDestinationMatches() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 

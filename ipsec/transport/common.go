@@ -25,6 +25,8 @@ const (
 	SecureModeTransport    = "trans"
 	SecureModeUDPEncTunnel = "UDP-enc-tun"
 
+	standardSIPPort                    = 5060
+	standardSecureSIPPort              = 5061
 	udpEncapsulatedESPPort             = 4500
 	udpEncapsulatedESPKeepalivePayload = 0xff
 	udpEncapsulatedESPKeepaliveTimeout = 2 * time.Second
@@ -74,13 +76,27 @@ func espIntegrityDisabled(value string) bool {
 }
 
 func validateSecureESPConfig(encryption, integrity string, encryptionKey, integrityKey []byte) error {
+	integrity = strings.ToLower(strings.TrimSpace(integrity))
+	switch integrity {
+	case esp.IntegrityHMACSHA196, esp.IntegrityHMACSHA196RFC:
+		if len(integrityKey) != 20 {
+			return fmt.Errorf("HMAC-SHA1 integrity key must be 20 bytes, got %d", len(integrityKey))
+		}
+	case esp.IntegrityAESGMAC:
+		if len(integrityKey) != 16 {
+			return fmt.Errorf("AES-GMAC integrity key must be 16 bytes, got %d", len(integrityKey))
+		}
+	case esp.IntegrityNone, esp.IntegrityNull:
+	default:
+		return fmt.Errorf("unsupported integrity %q", integrity)
+	}
+	if (encryption == esp.EncryptionAESCBC || encryption == esp.EncryptionAESGCM) && len(encryptionKey) != 16 {
+		return fmt.Errorf("AES encryption key must be 16 bytes, got %d", len(encryptionKey))
+	}
 	integrityDisabled := espIntegrityDisabled(integrity)
 	if encryption == esp.EncryptionAESGCM {
 		if !integrityDisabled {
 			return errors.New("AES-GCM requires null integrity")
-		}
-		if len(encryptionKey) == 0 {
-			return errors.New("encryption key is empty")
 		}
 		return nil
 	}
@@ -89,12 +105,6 @@ func validateSecureESPConfig(encryption, integrity string, encryptionKey, integr
 	}
 	if integrityDisabled {
 		return errors.New("integrity must be enabled")
-	}
-	if encryption == esp.EncryptionAESCBC && len(encryptionKey) == 0 {
-		return errors.New("encryption key is empty")
-	}
-	if len(integrityKey) == 0 {
-		return errors.New("integrity key is empty")
 	}
 	return nil
 }
@@ -105,6 +115,25 @@ func validateSecureSPIs(outbound, inbound uint32) error {
 	}
 	if outbound == inbound {
 		return errors.New("spi values must be unique")
+	}
+	return nil
+}
+
+func validateSecureTransportPorts(local, remote int) error {
+	ports := []struct {
+		name string
+		port int
+	}{
+		{name: "local", port: local},
+		{name: "remote", port: remote},
+	}
+	for _, value := range ports {
+		if value.port <= 0 || value.port > 65535 {
+			return fmt.Errorf("%s protected port %d is out of range", value.name, value.port)
+		}
+		if value.port == standardSIPPort || value.port == standardSecureSIPPort {
+			return fmt.Errorf("%s protected port %d is a standard SIP port", value.name, value.port)
+		}
 	}
 	return nil
 }
@@ -131,9 +160,10 @@ func secureInnerPacket(localIP, remoteIP net.IP, mode string, payload []byte) (p
 	switch mode {
 	case SecureModeUDPEncTunnel:
 		outer := packet.UDPSegment{
-			Src:     &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: udpEncapsulatedESPPort},
-			Dst:     &net.UDPAddr{IP: append(net.IP(nil), remoteIP...), Port: udpEncapsulatedESPPort},
-			Payload: append([]byte(nil), payload...),
+			Src:              &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: udpEncapsulatedESPPort},
+			Dst:              &net.UDPAddr{IP: append(net.IP(nil), remoteIP...), Port: udpEncapsulatedESPPort},
+			Payload:          append([]byte(nil), payload...),
+			ZeroIPv4Checksum: true,
 		}
 		return packet.InnerPacket{UDP: &outer}, nil
 	case SecureModeTransport:
@@ -161,7 +191,9 @@ func secureESPPayload(pkt packet.InnerPacket, mode string) ([]byte, bool) {
 			}
 			udp = inner.UDP
 		}
-		if udp == nil || udp.Dst == nil || udp.Dst.Port != udpEncapsulatedESPPort || len(udp.Payload) == 0 {
+		if udp == nil || udp.Src == nil || udp.Dst == nil ||
+			udp.Src.Port != udpEncapsulatedESPPort || udp.Dst.Port != udpEncapsulatedESPPort ||
+			len(udp.Payload) == 0 {
 			return nil, false
 		}
 		if udpEncapsulatedESPKeepalive(udp.Payload) {
@@ -176,6 +208,17 @@ func secureESPPayload(pkt packet.InnerPacket, mode string) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func secureOuterDestinationMatches(pkt packet.InnerPacket, localIP net.IP, mode string) bool {
+	if mode != SecureModeUDPEncTunnel {
+		return true
+	}
+	dstIP := pkt.IP.DstIP
+	if pkt.UDP != nil && pkt.UDP.Dst != nil {
+		dstIP = pkt.UDP.Dst.IP
+	}
+	return len(dstIP) > 0 && dstIP.Equal(localIP)
 }
 
 func secureTunnelNextHeader(srcIP, dstIP net.IP) (byte, error) {

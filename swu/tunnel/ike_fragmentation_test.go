@@ -79,6 +79,48 @@ func TestIKEFragmentReassemblyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDefaultIKEFragmentSizeFitsRFC7383DatagramThresholds(t *testing.T) {
+	crypto := testIKECrypto()
+	payloads := []ike.Payload{
+		&ike.NotifyPayload{NotifyType: notifyTypeTemporaryFailure, Data: bytes.Repeat([]byte{0xab}, 1800)},
+	}
+	packets, err := crypto.SealIKEFragments(ike.IKEHeader{
+		InitiatorSPI: 0x0102030405060708,
+		ResponderSPI: 0x1112131415161718,
+		Version:      ikeVersion20,
+		ExchangeType: exchangeTypeInformational,
+		Flags:        flagInitiator,
+		MessageID:    3,
+	}, payloads, true, defaultIKEFragmentSize)
+	if err != nil {
+		t.Fatalf("SealIKEFragments() error = %v", err)
+	}
+	if len(packets) < 2 {
+		t.Fatalf("fragment count = %d, want multiple fragments", len(packets))
+	}
+
+	tests := []struct {
+		name         string
+		ipHeaderSize int
+		threshold    int
+	}{
+		{name: "ipv4", ipHeaderSize: 20, threshold: 576},
+		{name: "ipv6", ipHeaderSize: 40, threshold: 1280},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const udpHeaderSize = 8
+			for i, packet := range packets {
+				wire := buildIKEWire(packet, true)
+				got := tt.ipHeaderSize + udpHeaderSize + len(wire)
+				if got > tt.threshold {
+					t.Fatalf("fragment %d IP datagram size = %d, threshold = %d", i+1, got, tt.threshold)
+				}
+			}
+		})
+	}
+}
+
 func TestIKEFragmentReassemblySilentlyDiscardsInvalidFragments(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -986,7 +1028,14 @@ func TestExchangeProtectedIKEReassemblesFragmentedResponse(t *testing.T) {
 	session := mustDialSession(t, conn)
 	session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
 
-	gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), peer, [][]byte{request}, false, 4, crypto, false, true, ikeActionTestFragmentedResponse)
+	gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), protectedIKEExchange{
+		peer:                   peer,
+		requests:               [][]byte{request},
+		messageID:              4,
+		crypto:                 crypto,
+		fragmentationSupported: true,
+		action:                 ikeActionTestFragmentedResponse,
+	})
 	if err != nil {
 		t.Fatalf("exchangeProtectedIKE() error = %v", err)
 	}

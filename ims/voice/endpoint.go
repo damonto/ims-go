@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,20 +14,27 @@ import (
 )
 
 func New(cfg Config, sess *session.Session, reg *registration.Registrar) (*Endpoint, error) {
+	if sess == nil {
+		return nil, errors.New("creating voice endpoint: session is nil")
+	}
+	if reg == nil {
+		return nil, errors.New("creating voice endpoint: registrar is nil")
+	}
 	endpointCfg, err := cfg.Normalized()
 	if err != nil {
 		return nil, err
 	}
 	endpoint := &Endpoint{
-		cfg:       endpointCfg,
-		sess:      sess,
-		reg:       reg,
-		logger:    endpointCfg.Logger.With("component", "ims-voice"),
-		timers:    sess.TransactionTimers(),
-		nextPort:  endpointCfg.LocalRTPPortMin,
-		calls:     make(map[string]*Call),
-		incomings: make(map[string]*Call),
-		bgDone:    make(chan struct{}),
+		cfg:          endpointCfg,
+		sess:         sess,
+		reg:          reg,
+		logger:       endpointCfg.Logger.With("component", "ims-voice"),
+		timers:       sess.TransactionTimers(),
+		rtcpInterval: rtcpInterval,
+		nextPort:     endpointCfg.LocalRTPPortMin,
+		calls:        make(map[string]*Call),
+		incomings:    make(map[string]*Call),
+		bgDone:       make(chan struct{}),
 	}
 	attachment, err := sess.Attach(endpoint)
 	if err != nil {

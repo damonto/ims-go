@@ -1,9 +1,11 @@
 package eapaka
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 const (
@@ -20,8 +22,8 @@ type AKAKeys struct {
 }
 
 func DeriveAKAKeys(identity, ik, ck []byte) (AKAKeys, error) {
-	if len(identity) == 0 {
-		return AKAKeys{}, errors.New("deriving aka keys: identity is empty")
+	if err := validateAKAIdentity(identity); err != nil {
+		return AKAKeys{}, fmt.Errorf("deriving aka keys: %w", err)
 	}
 	if len(ik) != akaVectorLen {
 		return AKAKeys{}, fmt.Errorf("deriving aka keys: ik length %d, want %d", len(ik), akaVectorLen)
@@ -52,4 +54,17 @@ func DeriveAKAKeys(identity, ik, ck []byte) (AKAKeys, error) {
 	offset += akaPrimeMSKLen
 	keys.EMSK = append([]byte(nil), stream[offset:offset+akaPrimeEMSKLen]...)
 	return keys, nil
+}
+
+func validateAKAIdentity(identity []byte) error {
+	if len(identity) == 0 {
+		return errors.New("identity is empty")
+	}
+	if !utf8.Valid(identity) {
+		return errors.New("identity is not valid UTF-8")
+	}
+	if bytes.IndexByte(identity, 0) >= 0 {
+		return errors.New("identity contains NUL")
+	}
+	return nil
 }

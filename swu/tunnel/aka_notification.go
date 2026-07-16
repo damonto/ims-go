@@ -25,15 +25,11 @@ func (f *akaAuthFlow) validateEAPSuccess() error {
 
 func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
 	var notification eapaka.AKANotification
-	if err := notification.UnmarshalAttributes(message.Attributes); err != nil {
-		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing notification: %w", err))
+	if err := notification.UnmarshalHeader(message.Attributes); err != nil {
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing notification header: %w", err))
 	}
 	if f.notificationReceived {
 		return f.clientErrorResponse(message.Identifier, errors.New("validating notification: multiple aka notification rounds"))
-	}
-	f.notificationReceived = true
-	if !notification.Protected && eapaka.HasAttribute(message.Attributes, akaAttrMAC) {
-		return f.clientErrorResponse(message.Identifier, errors.New("validating notification: pre-challenge notification must not include AT_MAC"))
 	}
 	if notification.Protected {
 		if len(f.currentAuthKey) == 0 {
@@ -42,6 +38,11 @@ func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapDa
 		if err := f.verifyMessageMAC(f.currentEAPType, eapData, f.currentAuthKey, nil); err != nil {
 			return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying notification mac: %w", err))
 		}
+	}
+	if err := notification.UnmarshalAttributes(message.Attributes); err != nil {
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing authenticated notification: %w", err))
+	}
+	if notification.Protected {
 		if err := f.validateIPMSResult(message, notification); err != nil {
 			return f.clientErrorResponse(message.Identifier, fmt.Errorf("validating ipms result: %w", err))
 		}
@@ -67,6 +68,7 @@ func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapDa
 		return akaResponse{}, fmt.Errorf("building notification response: %w", err)
 	}
 	if !notification.Success {
+		f.notificationReceived = true
 		return akaResponse{data: data, afterSend: fmt.Errorf("notification code %d", notification.Code)}, nil
 	}
 	if notification.Code != akaNotificationSuccess {
@@ -78,6 +80,7 @@ func (f *akaAuthFlow) buildNotificationResponse(message eapaka.AKAMessage, eapDa
 	if !f.protectedSuccessExpected {
 		return f.clientErrorResponse(message.Identifier, errors.New("validating success notification: protected success was not negotiated"))
 	}
+	f.notificationReceived = true
 	f.protectedSuccessReceived = true
 	return akaResponse{data: data}, nil
 }

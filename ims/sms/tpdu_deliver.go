@@ -160,8 +160,14 @@ func decodeDeliverUserData(part userDataPart) (string, *concatInfo, error) {
 		return decodeDeliverGSM7(part)
 	case userDataEncodingUCS2:
 		return decodeDeliverUCS2(part)
+	case userDataEncoding8Bit:
+		if !part.udhi {
+			return "", nil, nil
+		}
+		_, concat, err := decodeUserDataHeader(part.userData)
+		return "", concat, err
 	default:
-		return "", nil, fmt.Errorf("decoding SMS-DELIVER: 8-bit dcs 0x%02X is unsupported", part.dcs)
+		return "", nil, fmt.Errorf("decoding SMS-DELIVER: unsupported dcs 0x%02X", part.dcs)
 	}
 }
 
@@ -178,10 +184,24 @@ func (tp *deliverTPDU) UnmarshalBinary(data []byte) error {
 	if err != nil {
 		return err
 	}
+	message := Incoming{
+		From: fields.from, Text: text,
+		ProtocolIdentifier: fields.part.pid,
+		DataCodingScheme:   fields.part.dcs,
+		UserData:           append([]byte(nil), fields.part.userData...),
+		RawTPDU:            append([]byte(nil), data...),
+		ReservedMTI:        data[0]&tpduMTIMask == tpduMTIReserved,
+	}
+	if fields.part.udhi && len(fields.part.userData) > 0 {
+		headerLen := int(fields.part.userData[0]) + 1
+		if headerLen <= len(fields.part.userData) {
+			message.UserDataHeader = append([]byte(nil), fields.part.userData[:headerLen]...)
+		}
+	}
 	*tp = deliverTPDU{
 		From:    fields.from,
 		Part:    fields.part,
-		Message: Incoming{From: fields.from, Text: text, RawTPDU: append([]byte(nil), data...), ReservedMTI: data[0]&tpduMTIMask == tpduMTIReserved},
+		Message: message,
 		Concat:  concat,
 	}
 	return nil

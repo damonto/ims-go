@@ -158,38 +158,46 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if response, ok, err := f.akaPrimeKDFNegotiationResponse(message); ok || err != nil {
 		return response, err
 	}
-	challengeData := eapData
+	challengeMessage := message
 	if data, ok, err := sanitizedAKAPrimeChallengeData(message); err != nil {
 		return akaResponse{}, fmt.Errorf("sanitizing aka prime challenge: %w", err)
 	} else if ok {
-		challengeData = data
+		if err := challengeMessage.UnmarshalBinary(data); err != nil {
+			return akaResponse{}, fmt.Errorf("parsing sanitized aka prime challenge: %w", err)
+		}
 	}
-	var challenge eapaka.AKAChallenge
-	if err := challenge.UnmarshalBinary(challengeData); err != nil {
-		if errors.Is(err, eapaka.ErrAKAPrimeAuthenticationFailure) {
-			data, buildErr := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
-			if buildErr != nil {
-				return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", buildErr)
+	parameters, err := eapaka.AKAParametersFromChallenge(message)
+	if err != nil {
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing aka parameters: %w", err))
+	}
+	if message.EAPType == eapTypeAKAPrime {
+		parameters, err = eapaka.AKAPrimeParametersFromChallenge(challengeMessage)
+		if err != nil {
+			if errors.Is(err, eapaka.ErrAKAPrimeAuthenticationFailure) {
+				data, buildErr := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
+				if buildErr != nil {
+					return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", buildErr)
+				}
+				return akaResponse{data: data}, nil
+			}
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing aka prime challenge: %w", err))
+		}
+		if !f.validateAKAPrimeNetworkName(parameters.NetworkName) {
+			data, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
+			if err != nil {
+				return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", err)
 			}
 			return akaResponse{data: data}, nil
 		}
-		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing aka challenge: %w", err))
 	}
-	if message.EAPType == eapTypeAKAPrime && !f.validateAKAPrimeNetworkName(challenge.NetworkName) {
+	if message.EAPType == eapTypeAKAPrime && !parameters.AMFSeparationBitSet() {
 		data, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
 		if err != nil {
 			return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", err)
 		}
 		return akaResponse{data: data}, nil
 	}
-	if message.EAPType == eapTypeAKAPrime && !challenge.AMFSeparationBitSet() {
-		data, err := eapaka.BuildAKAPrimeAuthenticationReject(message.Identifier)
-		if err != nil {
-			return akaResponse{}, fmt.Errorf("building aka prime authentication reject: %w", err)
-		}
-		return akaResponse{data: data}, nil
-	}
-	aka, err := f.card.AKA(ctx, challenge.RAND, challenge.AUTN)
+	aka, err := f.card.AKA(ctx, parameters.RAND, parameters.AUTN)
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("calculating aka response: %w", err)
 	}
@@ -224,6 +232,24 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if !aka.Successful() {
 		return f.clientErrorResponse(message.Identifier, errors.New("processing aka result: aka result is incomplete"))
 	}
+	keyIdentity := f.eapIdentity
+	derived := &ikeCrypto{}
+	if message.EAPType == eapTypeAKAPrime {
+		keyIdentity = f.akaPrimeChallengeIdentity()
+		sqnXorAK := parameters.AUTN[:akaPrimeSQNXorAKLen]
+		if err := derived.DeriveAKAPrimeEAPKeys([]byte(keyIdentity), aka.RES, aka.CK, aka.IK, parameters.NetworkName, sqnXorAK); err != nil {
+			return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving aka prime eap keys: %w", err))
+		}
+	} else if err := derived.DeriveEAPKeys([]byte(keyIdentity), aka.RES, aka.IK, aka.CK); err != nil {
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving eap keys: %w", err))
+	}
+	if err := f.verifyMessageMAC(message.EAPType, eapData, derived.eap.AUT, nil); err != nil {
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying aka challenge mac: %w", err))
+	}
+	var challenge eapaka.AKAChallenge
+	if err := challenge.UnmarshalMessage(challengeMessage); err != nil {
+		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing authenticated aka challenge: %w", err))
+	}
 	f.logger().Debug(
 		"calculated AKA response",
 		"res_len", len(aka.RES),
@@ -232,17 +258,8 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		"challenge_has_result_ind", eapaka.HasAttribute(message.Attributes, akaAttrResultInd),
 		"challenge_has_checkcode", eapaka.HasAttribute(message.Attributes, akaAttrCheckcode),
 	)
-	if message.EAPType == eapTypeAKAPrime {
-		f.eapIdentity = f.akaPrimeChallengeIdentity()
-		sqnXorAK := challenge.AUTN[:akaPrimeSQNXorAKLen]
-		if err := f.crypto.DeriveAKAPrimeEAPKeys([]byte(f.eapIdentity), aka.RES, aka.CK, aka.IK, challenge.NetworkName, sqnXorAK); err != nil {
-			return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving aka prime eap keys: %w", err))
-		}
-	} else if err := f.crypto.DeriveEAPKeys([]byte(f.eapIdentity), aka.RES, aka.IK, aka.CK); err != nil {
-		return f.clientErrorResponse(message.Identifier, fmt.Errorf("deriving eap keys: %w", err))
-	}
-	if err := f.verifyMessageMAC(message.EAPType, eapData, f.crypto.eap.AUT, nil); err != nil {
-		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying aka challenge mac: %w", err))
+	if challenge.TrustRelationship == eapaka.TrustRelationshipTrusted {
+		return f.clientErrorResponse(message.Identifier, errors.New("processing trust indication: trusted access cannot use the SWu untrusted-access procedure"))
 	}
 	if err := f.verifyCheckcode(message.Attributes, message.EAPType); err != nil {
 		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying aka checkcode: %w", err))
@@ -250,26 +267,29 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if response, ok, err := f.biddingDownRejectResponse(message); ok || err != nil {
 		return response, err
 	}
-	nested, err := f.challengeAttributes(message)
+	nested, err := f.challengeAttributes(challengeMessage, derived.eap.ENCR)
 	if err != nil {
 		return f.clientErrorResponse(message.Identifier, fmt.Errorf("decrypting aka challenge attrs: %w", err))
 	}
-	f.pendingState = usim.AKAIdentityState{}
+	pendingState := usim.AKAIdentityState{}
 	if attr := eapaka.FindAttribute(nested, akaAttrNextPseudonym); attr != nil {
-		f.pendingState.Pseudonym, err = eapaka.StringValue(attr)
+		pendingState.Pseudonym, err = eapaka.StringValue(attr)
 		if err != nil {
 			return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing next pseudonym: %w", err))
 		}
+		if strings.Contains(pendingState.Pseudonym, "@") {
+			return f.clientErrorResponse(message.Identifier, errors.New("parsing next pseudonym: realm is not allowed"))
+		}
 	}
 	if attr := eapaka.FindAttribute(nested, akaAttrNextReauthID); attr != nil {
-		f.pendingState.ReauthIdentity, err = eapaka.StringValue(attr)
+		pendingState.ReauthIdentity, err = eapaka.StringValue(attr)
 		if err != nil {
 			return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing next reauth id: %w", err))
 		}
-		f.pendingState.Counter = 0
-		f.pendingState.MK = append([]byte(nil), f.crypto.eap.MK...)
-		f.pendingState.KEncr = append([]byte(nil), f.crypto.eap.ENCR...)
-		f.pendingState.KAut = append([]byte(nil), f.crypto.eap.AUT...)
+		pendingState.Counter = 0
+		pendingState.MK = append([]byte(nil), derived.eap.MK...)
+		pendingState.KEncr = append([]byte(nil), derived.eap.ENCR...)
+		pendingState.KAut = append([]byte(nil), derived.eap.AUT...)
 	}
 	responseCheckcode := f.challengeResponseCheckcode(message.Attributes, message.EAPType)
 	useResultInd := eapaka.HasAttribute(message.Attributes, akaAttrResultInd)
@@ -281,7 +301,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		Identifier:   message.Identifier,
 		EAPType:      message.EAPType,
 		RES:          aka.RES,
-		AUTKey:       f.crypto.eap.AUT,
+		AUTKey:       derived.eap.AUT,
 		UseResultInd: useResultInd,
 		Checkcode:    responseCheckcode,
 		IPMSSupport:  ipmsSupport,
@@ -289,6 +309,9 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("building aka response: %w", err)
 	}
+	f.eapIdentity = keyIdentity
+	f.crypto.eap = derived.eap
+	f.pendingState = pendingState
 	f.currentAuthKey = append([]byte(nil), f.crypto.eap.AUT...)
 	f.currentEncrKey = append([]byte(nil), f.crypto.eap.ENCR...)
 	f.currentEAPType = message.EAPType
@@ -299,11 +322,11 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	return akaResponse{data: data}, nil
 }
 
-func (f *akaAuthFlow) challengeAttributes(message eapaka.AKAMessage) ([]eapaka.AKAAttribute, error) {
+func (f *akaAuthFlow) challengeAttributes(message eapaka.AKAMessage, encrKey []byte) ([]eapaka.AKAAttribute, error) {
 	if !eapaka.HasAttribute(message.Attributes, akaAttrIV) && !eapaka.HasAttribute(message.Attributes, akaAttrEncryptedData) {
 		return nil, nil
 	}
-	nested, err := eapaka.DecryptAttributes(message.Attributes, f.crypto.eap.ENCR)
+	nested, err := eapaka.DecryptChallengeAttributes(message.Attributes, encrKey)
 	if err != nil {
 		return nil, err
 	}

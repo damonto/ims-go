@@ -29,36 +29,40 @@ type AudioFormat struct {
 
 // MediaDescription is the audio media description carried by SDP.
 type MediaDescription struct {
-	Formats      []AudioFormat
-	Profile      string
-	PTime        time.Duration
-	MaxPTime     time.Duration
-	Direction    MediaDirection
-	IP           net.IP
-	Port         int
-	RTCPIP       net.IP
-	RTCPPort     int
-	RTCPMux      bool
-	RTCPDisabled bool
-	RawSDP       []byte
+	Formats               []AudioFormat
+	Profile               string
+	PTime                 time.Duration
+	MaxPTime              time.Duration
+	Direction             MediaDirection
+	IP                    net.IP
+	Port                  int
+	RTCPIP                net.IP
+	RTCPPort              int
+	RTCPMux               bool
+	RTCPDisabled          bool
+	RTCPSenderBandwidth   int
+	RTCPReceiverBandwidth int
+	RawSDP                []byte
 }
 
 // NegotiatedMedia describes the selected local and remote RTP format.
 type NegotiatedMedia struct {
 	AudioFormat
-	RemoteFormat   AudioFormat
-	DTMF           *AudioFormat
-	Negotiated     bool
-	Profile        string
-	PTime          time.Duration
-	MaxPTime       time.Duration
-	Direction      MediaDirection
-	RemoteIP       net.IP
-	RemotePort     int
-	RemoteRTCPIP   net.IP
-	RemoteRTCPPort int
-	RTCPMux        bool
-	RTCPDisabled   bool
+	RemoteFormat          AudioFormat
+	DTMF                  *AudioFormat
+	Negotiated            bool
+	Profile               string
+	PTime                 time.Duration
+	MaxPTime              time.Duration
+	Direction             MediaDirection
+	RemoteIP              net.IP
+	RemotePort            int
+	RemoteRTCPIP          net.IP
+	RemoteRTCPPort        int
+	RTCPMux               bool
+	RTCPDisabled          bool
+	RTCPSenderBandwidth   int
+	RTCPReceiverBandwidth int
 }
 
 type MediaDirection string

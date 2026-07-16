@@ -278,18 +278,20 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime, maxptime
 		remoteRTCPPort = remote.RemotePort
 	}
 	media := NegotiatedMedia{
-		AudioFormat:    audioFormat(selected, selected.PayloadTypes[0], answerCodecFMTP(selected)),
-		Negotiated:     true,
-		Profile:        remote.Profile,
-		PTime:          ptime,
-		MaxPTime:       maxptime,
-		Direction:      answerDirection(remote.Direction, false),
-		RemoteIP:       append(net.IP(nil), remote.RemoteIP...),
-		RemotePort:     remote.RemotePort,
-		RemoteRTCPIP:   remoteRTCPIP,
-		RemoteRTCPPort: remoteRTCPPort,
-		RTCPMux:        remote.RTCPMux,
-		RTCPDisabled:   rtcpDisabled(remote),
+		AudioFormat:           audioFormat(selected, selected.PayloadTypes[0], answerCodecFMTP(selected)),
+		Negotiated:            true,
+		Profile:               remote.Profile,
+		PTime:                 ptime,
+		MaxPTime:              maxptime,
+		Direction:             answerDirection(remote.Direction, false),
+		RemoteIP:              append(net.IP(nil), remote.RemoteIP...),
+		RemotePort:            remote.RemotePort,
+		RemoteRTCPIP:          remoteRTCPIP,
+		RemoteRTCPPort:        remoteRTCPPort,
+		RTCPMux:               remote.RTCPMux,
+		RTCPDisabled:          rtcpDisabled(remote),
+		RTCPSenderBandwidth:   effectiveRTCPBandwidth(remote.RTCPSenderBandwidth, rtcpSenderBandwidth),
+		RTCPReceiverBandwidth: effectiveRTCPBandwidth(remote.RTCPReceiverBandwidth, rtcpReceiverBandwidth),
 	}
 	if remoteCodec, ok := remote.Codecs[selected.PayloadTypes[0]]; ok {
 		media.RemoteFormat = audioFormat(remoteCodec, selected.PayloadTypes[0], remote.FMTP[selected.PayloadTypes[0]])
@@ -299,4 +301,11 @@ func negotiatedMedia(remote sdpOffer, selected AudioCodecConfig, ptime, maxptime
 		media.DTMF = &format
 	}
 	return media
+}
+
+func effectiveRTCPBandwidth(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }

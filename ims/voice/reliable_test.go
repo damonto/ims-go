@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -10,6 +11,39 @@ import (
 	"github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/ims/sip"
 )
+
+func TestRouteSetFromResponseExpandsAndReversesValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers sip.Headers
+		want    []string
+	}{
+		{
+			name: "comma list",
+			headers: sip.Headers{
+				{Name: "Record-Route", Value: "<sip:p1.example.com;lr>,<sip:p2.example.com;lr>"},
+			},
+			want: []string{"<sip:p2.example.com;lr>", "<sip:p1.example.com;lr>"},
+		},
+		{
+			name: "multiple lines and comma list",
+			headers: sip.Headers{
+				{Name: "Record-Route", Value: "<sip:p1.example.com;lr>,<sip:p2.example.com;lr>"},
+				{Name: "Record-Route", Value: "<sip:p3.example.com;lr>"},
+			},
+			want: []string{"<sip:p3.example.com;lr>", "<sip:p2.example.com;lr>", "<sip:p1.example.com;lr>"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := sip.Message{Headers: tt.headers}
+			if got := routeSetFromResponse(msg); !slices.Equal(got, tt.want) {
+				t.Fatalf("routeSetFromResponse() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestRSeqHeaderText(t *testing.T) {
 	tests := []struct {

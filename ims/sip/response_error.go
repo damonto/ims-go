@@ -84,39 +84,82 @@ func (w WarningValue) MarshalText() ([]byte, error) {
 	if w.Code < 100 || w.Code > 999 {
 		return nil, fmt.Errorf("marshaling SIP Warning: code %d is not three digits", w.Code)
 	}
-	if strings.TrimSpace(w.Agent) == "" {
+	agent := strings.TrimSpace(w.Agent)
+	if agent == "" {
 		return nil, errors.New("marshaling SIP Warning: agent is empty")
 	}
-	return fmt.Appendf(nil, `%03d %s "%s"`, w.Code, strings.TrimSpace(w.Agent), quoteSIPString(w.Text)), nil
+	if strings.ContainsAny(agent, " \t\r\n,\"") {
+		return nil, fmt.Errorf("marshaling SIP Warning: invalid agent %q", w.Agent)
+	}
+	if !validSIPQuotedText(w.Text) {
+		return nil, errors.New("marshaling SIP Warning: text contains an invalid control character")
+	}
+	return fmt.Appendf(nil, `%03d %s "%s"`, w.Code, agent, quoteSIPString(w.Text)), nil
 }
 
 func (w *WarningValue) UnmarshalText(text []byte) error {
 	value := strings.TrimSpace(string(text))
-	fields := strings.Fields(value)
-	if len(fields) < 3 {
+	codeText, rest, ok := strings.Cut(value, " ")
+	if !ok {
 		return errors.New("parsing SIP Warning: expected code, agent, and text")
 	}
-	if len(fields[0]) != 3 {
-		return fmt.Errorf("parsing SIP Warning code %q: expected three digits", fields[0])
+	if len(codeText) != 3 {
+		return fmt.Errorf("parsing SIP Warning code %q: expected three digits", codeText)
 	}
-	code, err := strconv.Atoi(fields[0])
+	code, err := strconv.Atoi(codeText)
 	if err != nil {
-		return fmt.Errorf("parsing SIP Warning code %q: %w", fields[0], err)
+		return fmt.Errorf("parsing SIP Warning code %q: %w", codeText, err)
 	}
-	textStart := strings.Index(value, fields[2])
-	if textStart < 0 {
-		return errors.New("parsing SIP Warning: missing text")
+	rest = strings.TrimLeft(rest, " \t")
+	agent, rawText, ok := strings.Cut(rest, " ")
+	if !ok || agent == "" || strings.ContainsAny(agent, "\t\r\n,\"") {
+		return errors.New("parsing SIP Warning: invalid agent")
 	}
-	rawText := strings.TrimSpace(value[textStart:])
-	if len(rawText) < 2 || rawText[0] != '"' || rawText[len(rawText)-1] != '"' {
+	rawText = strings.TrimSpace(rawText)
+	if !validSIPQuotedString(rawText) {
 		return errors.New("parsing SIP Warning: text must be quoted")
 	}
 	*w = WarningValue{
 		Code:  code,
-		Agent: fields[1],
+		Agent: agent,
 		Text:  unquoteSIPString(rawText),
 	}
 	return nil
+}
+
+func validSIPQuotedString(value string) bool {
+	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
+		return false
+	}
+	escaped := false
+	for i := 1; i < len(value)-1; i++ {
+		b := value[i]
+		if escaped {
+			if b == '\r' || b == '\n' || b >= 0x80 {
+				return false
+			}
+			escaped = false
+			continue
+		}
+		if b == '\\' {
+			escaped = true
+			continue
+		}
+		if b == '"' || b == '\r' || b == '\n' || (b < 0x20 && b != '\t') {
+			return false
+		}
+	}
+	return !escaped
+}
+
+func validSIPQuotedText(value string) bool {
+	for i := range len(value) {
+		b := value[i]
+		if b == '\r' || b == '\n' || (b < 0x20 && b != '\t') {
+			return false
+		}
+	}
+	return true
 }
 
 func unquoteSIPString(value string) string {

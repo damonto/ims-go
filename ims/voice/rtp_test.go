@@ -5,6 +5,7 @@ import (
 	"encoding"
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 var (
@@ -318,6 +319,159 @@ func TestBuildRTCPReceiverReport(t *testing.T) {
 			}
 			if !bytes.Contains(wire, []byte(tt.cname)) {
 				t.Fatalf("RTCP packet missing CNAME %q: %x", tt.cname, wire)
+			}
+		})
+	}
+}
+
+func TestBuildRTCPReceiverReportWithBlock(t *testing.T) {
+	block := make([]byte, 24)
+	got := buildRTCPReceiverReportWithBlock(7, "call", block)
+	if got[0] != (rtpVersion<<rtpVersionShift)|1 {
+		t.Fatalf("report count byte = %#x, want %#x", got[0], (rtpVersion<<rtpVersionShift)|1)
+	}
+	if got[1] != rtcpRRPacketType {
+		t.Fatalf("packet type = %d, want %d", got[1], rtcpRRPacketType)
+	}
+	if binary.BigEndian.Uint16(got[2:4]) != 7 {
+		t.Fatalf("report length = %d, want 7", binary.BigEndian.Uint16(got[2:4]))
+	}
+}
+
+func TestBuildRTCPSenderReportWithBlock(t *testing.T) {
+	tests := []struct {
+		name  string
+		block []byte
+		want  byte
+	}{
+		{name: "without reception report", want: 0},
+		{name: "with reception report", block: make([]byte, 24), want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildRTCPSenderReport(7, "call", time.Unix(1, 0), 8, 9, 10, tt.block)
+			if count := got[0] & 0x1f; count != tt.want {
+				t.Fatalf("report count = %d, want %d", count, tt.want)
+			}
+			if words := binary.BigEndian.Uint16(got[2:4]); words != uint16(6+6*int(tt.want)) {
+				t.Fatalf("report length = %d, want %d", words, 6+6*int(tt.want))
+			}
+		})
+	}
+}
+
+func TestRTCPSenderTimestamp(t *testing.T) {
+	now := time.Unix(100, 0)
+	tests := []struct {
+		name  string
+		state rtcpSendState
+		want  uint32
+	}{
+		{
+			name: "advances from the last RTP send instant",
+			state: rtcpSendState{
+				lastRTPTimestamp: 1000,
+				lastRTPSentAt:    now.Add(-1500 * time.Millisecond),
+				lastRTPClockRate: 8000,
+			},
+			want: 13000,
+		},
+		{
+			name:  "missing send instant keeps last timestamp",
+			state: rtcpSendState{lastRTPTimestamp: 1000},
+			want:  1000,
+		},
+		{
+			name: "future send instant keeps last timestamp",
+			state: rtcpSendState{
+				lastRTPTimestamp: 1000,
+				lastRTPSentAt:    now.Add(time.Second),
+				lastRTPClockRate: 8000,
+			},
+			want: 1000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rtcpSenderTimestamp(tt.state, now); got != tt.want {
+				t.Fatalf("rtcpSenderTimestamp() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteRTCPSenderReportUsesRTPSSRC(t *testing.T) {
+	tests := []struct {
+		name string
+		ssrc uint32
+	}{
+		{name: "sender report identifies RTP source", ssrc: 0x11223344},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rtcpCh := make(chan []byte, 1)
+			call := &Call{
+				endpoint: &Endpoint{},
+				id:       "call-id",
+				media:    NegotiatedMedia{AudioFormat: AudioFormat{ClockRate: 8000}},
+				transport: &voiceMediaTransport{
+					rtcpCh: rtcpCh,
+				},
+				rtcpSSRC: 0xaabbccdd,
+				rtpSend: rtpSendState{
+					initialized: true,
+					ssrc:        tt.ssrc,
+				},
+				rtcpSend: rtcpSendState{
+					packetCount:      1,
+					octetCount:       20,
+					lastRTPTimestamp: 160,
+					lastRTPSentAt:    time.Now(),
+					lastRTPClockRate: 8000,
+				},
+			}
+
+			call.writeRTCPReport(make(chan struct{}))
+			packet := <-rtcpCh
+			if packet[1] != rtcpSRPacketType {
+				t.Fatalf("RTCP packet type = %d, want sender report %d", packet[1], rtcpSRPacketType)
+			}
+			if got := binary.BigEndian.Uint32(packet[4:8]); got != tt.ssrc {
+				t.Fatalf("RTCP sender SSRC = %#x, want RTP SSRC %#x", got, tt.ssrc)
+			}
+		})
+	}
+}
+
+func TestRTCPReceiverReportFractionUsesReportingInterval(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "loss recovered in next reporting interval"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{rtcpRecv: rtcpReceiveState{
+				initialized:  true,
+				ssrc:         7,
+				baseSequence: 1,
+				maxSequence:  10,
+				received:     8,
+			}}
+			first := call.rtcpReceiverReportBlockLocked()
+			if got := first[4]; got != 51 {
+				t.Fatalf("first fraction lost = %d, want 51", got)
+			}
+			call.rtcpRecv.maxSequence = 20
+			call.rtcpRecv.received = 18
+			second := call.rtcpReceiverReportBlockLocked()
+			if got := second[4]; got != 0 {
+				t.Fatalf("second fraction lost = %d, want 0", got)
+			}
+			if got := uint32(second[5])<<16 | uint32(second[6])<<8 | uint32(second[7]); got != 2 {
+				t.Fatalf("cumulative loss = %d, want 2", got)
 			}
 		})
 	}

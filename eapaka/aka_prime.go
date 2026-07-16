@@ -39,11 +39,8 @@ func DeriveAKAPrimeCKIK(ck, ik, networkName, sqnXorAK []byte) ([]byte, []byte, e
 	if len(ik) != akaPrimeIKLen {
 		return nil, nil, fmt.Errorf("deriving aka prime ck/ik: ik length %d, want %d", len(ik), akaPrimeIKLen)
 	}
-	if len(networkName) == 0 {
-		return nil, nil, errors.New("deriving aka prime ck/ik: network name is empty")
-	}
-	if len(networkName) > 0xffff {
-		return nil, nil, fmt.Errorf("deriving aka prime ck/ik: network name length %d exceeds uint16", len(networkName))
+	if err := validateAKANetworkName(networkName); err != nil {
+		return nil, nil, fmt.Errorf("deriving aka prime ck/ik: %w", err)
 	}
 	if len(sqnXorAK) != akaPrimeSQNXorAKLen {
 		return nil, nil, fmt.Errorf("deriving aka prime ck/ik: sqn xor ak length %d, want %d", len(sqnXorAK), akaPrimeSQNXorAKLen)
@@ -67,8 +64,8 @@ func DeriveAKAPrimeCKIK(ck, ik, networkName, sqnXorAK []byte) ([]byte, []byte, e
 }
 
 func DeriveAKAPrimeKeys(identity, ck, ik, networkName, sqnXorAK []byte) (AKAPrimeKeys, error) {
-	if len(identity) == 0 {
-		return AKAPrimeKeys{}, errors.New("deriving aka prime keys: identity is empty")
+	if err := validateAKAIdentity(identity); err != nil {
+		return AKAPrimeKeys{}, fmt.Errorf("deriving aka prime keys: %w", err)
 	}
 	ckPrime, ikPrime, err := DeriveAKAPrimeCKIK(ck, ik, networkName, sqnXorAK)
 	if err != nil {
@@ -106,8 +103,8 @@ func DeriveAKAPrimeKeys(identity, ck, ik, networkName, sqnXorAK []byte) (AKAPrim
 }
 
 func DeriveAKAPrimeFastReauthKeys(identity []byte, counter uint16, nonceS, kRe []byte) ([]byte, []byte, error) {
-	if len(identity) == 0 {
-		return nil, nil, errors.New("deriving aka prime fast reauth keys: identity is empty")
+	if err := validateAKAIdentity(identity); err != nil {
+		return nil, nil, fmt.Errorf("deriving aka prime fast reauth keys: %w", err)
 	}
 	if len(nonceS) != akaVectorLen {
 		return nil, nil, fmt.Errorf("deriving aka prime fast reauth keys: nonce_s length %d, want %d", len(nonceS), akaVectorLen)

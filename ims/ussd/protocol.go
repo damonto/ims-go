@@ -22,7 +22,8 @@ var (
 )
 
 type xmlBody struct {
-	Message Message
+	Message  Message
+	presence payloadPresence
 }
 
 type multipartBody struct {
@@ -35,9 +36,13 @@ func (b xmlBody) MarshalText() ([]byte, error) {
 	if err := validateLanguage(language); err != nil {
 		return nil, err
 	}
-	payload := xmlPayload{
-		Language: language,
-		String:   b.Message.Text,
+	payload := xmlPayload{}
+	if language != "" {
+		payload.Language = &language
+	}
+	if b.Message.ErrorCode == 0 || b.Message.Text != "" {
+		text := b.Message.Text
+		payload.String = &text
 	}
 	if b.Message.ErrorCode != 0 {
 		errorCode := normalizeErrorCode(b.Message.ErrorCode)
@@ -61,15 +66,16 @@ func (b xmlBody) MarshalText() ([]byte, error) {
 
 func (b *xmlBody) UnmarshalText(text []byte) error {
 	var payload xmlPayload
-	if err := xml.Unmarshal(escapeBareAmpersands(text), &payload); err != nil {
+	if err := xml.Unmarshal(text, &payload); err != nil {
 		return err
 	}
-	if err := validateLanguage(payload.Language); err != nil {
+	language := stringValue(payload.Language)
+	if err := validateLanguage(language); err != nil {
 		return err
 	}
 	msg := Message{
-		Text:     payload.String,
-		Language: strings.TrimSpace(payload.Language),
+		Text:     stringValue(payload.String),
+		Language: strings.TrimSpace(language),
 	}
 	if payload.ErrorCode != nil {
 		msg.ErrorCode = normalizeErrorCode(*payload.ErrorCode)
@@ -79,54 +85,23 @@ func (b *xmlBody) UnmarshalText(text []byte) error {
 		msg.Notify = payload.AnyExt.Notify != nil
 	}
 	b.Message = msg
+	b.presence = payloadPresence{
+		language: payload.hasLanguage,
+		text:     payload.hasString,
+		error:    payload.hasError,
+	}
 	return nil
 }
 
-func escapeBareAmpersands(text []byte) []byte {
-	if !bytes.Contains(text, []byte("&")) {
-		return text
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
 	}
-	var out []byte
-	for i := range len(text) {
-		if text[i] != '&' || isXMLReference(text[i:]) {
-			out = append(out, text[i])
-			continue
-		}
-		out = append(out, "&amp;"...)
-	}
-	return out
-}
-
-func isXMLReference(text []byte) bool {
-	semi := bytes.IndexByte(text, ';')
-	if semi < 0 {
-		return false
-	}
-	name := string(text[1:semi])
-	switch name {
-	case "quot", "lt", "gt", "apos", "amp":
-		return true
-	}
-	if strings.HasPrefix(name, "#x") || strings.HasPrefix(name, "#X") {
-		return len(name) > 2 && allASCIIAlphaNum(name[2:])
-	}
-	if strings.HasPrefix(name, "#") {
-		return len(name) > 1 && allASCIIAlphaNum(name[1:])
-	}
-	return false
-}
-
-func allASCIIAlphaNum(value string) bool {
-	for _, r := range value {
-		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
-			return false
-		}
-	}
-	return value != ""
+	return *value
 }
 
 func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
-	if start.Name.Local != "ussd-data" {
+	if start.Name.Local != "ussd-data" || start.Name.Space != "" {
 		return fmt.Errorf("parsing USSD XML: unexpected root element %q", start.Name.Local)
 	}
 	*p = xmlPayload{XMLName: start.Name}
@@ -140,6 +115,8 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 	var fieldText strings.Builder
 	depth := 0
 	inAnyExt := false
+	lastOrder := 0
+	markerCounts := map[string]int{}
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -150,32 +127,53 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 		}
 		switch elem := token.(type) {
 		case xml.StartElement:
-			if depth == 0 && elementInDocumentNamespace(elem.Name, start.Name.Space) {
+			if field != "" {
+				return fmt.Errorf("parsing USSD XML: %s element contains a child element", field)
+			}
+			if depth == 0 && elem.Name.Space == "" {
 				switch elem.Name.Local {
 				case "language", "ussd-string", "error-code":
+					order := map[string]int{"language": 1, "ussd-string": 2, "error-code": 3}[elem.Name.Local]
+					if order < lastOrder {
+						return fmt.Errorf("parsing USSD XML: %s element is out of order", elem.Name.Local)
+					}
+					lastOrder = order
 					counts[elem.Name.Local]++
 					if counts[elem.Name.Local] > 1 {
 						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
 					}
 					field = elem.Name.Local
 					fieldText.Reset()
+					switch elem.Name.Local {
+					case "language":
+						p.hasLanguage = true
+					case "ussd-string":
+						p.hasString = true
+					case "error-code":
+						p.hasError = true
+					}
 				case "anyExt":
+					lastOrder = 4
 					counts[elem.Name.Local]++
 					if counts[elem.Name.Local] > 1 {
 						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
 					}
 					inAnyExt = true
 					p.AnyExt = &anyExt{}
-				case "UnstructuredSS-Request":
-					p.ensureAnyExt().Request = new(struct{})
-				case "UnstructuredSS-Notify":
-					p.ensureAnyExt().Notify = new(struct{})
 				}
-			} else if inAnyExt && depth == 1 && elementInDocumentNamespace(elem.Name, start.Name.Space) {
+			} else if inAnyExt && depth == 1 && elem.Name.Space == "" {
 				switch elem.Name.Local {
 				case "UnstructuredSS-Request":
+					markerCounts[elem.Name.Local]++
+					if markerCounts[elem.Name.Local] > 1 {
+						return errors.New("parsing USSD XML: duplicate UnstructuredSS-Request element")
+					}
 					p.AnyExt.Request = new(struct{})
 				case "UnstructuredSS-Notify":
+					markerCounts[elem.Name.Local]++
+					if markerCounts[elem.Name.Local] > 1 {
+						return errors.New("parsing USSD XML: duplicate UnstructuredSS-Notify element")
+					}
 					p.AnyExt.Notify = new(struct{})
 				}
 			}
@@ -193,9 +191,9 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 				value := fieldText.String()
 				switch field {
 				case "language":
-					p.Language = value
+					p.Language = &value
 				case "ussd-string":
-					p.String = value
+					p.String = &value
 				case "error-code":
 					code, err := strconv.Atoi(strings.TrimSpace(value))
 					if err != nil {
@@ -205,16 +203,12 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 				}
 				field = ""
 			}
-			if inAnyExt && depth == 0 && elementInDocumentNamespace(elem.Name, start.Name.Space) && elem.Name.Local == "anyExt" {
+			if inAnyExt && depth == 0 && elem.Name.Space == "" && elem.Name.Local == "anyExt" {
 				inAnyExt = false
 			}
 		}
 	}
 	return errors.New("parsing USSD XML: missing ussd-data root element")
-}
-
-func elementInDocumentNamespace(name xml.Name, documentNamespace string) bool {
-	return name.Space == "" || name.Space == documentNamespace
 }
 
 func (p *xmlPayload) ensureAnyExt() *anyExt {
@@ -227,9 +221,6 @@ func (p *xmlPayload) ensureAnyExt() *anyExt {
 func validateLanguage(language string) error {
 	language = strings.TrimSpace(language)
 	if language == "" {
-		return nil
-	}
-	if strings.EqualFold(language, undefinedLang) {
 		return nil
 	}
 	if strings.Contains(language, "-") {

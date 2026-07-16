@@ -10,10 +10,13 @@ const (
 )
 
 const (
-	ikeHeaderLen           = 28
-	ikePayloadHeaderLen    = 4
-	ikeFragmentHeaderLen   = 4
-	defaultIKEFragmentSize = 1280
+	ikeHeaderLen         = 28
+	ikePayloadHeaderLen  = 4
+	ikeFragmentHeaderLen = 4
+	// RFC 7383 recommends 576 bytes as the IPv4 IP-datagram threshold.
+	// Leave room for the IPv4, UDP, and NAT-T non-ESP-marker headers. This
+	// conservative limit is also safely below the IPv6 1280-byte threshold.
+	defaultIKEFragmentSize = 576 - 20 - 8 - nonESPMarkerLen
 	maxIKEFragments        = 65535
 	nonESPMarkerLen        = 4
 )
@@ -199,6 +202,7 @@ const (
 	akaAttrBidding         byte = 136
 	akaAttrIPMSInd         byte = 137
 	akaAttrIPMSRes         byte = 138
+	akaAttrTrustInd        byte = 139
 )
 
 const (

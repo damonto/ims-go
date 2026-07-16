@@ -198,7 +198,7 @@ func (c *Client) openIMSWithPCSCFFailoverAttempts(ctx context.Context, setup *co
 		if closeErr := setup.closeIMS(); closeErr != nil {
 			return errors.Join(errs, fmt.Errorf("closing failed IMS attempt: %w", closeErr))
 		}
-		if attempt+1 == attempts || ctx.Err() != nil || !pcscfFailoverRequired(err) {
+		if attempt+1 == attempts || ctx.Err() != nil || !pcscfFailoverRequired(err, setup.imsCfg.SIPTimers.TF) {
 			return errs
 		}
 		if err := reselector.SelectNextPCSCF(); err != nil {
@@ -208,8 +208,11 @@ func (c *Client) openIMSWithPCSCFFailoverAttempts(ctx context.Context, setup *co
 	return errs
 }
 
-func pcscfFailoverRequired(err error) bool {
-	if registration.PCSCFReselectionRequired(err) ||
+func pcscfFailoverRequired(err error, timerF time.Duration) bool {
+	if timerF <= 0 {
+		timerF = imssession.DefaultTransactionTimers().TF
+	}
+	if registration.PCSCFFailoverRequired(err, timerF) ||
 		imssession.TransactionTimerExpired(err, "B") ||
 		imssession.TransactionTimerExpired(err, "F") {
 		return true
@@ -764,7 +767,7 @@ func (r *connectionRunner) restoreIMSAfterSWUPCSCF(cause error) (bool, error) {
 }
 
 func (r *connectionRunner) restoreIMSAfterRegistrationPCSCF(cause error) (bool, error) {
-	if r.active == nil || !pcscfFailoverRequired(cause) {
+	if r.active == nil || !pcscfFailoverRequired(cause, r.client.cfg.IMS.SIPTimers.TF) {
 		return false, cause
 	}
 	if r.active.tunnel != nil {
@@ -806,7 +809,9 @@ func (c *Client) restoreIMSWithNextLTEPCSCF(active *activeConn, access pcscfRese
 		imsCfg:    c.cfg.IMS,
 		tunnel:    active.tunnel,
 	}
-	remainingCandidates := max(access.PCSCFCandidateCount()-1, 1)
+	// SelectNextPCSCF removes the failed address, so the reported count already
+	// contains only candidates that still need to be attempted.
+	remainingCandidates := max(access.PCSCFCandidateCount(), 1)
 	if err := c.openIMSWithPCSCFFailoverAttempts(setupCtx, setup, access, remainingCandidates); err != nil {
 		_ = setup.closeIMS()
 		return nil, err

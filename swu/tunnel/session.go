@@ -221,7 +221,9 @@ func (s *Session) startBackgroundLoop(run func()) {
 func (s *Session) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()
-	_ = s.sendDeleteRequest(ctx)
+	if err := s.sendDeleteRequest(ctx); err != nil {
+		s.logger.Debug("sending IKE delete request failed", "err", err)
+	}
 	s.closeSession()
 	s.wg.Wait()
 	s.discardSecurityAssociations(nil)

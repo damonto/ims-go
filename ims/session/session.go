@@ -3,13 +3,13 @@ package session
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,10 +21,12 @@ import (
 const (
 	sipStatusOK                          = 200
 	sipStatusTrying                      = 100
+	sipStatusBadRequest                  = 400
 	sipStatusMethodNotAllowed            = 405
+	sipStatusBadExtension                = 420
+	sipStatusLoopDetected                = 482
 	sipStatusCallTransactionDoesNotExist = 481
 	sipStatusRequestTerminated           = 487
-	sipStatusServiceUnavailable          = 503
 )
 
 type Config struct {
@@ -61,6 +63,9 @@ type Session struct {
 	dialogs        map[string][]*dialogEntry
 	transactions   map[string]*clientTransaction
 	serverTxs      map[string]*serverTransaction
+	stunPending    map[[12]byte]stunPendingTransaction
+	stunMapped     map[Transport]string
+	crlfPending    map[Transport]chan error
 	txChanged      chan struct{}
 	handlers       []*handlerEntry
 	startedCh      chan struct{}
@@ -91,6 +96,9 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		dialogs:        make(map[string][]*dialogEntry),
 		transactions:   make(map[string]*clientTransaction),
 		serverTxs:      make(map[string]*serverTransaction),
+		stunPending:    make(map[[12]byte]stunPendingTransaction),
+		stunMapped:     make(map[Transport]string),
+		crlfPending:    make(map[Transport]chan error),
 		txChanged:      make(chan struct{}),
 		startedCh:      make(chan struct{}),
 		closedCh:       make(chan struct{}),
@@ -110,9 +118,16 @@ type runState struct {
 
 type inboundMessage struct {
 	msg       sip.Message
+	packet    []byte
+	parseErr  error
 	transport Transport
 	peer      net.Addr
 	err       error
+}
+
+type usableTransportError interface {
+	error
+	TransportUsable() bool
 }
 
 func (s *Session) Run(ctx context.Context) error {
@@ -152,6 +167,12 @@ func (s *Session) Run(ctx context.Context) error {
 				if !s.isTransportActive(inbound.transport) {
 					continue
 				}
+				if transportRemainsUsable(inbound.err) {
+					s.logger.Warn("SIP transport connection lost; transport remains active", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
+					s.abortTransportTransactions(inbound.transport, inbound.err)
+					s.startReadLoop(ctx, inbound.transport, inboundCh)
+					continue
+				}
 				if s.removeFailedAuxTransport(inbound.transport) {
 					s.logger.Warn("removed failed auxiliary SIP transport", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
 					s.abortTransportTransactions(inbound.transport, inbound.err)
@@ -166,12 +187,56 @@ func (s *Session) Run(ctx context.Context) error {
 	}
 }
 
+func transportRemainsUsable(err error) bool {
+	var usable usableTransportError
+	return errors.As(err, &usable) && usable.TransportUsable()
+}
+
 func (s *Session) handleInboundRequest(ctx context.Context, req Request) error {
+	if err := validateInboundRequest(req.Message); err != nil {
+		s.logger.Debug("dropping malformed SIP request", "start_line", req.Message.StartLine, "err", err)
+		if !canRespondToRequest(req.Message) || strings.EqualFold(req.Message.Method(), "ACK") {
+			return nil
+		}
+		return s.WriteStatus(ctx, req, sipStatusBadRequest, "Bad Request")
+	}
 	handled, err := s.processServerTransaction(ctx, req)
 	if handled || err != nil {
 		return err
 	}
+	if unsupported := unsupportedRequireOptions(req.Message); len(unsupported) != 0 {
+		resp := sip.NewResponse(sipStatusBadExtension, "Bad Extension")
+		resp.Headers = sip.ResponseHeaders(req.Message, sipStatusBadExtension)
+		resp.Headers.Add("Unsupported", strings.Join(unsupported, ","))
+		return s.WriteResponse(ctx, req, resp)
+	}
 	return s.handleRequest(ctx, req)
+}
+
+func unsupportedRequireOptions(msg sip.Message) []string {
+	method := strings.ToUpper(strings.TrimSpace(msg.Method()))
+	if method == "ACK" || method == "CANCEL" {
+		return nil
+	}
+	supported := sip.SplitHeaderList(sip.DefaultClientSupported)
+	supported = append(supported, "100rel", "precondition", "timer")
+	unsupported := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, value := range msg.HeadersByName("Require") {
+		for _, option := range sip.SplitHeaderList(value) {
+			option = strings.TrimSpace(option)
+			if option == "" || slices.ContainsFunc(supported, func(candidate string) bool { return strings.EqualFold(candidate, option) }) {
+				continue
+			}
+			key := strings.ToLower(option)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			unsupported = append(unsupported, option)
+		}
+	}
+	return unsupported
 }
 
 func (s *Session) WaitStarted(ctx context.Context) error {
@@ -327,10 +392,17 @@ func readTransportMessage(ctx context.Context, transport Transport) (inboundMess
 			return inboundMessage{}, err
 		}
 		if isKeepAlivePacket(packet) {
-			continue
+			return inboundMessage{packet: packet, transport: transport, peer: peer}, nil
 		}
 		msg, err := sip.ParseMessage(packet)
 		if err != nil {
+			if !transportIsReliable(transport) {
+				partial, partialErr := sip.ParseMessagePartial(packet)
+				if partialErr != nil && partial.StartLine != "" {
+					return inboundMessage{msg: partial, parseErr: partialErr, transport: transport, peer: peer}, nil
+				}
+				continue
+			}
 			return inboundMessage{}, err
 		}
 		return inboundMessage{msg: msg, transport: transport, peer: peer}, nil
@@ -393,6 +465,16 @@ type ResponseHandler interface {
 }
 
 func (s *Session) dispatchInbound(ctx context.Context, inbound inboundMessage) error {
+	if len(inbound.packet) != 0 {
+		return s.handleKeepAlivePacket(ctx, inbound)
+	}
+	if inbound.parseErr != nil {
+		s.logger.Debug("dropping malformed SIP datagram", "start_line", inbound.msg.StartLine, "err", inbound.parseErr)
+		if inbound.msg.IsRequest() && canRespondToRequest(inbound.msg) && !strings.EqualFold(inbound.msg.Method(), "ACK") {
+			return s.WriteStatus(ctx, Request{Message: inbound.msg, Transport: inbound.transport, PeerAddr: inbound.peer}, sipStatusBadRequest, "Bad Request")
+		}
+		return nil
+	}
 	text, err := inbound.msg.MarshalText()
 	if err != nil {
 		s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "marshal_error", err)
@@ -402,10 +484,56 @@ func (s *Session) dispatchInbound(ctx context.Context, inbound inboundMessage) e
 	if inbound.msg.IsRequest() {
 		return s.handleInboundRequest(ctx, Request{Message: inbound.msg, Transport: inbound.transport, PeerAddr: inbound.peer})
 	}
+	if err := validateInboundResponse(inbound.msg); err != nil {
+		s.logger.Debug("dropping malformed SIP response", "start_line", inbound.msg.StartLine, "err", err)
+		return nil
+	}
 	if !s.dispatchResponse(inbound) {
 		return s.handleInboundResponse(ctx, inbound.msg)
 	}
 	return nil
+}
+
+func validateInboundRequest(msg sip.Message) error {
+	validated := msg
+	if strings.TrimSpace(validated.Header("Max-Forwards")) == "" {
+		validated.Headers = validated.Headers.Clone()
+		validated.Headers.Add("Max-Forwards", strconv.Itoa(sip.DefaultMaxForwards))
+	}
+	if err := validated.Validate(); err != nil {
+		return fmt.Errorf("validating inbound SIP request: %w", err)
+	}
+	return validateTopViaSentBy(msg)
+}
+
+func validateInboundResponse(msg sip.Message) error {
+	if err := msg.Validate(); err != nil {
+		return fmt.Errorf("validating inbound SIP response: %w", err)
+	}
+	return validateTopViaSentBy(msg)
+}
+
+func validateTopViaSentBy(msg sip.Message) error {
+	if strings.TrimSpace(sip.TopViaSentBy(msg.Header("Via"))) == "" {
+		return errors.New("validating inbound SIP message: top Via is missing sent-by")
+	}
+	return nil
+}
+
+func validateInboundCoreFields(msg sip.Message) error {
+	for _, name := range []string{"Via", "From", "To", "Call-ID", "CSeq"} {
+		if strings.TrimSpace(msg.Header(name)) == "" {
+			return fmt.Errorf("validating inbound SIP message: missing %s header", name)
+		}
+	}
+	if strings.TrimSpace(sip.TopViaSentBy(msg.Header("Via"))) == "" {
+		return errors.New("validating inbound SIP message: top Via is missing sent-by")
+	}
+	return nil
+}
+
+func canRespondToRequest(msg sip.Message) bool {
+	return validateInboundCoreFields(msg) == nil
 }
 
 func (s *Session) handleRequest(ctx context.Context, req Request) error {
@@ -415,6 +543,13 @@ func (s *Session) handleRequest(ctx context.Context, req Request) error {
 	}
 	if handled {
 		return nil
+	}
+	if strings.EqualFold(req.Message.Method(), "OPTIONS") {
+		resp := sip.NewResponse(sipStatusOK, "OK")
+		resp.Headers = sip.ResponseHeaders(req.Message, sipStatusOK)
+		resp.Headers.Add("Allow", sip.DefaultClientAllow)
+		resp.Headers.Add("Supported", sip.DefaultClientSupported)
+		return s.WriteResponse(ctx, req, resp)
 	}
 	if req.Message.Method() == "ACK" {
 		return nil
@@ -502,9 +637,6 @@ func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport
 		return s.exchangeWithBootstrapReader(ctx, tx)
 	}
 	if err := tx.start(ctx); err != nil {
-		if resp, ok := transactionLayerErrorResponse(req, err); ok {
-			return resp, nil
-		}
 		return sip.Message{}, err
 	}
 	return tx.await(ctx)
@@ -512,9 +644,6 @@ func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport
 
 func (s *Session) exchangeWithBootstrapReader(ctx context.Context, tx *clientTransaction) (sip.Message, error) {
 	if err := tx.start(ctx); err != nil {
-		if resp, ok := transactionLayerErrorResponse(tx.request, err); ok {
-			return resp, nil
-		}
 		return sip.Message{}, err
 	}
 
@@ -597,6 +726,13 @@ func sameSIPSentBy(left, right string) bool {
 	return leftErr == nil && rightErr == nil && leftAddr == rightAddr
 }
 
+func canonicalSIPSentBy(sentBy string) string {
+	if addr, err := netip.ParseAddrPort(sentBy); err == nil {
+		return addr.String()
+	}
+	return strings.ToLower(sentBy)
+}
+
 func exchangeReadTransports(requestTransport Transport, responseTransports []Transport) []Transport {
 	if len(responseTransports) == 0 {
 		return []Transport{requestTransport}
@@ -610,6 +746,10 @@ type Transport interface {
 	WritePacket(ctx context.Context, data []byte) error
 	ReadPacket(ctx context.Context) ([]byte, net.Addr, error)
 	Close() error
+}
+
+type keepAliveTransport interface {
+	SupportsSIPKeepAlive() bool
 }
 
 type SecureTCPConfig struct {
@@ -653,6 +793,14 @@ func (s *Session) RemoteAddr() net.Addr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.primary.RemoteAddr()
+}
+
+// SupportsKeepAlive reports whether the primary transport permits the SIP
+// keep-alive mechanisms negotiated through RFC 6223.
+func (s *Session) SupportsKeepAlive() bool {
+	transport := s.primaryTransport()
+	capability, ok := transport.(keepAliveTransport)
+	return !ok || capability.SupportsSIPKeepAlive()
 }
 
 func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transport) error {
@@ -742,6 +890,7 @@ func (s *Session) removeFailedAuxTransport(transport Transport) bool {
 	s.aux = removeTransport(s.aux, transport)
 	s.notifyTransactionsChanged()
 	s.mu.Unlock()
+	s.abortTransportKeepAlives(transport, errors.New("waiting for keepalive: transport failed"))
 	_ = transport.Close()
 	return true
 }
@@ -805,6 +954,7 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 		return fmt.Errorf("writing response: %w", err)
 	}
 	s.applyResponseDecorator(&resp)
+	sip.SetResponseViaPeer(&resp, req.PeerAddr)
 	// Record the response before writing it so the INVITE transaction's
 	// automatic 100 Trying timer cannot race a response already in flight.
 	tx := s.recordServerTransactionResponse(req, resp)
@@ -867,7 +1017,7 @@ func (s *Session) writeResponse(ctx context.Context, transport Transport, peer n
 	if remote == nil {
 		remote = transport.RemoteAddr()
 	}
-	target := responseDestination(remote, req.Header("Via"))
+	target := responseDestination(remote, resp.Header("Via"))
 	if peer != nil {
 		transport = s.responseTransport(transport, target)
 	}
@@ -992,44 +1142,22 @@ func stripHostBrackets(host string) string {
 	return strings.TrimSuffix(host, "]")
 }
 
-const (
-	stunBindingIndication = 0x0011
-	stunMagicCookie       = 0x2112A442
-	stunHeaderBytes       = 20
-)
-
 var sipCRLFKeepAlive = []byte("\r\n\r\n")
 
 func (s *Session) SendKeepAlive(ctx context.Context) error {
 	if err := s.ensureOpen(); err != nil {
 		return fmt.Errorf("sending SIP keepalive: %w", err)
 	}
+	if !s.SupportsKeepAlive() {
+		return errors.New("sending SIP keepalive: primary transport disables SIP keepalive")
+	}
 	transport := s.primaryTransport()
-	packet, err := keepAlivePacket(transport.LocalAddr())
-	if err != nil {
-		return fmt.Errorf("sending SIP keepalive: %w", err)
-	}
-	return s.writePacket(ctx, transport, packet)
-}
-
-func keepAlivePacket(addr net.Addr) ([]byte, error) {
-	switch addr.(type) {
+	switch transport.LocalAddr().(type) {
 	case *net.TCPAddr:
-		return append([]byte(nil), sipCRLFKeepAlive...), nil
+		return s.sendCRLFKeepAlive(ctx, transport)
 	default:
-		return newSTUNBindingIndication()
+		return s.sendSTUNBindingRequest(ctx, transport)
 	}
-}
-
-func newSTUNBindingIndication() ([]byte, error) {
-	packet := make([]byte, stunHeaderBytes)
-	binary.BigEndian.PutUint16(packet[0:2], stunBindingIndication)
-	binary.BigEndian.PutUint16(packet[2:4], 0)
-	binary.BigEndian.PutUint32(packet[4:8], stunMagicCookie)
-	if _, err := rand.Read(packet[8:20]); err != nil {
-		return nil, err
-	}
-	return packet, nil
 }
 
 func isKeepAlivePacket(packet []byte) bool {
@@ -1037,7 +1165,7 @@ func isKeepAlivePacket(packet []byte) bool {
 }
 
 func isCRLFKeepAlivePacket(packet []byte) bool {
-	return len(bytes.Trim(packet, "\r\n")) == 0
+	return bytes.Equal(packet, []byte("\r\n")) || bytes.Equal(packet, sipCRLFKeepAlive)
 }
 
 func isSTUNPacket(packet []byte) bool {
@@ -1051,5 +1179,5 @@ func isSTUNPacket(packet []byte) bool {
 		return false
 	}
 	length := int(binary.BigEndian.Uint16(packet[2:4]))
-	return stunHeaderBytes+length == len(packet)
+	return length%4 == 0 && stunHeaderBytes+length == len(packet)
 }

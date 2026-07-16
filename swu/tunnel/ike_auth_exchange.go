@@ -5,26 +5,29 @@ import (
 	"crypto/hmac"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
 	"github.com/damonto/ims-go/swu/ike"
 )
 
-func responderIDRawFromPayloads(payloads []ike.Payload) ([]byte, error) {
+func responderIDRawFromPayloads(payloads []ike.Payload, requestedAPN string, requestedDefaultAPN bool) ([]byte, string, error) {
 	idr := ike.FindIDPayload(payloads, payloadTypeIDr)
 	if idr == nil {
-		return nil, errors.New("ike_auth response idr is missing")
+		return nil, "", errors.New("ike_auth response idr is missing")
 	}
 	if err := validateResponderID(idr); err != nil {
-		return nil, fmt.Errorf("ike_auth response idr: %w", err)
+		return nil, "", fmt.Errorf("ike_auth response idr: %w", err)
 	}
 	idrRaw, err := idr.RawData()
 	if err != nil {
-		return nil, fmt.Errorf("ike_auth response idr: %w", err)
+		return nil, "", fmt.Errorf("ike_auth response idr: %w", err)
 	}
-	return idrRaw, nil
+	responderAPN, err := responderAPNFromID(idr, requestedAPN, requestedDefaultAPN)
+	if err != nil {
+		return nil, "", fmt.Errorf("ike_auth response idr: %w", err)
+	}
+	return idrRaw, responderAPN, nil
 }
 
 func validateResponderID(idr *ike.IDPayload) error {
@@ -43,6 +46,39 @@ func validateResponderID(idr *ike.IDPayload) error {
 		return fmt.Errorf("unsupported type %d", idr.IDType)
 	}
 	return nil
+}
+
+func responderAPNFromID(idr *ike.IDPayload, requestedAPN string, requestedDefaultAPN bool) (string, error) {
+	if idr.IDType != idTypeFQDN {
+		if requestedDefaultAPN {
+			return "", nil
+		}
+		requestedAPN = strings.TrimSpace(requestedAPN)
+		if requestedAPN == "" {
+			requestedAPN = DefaultAPN
+		}
+		return requestedAPN, nil
+	}
+	if len(idr.Data) == 0 {
+		return "", errors.New("data is empty")
+	}
+	for _, char := range idr.Data {
+		if char < 0x21 || char > 0x7e {
+			return "", errors.New("fqdn contains a non-printable or non-ASCII character")
+		}
+	}
+	if requestedDefaultAPN {
+		return string(idr.Data), nil
+	}
+	requestedAPN = strings.TrimSpace(requestedAPN)
+	if requestedAPN == "" {
+		requestedAPN = DefaultAPN
+	}
+	// RFC 7296 allows the responder to assert an IDr different from the one
+	// proposed by the initiator. Some ePDGs use their node FQDN here instead of
+	// echoing the APN required by TS 24.302, so keep the requested APN separate
+	// from the responder identity used to verify AUTH.
+	return requestedAPN, nil
 }
 
 func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Payload) ([]ike.Payload, uint32, error) {
@@ -64,7 +100,15 @@ func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Pa
 	if err != nil {
 		return nil, 0, fmt.Errorf("sealing final ike_auth: %w", err)
 	}
-	payloads, _, err := f.session.exchangeProtectedIKE(ctx, f.ikePeer, requests, f.useNATT, f.nextRequestID, f.crypto, false, f.ikeFragmentationSupported, ikeActionOpenFinalIKEAuthResponse)
+	payloads, _, err := f.session.exchangeProtectedIKE(ctx, protectedIKEExchange{
+		peer:                   f.ikePeer,
+		requests:               requests,
+		useNATT:                f.useNATT,
+		messageID:              f.nextRequestID,
+		crypto:                 f.crypto,
+		fragmentationSupported: f.ikeFragmentationSupported,
+		action:                 ikeActionOpenFinalIKEAuthResponse,
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -103,26 +147,26 @@ func findAuthPayload(payloads []ike.Payload) *ike.AuthPayload {
 }
 
 func (f *akaAuthFlow) exchangeResponse(ctx context.Context, serverPayloads []ike.Payload, responseData []byte) ([]ike.Payload, error) {
-	nextPayloads, err := f.session.exchangeAKAResponse(ctx, f.crypto, f.initiatorSPI, f.responderSPI, f.nextRequestID, serverPayloads, f.imei, f.akaAuthenticated, responseData, f.ikePeer, f.useNATT, f.ikeFragmentationSupported)
-	if err != nil {
-		return nil, err
-	}
-	return nextPayloads, nil
-}
-
-func (s *Session) exchangeAKAResponse(ctx context.Context, crypto *ikeCrypto, initiatorSPI, responderSPI uint64, messageID uint32, serverPayloads []ike.Payload, imei string, allowDeviceIdentity bool, responseData []byte, peer *net.UDPAddr, useNATT bool, fragmentationSupported bool) ([]ike.Payload, error) {
 	requestPayloads := []ike.Payload{&ike.EAPPayload{Data: responseData}}
-	requestPayloads, err := appendDeviceIdentityResponsePayload(requestPayloads, serverPayloads, imei, allowDeviceIdentity)
+	requestPayloads, err := appendDeviceIdentityResponsePayload(requestPayloads, serverPayloads, f.imei, f.akaAuthenticated)
 	if err != nil {
 		return nil, fmt.Errorf("building device identity response: %w", err)
 	}
-	logEAPPacket(s.logger, "sending EAP packet", "outbound", messageID, responseData)
-	header := ike.IKEHeader{InitiatorSPI: initiatorSPI, ResponderSPI: responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: messageID}
-	requests, err := sealIKEPackets(crypto, header, requestPayloads, true, fragmentationSupported)
+	logEAPPacket(f.logger(), "sending EAP packet", "outbound", f.nextRequestID, responseData)
+	header := ike.IKEHeader{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
+	requests, err := sealIKEPackets(f.crypto, header, requestPayloads, true, f.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing aka response: %w", err)
 	}
-	payloads, _, err := s.exchangeProtectedIKE(ctx, peer, requests, useNATT, messageID, crypto, false, fragmentationSupported, ikeActionConnectOpenAKAResponseMessage)
+	payloads, _, err := f.session.exchangeProtectedIKE(ctx, protectedIKEExchange{
+		peer:                   f.ikePeer,
+		requests:               requests,
+		useNATT:                f.useNATT,
+		messageID:              f.nextRequestID,
+		crypto:                 f.crypto,
+		fragmentationSupported: f.ikeFragmentationSupported,
+		action:                 ikeActionConnectOpenAKAResponseMessage,
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -132,7 +132,9 @@ func (s *Endpoint) HandleRequest(ctx context.Context, req session.Request) (bool
 		if session == nil {
 			return false, nil
 		}
-		session.finish(false)
+		if !session.inviteHasFinalResponse() {
+			session.finish(false)
+		}
 		return true, nil
 	case "INFO", "BYE":
 		session := s.lookupSessionForMessage(req.Message)
@@ -153,6 +155,66 @@ func (s *Endpoint) HandleError(err error) {
 		return
 	}
 	s.logger.Debug("session error", "err", err)
+}
+
+func (s *Endpoint) HandleResponse(ctx context.Context, msg sip.Message) (bool, error) {
+	if msg.StatusCode() < 200 || msg.StatusCode() >= 300 || !strings.EqualFold(sip.CSeqMethod(msg.Header("CSeq")), "INVITE") {
+		return false, nil
+	}
+	session := s.lookupSessionByCallID(strings.TrimSpace(msg.Header("Call-ID")))
+	if session == nil || sip.CSeqNumber(msg.Header("CSeq")) != session.inviteSeq {
+		return false, nil
+	}
+	remoteTag := sip.HeaderTag(msg.Header("To"))
+	if remoteTag != session.remoteTag {
+		return true, s.ackAndEndForkedDialog(ctx, session, msg)
+	}
+	session.mu.Lock()
+	ack := session.inviteACK
+	session.mu.Unlock()
+	if ack.StartLine == "" {
+		return false, nil
+	}
+	if err := s.sess.Send(ctx, ack); err != nil {
+		return true, fmt.Errorf("acknowledging retransmitted USSD INVITE 2xx: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Endpoint) ackAndEndForkedDialog(ctx context.Context, base *Session, resp sip.Message) error {
+	base.mu.Lock()
+	fork := &Session{
+		endpoint:     s,
+		callID:       base.callID,
+		sessionID:    base.sessionID,
+		localURI:     base.localURI,
+		localTag:     base.localTag,
+		remoteTag:    sip.HeaderTag(resp.Header("To")),
+		remoteTo:     resp.Header("To"),
+		targetURI:    nonEmpty(sip.AddressURI(resp.Header("Contact")), base.targetURI),
+		routeSet:     reverseValues(resp.HeaderList("Record-Route")),
+		inviteSeq:    base.inviteSeq,
+		localCSeq:    base.inviteSeq,
+		language:     base.language,
+		events:       make(chan Message),
+		remoteCSeqs:  make(map[string]struct{}),
+		responseKind: dialogKindRequest,
+	}
+	base.mu.Unlock()
+	if fork.remoteTag == "" {
+		return errors.New("acknowledging forked USSD INVITE 2xx: missing To tag")
+	}
+	if err := s.sess.Send(ctx, fork.buildACK()); err != nil {
+		return fmt.Errorf("acknowledging forked USSD INVITE 2xx: %w", err)
+	}
+	s.startBackgroundTask(func(done <-chan struct{}) {
+		endCtx, cancel := contextWithDoneTimeout(done, defaultQueuedRequestTimeout)
+		defer cancel()
+		if err := fork.endDirect(endCtx, ""); err != nil {
+			s.logger.Warn("ending forked USSD dialog", "call_id", fork.callID, "remote_tag", fork.remoteTag, "err", err)
+		}
+	})
+	return nil
 }
 
 func (s *Endpoint) writeUnsupportedMediaType(ctx context.Context, req session.Request) error {
@@ -211,7 +273,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 	if s.hasActiveSession() {
 		return s.sess.WriteStatus(ctx, req, sipStatusBusyHere, "Busy Here")
 	}
-	payload, err := validateIncomingInvite(req.Message)
+	payload, offerSDP, err := validateIncomingInvite(req.Message)
 	if err != nil {
 		if errors.Is(err, errUnsupportedMediaType) {
 			return s.writeUnsupportedMediaType(ctx, req)
@@ -222,7 +284,12 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 	if err := s.sess.WriteStatus(ctx, req, sipStatusTrying, "Trying"); err != nil {
 		return fmt.Errorf("handling USSD INVITE: sending 100 Trying: %w", err)
 	}
-	session.inviteOK = s.buildIncomingInviteOK(req.Message, session.localURI, session.localTag)
+	answerSDP, err := s.sdpAnswer(offerSDP)
+	if err != nil {
+		session.closeEvents()
+		return s.sess.WriteStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
+	}
+	session.inviteOK = s.buildIncomingInviteOK(req.Message, session.localURI, session.localTag, answerSDP)
 	if err := s.storeSession(session); err != nil {
 		session.closeEvents()
 		if errors.Is(err, errSessionActive) {
@@ -240,6 +307,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 		session.finish(false)
 		return fmt.Errorf("handling USSD INVITE: sending 200 OK: %w", err)
 	}
+	session.markInviteFinalResponseSent()
 	session.startInviteOKRetransmit(req, session.inviteOK)
 	s.logger.Info("accepted network-initiated USSD", "call_id", session.callID, "target_uri", session.targetURI)
 	return nil
@@ -274,7 +342,7 @@ func (s *Endpoint) newIncomingSession(msg sip.Message, payload Message) *Session
 		remoteTag:        sip.HeaderTag(remoteTo),
 		remoteTo:         remoteTo,
 		targetURI:        targetURI,
-		routeSet:         append([]string(nil), msg.HeadersByName("Record-Route")...),
+		routeSet:         msg.HeaderList("Record-Route"),
 		inviteSeq:        sip.CSeqNumber(msg.Header("CSeq")),
 		localCSeq:        0,
 		remoteCSeq:       sip.CSeqNumber(msg.Header("CSeq")),
@@ -288,15 +356,18 @@ func (s *Endpoint) newIncomingSession(msg sip.Message, payload Message) *Session
 	}
 }
 
-func (s *Endpoint) buildIncomingInviteOK(msg sip.Message, localURI, localTag string) sip.Message {
+func (s *Endpoint) buildIncomingInviteOK(msg sip.Message, localURI, localTag string, answerSDP []byte) sip.Message {
 	ok := sip.NewResponse(sipStatusOK, "OK")
 	ok.Headers = sip.ResponseHeaders(msg, sipStatusOK)
 	ok.Headers = sip.UpsertHeader(ok.Headers, "To", sip.WithTag(msg.Header("To"), localURI, localTag))
+	for _, recordRoute := range msg.HeadersByName("Record-Route") {
+		ok.Headers.Add("Record-Route", recordRoute)
+	}
 	ok.Headers.Add("Contact", contactValue(s.reg.State(), s.cfg.NetworkInitiatedSupported))
 	ok.Headers.Add("Recv-Info", infoPackage)
 	ok.Headers.Add("Accept", acceptHeader)
 	ok.Headers.Add("Content-Type", sdpContentType)
-	ok.Body = []byte(s.sdp())
+	ok.Body = answerSDP
 	return ok
 }
 
@@ -369,9 +440,6 @@ func (s *Endpoint) buildInvite(start startRequest, boundary string, body []byte)
 }
 
 func (s *Endpoint) startSession(ctx context.Context, start startRequest, invite, resp sip.Message) (*Session, error) {
-	if err := validateInviteOK(resp); err != nil {
-		return nil, fmt.Errorf("starting USSD: validating 200 OK: %w", err)
-	}
 	session := &Session{
 		endpoint:     s,
 		callID:       start.callID,
@@ -381,7 +449,7 @@ func (s *Endpoint) startSession(ctx context.Context, start startRequest, invite,
 		remoteTag:    sip.HeaderTag(resp.Header("To")),
 		remoteTo:     nonEmpty(resp.Header("To"), invite.Header("To")),
 		targetURI:    nonEmpty(sip.AddressURI(resp.Header("Contact")), start.target),
-		routeSet:     reverseValues(resp.HeadersByName("Record-Route")),
+		routeSet:     reverseValues(resp.HeaderList("Record-Route")),
 		inviteSeq:    start.inviteSeq,
 		localCSeq:    start.inviteSeq,
 		language:     start.language,
@@ -389,17 +457,34 @@ func (s *Endpoint) startSession(ctx context.Context, start startRequest, invite,
 		remoteCSeqs:  make(map[string]struct{}),
 		responseKind: dialogKindRequest,
 	}
-	if err := s.storeSession(session); err != nil {
+	validationErr := validateInviteOK(resp)
+	storeErr := s.storeSession(session)
+
+	// RFC 3261 section 13.2.2.4 requires an ACK for every INVITE 2xx,
+	// including an unacceptable response or a dialog we cannot retain.
+	ack := session.buildACK()
+	session.inviteACK = ack
+	if err := s.sess.Send(ctx, ack); err != nil {
+		session.finish(false)
+		return nil, fmt.Errorf("starting USSD: acknowledging 200 OK: %w", err)
+	}
+	if validationErr != nil {
+		validationErr = fmt.Errorf("starting USSD: validating 200 OK: %w", validationErr)
+		if storeErr != nil {
+			validationErr = errors.Join(validationErr, storeErr)
+		}
 		if endErr := session.endDirect(ctx, ""); endErr != nil {
-			err = errors.Join(err, endErr)
+			validationErr = errors.Join(validationErr, endErr)
 		}
 		session.finish(false)
-		return nil, err
+		return nil, validationErr
 	}
-	if err := s.sess.Send(ctx, session.buildACK()); err != nil {
-		s.removeSession(session.sessionKey())
-		session.closeEvents()
-		return nil, fmt.Errorf("starting USSD: %w", err)
+	if storeErr != nil {
+		if endErr := session.endDirect(ctx, ""); endErr != nil {
+			storeErr = errors.Join(storeErr, endErr)
+		}
+		session.finish(false)
+		return nil, storeErr
 	}
 	s.logger.Info("started USSD session", "code", start.code, "call_id", start.callID, "target_uri", session.targetURI)
 	return session, nil
@@ -453,8 +538,17 @@ func (s *Session) startInviteOKRetransmit(req session.Request, resp sip.Message)
 }
 
 func validateInviteOK(msg sip.Message) error {
-	if !sip.TokenListContains(msg.Header("Recv-Info"), infoPackage) {
+	if sip.HeaderTag(msg.Header("To")) == "" {
+		return errors.New("missing To tag")
+	}
+	if _, err := dialogContactURI(msg); err != nil {
+		return fmt.Errorf("invalid Contact: %w", err)
+	}
+	if !msg.HeaderHasToken("Recv-Info", infoPackage) {
 		return fmt.Errorf("missing Recv-Info %q", infoPackage)
+	}
+	if !acceptsMedia(strings.Join(msg.HeadersByName("Accept"), ",")) {
+		return errors.New("missing required Accept media types")
 	}
 	if err := validateMessageSDP(msg); err != nil {
 		return fmt.Errorf("validating SDP answer: %w", err)
@@ -462,24 +556,45 @@ func validateInviteOK(msg sip.Message) error {
 	return nil
 }
 
-func validateIncomingInvite(msg sip.Message) (Message, error) {
-	if !sip.TokenListContains(msg.Header("Recv-Info"), infoPackage) {
-		return Message{}, fmt.Errorf("missing Recv-Info %q", infoPackage)
+func validateIncomingInvite(msg sip.Message) (Message, []byte, error) {
+	if _, err := dialogContactURI(msg); err != nil {
+		return Message{}, nil, fmt.Errorf("invalid Contact: %w", err)
 	}
-	if !acceptsMedia(msg.Header("Accept")) {
-		return Message{}, errors.New("missing required Accept media types")
+	if !msg.HeaderHasToken("Recv-Info", infoPackage) {
+		return Message{}, nil, fmt.Errorf("missing Recv-Info %q", infoPackage)
+	}
+	if !acceptsMedia(strings.Join(msg.HeadersByName("Accept"), ",")) {
+		return Message{}, nil, errors.New("missing required Accept media types")
 	}
 	payload, hasSDP, err := decodeInvitePayload(msg)
 	if err != nil {
-		return Message{}, err
+		return Message{}, nil, err
 	}
 	if !hasSDP {
-		return Message{}, errors.New("missing SDP offer")
+		return Message{}, nil, errors.New("missing SDP offer")
 	}
-	if !payload.Request && !payload.Notify {
-		return Message{}, errors.New("missing network initiated USSD marker")
+	if !payload.Request || payload.Notify {
+		return Message{}, nil, errors.New("invalid network initiated USSD request marker")
 	}
-	return payload, nil
+	xmlData, err := messageBodyPart(msg, xmlContentType)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	_, presence, err := decodeXMLWithPresence(xmlData)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	if !presence.text {
+		return Message{}, nil, errors.New("missing ussd-string element")
+	}
+	if presence.error {
+		return Message{}, nil, errors.New("unexpected error-code in network initiated INVITE")
+	}
+	offerSDP, err := messageSDPBody(msg)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	return payload, offerSDP, nil
 }
 
 func decodeInvitePayload(msg sip.Message) (Message, bool, error) {
@@ -512,5 +627,5 @@ func looksLikeInvite(msg sip.Message) bool {
 	if !strings.EqualFold(msg.Method(), "INVITE") {
 		return false
 	}
-	return sip.TokenListContains(msg.Header("Recv-Info"), infoPackage) || acceptsMedia(msg.Header("Accept"))
+	return msg.HeaderHasToken("Recv-Info", infoPackage) || acceptsMedia(strings.Join(msg.HeadersByName("Accept"), ","))
 }

@@ -200,7 +200,8 @@ func isKnownAKAAttribute(attrType byte) bool {
 		akaAttrResultInd,
 		akaAttrBidding,
 		akaAttrIPMSInd,
-		akaAttrIPMSRes:
+		akaAttrIPMSRes,
+		akaAttrTrustInd:
 		return true
 	default:
 		return false

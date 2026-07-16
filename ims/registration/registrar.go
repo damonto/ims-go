@@ -18,6 +18,7 @@ const (
 	sipStatusOK                          = 200
 	sipStatusUseProxy                    = 305
 	sipStatusBadRequest                  = 400
+	sipStatusUnsupportedMediaType        = 415
 	sipStatusUnauthorized                = 401
 	sipStatusProxyAuthenticationRequired = 407
 	sipStatusForbidden                   = 403
@@ -105,6 +106,7 @@ type Registrar struct {
 	authRealm           string
 	authAlgorithm       string
 	authQOP             string
+	authOpaque          string
 	authHeader          string
 	authNonceCount      uint32
 	authDigestNonce     string
@@ -130,6 +132,7 @@ type Registrar struct {
 	done                      chan struct{}
 	secureServerAttachments   []session.Attachment
 	secureResponseAttachments []session.Attachment
+	unprotectedPrimary        session.Transport
 	drainTimers               []*attachmentDrain
 	activeSecureSAExpiresAt   time.Time
 	activeSecureSAExpiry      *secureAssociationExpiry
@@ -259,11 +262,11 @@ func (s *Registrar) Register(ctx context.Context) error {
 	var initialAuth *security.Authorization
 	resynchronized := false
 	for {
-		initialAuth, err = s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP)
+		initialAuth, err = s.buildRegisterAuthorization(ctx, challenge)
 		if err == nil {
 			break
 		}
-		resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), err)
+		resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), s.CurrentFlow(), err)
 		if err != nil {
 			return fmt.Errorf("registering IMS: %w", err)
 		}
@@ -342,9 +345,9 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 	for {
 		if auth == nil {
 			var err error
-			auth, err = s.buildRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP)
+			auth, err = s.buildRegisterAuthorization(ctx, challenge)
 			if err != nil {
-				resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), err)
+				resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), s.CurrentFlow(), err)
 				if err != nil {
 					return err
 				}
@@ -421,13 +424,17 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 	}
 }
 
-func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip.Message) error {
-	parsed, err := parseRegisterChallenge(challengeResp, s.CurrentFlow().SecurityClients)
+func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip.Message, proposedFlow Flow) error {
+	currentFlow := s.CurrentFlow()
+	parsed, err := parseRegisterChallenge(challengeResp, proposedFlow.SecurityClients)
 	if err != nil {
 		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
 	challenge := parsed.challenge
 	verify := parsed.verify
+	if err := validateReauthenticationSecurityServer(currentFlow, verify); err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
 	raw := parsed.rawSecurityServer
 	authorizationHeader := parsed.authorizationHeader
 	var auth *security.Authorization
@@ -435,31 +442,37 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	var password string
 	resynchronized := false
 	for {
-		auth, ck, ik, password, err = s.calculateRegisterAuthorization(ctx, challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP, 1)
+		auth, ck, ik, password, err = s.calculateRegisterAuthorization(ctx, challenge, 1)
 		if err == nil {
 			break
 		}
-		resp, err := s.exchangeAKAFailure(ctx, challenge, authorizationHeader, err)
+		resp, err := s.exchangeAKAFailure(ctx, challenge, authorizationHeader, proposedFlow, err)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
 		if resynchronized {
 			return errors.New("refreshing IMS registration: repeated AKA synchronization failure")
 		}
-		parsed, err = parseRegisterChallenge(resp, s.CurrentFlow().SecurityClients)
+		parsed, err = parseRegisterChallenge(resp, proposedFlow.SecurityClients)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
 		challenge = parsed.challenge
 		verify = parsed.verify
+		if err := validateReauthenticationSecurityServer(currentFlow, verify); err != nil {
+			return fmt.Errorf("refreshing IMS registration: %w", err)
+		}
 		raw = parsed.rawSecurityServer
 		authorizationHeader = parsed.authorizationHeader
 		resynchronized = true
 	}
 
-	nextFlow := s.CurrentFlow()
+	nextFlow := proposedFlow.clone()
 	nextFlow.SecurityVerify = verify
 	nextFlow.SecurityServerRaw = append([]string(nil), raw...)
+	if parsed.publicContactHost != "" {
+		nextFlow.ContactHost = parsed.publicContactHost
+	}
 	if verify == nil {
 		nextFlow.MessagePort = nextFlow.RegisterPort
 		req := s.buildRegisterForFlowWithAuthorizationHeader(auth, nil, nextFlow, authorizationHeader)
@@ -483,8 +496,6 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		s.applyRegisterSuccess(resp)
 		return nil
 	}
-	nextFlow.SecurityClient = reauthSecurityClient(nextFlow.SecurityClient, nextFlow.RegisterPort)
-	nextFlow.SecurityClients = securityClientCapabilities(nextFlow.SecurityClient)
 	nextFlow.MessagePort = nextFlow.SecurityClient.PortS
 
 	outbound, err := s.dialSecureTransport(ctx, verify, nextFlow, ck, ik)
@@ -561,9 +572,14 @@ func (s *Registrar) Refresh(ctx context.Context) error {
 	}
 	defer release()
 
-	state := refreshRegisterState{}
+	flow := s.CurrentFlow()
+	if flow.SecurityVerify != nil {
+		flow.SecurityClient = reauthSecurityClient(flow.SecurityClient, *flow.SecurityVerify, flow.RegisterPort)
+		flow.SecurityClients = securityClientCapabilities(flow.SecurityClient)
+	}
+	state := refreshRegisterState{flow: flow}
 	for range 6 {
-		req, auth, err := s.buildRefreshRegister(ctx)
+		req, auth, err := s.buildRefreshRegister(ctx, state.flow)
 		if err != nil {
 			resp, err := s.exchangeCurrentAKAFailure(ctx, err)
 			if err != nil {
@@ -641,10 +657,10 @@ func (s *Registrar) deregister(ctx context.Context) error {
 		return nil
 	}
 	verify := s.currentSecurityVerify()
-	realm, nonce, algorithm, qop := s.currentAuthState()
+	challenge := s.currentAuthChallenge()
 	challenged := false
 	for range 2 {
-		req, err := s.buildDeregisterMessage(ctx, verify, realm, nonce, algorithm, qop)
+		req, err := s.buildDeregisterMessage(ctx, verify, challenge)
 		if err != nil {
 			return fmt.Errorf("deregistering IMS: %w", err)
 		}
@@ -652,13 +668,14 @@ func (s *Registrar) deregister(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("deregistering IMS: %w", err)
 		}
-		done, err := s.handleDeregisterResponse(resp, &challenged, &realm, &nonce, &algorithm, &qop)
+		done, err := s.handleDeregisterResponse(resp, &challenged, &challenge)
 		if err != nil {
 			return fmt.Errorf("deregistering IMS: %w", err)
 		}
 		if done {
-			s.setRegistered(false)
-			s.stopRegistrationKeepAlive("deregistered")
+			if err := s.clearRegistrationState(); err != nil {
+				return fmt.Errorf("deregistering IMS: deleting registration security state: %w", err)
+			}
 			s.logger.Info("IMS deregistered")
 			return nil
 		}
@@ -666,15 +683,15 @@ func (s *Registrar) deregister(ctx context.Context) error {
 	return errors.New("deregistering IMS: exhausted retries")
 }
 
-func (s *Registrar) buildDeregisterMessage(ctx context.Context, verify *security.Param, realm, nonce, algorithm, qop string) (sip.Message, error) {
-	auth, err := s.buildRegisterAuthorization(ctx, realm, nonce, algorithm, qop)
+func (s *Registrar) buildDeregisterMessage(ctx context.Context, verify *security.Param, challenge security.Challenge) (sip.Message, error) {
+	auth, err := s.buildRegisterAuthorization(ctx, challenge)
 	if err != nil {
 		return sip.Message{}, err
 	}
 	return s.buildDeregister(auth, verify), nil
 }
 
-func (s *Registrar) handleDeregisterResponse(resp sip.Message, challenged *bool, realm, nonce, algorithm, qop *string) (bool, error) {
+func (s *Registrar) handleDeregisterResponse(resp sip.Message, challenged *bool, challenge *security.Challenge) (bool, error) {
 	switch resp.StatusCode() {
 	case sipStatusOK:
 		return true, nil
@@ -687,10 +704,7 @@ func (s *Registrar) handleDeregisterResponse(resp sip.Message, challenged *bool,
 			return false, err
 		}
 		s.storeAuthChallenge(parsed.challenge, parsed.authorizationHeader)
-		*realm = parsed.challenge.Realm
-		*nonce = parsed.challenge.Nonce
-		*algorithm = parsed.challenge.Algorithm
-		*qop = parsed.challenge.QOP
+		*challenge = parsed.challenge
 		*challenged = true
 		return false, nil
 	default:

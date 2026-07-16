@@ -3,6 +3,7 @@ package sms
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/damonto/ims-go/ims/registration"
@@ -17,12 +18,16 @@ func New(cfg Config, sess *session.Session, reg *registration.Registrar, card Ca
 	if err != nil {
 		return nil, err
 	}
+	logger := endpointCfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	endpoint := &Endpoint{
 		cfg:       endpointCfg,
 		sess:      sess,
 		reg:       reg,
 		card:      card,
-		logger:    endpointCfg.Logger.With("component", "ims-sms"),
+		logger:    logger.With("component", "ims-sms"),
 		done:      make(chan struct{}),
 		rpRefs:    make(map[byte]struct{}),
 		pending:   make(map[string]pendingEntry),
@@ -30,6 +35,7 @@ func New(cfg Config, sess *session.Session, reg *registration.Registrar, card Ca
 		recent:    make(map[string]time.Time),
 		concat:    make(map[string]concatState),
 	}
+	endpoint.submitTimeout.Store(int64(endpointCfg.SubmitReportTimeout))
 	attachment, err := sess.Attach(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("creating SMS endpoint: %w", err)
@@ -58,6 +64,7 @@ func (s *Endpoint) Close() error {
 		err = attachment.Close()
 	}
 	s.bgWG.Wait()
+	s.closePendingSubmissions()
 	return err
 }
 

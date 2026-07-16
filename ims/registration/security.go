@@ -7,10 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +32,7 @@ type secureAssociationExpiry struct {
 type secureResources struct {
 	serverAttachments   []session.Attachment
 	responseAttachments []session.Attachment
+	unprotectedPrimary  session.Transport
 	drains              []*attachmentDrain
 	expiry              *secureAssociationExpiry
 	keepalive           *registrationKeepAlive
@@ -81,11 +80,14 @@ func securityVerifyValueForFlow(flow Flow, verify *security.Param) string {
 	return verify.String()
 }
 
-func (s *Registrar) applySelectedSecurityServer(verify *security.Param, raw []string) {
+func (s *Registrar) applySelectedSecurityServer(verify *security.Param, raw []string, publicContactHost string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.flow.SecurityServerRaw = append([]string(nil), raw...)
 	s.flow.SecurityVerify = verify
+	if publicContactHost != "" {
+		s.flow.ContactHost = publicContactHost
+	}
 	if verify == nil {
 		s.flow.MessagePort = s.flow.RegisterPort
 		return
@@ -270,16 +272,68 @@ func (s *Registrar) forgetDrain(drain *attachmentDrain) {
 	s.mu.Unlock()
 }
 
-func (s *Registrar) closeSecureResources() {
+func (s *Registrar) closeSecureResources() error {
 	resources := s.takeSecureResourcesForClose()
 	resources.stop()
 	s.bgWG.Wait()
-	resources.close()
+	return resources.close(s.sess)
+}
+
+func (s *Registrar) clearSecureResources() error {
+	resources := s.takeSecureResourcesForReset()
+	resources.stop()
+	s.bgWG.Wait()
+	return resources.close(s.sess)
+}
+
+func (s *Registrar) clearSecureResourcesAfter(delay time.Duration) {
+	resources := s.takeSecureResourcesForReset()
+	resources.stop()
+	s.bgWG.Wait()
+	if delay <= 0 {
+		if err := resources.close(s.sess); err != nil {
+			s.logger.Error("deleting IMS security association", "err", err)
+		}
+		return
+	}
+	done := s.done
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-done:
+		}
+		if err := resources.close(s.sess); err != nil {
+			s.logger.Error("deleting IMS security association", "err", err)
+		}
+	}()
 }
 
 func (s *Registrar) takeSecureResourcesForClose() secureResources {
 	s.mu.Lock()
 	resources := s.takeSecureResourcesLocked()
+	s.mu.Unlock()
+	return resources
+}
+
+func (s *Registrar) takeSecureResourcesForReset() secureResources {
+	s.mu.Lock()
+	resources := secureResources{
+		serverAttachments:   s.secureServerAttachments,
+		responseAttachments: s.secureResponseAttachments,
+		unprotectedPrimary:  s.unprotectedPrimary,
+		drains:              s.drainTimers,
+		expiry:              s.activeSecureSAExpiry,
+		keepalive:           s.registrationKeepAlive,
+	}
+	s.secureServerAttachments = nil
+	s.secureResponseAttachments = nil
+	s.unprotectedPrimary = nil
+	s.drainTimers = nil
+	s.activeSecureSAExpiry = nil
+	s.activeSecureSAExpiresAt = time.Time{}
+	s.registrationKeepAlive = nil
 	s.mu.Unlock()
 	return resources
 }
@@ -297,12 +351,14 @@ func (s *Registrar) takeSecureResourcesLocked() secureResources {
 	resources := secureResources{
 		serverAttachments:   s.secureServerAttachments,
 		responseAttachments: s.secureResponseAttachments,
+		unprotectedPrimary:  s.unprotectedPrimary,
 		drains:              s.drainTimers,
 		expiry:              s.activeSecureSAExpiry,
 		keepalive:           s.registrationKeepAlive,
 	}
 	s.secureServerAttachments = nil
 	s.secureResponseAttachments = nil
+	s.unprotectedPrimary = nil
 	s.drainTimers = nil
 	s.activeSecureSAExpiry = nil
 	s.activeSecureSAExpiresAt = time.Time{}
@@ -324,9 +380,21 @@ func (r secureResources) stop() {
 	}
 }
 
-func (r secureResources) close() {
+func (r secureResources) close(sess *session.Session) error {
+	var restoreErr error
+	if r.unprotectedPrimary != nil {
+		securePrimary, err := sess.PromotePrimary(r.unprotectedPrimary)
+		if err != nil {
+			restoreErr = fmt.Errorf("restoring unprotected IMS transport: %w", err)
+		} else if securePrimary != nil {
+			if err := securePrimary.Close(); err != nil {
+				restoreErr = fmt.Errorf("deleting secure IMS transport: %w", err)
+			}
+		}
+	}
 	closeAttachments(r.serverAttachments)
 	closeAttachments(r.responseAttachments)
+	return restoreErr
 }
 
 func saDrainDelay(timers session.TransactionTimers) time.Duration {
@@ -411,7 +479,9 @@ func (s *Registrar) expireActiveSecureAssociation(expiry *secureAssociationExpir
 		return
 	}
 	resources.stop()
-	resources.close()
+	if err := resources.close(s.sess); err != nil {
+		s.logger.Error("deleting expired IMS security association", "err", err)
+	}
 	s.setRegistered(false)
 	s.publishRegistrationEvent(errSecureSAExpired)
 }
@@ -428,6 +498,7 @@ func (s *Registrar) commitReauthentication(challenge security.Challenge, authori
 	s.authNonce = challenge.Nonce
 	s.authAlgorithm = challenge.Algorithm
 	s.authQOP = challenge.QOP
+	s.authOpaque = challenge.Opaque
 	s.authHeader = authorizationHeader
 	s.authNonceCount = 1
 	s.authDigestNonce = challenge.Nonce
@@ -496,10 +567,24 @@ func (s *Registrar) commitRegisterSecurity(registration *registerSecurity) error
 	registration.responseAttachments = nil
 	closeAttachments(oldServers)
 	closeAttachments(oldResponses)
-	if oldPrimary != nil {
+	if oldPrimary != nil && !s.retainUnprotectedPrimary(oldPrimary) {
 		_ = oldPrimary.Close()
 	}
 	return nil
+}
+
+func (s *Registrar) retainUnprotectedPrimary(attachment session.Attachment) bool {
+	transportAttachment, ok := attachment.(session.TransportAttachment)
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unprotectedPrimary != nil {
+		return false
+	}
+	s.unprotectedPrimary = transportAttachment.Transport()
+	return true
 }
 
 func sameSessionEndpoint(transport session.Transport, local, remote net.Addr) bool {
@@ -714,6 +799,7 @@ func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, v
 
 func selectSecurityServer(values []string, offered security.Params) (*security.Param, []string, error) {
 	raw := make([]string, 0, len(values))
+	qValues := make(map[int]struct{})
 	bestQ := -1
 	var best *security.Param
 	for _, value := range values {
@@ -727,13 +813,17 @@ func selectSecurityServer(values []string, offered security.Params) (*security.P
 			return nil, nil, err
 		}
 		for _, param := range params {
-			normalized, ok := security.NormalizeParam(param)
-			if !ok || !securityMechanismOffered(normalized, offered) {
-				continue
-			}
 			q, err := securityQValue(param.Q)
 			if err != nil {
 				return nil, nil, fmt.Errorf("parsing Security-Server q-value %q: %w", param.Q, err)
+			}
+			if _, duplicate := qValues[q]; duplicate {
+				return nil, nil, fmt.Errorf("parsing Security-Server: duplicate q-value %q", param.Q)
+			}
+			qValues[q] = struct{}{}
+			normalized, ok := security.NormalizeParam(param)
+			if !ok || !securityMechanismOffered(normalized, offered) {
+				continue
 			}
 			if best != nil && q <= bestQ {
 				continue
@@ -762,8 +852,16 @@ func securityMechanismOffered(selected security.Param, offered security.Params) 
 			strings.EqualFold(normalized.Alg, selected.Alg) &&
 			strings.EqualFold(normalized.EAlg, selected.EAlg) &&
 			strings.EqualFold(normalized.Mod, selected.Mod) &&
-			strings.EqualFold(normalized.Prot, selected.Prot)
+			strings.EqualFold(normalized.Prot, selected.Prot) &&
+			securitySPIsDisjoint(normalized, selected)
 	})
+}
+
+func securitySPIsDisjoint(left, right security.Param) bool {
+	return left.SPIC != right.SPIC &&
+		left.SPIC != right.SPIS &&
+		left.SPIS != right.SPIC &&
+		left.SPIS != right.SPIS
 }
 
 func securityQValue(value string) (int, error) {
@@ -771,14 +869,33 @@ func securityQValue(value string) (int, error) {
 	if value == "" {
 		return 1000, nil
 	}
-	q, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return 0, err
+	integer, fraction, hasFraction := strings.Cut(value, ".")
+	if integer != "0" && integer != "1" {
+		return 0, fmt.Errorf("invalid q-value %q", value)
 	}
-	if q < 0 || q > 1 {
-		return 0, fmt.Errorf("out of range q=%q", value)
+	if !hasFraction {
+		if integer == "1" {
+			return 1000, nil
+		}
+		return 0, nil
 	}
-	return int(math.Round(q * 1000)), nil
+	if len(fraction) > 3 {
+		return 0, fmt.Errorf("invalid q-value precision %q", value)
+	}
+	q := 0
+	for i := range len(fraction) {
+		if fraction[i] < '0' || fraction[i] > '9' || integer == "1" && fraction[i] != '0' {
+			return 0, fmt.Errorf("invalid q-value %q", value)
+		}
+		q = q*10 + int(fraction[i]-'0')
+	}
+	for range 3 - len(fraction) {
+		q *= 10
+	}
+	if integer == "1" {
+		return 1000, nil
+	}
+	return q, nil
 }
 
 func newFlow(host string, port int) Flow {
@@ -794,6 +911,9 @@ func newFlow(host string, port int) Flow {
 
 func newSecurityClient(registerPort int) security.Param {
 	clientPort := randomIMSPort()
+	for clientPort == registerPort {
+		clientPort = randomIMSPort()
+	}
 	serverPort := randomIMSPort()
 	for serverPort == clientPort || serverPort == registerPort {
 		serverPort = randomIMSPort()
@@ -814,8 +934,8 @@ func newSecurityClient(registerPort int) security.Param {
 }
 
 func securityClientCapabilities(base security.Param) security.Params {
-	// Keep the default offer conservative. Deployed P-CSCFs commonly reject
-	// Security-Client values that include optional algorithms they do not parse.
+	// Keep the algorithm offer conservative, but advertise both IMS signalling
+	// modes required for deployments that use UDP encapsulation through NAT.
 	algorithms := []struct {
 		alg  string
 		ealg string
@@ -823,26 +943,46 @@ func securityClientCapabilities(base security.Param) security.Params {
 		{alg: "hmac-sha-1-96", ealg: "null"},
 		{alg: "hmac-sha-1-96", ealg: "aes-cbc"},
 	}
-	params := make(security.Params, 0, len(algorithms))
+	modes := []string{"trans", "UDP-enc-tun"}
+	params := make(security.Params, 0, len(algorithms)*len(modes))
 	for _, algorithm := range algorithms {
-		param := base
-		param.Alg = algorithm.alg
-		param.EAlg = algorithm.ealg
-		param.Mod = "trans"
-		params = append(params, param)
+		for _, mode := range modes {
+			param := base
+			param.Alg = algorithm.alg
+			param.EAlg = algorithm.ealg
+			param.Mod = mode
+			params = append(params, param)
+		}
 	}
 	return params
 }
 
-func reauthSecurityClient(current security.Param, registerPort int) security.Param {
+func reauthSecurityClient(current, peer security.Param, registerPort int) security.Param {
 	next := current
 	next.PortC = randomIMSPort()
 	for next.PortC == current.PortC || next.PortC == current.PortS || next.PortC == registerPort {
 		next.PortC = randomIMSPort()
 	}
-	next.SPIC = randomNonZeroUint32Except(current.SPIC, current.SPIS)
-	next.SPIS = randomNonZeroUint32Except(current.SPIC, current.SPIS, next.SPIC)
+	next.SPIC = randomNonZeroUint32Except(current.SPIC, current.SPIS, peer.SPIC, peer.SPIS)
+	next.SPIS = randomNonZeroUint32Except(current.SPIC, current.SPIS, peer.SPIC, peer.SPIS, next.SPIC)
 	return next
+}
+
+func validateReauthenticationSecurityServer(current Flow, selected *security.Param) error {
+	if current.SecurityVerify == nil || selected == nil {
+		return nil
+	}
+	if selected.PortS != current.SecurityVerify.PortS {
+		return fmt.Errorf("applying re-authentication Security-Server: protected server port changed from %d to %d", current.SecurityVerify.PortS, selected.PortS)
+	}
+	if selected.PortC == current.SecurityVerify.PortC {
+		return errors.New("applying re-authentication Security-Server: protected client port did not change")
+	}
+	if selected.SPIC == current.SecurityVerify.SPIC || selected.SPIC == current.SecurityVerify.SPIS ||
+		selected.SPIS == current.SecurityVerify.SPIC || selected.SPIS == current.SecurityVerify.SPIS {
+		return errors.New("applying re-authentication Security-Server: SPI reuses an active P-CSCF SPI")
+	}
+	return nil
 }
 
 func randomNonZeroUint32Except(except ...uint32) uint32 {

@@ -82,7 +82,9 @@ func (s *Endpoint) concatKey(msg Incoming, concat concatInfo) string {
 	if sender == "" {
 		sender = msg.FromURI
 	}
-	return fmt.Sprintf("%t|%d|%s|%s", concat.SixteenBit, concat.Reference, sender, msg.ServiceCenter)
+	// TS 23.040 9.2.3.24 recommends not using the SC address because segments
+	// of one message can be routed through different service centres.
+	return fmt.Sprintf("%t|%d|%s", concat.SixteenBit, concat.Reference, sender)
 }
 
 func (s *Endpoint) evictExpiredConcat(now time.Time) {

@@ -2,6 +2,7 @@ package registration
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/damonto/ims-go/ims/security"
@@ -54,8 +55,7 @@ func (s *Registrar) StrictDialogRequestPolicy(routes []string) sip.ClientRequest
 }
 
 func (s *Registrar) Close() error {
-	s.closeSecureResources()
-	err := s.closeAttachment()
+	err := errors.Join(s.closeSecureResources(), s.closeAttachment())
 	s.setRegistered(false)
 	return err
 }
@@ -78,16 +78,53 @@ func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (boo
 	if !s.notifyMatchesSubscription(req.Message) {
 		return true, s.sess.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
 	}
+	if !strings.EqualFold(strings.TrimSpace(req.Message.Header("Event")), regEventPackage) {
+		return true, s.sess.WriteStatus(ctx, req, sipStatusBadEvent, "Bad Event")
+	}
 	if status, reason := s.recordNotifyCSeq(req.Message); status != 0 {
 		return true, s.sess.WriteStatus(ctx, req, status, reason)
 	}
-	s.applySubscriptionStateFromNotify(req.Message)
+	if len(req.Message.Body) != 0 {
+		contentType := strings.TrimSpace(req.Message.Header("Content-Type"))
+		if contentType == "" {
+			return true, s.sess.WriteStatus(ctx, req, sipStatusBadRequest, "Bad Request")
+		}
+		if !regInfoContentTypeMatches(contentType) {
+			return true, s.writeUnsupportedRegInfoMediaType(ctx, req)
+		}
+	}
+	subscriptionTerminated := s.applySubscriptionStateFromNotify(req.Message)
 	notifyErr := s.applyRegInfoNotify(req.Message)
 	if err := s.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return true, err
 	}
+	if subscriptionTerminated {
+		s.resetSubscription()
+		s.resetRegInfoState()
+		if s.isRegistered() {
+			s.requestSubscribeRefresh()
+		}
+	}
 	if notifyErr != nil {
+		if errors.Is(notifyErr, errNetworkDeregistered) {
+			// TS 24.229 requires deleting registration state and security
+			// associations after the NOTIFY server transaction completes.
+			if strings.EqualFold(sip.TransportToken(req.Transport.LocalAddr()), "UDP") {
+				s.resetRegistrationState()
+				s.clearSecureResourcesAfter(s.sess.TransactionTimers().TJ)
+			} else if err := s.clearRegistrationState(); err != nil {
+				s.publishRegistrationEvent(notifyErr)
+				return true, err
+			}
+		}
 		s.publishRegistrationEvent(notifyErr)
 	}
 	return true, nil
+}
+
+func (s *Registrar) writeUnsupportedRegInfoMediaType(ctx context.Context, req session.Request) error {
+	resp := sip.NewResponse(sipStatusUnsupportedMediaType, "Unsupported Media Type")
+	resp.Headers = sip.ResponseHeaders(req.Message, sipStatusUnsupportedMediaType)
+	resp.Headers.Add("Accept", regInfoContentType)
+	return s.sess.WriteResponse(ctx, req, resp)
 }

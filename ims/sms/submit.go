@@ -100,6 +100,14 @@ func (s *Endpoint) handleSegmentReport(segment outboundSegment, response submitR
 		segment.tracker.completeSegment()
 		return fmt.Errorf("sending SMS segment %d/%d: unexpected rp reference %d", segment.index+1, segment.count, report.Reference)
 	}
+	if len(report.UserData) != 0 {
+		submitReport, err := decodeSubmitReport(report.UserData, report.Type == rpErrorNetworkToMS)
+		if err != nil {
+			segment.tracker.completeSegment()
+			return fmt.Errorf("sending SMS segment %d/%d: decoding SMS-SUBMIT-REPORT: %w", segment.index+1, segment.count, err)
+		}
+		report.SubmitReport = &submitReport
+	}
 	switch report.Type {
 	case rpAckNetworkToMS:
 		s.publishSubmissionUpdate(segment, response, report, SubmissionAcceptedBySMSC)
@@ -131,6 +139,7 @@ func (s *Endpoint) publishSubmissionUpdate(segment outboundSegment, _ submitResp
 		State:         state,
 		RPCause:       report.Cause,
 		HasRPCause:    report.HasCause,
+		SubmitReport:  report.SubmitReport,
 		At:            time.Now(),
 	}
 	if !segment.tracker.publish(update) {
@@ -141,6 +150,9 @@ func (s *Endpoint) publishSubmissionUpdate(segment outboundSegment, _ submitResp
 func (s *Endpoint) registerPending(callID string, rpRef byte) (<-chan rpMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("sending SMS: endpoint is closed")
+	}
 	if callID == "" {
 		return nil, errors.New("sending SMS: call id is empty")
 	}
@@ -155,6 +167,9 @@ func (s *Endpoint) registerPending(callID string, rpRef byte) (<-chan rpMessage,
 func (s *Endpoint) registerPendingSegment(segment outboundSegment) (<-chan rpMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("sending SMS: endpoint is closed")
+	}
 	if segment.callID == "" {
 		return nil, errors.New("sending SMS: call id is empty")
 	}
@@ -215,7 +230,7 @@ func (s *Endpoint) activatePendingAsync(segment outboundSegment, response submit
 	}
 	entry.segment = segment
 	entry.response = response
-	entry.expiresAt = now.Add(s.cfg.SubmitReportTimeout)
+	entry.expiresAt = now.Add(s.submitReportTimeout())
 	entry.async = true
 	s.pending[segment.callID] = entry
 	select {
@@ -413,7 +428,7 @@ func (s *Endpoint) expirePendingSegment(entry pendingEntry) {
 }
 
 func (s *Endpoint) submitSweepInterval() time.Duration {
-	interval := s.cfg.SubmitReportTimeout / 4
+	interval := s.submitReportTimeout() / 4
 	if interval < 10*time.Millisecond {
 		return 10 * time.Millisecond
 	}
@@ -421,6 +436,10 @@ func (s *Endpoint) submitSweepInterval() time.Duration {
 		return time.Second
 	}
 	return interval
+}
+
+func (s *Endpoint) submitReportTimeout() time.Duration {
+	return time.Duration(s.submitTimeout.Load())
 }
 
 func (s *Endpoint) runSubmitCleanup() {
@@ -456,5 +475,25 @@ func (s *Endpoint) expireSubmitState(now time.Time) {
 	s.mu.Unlock()
 	for _, entry := range expired {
 		s.expirePendingSegment(entry)
+	}
+}
+
+func (s *Endpoint) closePendingSubmissions() {
+	var pending []pendingEntry
+	s.mu.Lock()
+	for callID, entry := range s.pending {
+		delete(s.pending, callID)
+		if entry.segment.tracker != nil {
+			pending = append(pending, entry)
+		}
+	}
+	clear(s.submitted)
+	s.mu.Unlock()
+	for _, entry := range pending {
+		s.releaseReference(entry.rpRef)
+		if entry.async {
+			s.publishSubmissionUpdate(entry.segment, entry.response, rpMessage{}, SubmissionSubmitUnknown)
+		}
+		entry.segment.tracker.completeSegment()
 	}
 }

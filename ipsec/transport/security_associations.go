@@ -1,8 +1,6 @@
 package transport
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"sync"
 
@@ -16,8 +14,7 @@ type SecurityAssociations struct {
 }
 
 type associationKey struct {
-	spi    uint32
-	digest [32]byte
+	spi uint32
 }
 
 type outboundAssociation struct {
@@ -36,6 +33,9 @@ func NewSecurityAssociations() *SecurityAssociations {
 }
 
 func (s *SecurityAssociations) sealESP(codec esp.Codec, nextHeader byte, payload []byte) ([]byte, error) {
+	if nextHeader == esp.NextHeaderNoNext {
+		return nil, errors.New("encoding ESP: IMS dummy packets are not supported")
+	}
 	key := newAssociationKey(codec)
 
 	s.mu.Lock()
@@ -96,21 +96,7 @@ func (s *SecurityAssociations) ensureState() {
 }
 
 func newAssociationKey(codec esp.Codec) associationKey {
-	var spi [4]byte
-	binary.BigEndian.PutUint32(spi[:], codec.SPI)
-
-	material := make([]byte, 0, len(spi)+len(codec.Encryption)+len(codec.EncryptionKey)+len(codec.Integrity)+len(codec.IntegrityKey)+len(codec.Salt)+4)
-	material = append(material, spi[:]...)
-	material = appendAssociationPart(material, []byte(codec.Encryption))
-	material = appendAssociationPart(material, codec.EncryptionKey)
-	material = appendAssociationPart(material, []byte(codec.Integrity))
-	material = appendAssociationPart(material, codec.IntegrityKey)
-	material = appendAssociationPart(material, codec.Salt[:])
-	digest := sha256.Sum256(material)
-	return associationKey{spi: codec.SPI, digest: digest}
-}
-
-func appendAssociationPart(dst, part []byte) []byte {
-	dst = append(dst, 0)
-	return append(dst, part...)
+	// RFC 4303 uses the SPI to identify a unicast SA. Keeping keys or salt in
+	// this key would allow one SPI to create multiple sequence/replay states.
+	return associationKey{spi: codec.SPI}
 }

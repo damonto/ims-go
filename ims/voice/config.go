@@ -54,7 +54,6 @@ type Config struct {
 	RTPInactivityTimeout          *time.Duration
 	RTCPInactivityTimeout         *time.Duration
 	AudioInactivityCallEndReasons []AudioInactivityCallEndReason
-	RTCPSendInterval              *time.Duration
 	LocalRTPPortMin               int
 	LocalRTPPortMax               int
 	PrepareMedia                  func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
@@ -103,8 +102,12 @@ type MediaConfig struct {
 }
 
 type MediaPacket struct {
-	RTCP    bool
-	RTCPBye bool
+	RTCP              bool
+	RTCPBye           bool
+	RTPSequenceNumber uint16
+	RTPTimestamp      uint32
+	RTPSSRC           uint32
+	RTPPayloadBytes   int
 }
 
 type MediaTransport interface {
@@ -142,7 +145,6 @@ const (
 	defaultMinSessionExpires = 90 * time.Second
 	defaultRTPInactivity     = 10 * time.Second
 	defaultRTCPInactivity    = 30 * time.Second
-	defaultRTCPSend          = 5 * time.Second
 	defaultLocalRTPPortMin   = 40000
 	defaultLocalRTPPortMax   = 40100
 )
@@ -258,8 +260,8 @@ func (cfg Config) Normalized() (Config, error) {
 			return Config{}, fmt.Errorf("normalizing voice config: unsupported audio inactivity call end reason %d", reason)
 		}
 	}
-	if cfg.RTCPSendInterval, err = normalizeDurationSetting(cfg.RTCPSendInterval, defaultRTCPSend, durationSettingRTCPSendInterval); err != nil {
-		return Config{}, err
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 	if cfg.LocalRTPPortMin == 0 {
 		cfg.LocalRTPPortMin = defaultLocalRTPPortMin
@@ -291,7 +293,6 @@ type durationSetting uint8
 const (
 	durationSettingRTPInactivityTimeout durationSetting = iota
 	durationSettingRTCPInactivityTimeout
-	durationSettingRTCPSendInterval
 )
 
 func (s durationSetting) String() string {
@@ -300,8 +301,6 @@ func (s durationSetting) String() string {
 		return "rtp inactivity timeout"
 	case durationSettingRTCPInactivityTimeout:
 		return "rtcp inactivity timeout"
-	case durationSettingRTCPSendInterval:
-		return "rtcp send interval"
 	default:
 		return "duration setting"
 	}

@@ -45,6 +45,7 @@ type connectState struct {
 	natDetected               bool
 	useNATT                   bool
 	ikeFragmentationSupported bool
+	responderAPN              string
 	nextMessageID             uint32
 	finalPayloads             []ike.Payload
 	tunnel                    Info

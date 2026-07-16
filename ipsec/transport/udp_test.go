@@ -8,6 +8,27 @@ import (
 	"time"
 )
 
+func TestSecureTransportSupportsSIPKeepAlive(t *testing.T) {
+	tests := []struct {
+		name      string
+		transport interface{ SupportsSIPKeepAlive() bool }
+		want      bool
+	}{
+		{"UDP transport mode", &UDPConn{secureMode: SecureModeTransport}, true},
+		{"UDP encapsulated tunnel", &UDPConn{secureMode: SecureModeUDPEncTunnel}, false},
+		{"TCP transport mode", &TCPConn{secureMode: SecureModeTransport}, true},
+		{"TCP over UDP encapsulated tunnel", &TCPConn{secureMode: SecureModeUDPEncTunnel}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.transport.SupportsSIPKeepAlive(); got != tt.want {
+				t.Fatalf("SupportsSIPKeepAlive() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUDPConnReadPacketUnblocksOnHandleError(t *testing.T) {
 	conn := &UDPConn{
 		readCh:       make(chan inboundPacket, 1),

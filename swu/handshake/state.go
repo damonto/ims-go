@@ -21,9 +21,11 @@ type Card interface {
 }
 
 type Config struct {
-	LocalAddr                string
-	RemoteAddr               string
-	APN                      string
+	LocalAddr  string
+	RemoteAddr string
+	APN        string
+	// RequestDefaultAPN omits IDr so the ePDG selects the default APN.
+	RequestDefaultAPN        bool
 	PDNType                  PDNType
 	InitialPort              int
 	NATTPort                 int
@@ -64,6 +66,7 @@ func (p IPPrefix) IsZero() bool {
 }
 
 type Info struct {
+	APN                       string
 	InnerIPv4                 net.IP
 	InnerIPv6                 IPAddress
 	InnerIPv6Prefix           IPPrefix

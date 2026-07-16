@@ -83,6 +83,26 @@ func TestConfigNormalized(t *testing.T) {
 	}
 }
 
+func TestInfoPreservesResponderAPN(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+	}{
+		{name: "explicit apn", info: Info{APN: "ims"}},
+		{name: "network selected default apn", info: Info{APN: "internet"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cloneInfo(tt.info).APN; got != tt.info.APN {
+				t.Fatalf("cloneInfo() APN = %q, want %q", got, tt.info.APN)
+			}
+			if got := infoFromHandshake(handshakeInfo(tt.info)).APN; got != tt.info.APN {
+				t.Fatalf("Info handshake round trip APN = %q, want %q", got, tt.info.APN)
+			}
+		})
+	}
+}
+
 func TestConfigNormalizedAdvancedFields(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -90,6 +110,31 @@ func TestConfigNormalizedAdvancedFields(t *testing.T) {
 		wantErr string
 		check   func(t *testing.T, got Config)
 	}{
+		{
+			name: "network default apn",
+			cfg: Config{
+				RemoteAddr:        "127.0.0.1",
+				RequestDefaultAPN: true,
+			},
+			check: func(t *testing.T, got Config) {
+				t.Helper()
+				if got.APN != "" || !got.RequestDefaultAPN {
+					t.Fatalf("default APN config = APN %q, request %t", got.APN, got.RequestDefaultAPN)
+				}
+				if handshake := handshakeConfig(got); !handshake.RequestDefaultAPN || handshake.APN != "" {
+					t.Fatalf("handshake default APN config = APN %q, request %t", handshake.APN, handshake.RequestDefaultAPN)
+				}
+			},
+		},
+		{
+			name: "network default apn conflicts with explicit apn",
+			cfg: Config{
+				RemoteAddr:        "127.0.0.1",
+				APN:               "ims",
+				RequestDefaultAPN: true,
+			},
+			wantErr: "apn must be empty when requesting the default apn",
+		},
 		{
 			name: "custom carrier timers and dh groups",
 			cfg: Config{

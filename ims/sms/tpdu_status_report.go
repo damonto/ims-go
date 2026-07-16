@@ -17,11 +17,37 @@ type statusReportTPDU struct {
 
 func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	msg := tp.Message
+	if len(msg.UserData) == 0 && msg.UserDataLength != 0 {
+		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UDL requires TP-UD")
+	}
 	if len(msg.UserData) > 0 && !msg.HasDataCodingScheme {
 		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD requires TP-DCS")
 	}
-	if len(msg.UserData) > 0 && msg.DataCodingScheme == tpDCSGSM7 {
-		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UD with GSM7 DCS is unsupported")
+	userDataLength := msg.UserDataLength
+	if len(msg.UserData) > 0 {
+		encoding, err := userDataEncodingFromDCS(msg.DataCodingScheme)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling SMS-STATUS-REPORT: %w", err)
+		}
+		switch encoding {
+		case userDataEncodingGSM7:
+			if userDataLength <= 0 {
+				return nil, errors.New("marshalling SMS-STATUS-REPORT: GSM7 TP-UD requires septet TP-UDL")
+			}
+			if octets := gsm7OctetCount(userDataLength); octets != len(msg.UserData) {
+				return nil, fmt.Errorf("marshalling SMS-STATUS-REPORT: GSM7 TP-UDL %d requires %d octets, got %d", userDataLength, octets, len(msg.UserData))
+			}
+		default:
+			if userDataLength == 0 {
+				userDataLength = len(msg.UserData)
+			}
+			if userDataLength != len(msg.UserData) {
+				return nil, fmt.Errorf("marshalling SMS-STATUS-REPORT: TP-UDL %d does not match %d user data octets", userDataLength, len(msg.UserData))
+			}
+		}
+		if userDataLength > 255 {
+			return nil, fmt.Errorf("marshalling SMS-STATUS-REPORT: TP-UDL %d exceeds one octet", userDataLength)
+		}
 	}
 	recipient, err := encodeTPAddress(msg.Recipient)
 	if err != nil {
@@ -70,7 +96,7 @@ func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	if len(msg.UserData) == 0 {
 		return payload, nil
 	}
-	payload = append(payload, byte(len(msg.UserData)))
+	payload = append(payload, byte(userDataLength))
 	payload = append(payload, msg.UserData...)
 	return payload, nil
 }
@@ -118,6 +144,7 @@ func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {
 	report.Status = ReportStatus(data[idx])
 	idx++
 
+	ignoreTrailing := false
 	if len(data[idx:]) > 0 {
 		piOctets := make([]byte, 0, 1)
 		for {
@@ -132,6 +159,7 @@ func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {
 			}
 		}
 		pi := piOctets[0]
+		ignoreTrailing = pi&tpduParameterIndicatorReservedMask != 0
 		if pi&tpduParameterIndicatorPID != 0 {
 			if len(data[idx:]) < 1 {
 				return errors.New("decoding SMS-STATUS-REPORT: missing protocol identifier")
@@ -155,10 +183,11 @@ func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {
 				return errors.New("decoding SMS-STATUS-REPORT: missing user data length")
 			}
 			userDataLength := int(data[idx])
+			report.UserDataLength = userDataLength
 			idx++
-			octets := userDataLength
-			if encoding, err := userDataEncodingFromDCS(dcs); err == nil && encoding == userDataEncodingGSM7 {
-				octets = gsm7OctetCount(userDataLength)
+			octets, err := userDataOctets(userDataLength, dcs)
+			if err != nil {
+				return fmt.Errorf("decoding SMS-STATUS-REPORT: %w", err)
 			}
 			if len(data[idx:]) < octets {
 				return errors.New("decoding SMS-STATUS-REPORT: truncated user data")
@@ -167,10 +196,11 @@ func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {
 			idx += octets
 		}
 	}
-	if idx != len(data) {
+	if idx != len(data) && !ignoreTrailing {
 		return errors.New("decoding SMS-STATUS-REPORT: trailing data")
 	}
 
+	report.RawTPDU = append([]byte(nil), data...)
 	tp.Message = report
 	return nil
 }

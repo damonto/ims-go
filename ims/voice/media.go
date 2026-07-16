@@ -247,6 +247,7 @@ func rewriteRTPHeader(data []byte, packet RTPPacket) []byte {
 }
 
 func (c *Call) saveRTPSendState(packet RTPPacket, media NegotiatedMedia) {
+	sentAt := time.Now()
 	c.mu.Lock()
 	c.rtpSend = rtpSendState{
 		initialized:   true,
@@ -254,7 +255,27 @@ func (c *Call) saveRTPSendState(packet RTPPacket, media NegotiatedMedia) {
 		nextSequence:  packet.SequenceNumber + 1,
 		nextTimestamp: packet.Timestamp + mediaFrameTicks(media),
 	}
+	c.rtcpSend.packetCount++
+	c.rtcpSend.octetCount += uint32(len(packet.Payload))
+	c.rtcpSend.lastRTPTimestamp = packet.Timestamp
+	c.rtcpSend.lastRTPSentAt = sentAt
+	c.rtcpSend.lastRTPClockRate = media.ClockRate
+	c.rtcpSend.reportsWithoutRTP = 0
 	c.mu.Unlock()
+}
+
+func rtcpSenderTimestamp(state rtcpSendState, now time.Time) uint32 {
+	if state.lastRTPSentAt.IsZero() || state.lastRTPClockRate <= 0 {
+		return state.lastRTPTimestamp
+	}
+	elapsed := now.Sub(state.lastRTPSentAt)
+	if elapsed <= 0 {
+		return state.lastRTPTimestamp
+	}
+	seconds := uint64(elapsed / time.Second)
+	fraction := uint64(elapsed % time.Second)
+	ticks := seconds*uint64(state.lastRTPClockRate) + fraction*uint64(state.lastRTPClockRate)/uint64(time.Second)
+	return state.lastRTPTimestamp + uint32(ticks)
 }
 
 func (c *Call) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {
@@ -281,6 +302,9 @@ func (c *Call) WriteRTCP(ctx context.Context, data []byte) error {
 
 func (c *Call) recordMediaPacket(packet MediaPacket) {
 	c.mu.Lock()
+	if !packet.RTCP && packet.RTPPayloadBytes > 0 {
+		c.recordRTPReceiveLocked(packet)
+	}
 	activity := c.mediaActivity
 	c.mu.Unlock()
 	if activity == nil {
@@ -292,20 +316,78 @@ func (c *Call) recordMediaPacket(packet MediaPacket) {
 	}
 }
 
-func (c *Call) writeRTCPReport(done <-chan struct{}) {
-	c.mu.Lock()
-	transport := c.transport
-	ssrc := c.rtcpSSRC
-	cname := c.id
-	closed := c.closed
-	c.mu.Unlock()
-	if closed || transport == nil {
+func (c *Call) recordRTPReceiveLocked(packet MediaPacket) {
+	r := &c.rtcpRecv
+	now := time.Now()
+	rate := c.media.ClockRate
+	arrival := int64(0)
+	if rate > 0 {
+		nanos := now.UnixNano()
+		arrival = nanos/int64(time.Second)*int64(rate) + nanos%int64(time.Second)*int64(rate)/int64(time.Second)
+	}
+	if r.initialized && r.ssrc != packet.RTPSSRC {
+		*r = rtcpReceiveState{}
+	}
+	if !r.initialized {
+		r.initialized = true
+		r.ssrc = packet.RTPSSRC
+		r.baseSequence = packet.RTPSequenceNumber
+		r.maxSequence = packet.RTPSequenceNumber
+		r.received = 1
+		if rate > 0 {
+			r.transit = arrival - int64(packet.RTPTimestamp)
+		}
+		r.lastArrival = now
 		return
 	}
+	if packet.RTPSequenceNumber < r.maxSequence {
+		if r.maxSequence-packet.RTPSequenceNumber > 0x8000 {
+			r.cycles += 1 << 16
+			r.maxSequence = packet.RTPSequenceNumber
+		}
+	} else if packet.RTPSequenceNumber-r.maxSequence < 0x8000 {
+		r.maxSequence = packet.RTPSequenceNumber
+	}
+	r.received++
+	if rate > 0 && !r.lastArrival.IsZero() {
+		transit := arrival - int64(packet.RTPTimestamp)
+		delta := transit - r.transit
+		if delta < 0 {
+			delta = -delta
+		}
+		r.jitter += uint32((delta - int64(r.jitter)) / 16)
+		r.transit = transit
+	}
+	r.lastArrival = now
+}
+
+func (c *Call) writeRTCPReport(done <-chan struct{}) {
+	c.mu.Lock()
+	now := time.Now()
+	transport := c.transport
+	ssrc := c.rtcpSSRC
+	if c.rtpSend.initialized {
+		ssrc = c.rtpSend.ssrc
+	}
+	cname := c.id
+	closed := c.closed
+	if closed || transport == nil {
+		c.mu.Unlock()
+		return
+	}
+	block := c.rtcpReceiverReportBlockLocked()
+	var packet []byte
+	if c.rtcpSend.packetCount != 0 && c.rtcpSend.reportsWithoutRTP < 2 {
+		timestamp := rtcpSenderTimestamp(c.rtcpSend, now)
+		packet = buildRTCPSenderReport(ssrc, cname, now, timestamp, c.rtcpSend.packetCount, c.rtcpSend.octetCount, block)
+	} else {
+		packet = buildRTCPReceiverReportWithBlock(ssrc, cname, block)
+	}
+	c.rtcpSend.reportsWithoutRTP++
+	c.mu.Unlock()
 
 	ctx, cancel := contextWithDoneTimeout(done, callReleaseTimeout)
 	defer cancel()
-	packet := buildRTCPReceiverReport(ssrc, cname)
 	if rtcp, ok := transport.(rtcpWriter); ok {
 		if err := rtcp.WriteRTCP(ctx, packet); err != nil && c.State() != CallStateEnded {
 			c.endpoint.emitError(fmt.Errorf("sending call rtcp: %w", err))
@@ -317,10 +399,44 @@ func (c *Call) writeRTCPReport(done <-chan struct{}) {
 	}
 }
 
+func (c *Call) rtcpReceiverReportBlockLocked() []byte {
+	r := c.rtcpRecv
+	if !r.initialized {
+		return nil
+	}
+	extendedMax := r.cycles + uint32(r.maxSequence)
+	expected := extendedMax - uint32(r.baseSequence) + 1
+	lost := int64(expected) - int64(r.received)
+	if lost < 0 {
+		lost = 0
+	}
+	block := make([]byte, 24)
+	binary.BigEndian.PutUint32(block[0:4], r.ssrc)
+	expectedInterval := expected - r.expectedPrior
+	receivedInterval := r.received - r.receivedPrior
+	lostInterval := int64(expectedInterval) - int64(receivedInterval)
+	if expectedInterval > 0 && lostInterval > 0 {
+		fraction := min(int64(255), lostInterval*256/int64(expectedInterval))
+		block[4] = byte(fraction)
+	}
+	c.rtcpRecv.expectedPrior = expected
+	c.rtcpRecv.receivedPrior = r.received
+	lost24 := uint32(min(lost, 0x7fffff))
+	block[5] = byte(lost24 >> 16)
+	block[6] = byte(lost24 >> 8)
+	block[7] = byte(lost24)
+	binary.BigEndian.PutUint32(block[8:12], extendedMax)
+	binary.BigEndian.PutUint32(block[12:16], r.jitter)
+	return block
+}
+
 func (c *Call) startMediaInactivityWatch() {
 	rtpTimeout := *c.endpoint.cfg.RTPInactivityTimeout
 	rtcpTimeout := *c.endpoint.cfg.RTCPInactivityTimeout
-	rtcpSendInterval := *c.endpoint.cfg.RTCPSendInterval
+	intervalFor := c.endpoint.rtcpInterval
+	if intervalFor == nil {
+		intervalFor = rtcpInterval
+	}
 	endOnRTPInactivity := c.endpoint.cfg.endsCallOnAudioInactivity(AudioInactivityRTPOnConnected)
 	endOnRTCPInactivity := c.endpoint.cfg.endsCallOnAudioInactivity(AudioInactivityRTCPOnConnected)
 	c.mu.Lock()
@@ -342,6 +458,7 @@ func (c *Call) startMediaInactivityWatch() {
 	}
 	media := c.media
 	transport := c.transport
+	rtcpSendInterval := intervalFor(media)
 	if media.RTCPDisabled {
 		rtcpTimeout = 0
 		rtcpSendInterval = 0
@@ -369,6 +486,20 @@ func (c *Call) startMediaInactivityWatch() {
 			endOnRTCPInactivity: endOnRTCPInactivity,
 		})
 	})
+}
+
+func rtcpInterval(media NegotiatedMedia) time.Duration {
+	bandwidth := media.RTCPReceiverBandwidth
+	if bandwidth <= 0 {
+		bandwidth = media.RTCPSenderBandwidth
+	}
+	if bandwidth <= 0 {
+		return 5 * time.Second
+	}
+	const members = 2
+	const compoundBytes = 64
+	interval := time.Duration(float64(compoundBytes*8*members) / float64(bandwidth) * float64(time.Second))
+	return max(interval, 5*time.Second)
 }
 
 type mediaWatch struct {

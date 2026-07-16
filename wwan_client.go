@@ -136,6 +136,7 @@ func (s qcomIMSPDNSession) Info() imsPDNInfo {
 		LocalIPv4:       info.LocalIPv4,
 		LocalIPv6:       info.LocalIPv6,
 		PCSCFIPs:        info.PCSCFIPs,
+		VoPSKnown:       info.VoPSKnown,
 		VoPSSupported:   info.VoPSSupported,
 		PacketDataReady: info.PacketDataReady,
 	}
@@ -234,6 +235,7 @@ func (s mbimIMSPDNSession) Info() imsPDNInfo {
 		LocalIPv4:       info.LocalIPv4,
 		LocalIPv6:       info.LocalIPv6,
 		PCSCFIPs:        info.PCSCFIPs,
+		VoPSKnown:       info.VoPSKnown,
 		VoPSSupported:   info.VoPSSupported,
 		PacketDataReady: info.PacketDataReady,
 	}

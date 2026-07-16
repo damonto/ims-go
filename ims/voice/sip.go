@@ -28,18 +28,20 @@ func mediaDescriptionFromSDP(offer sdpOffer) MediaDescription {
 		formats = append(formats, audioFormat(codec, payload, offer.FMTP[payload]))
 	}
 	return MediaDescription{
-		Formats:      formats,
-		Profile:      offer.Profile,
-		PTime:        offer.PTime,
-		MaxPTime:     offer.MaxPTime,
-		Direction:    offer.Direction,
-		IP:           append(net.IP(nil), offer.RemoteIP...),
-		Port:         offer.RemotePort,
-		RTCPIP:       append(net.IP(nil), offer.RemoteRTCPIP...),
-		RTCPPort:     offer.RemoteRTCPPort,
-		RTCPMux:      offer.RTCPMux,
-		RTCPDisabled: rtcpDisabled(offer),
-		RawSDP:       append([]byte(nil), offer.RawSDP...),
+		Formats:               formats,
+		Profile:               offer.Profile,
+		PTime:                 offer.PTime,
+		MaxPTime:              offer.MaxPTime,
+		Direction:             offer.Direction,
+		IP:                    append(net.IP(nil), offer.RemoteIP...),
+		Port:                  offer.RemotePort,
+		RTCPIP:                append(net.IP(nil), offer.RemoteRTCPIP...),
+		RTCPPort:              offer.RemoteRTCPPort,
+		RTCPMux:               offer.RTCPMux,
+		RTCPDisabled:          rtcpDisabled(offer),
+		RTCPSenderBandwidth:   effectiveRTCPBandwidth(offer.RTCPSenderBandwidth, rtcpSenderBandwidth),
+		RTCPReceiverBandwidth: effectiveRTCPBandwidth(offer.RTCPReceiverBandwidth, rtcpReceiverBandwidth),
+		RawSDP:                append([]byte(nil), offer.RawSDP...),
 	}
 }
 
@@ -166,12 +168,12 @@ func addInviteFeatureTags(invite *sip.Message, cfg Config) {
 }
 
 func addTokenHeader(msg *sip.Message, name string, token string) {
-	current := strings.TrimSpace(msg.Header(name))
+	current := strings.TrimSpace(strings.Join(msg.HeadersByName(name), ","))
 	if current == "" {
 		msg.Headers.Set(name, token)
 		return
 	}
-	if sip.TokenListContains(current, token) {
+	if msg.HeaderHasToken(name, token) {
 		return
 	}
 	msg.Headers.Set(name, current+","+token)

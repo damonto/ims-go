@@ -48,19 +48,24 @@ const (
 )
 
 type rpMessage struct {
-	Type        byte
-	Reference   byte
-	TPDU        []byte
-	Originator  string
-	Destination string
-	Cause       byte
-	HasCause    bool
-	UserData    []byte
+	Type         byte
+	Reference    byte
+	TPDU         []byte
+	Originator   string
+	Destination  string
+	Cause        byte
+	HasCause     bool
+	UserData     []byte
+	SubmitReport *SubmitReport
 }
 
 type RPError struct {
 	Cause byte
 }
+
+// RPCauseMemoryCapacityExceeded rejects an MT short message when the receiver
+// cannot persist it, as defined by TS 24.011 table 8.4 part 2.
+const RPCauseMemoryCapacityExceeded byte = rpCauseMemoryCapacityExceeded
 
 type unsupportedRPMessageTypeError struct {
 	Type byte
@@ -157,6 +162,16 @@ func newRPErrorMessage(reference, cause byte) rpMessage {
 	return rpMessage{Type: rpErrorMSToNetwork, Reference: reference, Cause: cause, HasCause: true}
 }
 
+func newRPErrorDeliverReportMessage(reference, cause, failureCause byte) rpMessage {
+	return rpMessage{
+		Type:      rpErrorMSToNetwork,
+		Reference: reference,
+		Cause:     cause,
+		HasCause:  true,
+		UserData:  []byte{tpduMTIDeliverReport, failureCause, tpduParameterIndicatorNone},
+	}
+}
+
 func newRPSMMAMessage(reference byte) rpMessage {
 	return rpMessage{Type: rpSMMAMSToNetwork, Reference: reference}
 }
@@ -215,7 +230,9 @@ func (m *rpMessage) UnmarshalBinary(data []byte) error {
 	if len(data) < 2 {
 		return errors.New("decoding RP: packet too short")
 	}
-	msg := rpMessage{Type: data[0], Reference: data[1]}
+	// TS 24.011 8.2.2 defines the MTI as the low three bits. Spare bits are
+	// ignored by the receiver.
+	msg := rpMessage{Type: data[0] & 0x07, Reference: data[1]}
 	switch msg.Type {
 	case rpAckMSToNetwork, rpAckNetworkToMS:
 		userData, err := decodeRPUserData(data[2:], maxRPAckErrorUserDataOctets)

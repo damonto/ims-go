@@ -121,7 +121,13 @@ func encodeRPAddress(number string) []byte {
 }
 
 func marshalRPAddress(number string) ([]byte, error) {
-	data := encodeRPAddress(number)
+	digits := strings.TrimPrefix(strings.TrimSpace(number), "+")
+	if digits != "" {
+		if err := validateTPAddressDigits(digits); err != nil {
+			return nil, fmt.Errorf("encoding RP address: %w", err)
+		}
+	}
+	data := encodeRPAddress(digits)
 	if data[0] == 0 {
 		return data, nil
 	}

@@ -158,6 +158,9 @@ func backoffTimerValue(notify *ike.NotifyPayload) (time.Duration, bool, bool) {
 	if notify.NotifyType != notifyTypeBackoffTimer {
 		return 0, false, false
 	}
+	if notify.ProtocolID != protocolIDUnset || len(notify.SPI) != 0 {
+		return 0, false, false
+	}
 	var data backoffTimerNotifyData
 	if err := data.UnmarshalBinary(notify.Data); err != nil {
 		return 0, false, false

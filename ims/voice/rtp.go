@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,6 +24,7 @@ const (
 	rtpMarkerFlag          = 0x80
 
 	rtcpRRPacketType             = 201
+	rtcpSRPacketType             = 200
 	rtcpSDESPacketType           = 202
 	rtcpSDESCNAMEItem            = 1
 	rtcpReceiverReportWordLength = 1
@@ -33,6 +35,7 @@ const (
 	rtcpSDESItemHeaderSize       = 2
 	rtcpSDESEndSize              = 1
 	rtcpWordSize                 = 4
+	rtcpNTPUnixOffset            = 2208988800
 
 	AMRNoModeRequest = 15
 
@@ -207,6 +210,10 @@ func randomRTCPSSRC() uint32 {
 }
 
 func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
+	return buildRTCPReceiverReportWithBlock(ssrc, cname, nil)
+}
+
+func buildRTCPReceiverReportWithBlock(ssrc uint32, cname string, block []byte) []byte {
 	if ssrc == 0 {
 		ssrc = rtcpSSRCFallback
 	}
@@ -218,12 +225,55 @@ func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
 		cname = "ims-go"
 	}
 
-	rr := make([]byte, 8)
+	reportCount := 0
+	if len(block) == 24 {
+		reportCount = 1
+	}
+	rr := make([]byte, 8+24*reportCount)
 	rr[0] = rtpVersion << rtpVersionShift
+	rr[0] |= byte(reportCount)
 	rr[1] = rtcpRRPacketType
-	binary.BigEndian.PutUint16(rr[2:4], rtcpReceiverReportWordLength)
+	binary.BigEndian.PutUint16(rr[2:4], uint16(len(rr)/rtcpWordSize-1))
 	binary.BigEndian.PutUint32(rr[4:8], ssrc)
+	copy(rr[8:], block)
 
+	return appendRTCPSourceDescription(rr, ssrc, cname)
+}
+
+func buildRTCPSenderReport(ssrc uint32, cname string, now time.Time, timestamp, packets, octets uint32, block []byte) []byte {
+	if ssrc == 0 {
+		ssrc = rtcpSSRCFallback
+	}
+	ntp := now.Sub(time.Unix(0, 0))
+	seconds := uint64(ntp/time.Second) + rtcpNTPUnixOffset
+	frac := uint64((ntp % time.Second) * (1 << 32) / time.Second)
+	reportCount := 0
+	if len(block) == 24 {
+		reportCount = 1
+	}
+	sr := make([]byte, 28+24*reportCount)
+	sr[0] = rtpVersion << rtpVersionShift
+	sr[0] |= byte(reportCount)
+	sr[1] = rtcpSRPacketType
+	binary.BigEndian.PutUint16(sr[2:4], uint16(len(sr)/rtcpWordSize-1))
+	binary.BigEndian.PutUint32(sr[4:8], ssrc)
+	binary.BigEndian.PutUint32(sr[8:12], uint32(seconds))
+	binary.BigEndian.PutUint32(sr[12:16], uint32(frac))
+	binary.BigEndian.PutUint32(sr[16:20], timestamp)
+	binary.BigEndian.PutUint32(sr[20:24], packets)
+	binary.BigEndian.PutUint32(sr[24:28], octets)
+	copy(sr[28:], block)
+	return appendRTCPSourceDescription(sr, ssrc, cname)
+}
+
+func appendRTCPSourceDescription(report []byte, ssrc uint32, cname string) []byte {
+	cname = strings.TrimSpace(cname)
+	if len(cname) > rtcpCNAMEMaxLen {
+		cname = cname[:rtcpCNAMEMaxLen]
+	}
+	if cname == "" {
+		cname = "ims-go"
+	}
 	sdesLen := rtcpSDESChunkHeaderSize + rtcpSDESItemHeaderSize + len(cname) + rtcpSDESEndSize
 	for sdesLen%rtcpWordSize != 0 {
 		sdesLen++
@@ -237,8 +287,8 @@ func buildRTCPReceiverReport(ssrc uint32, cname string) []byte {
 	sdes[9] = byte(len(cname))
 	copy(sdes[10:], cname)
 
-	out := make([]byte, 0, len(rr)+len(sdes))
-	out = append(out, rr...)
+	out := make([]byte, 0, len(report)+len(sdes))
+	out = append(out, report...)
 	out = append(out, sdes...)
 	return out
 }

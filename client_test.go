@@ -230,6 +230,27 @@ func TestOpenIMSWithPCSCFFailover(t *testing.T) {
 			wantSecondErr:   true,
 		},
 		{
+			name:            "504 selects next P-CSCF",
+			firstErr:        fmt.Errorf("registering IMS: %w", &imssip.ResponseError{StatusCode: 504, ReasonPhrase: "Server Time-out"}),
+			wantOpenCalls:   2,
+			wantSelectCalls: 1,
+			wantSecondErr:   true,
+		},
+		{
+			name:            "503 without Retry-After selects next P-CSCF",
+			firstErr:        fmt.Errorf("registering IMS: %w", &imssip.ResponseError{StatusCode: 503, ReasonPhrase: "Service Unavailable"}),
+			wantOpenCalls:   2,
+			wantSelectCalls: 1,
+			wantSecondErr:   true,
+		},
+		{
+			name:            "500 without Retry-After selects next P-CSCF",
+			firstErr:        fmt.Errorf("registering IMS: %w", &imssip.ResponseError{StatusCode: 500, ReasonPhrase: "Server Internal Error"}),
+			wantOpenCalls:   2,
+			wantSelectCalls: 1,
+			wantSecondErr:   true,
+		},
+		{
 			name:          "ordinary error keeps current P-CSCF",
 			firstErr:      errors.New("opening SIP transport"),
 			wantOpenCalls: 1,
@@ -278,6 +299,39 @@ func TestOpenIMSWithPCSCFFailover(t *testing.T) {
 			}
 			if access.selectCalls != tt.wantSelectCalls {
 				t.Fatalf("SelectNextPCSCF() calls = %d, want %d", access.selectCalls, tt.wantSelectCalls)
+			}
+		})
+	}
+}
+
+func TestRestoreIMSWithNextLTEPCSCFTriesAllRemainingCandidates(t *testing.T) {
+	tests := []struct {
+		name               string
+		remaining          int
+		wantOpenCalls      int
+		wantSelectionCalls int
+	}{
+		{name: "three remaining candidates", remaining: 3, wantOpenCalls: 3, wantSelectionCalls: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			openErrors := make([]error, tt.remaining)
+			for i := range openErrors {
+				openErrors[i] = &imssession.TransactionTimeoutError{Method: "REGISTER", Timer: "F"}
+			}
+			access := &pcscfReselectingAccessStub{openErrors: openErrors}
+			client := newClient(Config{Logger: slog.Default()})
+			active := &activeConn{scope: newConnectionScope(), access: access}
+
+			if _, err := client.restoreIMSWithNextLTEPCSCF(active, access); err == nil {
+				t.Fatal("restoreIMSWithNextLTEPCSCF() error = nil, want exhausted candidates error")
+			}
+			if access.openCalls != tt.wantOpenCalls {
+				t.Fatalf("OpenIMS() calls = %d, want %d", access.openCalls, tt.wantOpenCalls)
+			}
+			if access.selectCalls != tt.wantSelectionCalls {
+				t.Fatalf("SelectNextPCSCF() calls = %d, want %d", access.selectCalls, tt.wantSelectionCalls)
 			}
 		})
 	}
@@ -570,7 +624,7 @@ func (t *gatedCancelTransport) writeCount() int {
 
 const (
 	testIMEI              = "356789012345678"
-	fakeIMSSecurityServer = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=310;spi-s=320"
+	fakeIMSSecurityServer = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000310;spi-s=0000000320"
 )
 
 func newStandaloneClient(t *testing.T) *Client {
@@ -2864,16 +2918,22 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	state := reg.State()
 	contactURI := "sip:" + net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort))
 	notify := imssip.NewRequest("NOTIFY", "sip:user@example.com")
+	notify.Headers.Add("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-registration-terminated")
+	notify.Headers.Add("Max-Forwards", "70")
+	notify.Headers.Add("From", "<sip:registrar@example.com>;tag=registrar")
+	notify.Headers.Add("To", "<sip:user@example.com>;tag=user")
+	notify.Headers.Add("Call-ID", "registration-terminated@example.com")
+	notify.Headers.Add("CSeq", "1 NOTIFY")
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Content-Type", "application/reginfo+xml")
 	notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
-<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
-  <registration aor="%s" id="reg-1" state="active">
-    <contact id="contact-1" state="terminated" event="deactivated">
-      <uri>%s</uri>
-    </contact>
-  </registration>
-</reginfo>`, state.PublicIdentity, contactURI)
+	<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+	  <registration aor="%s" id="reg-1" state="active">
+	    <contact id="contact-1" state="terminated" event="deactivated">
+	      <uri>%s</uri>
+	    </contact>
+	  </registration>
+	</reginfo>`, state.PublicIdentity, contactURI)
 	transport.queueRead(notify)
 
 	select {

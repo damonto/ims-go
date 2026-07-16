@@ -44,20 +44,21 @@ type regInfoRegistration struct {
 	ID      string           `xml:"id,attr"`
 	AOR     string           `xml:"aor,attr"`
 	State   string           `xml:"state,attr"`
-	Event   string           `xml:"event,attr"`
 	Contact []regInfoContact `xml:"urn:ietf:params:xml:ns:reginfo contact"`
 }
 
 type regInfoContact struct {
-	ID          string                `xml:"id,attr"`
-	State       string                `xml:"state,attr"`
-	Event       string                `xml:"event,attr"`
-	CallID      string                `xml:"callid,attr"`
-	CSeq        string                `xml:"cseq,attr"`
-	ExpiresAttr string                `xml:"expires,attr"`
-	URI         string                `xml:"urn:ietf:params:xml:ns:reginfo uri"`
-	Expires     string                `xml:"urn:ietf:params:xml:ns:reginfo expires"`
-	Unknown     []regInfoUnknownParam `xml:"urn:ietf:params:xml:ns:reginfo unknown-param"`
+	ID                 string                `xml:"id,attr"`
+	State              string                `xml:"state,attr"`
+	Event              string                `xml:"event,attr"`
+	DurationRegistered string                `xml:"duration-registered,attr"`
+	ExpiresAttr        string                `xml:"expires,attr"`
+	RetryAfter         string                `xml:"retry-after,attr"`
+	Q                  string                `xml:"q,attr"`
+	CallID             string                `xml:"callid,attr"`
+	CSeq               string                `xml:"cseq,attr"`
+	URI                string                `xml:"urn:ietf:params:xml:ns:reginfo uri"`
+	Unknown            []regInfoUnknownParam `xml:"urn:ietf:params:xml:ns:reginfo unknown-param"`
 }
 
 type regInfoUnknownParam struct {
@@ -152,6 +153,7 @@ func (i *regInfo) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 
 func (i regInfo) validate() error {
 	seenRegistrations := make(map[string]struct{}, len(i.Registration))
+	seenContacts := make(map[string]string)
 	for _, reg := range i.Registration {
 		id := strings.TrimSpace(reg.ID)
 		if id == "" {
@@ -167,35 +169,72 @@ func (i regInfo) validate() error {
 		if !validRegInfoRegistrationState(reg.State) {
 			return fmtRegInfoError("registration state must be init, active or terminated")
 		}
-		if err := validateRegInfoContacts(reg.Contact); err != nil {
+		if err := validateRegInfoContacts(reg.Contact, seenContacts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateRegInfoContacts(contacts []regInfoContact) error {
-	seenContacts := make(map[string]struct{}, len(contacts))
+func validateRegInfoContacts(contacts []regInfoContact, seenContacts map[string]string) error {
+	seenInRegistration := make(map[string]struct{}, len(contacts))
 	for _, contact := range contacts {
 		id := strings.TrimSpace(contact.ID)
 		if id == "" {
 			return fmtRegInfoError("contact id is required")
 		}
-		if _, ok := seenContacts[id]; ok {
-			return fmtRegInfoError("contact id must be unique")
+		if _, ok := seenInRegistration[id]; ok {
+			return fmtRegInfoError("contact id must be unique within registration")
 		}
-		seenContacts[id] = struct{}{}
+		seenInRegistration[id] = struct{}{}
+		uri := strings.TrimSpace(contact.URI)
+		if uri == "" {
+			return fmtRegInfoError("contact uri is required")
+		}
+		if previousURI, ok := seenContacts[id]; ok && !sameRegInfoURI(previousURI, uri) {
+			return fmtRegInfoError("contact id must identify the same contact URI")
+		}
+		seenContacts[id] = uri
 		if !validRegInfoContactState(contact.State) {
 			return fmtRegInfoError("contact state must be active or terminated")
 		}
 		if !validRegInfoContactEvent(contact.Event) {
 			return fmtRegInfoError("contact event is invalid")
 		}
-		if strings.TrimSpace(contact.URI) == "" {
-			return fmtRegInfoError("contact uri is required")
+		if !validRegInfoUnsignedAttribute(contact.DurationRegistered) {
+			return fmtRegInfoError("duration-registered must be an unsigned integer")
+		}
+		if !validRegInfoUnsignedAttribute(contact.ExpiresAttr) {
+			return fmtRegInfoError("expires must be an unsigned integer")
+		}
+		if !validRegInfoUnsignedAttribute(contact.RetryAfter) {
+			return fmtRegInfoError("retry-after must be an unsigned integer")
+		}
+		if !validRegInfoUnsignedAttribute(contact.CSeq) {
+			return fmtRegInfoError("cseq must be an unsigned integer")
+		}
+		if strings.EqualFold(strings.TrimSpace(contact.Event), regInfoContactEventShortened) && strings.TrimSpace(contact.ExpiresAttr) == "" {
+			return fmtRegInfoError("shortened contact requires expires")
+		}
+		if strings.EqualFold(strings.TrimSpace(contact.Event), regInfoContactEventProbation) && strings.TrimSpace(contact.RetryAfter) == "" {
+			return fmtRegInfoError("probation contact requires retry-after")
+		}
+		for _, unknown := range contact.Unknown {
+			if strings.TrimSpace(unknown.Name) == "" {
+				return fmtRegInfoError("unknown-param name is required")
+			}
 		}
 	}
 	return nil
+}
+
+func validRegInfoUnsignedAttribute(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	_, err := strconv.ParseUint(value, 10, 64)
+	return err == nil
 }
 
 func validRegInfoRegistrationState(value string) bool {
@@ -243,9 +282,6 @@ func (i regInfo) version() (int, bool) {
 
 func (c regInfoContact) expiresDuration() (time.Duration, bool) {
 	value := strings.TrimSpace(c.ExpiresAttr)
-	if value == "" {
-		value = strings.TrimSpace(c.Expires)
-	}
 	seconds, err := strconv.Atoi(value)
 	if err != nil || seconds <= 0 {
 		return 0, false
@@ -261,6 +297,8 @@ func (c regInfoContact) terminated() bool {
 	return strings.EqualFold(strings.TrimSpace(c.State), regInfoContactStateTerminated)
 }
 
+var errInvalidRegInfo = errors.New("registration event body is invalid")
+
 func fmtRegInfoError(text string) error {
-	return errors.New("parsing registration event body: " + text)
+	return fmt.Errorf("%w: %s", errInvalidRegInfo, text)
 }

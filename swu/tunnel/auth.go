@@ -64,6 +64,12 @@ type akaResponse struct {
 	afterSend error
 }
 
+type akaAuthResult struct {
+	finalPayloads []ike.Payload
+	nextMessageID uint32
+	responderAPN  string
+}
+
 func (f *akaAuthFlow) clientErrorResponse(identifier byte, cause error) (akaResponse, error) {
 	eapType := eapTypeAKA
 	if f.currentEAPType == eapTypeAKAPrime {
@@ -79,41 +85,50 @@ func (f *akaAuthFlow) clientErrorResponse(identifier byte, cause error) (akaResp
 	}, nil
 }
 
-func (s *Session) authenticateEAPAKA(ctx context.Context, card Card, imei, identity, realm string, initialState usim.AKAIdentityState, crypto *ikeCrypto, initiatorSPI, responderSPI uint64, ikeInitRequest, ikeInitResponse, initiatorNonce, responderNonce []byte, idiRaw []byte, ikePeer *net.UDPAddr, useNATT bool, ikeFragmentationSupported bool, firstServerPayloads []ike.Payload) ([]ike.Payload, uint32, error) {
-	idrRaw, err := responderIDRawFromPayloads(firstServerPayloads)
+func (s *Session) authenticateEAPAKA(ctx context.Context, state *connectState, idiRaw []byte, firstServerPayloads []ike.Payload) (akaAuthResult, error) {
+	idrRaw, responderAPN, err := responderIDRawFromPayloads(firstServerPayloads, s.cfg.APN, s.cfg.RequestDefaultAPN)
 	if err != nil {
-		return nil, 0, err
+		return akaAuthResult{}, err
 	}
+	ikePeer, useNATT := s.connectIKEPeer(state)
 	flow := akaAuthFlow{
 		session:                          s,
-		card:                             card,
-		imei:                             imei,
-		identity:                         identity,
-		realm:                            realm,
-		eapIdentity:                      identity,
-		crypto:                           crypto,
-		initiatorSPI:                     initiatorSPI,
-		responderSPI:                     responderSPI,
-		ikeInitRequest:                   ikeInitRequest,
-		ikeInitResponse:                  ikeInitResponse,
-		initiatorNonce:                   initiatorNonce,
-		responderNonce:                   responderNonce,
+		card:                             state.card,
+		imei:                             state.imei,
+		identity:                         state.identity,
+		realm:                            state.realm,
+		eapIdentity:                      state.identity,
+		crypto:                           state.crypto,
+		initiatorSPI:                     state.initiatorSPI,
+		responderSPI:                     state.responderSPI,
+		ikeInitRequest:                   state.ikeInitRequest,
+		ikeInitResponse:                  state.ikeInitResponse,
+		initiatorNonce:                   state.nonceI,
+		responderNonce:                   state.responderNonce,
 		idrRaw:                           idrRaw,
 		idiRaw:                           idiRaw,
 		ikePeer:                          cloneUDPAddr(ikePeer),
 		useNATT:                          useNATT,
-		ikeFragmentationSupported:        ikeFragmentationSupported,
-		currentState:                     cloneAKAIdentityState(initialState),
-		pendingState:                     cloneAKAIdentityState(initialState),
+		ikeFragmentationSupported:        state.ikeFragmentationSupported,
+		currentState:                     cloneAKAIdentityState(state.initialAKAState),
+		pendingState:                     cloneAKAIdentityState(state.initialAKAState),
 		nextRequestID:                    2,
 		akaPrimeNetworkName:              s.cfg.AKAPrimeNetworkName,
 		allowAKAPrimeNetworkNameMismatch: s.cfg.AllowAKAPrimeNetworkNameMismatch,
 		ipmsIndication:                   s.cfg.EnableIPMSIndication,
 	}
-	if reauthIdentity, ok := normalizedAKAReauthIdentity(initialState, realm); ok {
+	if reauthIdentity, ok := normalizedAKAReauthIdentity(state.initialAKAState, state.realm); ok {
 		flow.reauthIdentity = reauthIdentity
 	}
-	return flow.run(ctx, firstServerPayloads)
+	finalPayloads, nextMessageID, err := flow.run(ctx, firstServerPayloads)
+	if err != nil {
+		return akaAuthResult{}, err
+	}
+	return akaAuthResult{
+		finalPayloads: finalPayloads,
+		nextMessageID: nextMessageID,
+		responderAPN:  responderAPN,
+	}, nil
 }
 
 func (f *akaAuthFlow) run(ctx context.Context, serverPayloads []ike.Payload) ([]ike.Payload, uint32, error) {

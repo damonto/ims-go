@@ -30,6 +30,12 @@ type akaChallengeTestCard struct {
 	result usim.AKAResult
 }
 
+type akaCountingChallengeTestCard struct {
+	sessionTestCard
+	result usim.AKAResult
+	calls  int
+}
+
 type akaFailTestCard struct {
 	sessionTestCard
 	err error
@@ -56,6 +62,11 @@ func (c *akaStateTestCard) SetAKAIdentityState(state usim.AKAIdentityState) {
 }
 
 func (c akaChallengeTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return c.result, nil
+}
+
+func (c *akaCountingChallengeTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	c.calls++
 	return c.result, nil
 }
 
@@ -260,15 +271,39 @@ func buildIdentityResponseForTest(t *testing.T, flow *akaAuthFlow, message eapak
 	if message.Subtype == 0 {
 		message.Subtype = akaSubtypeIdentity
 	}
-	wire, err := message.MarshalBinary()
-	if err != nil {
-		t.Fatalf("MarshalBinary() error = %v", err)
-	}
+	wire := marshalAKAMessageUncheckedForTest(t, message)
 	response, err := flow.buildIdentityResponse(message, wire)
 	if err != nil {
 		t.Fatalf("buildIdentityResponse() error = %v", err)
 	}
 	return response
+}
+
+func marshalAKAMessageUncheckedForTest(t *testing.T, message eapaka.AKAMessage) []byte {
+	t.Helper()
+	payload := []byte{message.Subtype, 0x00, 0x00}
+	for _, attr := range message.Attributes {
+		wire, err := attr.MarshalBinary()
+		if err != nil {
+			t.Fatalf("AKAAttribute.MarshalBinary() error = %v", err)
+		}
+		payload = append(payload, wire...)
+	}
+	eapType := message.EAPType
+	if eapType == 0 {
+		eapType = eapTypeAKA
+	}
+	wire, err := (eapaka.EAPPacket{
+		Code:       message.Code,
+		Identifier: message.Identifier,
+		Type:       eapType,
+		HasType:    true,
+		Data:       payload,
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("EAPPacket.MarshalBinary() error = %v", err)
+	}
+	return wire
 }
 
 func checkcodeForTest(packets [][]byte) []byte {
@@ -869,10 +904,7 @@ func TestAKAAuthFlowBuildChallengeResponseDuplicateRANDReturnsClientError(t *tes
 			{Type: akaAttrMAC, Value: append([]byte{0x00, 0x00}, make([]byte, 16)...)},
 		},
 	}
-	wire, err := message.MarshalBinary()
-	if err != nil {
-		t.Fatalf("MarshalBinary() error = %v", err)
-	}
+	wire := marshalAKAMessageUncheckedForTest(t, message)
 
 	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
 	if err != nil {
@@ -891,7 +923,15 @@ func TestAKAAuthFlowBuildChallengeResponseDuplicateRANDReturnsClientError(t *tes
 }
 
 func TestAKAAuthFlowBuildChallengeResponseUnexpectedAttributeReturnsClientError(t *testing.T) {
-	flow := akaAuthFlow{}
+	flow := akaAuthFlow{
+		session: &Session{logger: slog.Default()},
+		card: akaChallengeTestCard{result: usim.AKAResult{
+			RES: bytes.Repeat([]byte{0x11}, 8),
+			IK:  bytes.Repeat([]byte{0x22}, 16),
+			CK:  bytes.Repeat([]byte{0x33}, 16),
+		}},
+		crypto: &ikeCrypto{},
+	}
 	message := eapaka.AKAMessage{
 		Code:       eapCodeRequest,
 		Identifier: 13,
@@ -1033,6 +1073,160 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsBiddingDown(t *testing.T) {
 	}
 	if !bytes.Equal(response.data, want) {
 		t.Fatalf("response = % X, want % X", response.data, want)
+	}
+}
+
+func TestAKAAuthFlowBuildChallengeResponseHonorsTrustIndication(t *testing.T) {
+	identity := "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := bytes.Repeat([]byte{0x22}, 16)
+	akaResult := usim.AKAResult{
+		RES: bytes.Repeat([]byte{0x33}, 8),
+		IK:  bytes.Repeat([]byte{0x44}, 16),
+		CK:  bytes.Repeat([]byte{0x55}, 16),
+	}
+	tests := []struct {
+		name            string
+		relationship    eapaka.TrustRelationship
+		wantClientError bool
+	}{
+		{name: "trusted access terminates SWu", relationship: eapaka.TrustRelationshipTrusted, wantClientError: true},
+		{name: "untrusted access continues SWu", relationship: eapaka.TrustRelationshipUntrusted},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := akaAuthFlow{
+				session:     &Session{logger: slog.Default()},
+				card:        akaChallengeTestCard{result: akaResult},
+				identity:    identity,
+				eapIdentity: identity,
+				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:      &ikeCrypto{},
+			}
+			wire := buildSignedAKAChallenge(t, 8, identity, rand, autn, akaResult, eapaka.AKAAttribute{
+				Type:  akaAttrTrustInd,
+				Value: []byte{0x00, byte(tt.relationship)},
+			})
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if got := response.afterSend != nil; got != tt.wantClientError {
+				t.Fatalf("client error = %t, want %t", got, tt.wantClientError)
+			}
+			var got eapaka.AKAMessage
+			if err := got.UnmarshalBinary(response.data); err != nil {
+				t.Fatalf("response UnmarshalBinary() error = %v", err)
+			}
+			wantSubtype := akaSubtypeChallenge
+			if tt.wantClientError {
+				wantSubtype = akaSubtypeClientError
+			}
+			if got.Subtype != wantSubtype {
+				t.Fatalf("response subtype = %d, want %d", got.Subtype, wantSubtype)
+			}
+		})
+	}
+}
+
+func TestAKAAuthFlowProcessesAKAPrimeChallengeInAuthenticatedStages(t *testing.T) {
+	startIdentity := "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	keyIdentity := "6001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	rand := bytes.Repeat([]byte{0x11}, 16)
+	autn := []byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+		0x80, 0x00,
+		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+	}
+	networkName := []byte("WLAN")
+	akaResult := usim.AKAResult{
+		RES: bytes.Repeat([]byte{0x33}, 8),
+		IK:  bytes.Repeat([]byte{0x44}, 16),
+		CK:  bytes.Repeat([]byte{0x55}, 16),
+	}
+	tests := []struct {
+		name        string
+		extraAttr   *eapaka.AKAAttribute
+		nestedAttrs []eapaka.AKAAttribute
+		corruptMAC  bool
+	}{
+		{
+			name: "authenticated wrong attribute is rejected after USIM",
+			extraAttr: &eapaka.AKAAttribute{
+				Type:  akaAttrNextPseudonym,
+				Value: akaStringValueForTest("pseudonym"),
+			},
+		},
+		{
+			name: "invalid encrypted identity does not commit partial pending state",
+			nestedAttrs: []eapaka.AKAAttribute{
+				{Type: akaAttrNextPseudonym, Value: akaStringValueForTest("new-pseudonym")},
+				{Type: akaAttrNextReauthID, Value: []byte{0x00, 0x05, 'x', 'x', 'x', 'x'}},
+			},
+		},
+		{name: "invalid mac does not commit derived state", corruptMAC: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card := &akaCountingChallengeTestCard{result: akaResult}
+			initialPending := usim.AKAIdentityState{Pseudonym: "old-pseudonym", ReauthIdentity: "old-reauth@example.net", Counter: 7}
+			flow := akaAuthFlow{
+				session:             &Session{logger: slog.Default()},
+				card:                card,
+				identity:            startIdentity,
+				eapIdentity:         startIdentity,
+				realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:              &ikeCrypto{},
+				akaPrimeNetworkName: "WLAN",
+				pendingState:        cloneAKAIdentityState(initialPending),
+			}
+			extraAttrs := []eapaka.AKAAttribute(nil)
+			if tt.extraAttr != nil {
+				extraAttrs = append(extraAttrs, *tt.extraAttr)
+			}
+			if len(tt.nestedAttrs) != 0 {
+				keys, err := eapaka.DeriveAKAPrimeKeys([]byte(keyIdentity), akaResult.CK, akaResult.IK, networkName, autn[:akaPrimeSQNXorAKLen])
+				if err != nil {
+					t.Fatalf("DeriveAKAPrimeKeys() error = %v", err)
+				}
+				extraAttrs = append(extraAttrs, encryptAKAAttributesForTest(t, tt.nestedAttrs, keys.ENCR, bytes.Repeat([]byte{0x66}, aes.BlockSize))...)
+			}
+			wire := buildSignedAKAPrimeChallenge(t, 8, keyIdentity, rand, autn, networkName, akaResult, extraAttrs...)
+			if tt.corruptMAC {
+				wire[len(wire)-1] ^= 0x01
+			}
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			if err != nil {
+				t.Fatalf("buildChallengeResponse() error = %v", err)
+			}
+			if response.afterSend == nil {
+				t.Fatal("buildChallengeResponse() afterSend = nil, want client error")
+			}
+			if card.calls != 1 {
+				t.Fatalf("AKA() calls = %d, want 1", card.calls)
+			}
+			if flow.eapIdentity != startIdentity {
+				t.Fatalf("eapIdentity = %q, want unchanged %q", flow.eapIdentity, startIdentity)
+			}
+			if len(flow.crypto.eap.AUT) != 0 || len(flow.crypto.eap.MSK) != 0 {
+				t.Fatal("derived EAP state was committed before authenticated challenge validation")
+			}
+			if flow.pendingState.Pseudonym != initialPending.Pseudonym || flow.pendingState.ReauthIdentity != initialPending.ReauthIdentity || flow.pendingState.Counter != initialPending.Counter {
+				t.Fatalf("pending state = %+v, want unchanged %+v", flow.pendingState, initialPending)
+			}
+		})
 	}
 }
 
@@ -1284,7 +1478,7 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsInvalidAKAPrimeKDFAttributes(t 
 		0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
 	}
 	kdfInputAttr := akaAttributeFromBinaryForTest(t, eapaka.KDFInput{NetworkName: []byte("WLAN")})
-	emptyKDFInputAttr := akaAttributeFromBinaryForTest(t, eapaka.KDFInput{})
+	emptyKDFInputAttr := eapaka.AKAAttribute{Type: akaAttrKDFInput, Value: []byte{0x00, 0x00}}
 	kdfAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault})
 	unsupportedKDFAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault + 1})
 
@@ -1840,7 +2034,7 @@ func TestAKAAuthFlowBuildReauthenticationResponseUsesFastReauthIdentity(t *testi
 	}
 }
 
-func TestAKAAuthFlowBuildReauthenticationResponseRejectsBiddingDown(t *testing.T) {
+func TestAKAAuthFlowRejectsInvalidReauthenticationWithoutDiscardingState(t *testing.T) {
 	identity := "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
 	reauthIdentity := "reauth123@nai.epc.mnc001.mcc001.3gppnetwork.org"
 	mk := bytes.Repeat([]byte{0x77}, 20)
@@ -1848,37 +2042,74 @@ func TestAKAAuthFlowBuildReauthenticationResponseRejectsBiddingDown(t *testing.T
 	kEncr := bytes.Repeat([]byte{0x22}, 16)
 	nonceS := bytes.Repeat([]byte{0x33}, 16)
 	counter := uint16(5)
-	flow := akaAuthFlow{
-		eapIdentity:    identity,
-		reauthIdentity: reauthIdentity,
-		currentState: usim.AKAIdentityState{
-			ReauthIdentity: reauthIdentity,
-			Counter:        1,
-			MK:             mk,
-			KAut:           kAut,
-			KEncr:          kEncr,
-		},
-		crypto: &ikeCrypto{},
+	state := usim.AKAIdentityState{
+		ReauthIdentity: reauthIdentity,
+		Counter:        1,
+		MK:             mk,
+		KAut:           kAut,
+		KEncr:          kEncr,
 	}
-	wire := buildSignedAKAReauthRequest(t, 9, counter, nonceS, kAut, kEncr, eapaka.AKAAttribute{
-		Type:  akaAttrBidding,
-		Value: []byte{0x80, 0x00},
-	})
-	var message eapaka.AKAMessage
-	if err := message.UnmarshalBinary(wire); err != nil {
-		t.Fatalf("UnmarshalBinary() error = %v", err)
+	tests := []struct {
+		name       string
+		extraAttrs []eapaka.AKAAttribute
+		corruptMAC bool
+	}{
+		{
+			name: "bidding is invalid outside challenge",
+			extraAttrs: []eapaka.AKAAttribute{{
+				Type:  akaAttrBidding,
+				Value: []byte{0x80, 0x00},
+			}},
+		},
+		{name: "invalid mac", corruptMAC: true},
 	}
 
-	response, err := flow.buildReauthenticationResponse(message, wire)
-	if err != nil {
-		t.Fatalf("buildReauthenticationResponse() error = %v", err)
-	}
-	want, err := eapaka.BuildAKAAuthenticationReject(message.Identifier)
-	if err != nil {
-		t.Fatalf("BuildAKAAuthenticationReject() error = %v", err)
-	}
-	if !bytes.Equal(response.data, want) {
-		t.Fatalf("response = % X, want % X", response.data, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card := &akaStateTestCard{state: cloneAKAIdentityState(state)}
+			flow := akaAuthFlow{
+				card:             card,
+				eapIdentity:      identity,
+				reauthIdentity:   reauthIdentity,
+				currentState:     cloneAKAIdentityState(state),
+				currentAuthKey:   append([]byte(nil), kAut...),
+				currentEncrKey:   append([]byte(nil), kEncr...),
+				currentEAPType:   eapTypeAKA,
+				currentCounter:   state.Counter,
+				fastReauth:       true,
+				akaAuthenticated: true,
+				crypto:           &ikeCrypto{},
+			}
+			wire := buildSignedAKAReauthRequest(t, 9, counter, nonceS, kAut, kEncr, tt.extraAttrs...)
+			if tt.corruptMAC {
+				wire[len(wire)-1] ^= 0x01
+			}
+			var message eapaka.AKAMessage
+			if err := message.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+
+			response, err := flow.buildReauthenticationResponse(message, wire)
+			if err != nil {
+				t.Fatalf("buildReauthenticationResponse() error = %v", err)
+			}
+			if response.afterSend == nil {
+				t.Fatal("buildReauthenticationResponse() afterSend = nil, want client error")
+			}
+			want, err := eapaka.BuildClientErrorPacket(message.Identifier, akaClientErrorUnableToProcessPacket)
+			if err != nil {
+				t.Fatalf("BuildClientErrorPacket() error = %v", err)
+			}
+			if !bytes.Equal(response.data, want) {
+				t.Fatalf("response = % X, want client error % X", response.data, want)
+			}
+			if card.state.ReauthIdentity != state.ReauthIdentity || card.state.Counter != state.Counter {
+				t.Fatalf("stored reauth state was discarded: %+v", card.state)
+			}
+			if !bytes.Equal(card.state.MK, state.MK) || !bytes.Equal(card.state.KAut, state.KAut) || !bytes.Equal(card.state.KEncr, state.KEncr) {
+				t.Fatal("stored reauth keys changed after invalid request")
+			}
+		})
 	}
 }
 
@@ -2087,10 +2318,55 @@ func TestAKAAuthFlowValidatesIPMSResult(t *testing.T) {
 				if response.afterSend != nil {
 					t.Fatalf("buildNotificationResponse() afterSend = %v, want nil", response.afterSend)
 				}
+				if !flow.notificationReceived {
+					t.Fatal("valid notification was not marked received")
+				}
 				return
 			}
 			if response.afterSend == nil || !strings.Contains(response.afterSend.Error(), tt.wantAfter) {
 				t.Fatalf("buildNotificationResponse() afterSend = %v, want %q", response.afterSend, tt.wantAfter)
+			}
+			if flow.notificationReceived {
+				t.Fatal("invalid notification was marked received")
+			}
+		})
+	}
+}
+
+func TestAKAAuthFlowAuthenticatesNotificationBeforeOtherAttributes(t *testing.T) {
+	autKey := bytes.Repeat([]byte{0x11}, 16)
+	tests := []struct {
+		name       string
+		corruptMAC bool
+		wantAfter  string
+	}{
+		{name: "invalid mac is reported first", corruptMAC: true, wantAfter: "verifying notification mac"},
+		{name: "authenticated wrong attribute is rejected", wantAfter: "unexpected attribute"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := akaAuthFlow{
+				akaAuthenticated:         true,
+				protectedSuccessExpected: true,
+				currentAuthKey:           autKey,
+			}
+			wire, message := buildSignedNotificationForTest(t, 7, akaNotificationSuccess, autKey, eapaka.AKAAttribute{
+				Type:  akaAttrResultInd,
+				Value: []byte{0x00, 0x00},
+			})
+			if tt.corruptMAC {
+				wire[len(wire)-1] ^= 0x01
+			}
+			response, err := flow.buildNotificationResponse(message, wire)
+			if err != nil {
+				t.Fatalf("buildNotificationResponse() error = %v", err)
+			}
+			if response.afterSend == nil || !strings.Contains(response.afterSend.Error(), tt.wantAfter) {
+				t.Fatalf("buildNotificationResponse() afterSend = %v, want %q", response.afterSend, tt.wantAfter)
+			}
+			if flow.notificationReceived {
+				t.Fatal("notification was marked received before authenticated validation")
 			}
 		})
 	}
@@ -2109,6 +2385,9 @@ func TestAKAAuthFlowRejectsUnnegotiatedSuccessNotification(t *testing.T) {
 	}
 	if response.afterSend == nil || !strings.Contains(response.afterSend.Error(), "protected success was not negotiated") {
 		t.Fatalf("buildNotificationResponse() afterSend = %v, want unnegotiated protected success error", response.afterSend)
+	}
+	if flow.notificationReceived {
+		t.Fatal("unnegotiated success notification was marked received")
 	}
 }
 
@@ -2306,33 +2585,75 @@ func TestAKAAuthFlowVerifyResponderPostEAPAuth(t *testing.T) {
 
 func TestResponderIDRawFromPayloads(t *testing.T) {
 	tests := []struct {
-		name     string
-		payloads []ike.Payload
-		wantErr  string
+		name              string
+		payloads          []ike.Payload
+		requestedAPN      string
+		requestDefaultAPN bool
+		wantAPN           string
+		wantErr           string
 	}{
 		{
 			name: "fqdn idr",
 			payloads: []ike.Payload{
 				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte("ims")},
 			},
+			requestedAPN: "ims",
+			wantAPN:      "ims",
 		},
 		{
-			name: "fqdn idr with non-apn data",
+			name: "responder apn casing does not replace requested apn",
+			payloads: []ike.Payload{
+				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte("IMS")},
+			},
+			requestedAPN: "ims",
+			wantAPN:      "ims",
+		},
+		{
+			name: "network selected default apn",
 			payloads: []ike.Payload{
 				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte("internet")},
 			},
+			requestDefaultAPN: true,
+			wantAPN:           "internet",
+		},
+		{
+			name: "epdg fqdn differs from explicit apn",
+			payloads: []ike.Payload{
+				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte("topon.nodes.epdg.ld.epc.mnc015.mcc234.3gppnetwork.org")},
+			},
+			requestedAPN: "ims",
+			wantAPN:      "ims",
 		},
 		{
 			name: "ipv4 idr",
 			payloads: []ike.Payload{
 				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeIPv4Addr, Data: []byte{198, 18, 0, 6}},
 			},
+			requestedAPN: "ims",
+			wantAPN:      "ims",
 		},
 		{
 			name: "rfc822 idr",
 			payloads: []ike.Payload{
 				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeRFC822Addr, Data: []byte("ims")},
 			},
+			requestedAPN: "ims",
+			wantAPN:      "ims",
+		},
+		{
+			name: "ipv6 idr",
+			payloads: []ike.Payload{
+				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeIPv6Addr, Data: bytes.Repeat([]byte{0x20}, 16)},
+			},
+			requestedAPN: "ims",
+			wantAPN:      "ims",
+		},
+		{
+			name: "network default apn is unknown for ipv4 idr",
+			payloads: []ike.Payload{
+				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeIPv4Addr, Data: []byte{198, 18, 0, 6}},
+			},
+			requestDefaultAPN: true,
 		},
 		{
 			name:     "missing idr",
@@ -2347,30 +2668,59 @@ func TestResponderIDRawFromPayloads(t *testing.T) {
 			wantErr: "data is empty",
 		},
 		{
+			name: "non-ascii fqdn",
+			payloads: []ike.Payload{
+				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeFQDN, Data: []byte("ims\x00")},
+			},
+			requestDefaultAPN: true,
+			wantErr:           "non-printable or non-ASCII",
+		},
+		{
 			name: "invalid ipv4 idr length",
 			payloads: []ike.Payload{
 				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeIPv4Addr, Data: []byte{198, 18, 0}},
 			},
-			wantErr: "ID_IPV4_ADDR length 3, want 4",
+			requestedAPN: "ims",
+			wantErr:      "ID_IPV4_ADDR length 3, want 4",
+		},
+		{
+			name: "invalid ipv6 idr length",
+			payloads: []ike.Payload{
+				&ike.IDPayload{Tag: payloadTypeIDr, IDType: idTypeIPv6Addr, Data: bytes.Repeat([]byte{0x20}, 15)},
+			},
+			requestedAPN: "ims",
+			wantErr:      "ID_IPV6_ADDR length 15, want 16",
 		},
 		{
 			name: "unsupported idr type",
 			payloads: []ike.Payload{
 				&ike.IDPayload{Tag: payloadTypeIDr, IDType: 255, Data: []byte("ims")},
 			},
-			wantErr: "unsupported type 255",
+			requestedAPN: "ims",
+			wantErr:      "unsupported type 255",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := responderIDRawFromPayloads(tt.payloads)
+			got, gotAPN, err := responderIDRawFromPayloads(tt.payloads, tt.requestedAPN, tt.requestDefaultAPN)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("responderIDRawFromPayloads() error = %v", err)
 				}
 				if len(got) == 0 {
 					t.Fatal("responderIDRawFromPayloads() returned empty idr")
+				}
+				idr := ike.FindIDPayload(tt.payloads, payloadTypeIDr)
+				wantRaw, rawErr := idr.RawData()
+				if rawErr != nil {
+					t.Fatalf("IDPayload.RawData() error = %v", rawErr)
+				}
+				if !bytes.Equal(got, wantRaw) {
+					t.Fatalf("responderIDRawFromPayloads() raw = % X, want % X", got, wantRaw)
+				}
+				if gotAPN != tt.wantAPN {
+					t.Fatalf("responderIDRawFromPayloads() APN = %q, want %q", gotAPN, tt.wantAPN)
 				}
 				return
 			}
@@ -2728,7 +3078,14 @@ func TestExchangeProtectedIKEAuthNotify(t *testing.T) {
 			session := mustDialSession(t, conn)
 			session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
 
-			gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), peer, [][]byte{request}, false, 1, crypto, false, true, tt.action)
+			gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), protectedIKEExchange{
+				peer:                   peer,
+				requests:               [][]byte{request},
+				messageID:              1,
+				crypto:                 crypto,
+				fragmentationSupported: true,
+				action:                 tt.action,
+			})
 
 			if tt.wantErr == "" {
 				if err != nil {
@@ -3158,20 +3515,22 @@ func TestGPRSTimer3Deactivated(t *testing.T) {
 
 func TestBackoffTimerDelayRequiresLengthPrefixedTimerValue(t *testing.T) {
 	tests := []struct {
-		name string
-		data []byte
-		want time.Duration
-		ok   bool
+		name   string
+		notify ike.NotifyPayload
+		want   time.Duration
+		ok     bool
 	}{
-		{name: "valid", data: []byte{0x01, 0xa2}, want: 2 * time.Minute, ok: true},
-		{name: "missing length byte", data: []byte{0xa2}},
-		{name: "wrong value length", data: []byte{0x02, 0xa2}},
-		{name: "extra byte", data: []byte{0x01, 0xa2, 0x00}},
+		{name: "valid", notify: ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: []byte{0x01, 0xa2}}, want: 2 * time.Minute, ok: true},
+		{name: "missing length byte", notify: ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: []byte{0xa2}}},
+		{name: "wrong value length", notify: ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: []byte{0x02, 0xa2}}},
+		{name: "extra byte", notify: ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: []byte{0x01, 0xa2, 0x00}}},
+		{name: "esp protocol id", notify: ike.NotifyPayload{ProtocolID: protocolIDESP, NotifyType: notifyTypeBackoffTimer, Data: []byte{0x01, 0xa2}}},
+		{name: "non-empty spi", notify: ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, SPI: []byte{0, 0, 0, 1}, Data: []byte{0x01, 0xa2}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := backoffTimerDelay(&ike.NotifyPayload{NotifyType: notifyTypeBackoffTimer, Data: tt.data})
+			got, ok := backoffTimerDelay(&tt.notify)
 			if got != tt.want || ok != tt.ok {
 				t.Fatalf("backoffTimerDelay() = %v, %v; want %v, %v", got, ok, tt.want, tt.ok)
 			}

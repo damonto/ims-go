@@ -59,6 +59,8 @@ type UDPSegment struct {
 	Src     *net.UDPAddr
 	Dst     *net.UDPAddr
 	Payload []byte
+	// ZeroIPv4Checksum is used by RFC 3948 UDP-encapsulated ESP packets.
+	ZeroIPv4Checksum bool
 }
 
 type TCPSegment struct {
@@ -205,6 +207,9 @@ func (s UDPSegment) MarshalBinary() ([]byte, error) {
 	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
 	copy(udp[8:], s.Payload)
 	if src.To4() != nil {
+		if s.ZeroIPv4Checksum {
+			return udp, nil
+		}
 		binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv4(src.To4(), dst.To4(), udp)))
 		return udp, nil
 	}
@@ -400,6 +405,9 @@ func decodeIPv4Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) 
 	if ipv4HeaderChecksum(packet[:ihl]) != 0 {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid header checksum")
 	}
+	if binary.BigEndian.Uint16(packet[6:8])&0x3fff != 0 {
+		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: fragments are not accepted by ESP")
+	}
 	total := int(binary.BigEndian.Uint16(packet[2:4]))
 	if total < ihl || len(packet) < total {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid total length")
@@ -414,6 +422,9 @@ func decodeIPv6Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) 
 	length := int(binary.BigEndian.Uint16(packet[4:6]))
 	if len(packet) < 40+length {
 		return 0, 0, nil, nil, nil, errors.New("parsing ipv6 packet: invalid payload length")
+	}
+	if packet[6] == 44 { // IPv6 Fragment header
+		return 0, 0, nil, nil, nil, errors.New("parsing ipv6 packet: fragments are not accepted by ESP")
 	}
 	return IPVersion6, packet[6], append(net.IP(nil), packet[8:24]...), append(net.IP(nil), packet[24:40]...), append([]byte(nil), packet[40:40+length]...), nil
 }
@@ -505,9 +516,17 @@ func decodeOpaqueESPPacket(data []byte) (esp.ESPPacket, error) {
 	if len(data) < 8 {
 		return esp.ESPPacket{}, errors.New("parsing esp packet: packet too short")
 	}
+	spi := binary.BigEndian.Uint32(data[:4])
+	sequence := binary.BigEndian.Uint32(data[4:8])
+	if !esp.ValidSPI(spi) {
+		return esp.ESPPacket{}, errors.New("parsing esp packet: invalid spi")
+	}
+	if sequence == 0 {
+		return esp.ESPPacket{}, errors.New("parsing esp packet: invalid sequence number")
+	}
 	packet := esp.ESPPacket{
-		SPI:      binary.BigEndian.Uint32(data[:4]),
-		Sequence: binary.BigEndian.Uint32(data[4:8]),
+		SPI:      spi,
+		Sequence: sequence,
 		Payload:  append([]byte(nil), data[8:]...),
 	}
 	var decoded esp.ESPPacket

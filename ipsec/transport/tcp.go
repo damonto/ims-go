@@ -17,7 +17,7 @@ const (
 	tcpDefaultSegmentSize = 1024
 	tcpDefaultIPv4SendMSS = 536
 	tcpDefaultIPv6SendMSS = 1220
-	tcpDefaultRemotePort  = 5060
+	tcpDefaultRemotePort  = standardSIPPort
 	tcpEphemeralPortBase  = 40000
 	tcpEphemeralPortRange = 20000
 	tcpDefaultWindow      = 65535
@@ -64,7 +64,26 @@ var tcpRandomISS = randomUint32
 var (
 	errPendingSegmentCanceled = errors.New("tcp pending segment canceled")
 	errTCPPeerClosed          = errors.New("reading tcp packet: peer closed connection")
+	errTCPPeerReset           = errors.New("reading tcp packet: peer reset connection")
 )
+
+type recoverableTCPConnectionError struct {
+	err error
+}
+
+func (e *recoverableTCPConnectionError) Error() string {
+	return e.err.Error()
+}
+
+func (e *recoverableTCPConnectionError) Unwrap() error {
+	return e.err
+}
+
+// TransportUsable reports that only the accepted connection was lost; the
+// protected server port remains available for a new connection.
+func (e *recoverableTCPConnectionError) TransportUsable() bool {
+	return true
+}
 
 var _ imssession.Transport = (*TCPConn)(nil)
 
@@ -159,8 +178,8 @@ func ListenSecureTCP(s PacketSession, cfg SecureTCPConfig) (*TCPConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
-	if cfg.LocalPort == 0 || cfg.RemotePort == 0 {
-		return nil, errors.New("listening secure tcp transport: ports are required")
+	if err := validateSecureTransportPorts(cfg.LocalPort, cfg.RemotePort); err != nil {
+		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
 	}
 	if err := validateSecureSPIs(cfg.OutboundSPI, cfg.InboundSPI); err != nil {
 		return nil, fmt.Errorf("listening secure tcp transport: %w", err)
@@ -216,6 +235,11 @@ func dialTCP(ctx context.Context, s PacketSession, cfg TCPConfig, secure *Secure
 	innerLocal, innerRemote, err := connectedUDPAddrs(s, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("dialing tcp transport: %w", err)
+	}
+	if secure != nil {
+		if err := validateSecureTransportPorts(cfg.LocalPort, cfg.RemotePort); err != nil {
+			return nil, fmt.Errorf("dialing secure tcp transport: %w", err)
+		}
 	}
 	remotePort := cfg.RemotePort
 	if remotePort == 0 {
@@ -332,6 +356,12 @@ func (t *TCPConn) LocalAddr() net.Addr {
 
 func (t *TCPConn) RemoteAddr() net.Addr {
 	return cloneTCPAddr(t.remote)
+}
+
+func (t *TCPConn) SupportsSIPKeepAlive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.secureMode != SecureModeUDPEncTunnel
 }
 
 func (t *TCPConn) WritePacket(ctx context.Context, data []byte) error {
@@ -518,6 +548,9 @@ func (t *TCPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	t.mu.Unlock()
 	espPayload, ok := secureESPPayload(pkt, mode)
 	if !ok {
+		return false
+	}
+	if !secureOuterDestinationMatches(pkt, t.local.IP, mode) {
 		return false
 	}
 	spi := packetSPI(espPayload)
@@ -810,10 +843,14 @@ func (t *TCPConn) startPendingRetransmission(pending tcpPendingSegment, timeouts
 }
 
 func tcpControlSequenceLen(flags byte) uint32 {
-	if flags&(packet.TCPFlagSYN|packet.TCPFlagFIN) == 0 {
-		return 0
+	var length uint32
+	if flags&packet.TCPFlagSYN != 0 {
+		length++
 	}
-	return 1
+	if flags&packet.TCPFlagFIN != 0 {
+		length++
+	}
+	return length
 }
 
 func (t *TCPConn) maxPayloadSize() int {
@@ -842,13 +879,11 @@ func tcpSeqAfter(a, b uint32) bool {
 	return int32(a-b) > 0
 }
 
-// tcpSeqInWindow follows gVisor's Linux-compatible right-edge behavior for
-// zero-length control segments.
 func tcpSeqInWindow(value, start uint32, window uint32) bool {
 	if window == 0 {
 		return value == start
 	}
-	return !tcpSeqAfter(start, value) && !tcpSeqAfter(value, start+window)
+	return !tcpSeqAfter(start, value) && tcpSeqAfter(start+window, value)
 }
 
 func tcpSegmentAcceptable(seq uint32, length uint32, recvSeq uint32, window uint32) bool {
@@ -858,7 +893,8 @@ func tcpSegmentAcceptable(seq uint32, length uint32, recvSeq uint32, window uint
 	if length == 0 {
 		return tcpSeqInWindow(seq, recvSeq, window)
 	}
-	return tcpSeqAfter(seq+length, recvSeq) && !tcpSeqAfter(seq, recvSeq+window)
+	return tcpSeqInWindow(seq, recvSeq, window) ||
+		tcpSeqInWindow(seq+length-1, recvSeq, window)
 }
 
 func (t *TCPConn) ackContext(timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -903,7 +939,8 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 		}
 	}
 	if terminalErr != nil {
-		if errors.Is(terminalErr, errTCPPeerClosed) {
+		var recoverable *recoverableTCPConnectionError
+		if errors.Is(terminalErr, errTCPPeerClosed) || errors.As(terminalErr, &recoverable) {
 			t.signalReadError(terminalErr)
 		} else {
 			t.closeWithError(terminalErr)
@@ -994,7 +1031,11 @@ func (t *TCPConn) processResetSegment(segment packet.TCPSegment) (tcpSegmentResp
 		return tcpSegmentResponse{}, nil
 	}
 	if t.resetAcceptableLocked(segment) {
-		return tcpSegmentResponse{}, errors.New("reading tcp packet: peer reset connection")
+		if t.passive {
+			t.returnToPassiveListenLocked()
+			return tcpSegmentResponse{}, &recoverableTCPConnectionError{err: errTCPPeerReset}
+		}
+		return tcpSegmentResponse{}, errTCPPeerReset
 	}
 	if t.established && tcpSeqInWindow(segment.Seq, t.recvSeq, uint32(tcpDefaultWindow)) {
 		return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, nil

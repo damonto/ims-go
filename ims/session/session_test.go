@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -29,14 +30,38 @@ type stubTransport struct {
 
 type basicTransport struct{ stub *stubTransport }
 
+type keepAliveDisabledTransport struct{ *stubTransport }
+
 type readErrorTransport struct {
 	*stubTransport
 	errCh chan error
 }
 
+type usableReadError struct {
+	err error
+}
+
+func (e *usableReadError) Error() string {
+	return e.err.Error()
+}
+
+func (e *usableReadError) Unwrap() error {
+	return e.err
+}
+
+func (e *usableReadError) TransportUsable() bool {
+	return true
+}
+
 type writeErrorTransport struct {
 	*stubTransport
 	err error
+}
+
+type failAfterWritesTransport struct {
+	*stubTransport
+	failAfter int
+	err       error
 }
 
 type blockingWriteTransport struct {
@@ -54,6 +79,19 @@ type requestHandler struct {
 	requests []string
 	errs     []error
 	handle   func(context.Context, Request) (bool, error)
+}
+
+type responseCaptureHandler struct {
+	responses chan sip.Message
+}
+
+func (h *responseCaptureHandler) HandleRequest(context.Context, Request) (bool, error) {
+	return false, nil
+}
+
+func (h *responseCaptureHandler) HandleResponse(_ context.Context, msg sip.Message) (bool, error) {
+	h.responses <- msg
+	return true, nil
 }
 
 func newStubTransport(localPort, remotePort int) *stubTransport {
@@ -208,12 +246,18 @@ func (t *basicTransport) WritePacket(ctx context.Context, data []byte) error {
 }
 func (t *basicTransport) Close() error { return t.stub.Close() }
 
+func (t *keepAliveDisabledTransport) SupportsSIPKeepAlive() bool { return false }
+
 func (t *readErrorTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	select {
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
+	case <-t.closed:
+		return nil, nil, errors.New("transport is closed")
 	case err := <-t.errCh:
 		return nil, nil, err
+	case pkt := <-t.readCh:
+		return pkt, t.remote, nil
 	}
 }
 
@@ -223,6 +267,13 @@ func (t *readErrorTransport) fail(err error) {
 
 func (t *writeErrorTransport) WritePacket(ctx context.Context, data []byte) error {
 	return t.err
+}
+
+func (t *failAfterWritesTransport) WritePacket(ctx context.Context, data []byte) error {
+	if t.writeCount() >= t.failAfter {
+		return t.err
+	}
+	return t.stubTransport.WritePacket(ctx, data)
 }
 
 func (h *requestHandler) HandleRequest(ctx context.Context, req Request) (bool, error) {
@@ -272,7 +323,7 @@ func TestSendKeepAliveWritesTransportSpecificPacket(t *testing.T) {
 			},
 		},
 		{
-			name:   "udp stun binding indication",
+			name:   "udp stun binding request",
 			local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
 			remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 			assertData: func(t *testing.T, data []byte) {
@@ -280,8 +331,8 @@ func TestSendKeepAliveWritesTransportSpecificPacket(t *testing.T) {
 				if len(data) != stunHeaderBytes {
 					t.Fatalf("STUN packet length = %d, want %d", len(data), stunHeaderBytes)
 				}
-				if got := binary.BigEndian.Uint16(data[0:2]); got != stunBindingIndication {
-					t.Fatalf("STUN message type = %#x, want Binding Indication", got)
+				if got := binary.BigEndian.Uint16(data[0:2]); got != stunBindingRequest {
+					t.Fatalf("STUN message type = %#x, want Binding Request", got)
 				}
 				if got := binary.BigEndian.Uint16(data[2:4]); got != 0 {
 					t.Fatalf("STUN message length = %d, want 0", got)
@@ -302,6 +353,30 @@ func TestSendKeepAliveWritesTransportSpecificPacket(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
+			if _, ok := tt.local.(*net.UDPAddr); ok {
+				transport.onWrite = func(data []byte) {
+					var message stunMessage
+					if message.UnmarshalBinary(data) != nil || message.messageType != stunBindingRequest {
+						return
+					}
+					response, responseErr := stunBindingResponse(message.transactionID, transport.local)
+					if responseErr == nil {
+						transport.readCh <- response
+					}
+				}
+			} else {
+				transport.onWrite = func(data []byte) {
+					if string(data) == string(sipCRLFKeepAlive) {
+						transport.readCh <- []byte("\r\n")
+					}
+				}
+			}
+			runCtx, runCancel := context.WithCancel(context.Background())
+			errCh := make(chan error, 1)
+			go func() { errCh <- sess.Run(runCtx) }()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
 
 			if err := sess.SendKeepAlive(context.Background()); err != nil {
 				t.Fatalf("SendKeepAlive() error = %v", err)
@@ -311,11 +386,46 @@ func TestSendKeepAliveWritesTransportSpecificPacket(t *testing.T) {
 				t.Fatalf("write count = %d, want 1", len(writes))
 			}
 			tt.assertData(t, writes[0])
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
 		})
 	}
 }
 
-func TestRunTransportReadLoopIgnoresKeepAlivePackets(t *testing.T) {
+func TestSessionSupportsKeepAlive(t *testing.T) {
+	tests := []struct {
+		name      string
+		transport Transport
+		want      bool
+	}{
+		{"ordinary transport", newStubTransport(5062, 5060), true},
+		{"transport disables SIP keepalive", &keepAliveDisabledTransport{newStubTransport(5062, 5060)}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess, err := Open(Config{}, tt.transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if got := sess.SupportsKeepAlive(); got != tt.want {
+				t.Fatalf("SupportsKeepAlive() = %t, want %t", got, tt.want)
+			}
+			if !tt.want {
+				if err := sess.SendKeepAlive(context.Background()); err == nil {
+					t.Fatal("SendKeepAlive() error = nil, want disabled transport error")
+				}
+				if transport := extractStubTransport(tt.transport); transport != nil && transport.writeCount() != 0 {
+					t.Fatal("SendKeepAlive() wrote to disabled transport")
+				}
+			}
+		})
+	}
+}
+
+func TestRunTransportReadLoopStagesKeepAlivePackets(t *testing.T) {
 	tests := []struct {
 		name    string
 		packets func(*testing.T) [][]byte
@@ -324,9 +434,9 @@ func TestRunTransportReadLoopIgnoresKeepAlivePackets(t *testing.T) {
 			name: "crlf and stun",
 			packets: func(t *testing.T) [][]byte {
 				t.Helper()
-				stunPacket, err := newSTUNBindingIndication()
+				stunPacket, _, err := newSTUNBindingRequest()
 				if err != nil {
-					t.Fatalf("newSTUNBindingIndication() error = %v", err)
+					t.Fatalf("newSTUNBindingRequest() error = %v", err)
 				}
 				return [][]byte{[]byte("\r\n\r\n"), stunPacket}
 			},
@@ -346,16 +456,15 @@ func TestRunTransportReadLoopIgnoresKeepAlivePackets(t *testing.T) {
 			}
 			transport.queueRead(newRequest("MESSAGE", "call-1", "1 MESSAGE"))
 
-			select {
-			case inbound := <-out:
-				if inbound.err != nil {
-					t.Fatalf("inbound error = %v, want SIP message", inbound.err)
+			for range len(tt.packets(t)) + 1 {
+				select {
+				case inbound := <-out:
+					if inbound.err != nil {
+						t.Fatalf("inbound error = %v", inbound.err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("waiting for staged packet")
 				}
-				if got := inbound.msg.Method(); got != "MESSAGE" {
-					t.Fatalf("inbound method = %q, want MESSAGE", got)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("waiting for SIP message after keepalives")
 			}
 		})
 	}
@@ -782,6 +891,92 @@ func TestRunRemovesFailedAuxTransportWithoutStoppingSession(t *testing.T) {
 	}
 }
 
+func TestRunRestartsReadLoopForUsableTransport(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "auxiliary TCP connection reset"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			aux := newReadErrorTransport(15062, 15060)
+			aux.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 15062}
+			aux.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 15060}
+
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if _, err := sess.AddTransport(aux); err != nil {
+				t.Fatalf("AddTransport(aux) error = %v", err)
+			}
+
+			handledCh := make(chan string, 1)
+			handler := &requestHandler{
+				handle: func(ctx context.Context, req Request) (bool, error) {
+					handledCh <- req.Transport.LocalAddr().String()
+					return true, nil
+				},
+			}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			req := newRequest("MESSAGE", "pending-on-reset", "1 MESSAGE")
+			exchangeErrCh := make(chan error, 1)
+			go func() {
+				_, err := sess.ExchangeWithTransport(context.Background(), aux, req, ExchangeOptions{})
+				exchangeErrCh <- err
+			}()
+			waitForWriteCount(t, aux.stubTransport, 1)
+
+			cause := errors.New("peer reset connection")
+			aux.fail(&usableReadError{err: cause})
+			if err := <-exchangeErrCh; !errors.Is(err, cause) {
+				t.Fatalf("ExchangeWithTransport() error = %v, want %v", err, cause)
+			}
+			if !sess.isTransportActive(aux) {
+				t.Fatal("aux transport is inactive after recoverable connection error")
+			}
+			aux.mu.Lock()
+			closeCount := aux.closeCount
+			aux.mu.Unlock()
+			if closeCount != 0 {
+				t.Fatalf("aux close count = %d, want 0", closeCount)
+			}
+
+			aux.queueRead(newInboundRequest("MESSAGE", "after-reset", "2 MESSAGE"))
+			select {
+			case got := <-handledCh:
+				if got != aux.LocalAddr().String() {
+					t.Fatalf("handled transport = %q, want %q", got, aux.LocalAddr())
+				}
+			case err := <-errCh:
+				t.Fatalf("Run() returned after recoverable connection error: %v", err)
+			case <-time.After(time.Second):
+				t.Fatal("waiting for request on recovered transport")
+			}
+
+			runCancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
 func TestRunReturnsPrimaryTransportReadError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1095,7 +1290,7 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 	}{
 		{name: "ack ignored", msg: newInboundRequest("ACK", "ack-1", "1 ACK"), wantWrites: 0},
 		{name: "unmatched bye gets 481", msg: newInboundRequest("BYE", "bye-1", "1 BYE"), wantWrites: 1, wantStatus: 481},
-		{name: "unhandled request gets 405", msg: newInboundRequest("OPTIONS", "options-1", "1 OPTIONS"), wantWrites: 1, wantStatus: 405, wantAllow: sip.DefaultClientAllow},
+		{name: "options gets capabilities", msg: newInboundRequest("OPTIONS", "options-1", "1 OPTIONS"), wantWrites: 1, wantStatus: 200, wantAllow: sip.DefaultClientAllow},
 	}
 
 	for _, tt := range tests {
@@ -1144,6 +1339,409 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 				if got := resp.Header("Allow"); got != tt.wantAllow {
 					t.Fatalf("Allow = %q, want %q", got, tt.wantAllow)
 				}
+			}
+		})
+	}
+}
+
+func TestHandleInboundRequestRejectsMalformedMessages(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		mutate     func(*sip.Message)
+		wantWrites int
+	}{
+		{
+			name:       "mismatched cseq gets 400",
+			method:     "MESSAGE",
+			mutate:     func(msg *sip.Message) { msg.Headers.Set("CSeq", "1 INVITE") },
+			wantWrites: 1,
+		},
+		{
+			name:       "invalid max forwards gets 400",
+			method:     "MESSAGE",
+			mutate:     func(msg *sip.Message) { msg.Headers.Set("Max-Forwards", "many") },
+			wantWrites: 1,
+		},
+		{
+			name:       "duplicate call id gets 400",
+			method:     "MESSAGE",
+			mutate:     func(msg *sip.Message) { msg.Headers.Add("Call-ID", "duplicate") },
+			wantWrites: 1,
+		},
+		{
+			name:   "malformed ack is silently discarded",
+			method: "ACK",
+			mutate: func(msg *sip.Message) { msg.Headers.Set("CSeq", "bad ACK") },
+		},
+		{
+			name:   "request without via cannot receive response",
+			method: "MESSAGE",
+			mutate: func(msg *sip.Message) { msg.Headers.Del("Via") },
+		},
+		{
+			name:   "request with malformed via cannot receive response",
+			method: "MESSAGE",
+			mutate: func(msg *sip.Message) { msg.Headers.Set("Via", "malformed") },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			handler := &requestHandler{}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			msg := newInboundRequest(tt.method, "malformed-call", "1 "+tt.method)
+			tt.mutate(&msg)
+			req := Request{Message: msg, Transport: transport, PeerAddr: transport.remote}
+			if err := sess.handleInboundRequest(context.Background(), req); err != nil {
+				t.Fatalf("handleInboundRequest() error = %v", err)
+			}
+			writes := transport.snapshotWrites()
+			if len(writes) != tt.wantWrites {
+				t.Fatalf("write count = %d, want %d", len(writes), tt.wantWrites)
+			}
+			if tt.wantWrites != 0 {
+				resp, err := sip.ParseMessage(writes[0])
+				if err != nil {
+					t.Fatalf("ParseMessage() error = %v", err)
+				}
+				if resp.StatusCode() != sipStatusBadRequest {
+					t.Fatalf("status = %d, want %d", resp.StatusCode(), sipStatusBadRequest)
+				}
+			}
+			handler.mu.Lock()
+			requestCount := len(handler.requests)
+			handler.mu.Unlock()
+			if requestCount != 0 {
+				t.Fatalf("handler request count = %d, want 0", requestCount)
+			}
+		})
+	}
+}
+
+func TestHandleInboundRequestDetectsMergedRequests(t *testing.T) {
+	tests := []struct {
+		name           string
+		toTag          string
+		withoutFromTag bool
+		wantWrites     int
+		wantRequests   int
+	}{
+		{name: "different branch outside dialog gets retained 482", wantWrites: 2, wantRequests: 1},
+		{name: "missing From tags are equal null tags", withoutFromTag: true, wantWrites: 2, wantRequests: 1},
+		{name: "in-dialog request is not merged", toTag: "remote", wantRequests: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			defer sess.clearServerTransactions()
+			handler := &requestHandler{handle: func(context.Context, Request) (bool, error) { return true, nil }}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			first := newInboundRequestWithBranch("MESSAGE", "merged-call", "1 MESSAGE", "z9hG4bK-first")
+			second := newInboundRequestWithBranch("MESSAGE", "merged-call", "1 MESSAGE", "z9hG4bK-second")
+			if tt.withoutFromTag {
+				first.Headers.Set("From", "<sip:alice@example.com>")
+				second.Headers.Set("From", "<sip:alice@example.com>")
+			}
+			if tt.toTag != "" {
+				second.Headers.Set("To", "<sip:bob@example.com>;tag="+tt.toTag)
+			}
+			messages := []sip.Message{first, second}
+			if tt.toTag == "" {
+				messages = append(messages, second)
+			}
+			for _, msg := range messages {
+				req := Request{Message: msg, Transport: transport, PeerAddr: transport.remote}
+				if err := sess.handleInboundRequest(context.Background(), req); err != nil {
+					t.Fatalf("handleInboundRequest() error = %v", err)
+				}
+			}
+
+			writes := transport.snapshotWrites()
+			if len(writes) != tt.wantWrites {
+				t.Fatalf("write count = %d, want %d", len(writes), tt.wantWrites)
+			}
+			if tt.wantWrites != 0 {
+				resp, err := sip.ParseMessage(writes[0])
+				if err != nil {
+					t.Fatalf("ParseMessage() error = %v", err)
+				}
+				if resp.StatusCode() != sipStatusLoopDetected {
+					t.Fatalf("status = %d, want %d", resp.StatusCode(), sipStatusLoopDetected)
+				}
+			}
+			handler.mu.Lock()
+			requestCount := len(handler.requests)
+			handler.mu.Unlock()
+			if requestCount != tt.wantRequests {
+				t.Fatalf("handler request count = %d, want %d", requestCount, tt.wantRequests)
+			}
+		})
+	}
+}
+
+func TestServerTransactionMatchesEquivalentSentBy(t *testing.T) {
+	tests := []struct {
+		name       string
+		original   string
+		retransmit string
+	}{
+		{name: "hostname case", original: "CLIENT.EXAMPLE.COM:5060", retransmit: "client.example.com:5060"},
+		{name: "IPv6 spelling", original: "[2001:0db8::1]:5060", retransmit: "[2001:db8:0:0::1]:5060"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := newInboundRequestWithBranch("MESSAGE", "sent-by-call", "1 MESSAGE", "z9hG4bK-sent-by")
+			original.Headers.Set("Via", "SIP/2.0/UDP "+tt.original+";branch=z9hG4bK-sent-by")
+			retransmit := cloneSIPMessage(original)
+			retransmit.Headers.Set("Via", "SIP/2.0/UDP "+tt.retransmit+";branch=z9hG4bK-sent-by")
+
+			transport := newStubTransport(5062, 5060)
+			tx := newServerTransaction(&Session{}, Request{Message: original, Transport: transport, PeerAddr: transport.remote})
+			if got, want := serverTransactionKey(retransmit), tx.key; got != want {
+				t.Fatalf("serverTransactionKey() = %q, want %q", got, want)
+			}
+			cancel := cloneSIPMessage(retransmit)
+			cancel.StartLine = "CANCEL " + sip.RequestURI(cancel) + " SIP/2.0"
+			if !cancelMatchesServerTransaction(cancel, tx) {
+				t.Fatal("cancelMatchesServerTransaction() = false, want true")
+			}
+			tx.method = "INVITE"
+			ack := cloneSIPMessage(retransmit)
+			ack.StartLine = "ACK " + sip.RequestURI(ack) + " SIP/2.0"
+			if !ackMatchesServerTransaction(ack, tx) {
+				t.Fatal("ackMatchesServerTransaction() = false, want true")
+			}
+		})
+	}
+}
+
+func TestLegacyServerTransactionMatching(t *testing.T) {
+	tests := []struct {
+		name            string
+		change          func(*sip.Message, *sip.Message)
+		wantKeyMatch    bool
+		wantCancelMatch bool
+	}{
+		{
+			name: "missing From tag is a null tag",
+			change: func(original, candidate *sip.Message) {
+				original.Headers.Set("From", "<sip:alice@example.com>")
+				candidate.Headers.Set("From", "<sip:alice@example.com>")
+			},
+			wantKeyMatch: true, wantCancelMatch: true,
+		},
+		{
+			name: "different To tag does not match CANCEL",
+			change: func(_ *sip.Message, candidate *sip.Message) {
+				candidate.Headers.Set("To", "<sip:bob@example.com>;tag=other")
+			},
+			wantKeyMatch: false, wantCancelMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := newInboundRequestWithBranch("MESSAGE", "legacy-call", "1 MESSAGE", "legacy-branch")
+			candidate := cloneSIPMessage(original)
+			tt.change(&original, &candidate)
+			transport := newStubTransport(5062, 5060)
+			tx := newServerTransaction(&Session{}, Request{Message: original, Transport: transport, PeerAddr: transport.remote})
+			if got := serverTransactionKey(candidate) == tx.key; got != tt.wantKeyMatch {
+				t.Fatalf("server transaction key match = %v, want %v", got, tt.wantKeyMatch)
+			}
+
+			cancel := cloneSIPMessage(candidate)
+			cancel.StartLine = "CANCEL " + sip.RequestURI(cancel) + " SIP/2.0"
+			if got := cancelMatchesServerTransaction(cancel, tx); got != tt.wantCancelMatch {
+				t.Fatalf("cancelMatchesServerTransaction() = %v, want %v", got, tt.wantCancelMatch)
+			}
+		})
+	}
+}
+
+func TestHandleInboundRequestRejectsUnsupportedRequire(t *testing.T) {
+	tests := []struct {
+		name         string
+		method       string
+		require      string
+		wantStatus   int
+		wantRequests int
+		wantHeader   string
+	}{
+		{"supported option reaches handler", "MESSAGE", "sec-agree", 0, 1, ""},
+		{"unknown option gets 420", "MESSAGE", "sec-agree,unknown-extension", sipStatusBadExtension, 0, "unknown-extension"},
+		{"duplicates are reported once", "MESSAGE", "unknown,UNKNOWN", sipStatusBadExtension, 0, "unknown"},
+		{"ACK ignores Require", "ACK", "unknown-extension", 0, 1, ""},
+		{"CANCEL ignores Require", "CANCEL", "unknown-extension", sipStatusCallTransactionDoesNotExist, 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			handler := &requestHandler{handle: func(context.Context, Request) (bool, error) { return true, nil }}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			msg := newInboundRequest(tt.method, "require-call", "1 "+tt.method)
+			msg.Headers.Add("Require", tt.require)
+			req := Request{Message: msg, Transport: transport, PeerAddr: transport.remote}
+			if err := sess.handleInboundRequest(context.Background(), req); err != nil {
+				t.Fatalf("handleInboundRequest() error = %v", err)
+			}
+			if got := handler.requestCount(); got != tt.wantRequests {
+				t.Fatalf("handler request count = %d, want %d", got, tt.wantRequests)
+			}
+			writes := transport.snapshotWrites()
+			if tt.wantStatus == 0 {
+				if len(writes) != 0 {
+					t.Fatalf("write count = %d, want 0", len(writes))
+				}
+				return
+			}
+			if len(writes) != 1 {
+				t.Fatalf("write count = %d, want 1", len(writes))
+			}
+			resp, err := sip.ParseMessage(writes[0])
+			if err != nil {
+				t.Fatalf("ParseMessage() error = %v", err)
+			}
+			if resp.StatusCode() != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode(), tt.wantStatus)
+			}
+			if tt.wantHeader != "" && resp.Header("Unsupported") != tt.wantHeader {
+				t.Fatalf("Unsupported = %q, want %q", resp.Header("Unsupported"), tt.wantHeader)
+			}
+		})
+	}
+}
+
+func TestRunDiscardsMalformedUDPDatagram(t *testing.T) {
+	tests := []struct {
+		name       string
+		malformed  func() []byte
+		wantWrites int
+	}{
+		{"invalid start line", func() []byte { return []byte("not a SIP message\r\n\r\n") }, 0},
+		{"truncated body gets 400", func() []byte {
+			msg := newInboundRequest("MESSAGE", "truncated", "1 MESSAGE")
+			msg.Body = []byte("hi")
+			packet := marshalSIPMessageForTest(msg)
+			return []byte(strings.Replace(string(packet), "Content-Length: 2", "Content-Length: 5", 1))
+		}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			handler := &requestHandler{handle: func(context.Context, Request) (bool, error) { return true, nil }}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			errCh := make(chan error, 1)
+			go func() { errCh <- sess.Run(ctx) }()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			transport.readCh <- tt.malformed()
+			transport.queueRead(newInboundRequest("MESSAGE", "after-malformed", "1 MESSAGE"))
+			deadline := time.Now().Add(time.Second)
+			for handler.requestCount() == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := handler.requestCount(); got != 1 {
+				t.Fatalf("handled request count = %d, want 1 after malformed datagram", got)
+			}
+			if got := transport.writeCount(); got != tt.wantWrites {
+				t.Fatalf("response write count = %d, want %d", got, tt.wantWrites)
+			}
+			cancel()
+			if err := <-errCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestValidateInboundResponse(t *testing.T) {
+	req := newInboundRequest("MESSAGE", "response-validation", "1 MESSAGE")
+	valid := newResponse(req, 200, "OK")
+	tests := []struct {
+		name   string
+		mutate func(*sip.Message)
+		wantOK bool
+	}{
+		{name: "valid", mutate: func(*sip.Message) {}, wantOK: true},
+		{name: "missing call id", mutate: func(msg *sip.Message) { msg.Headers.Del("Call-ID") }},
+		{name: "missing via", mutate: func(msg *sip.Message) { msg.Headers.Del("Via") }},
+		{name: "invalid cseq", mutate: func(msg *sip.Message) { msg.Headers.Set("CSeq", "bad MESSAGE") }},
+		{name: "duplicate from", mutate: func(msg *sip.Message) { msg.Headers.Add("From", "<sip:other@example.com>;tag=other") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := valid
+			msg.Headers = valid.Headers.Clone()
+			tt.mutate(&msg)
+			err := validateInboundResponse(msg)
+			if tt.wantOK && err != nil {
+				t.Fatalf("validateInboundResponse() error = %v", err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Fatal("validateInboundResponse() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestBuildInviteErrorACKPreservesSecurityVerify(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "without security agreement"},
+		{name: "with security agreement", want: "ipsec-3gpp;alg=hmac-sha-1-96"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := newInboundRequest("INVITE", "error-ack", "1 INVITE")
+			if tt.want != "" {
+				req.Headers.Add("Security-Verify", tt.want)
+			}
+			resp := newResponse(req, 486, "Busy Here")
+			ack := buildInviteErrorACK(req, resp)
+			if got := ack.Header("Security-Verify"); got != tt.want {
+				t.Fatalf("Security-Verify = %q, want %q", got, tt.want)
+			}
+			if ack.Headers.Has("Require") || ack.Headers.Has("Proxy-Require") {
+				t.Fatalf("ACK contains extension requirements: %#v", ack.Headers)
 			}
 		})
 	}
@@ -1550,6 +2148,17 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 			t.Fatalf("responses[%d] Server = %q, want test-agent", i+1, got)
 		}
 	}
+	cancelOK, err := sip.ParseMessage(writes[1])
+	if err != nil {
+		t.Fatalf("ParseMessage(CANCEL 200) error = %v", err)
+	}
+	inviteFinal, err := sip.ParseMessage(writes[2])
+	if err != nil {
+		t.Fatalf("ParseMessage(INVITE 487) error = %v", err)
+	}
+	if got, want := sip.HeaderTag(cancelOK.Header("To")), sip.HeaderTag(inviteFinal.Header("To")); got != want {
+		t.Fatalf("CANCEL To-tag = %q, want INVITE response To-tag %q", got, want)
+	}
 
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
@@ -1601,7 +2210,9 @@ func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
-			transport.queueRead(newInboundRequest("INVITE", "call-auto-trying", "1 INVITE"))
+			invite := newInboundRequest("INVITE", "call-auto-trying", "1 INVITE")
+			invite.Headers.Add("Timestamp", "54")
+			transport.queueRead(invite)
 			select {
 			case <-handled:
 			case <-time.After(time.Second):
@@ -1616,6 +2227,9 @@ func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
 			}
 			if trying.StatusCode() != 100 {
 				t.Fatalf("automatic response status = %d, want 100", trying.StatusCode())
+			}
+			if got := trying.Header("Timestamp"); got != "54" {
+				t.Fatalf("automatic response Timestamp = %q, want 54", got)
 			}
 			if got := trying.Header("Server"); got != "test-agent" {
 				t.Fatalf("automatic trying Server = %q, want test-agent", got)
@@ -2008,24 +2622,17 @@ func TestInviteServerTransactionMatchesLegacyACK(t *testing.T) {
 	}
 }
 
-func TestInviteServerTransactionTerminatesAfter2xxOverUDP(t *testing.T) {
+func TestInviteServerTransactionRetains2xxUntilTimerL(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "2xx is not retained by server transaction"},
+		{name: "duplicate INVITE reaches TU while accepted"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useTransactionTimers(t, TransactionTimers{
-				T1: 100 * time.Millisecond,
-				T2: 100 * time.Millisecond,
-				T4: 50 * time.Millisecond,
-				TJ: 200 * time.Millisecond,
-			})
-
 			transport := newStubTransport(5062, 5060)
-			sess, err := Open(Config{}, transport)
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{TL: 100 * time.Millisecond}}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
@@ -2060,21 +2667,78 @@ func TestInviteServerTransactionTerminatesAfter2xxOverUDP(t *testing.T) {
 			transport.queueRead(invite)
 			waitForWriteCount(t, transport, 2)
 
-			if got := collectHandledMethods(t, handled, "INVITE"); strings.Join(got, ",") != "INVITE" {
-				t.Fatalf("first handled requests = %q, want INVITE", strings.Join(got, ","))
-			}
-			select {
-			case got := <-handled:
-				if got != "INVITE" {
-					t.Fatalf("second handled request = %q, want INVITE", got)
+			for range 2 {
+				select {
+				case got := <-handled:
+					if got != "INVITE" {
+						t.Fatalf("handled request = %q, want INVITE", got)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("waiting for INVITE to reach TU")
 				}
-			case <-time.After(time.Second):
-				t.Fatal("waiting for retransmitted invite to reach TU")
+			}
+			if tx := sess.lookupServerTransaction(invite); tx == nil {
+				t.Fatal("server transaction was removed before Timer L")
+			}
+			deadline := time.Now().Add(time.Second)
+			for sess.lookupServerTransaction(invite) != nil {
+				if time.Now().After(deadline) {
+					t.Fatal("server transaction remains registered after Timer L")
+				}
+				time.Sleep(time.Millisecond)
 			}
 
 			runCancel()
 			if err := <-errCh; !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestInviteServerTransactionReportsTimerH(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "missing ACK notifies TU"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{TH: 10 * time.Millisecond}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			handler := &requestHandler{}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			req := Request{Message: newInboundRequest("INVITE", "call-timer-h", "1 INVITE"), Transport: transport, PeerAddr: transport.remote}
+			tx := newServerTransaction(sess, req)
+			sess.registerServerTransaction(tx)
+			resp := sip.NewResponse(486, "Busy Here")
+			resp.Headers = sip.ResponseHeaders(req.Message, 486)
+			tx.recordResponse(resp)
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				handler.mu.Lock()
+				errs := append([]error(nil), handler.errs...)
+				handler.mu.Unlock()
+				if len(errs) != 0 {
+					if !TransactionTimerExpired(errs[0], "H") {
+						t.Fatalf("HandleError() error = %v, want Timer H timeout", errs[0])
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("waiting for Timer H notification")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if tx := sess.lookupServerTransaction(req.Message); tx != nil {
+				t.Fatal("server transaction remains registered after Timer H")
 			}
 		})
 	}
@@ -2088,6 +2752,7 @@ func newRequest(method, callID, cseq string) sip.Message {
 		{Name: "To", Value: "<sip:bob@example.com>"},
 		{Name: "Call-ID", Value: callID},
 		{Name: "CSeq", Value: cseq},
+		{Name: "Max-Forwards", Value: "70"},
 		{Name: "Content-Length", Value: "0"},
 	}
 	return msg
@@ -2171,6 +2836,8 @@ func extractStubTransport(t Transport) *stubTransport {
 		return v
 	case *basicTransport:
 		return v.stub
+	case *keepAliveDisabledTransport:
+		return v.stubTransport
 	default:
 		return nil
 	}
@@ -2194,12 +2861,12 @@ func TestTransactionTimersNormalizeDefaults(t *testing.T) {
 		{
 			name:  "empty uses IMS defaults",
 			input: TransactionTimers{},
-			want:  TransactionTimers{T1: 500 * time.Millisecond, T2: 4 * time.Second, T4: 5 * time.Second, TB: 32 * time.Second, TD: 32 * time.Second, TF: 32 * time.Second, TH: 32 * time.Second, TJ: 32 * time.Second},
+			want:  TransactionTimers{T1: 500 * time.Millisecond, T2: 4 * time.Second, T4: 5 * time.Second, TB: 32 * time.Second, TD: 32 * time.Second, TF: 32 * time.Second, TH: 32 * time.Second, TJ: 32 * time.Second, TL: 32 * time.Second, TM: 32 * time.Second},
 		},
 		{
 			name:  "derived SIP timers scale from custom T1",
 			input: TransactionTimers{T1: 100 * time.Millisecond, T2: 800 * time.Millisecond, T4: 900 * time.Millisecond, TD: 32 * time.Second},
-			want:  TransactionTimers{T1: 100 * time.Millisecond, T2: 800 * time.Millisecond, T4: 900 * time.Millisecond, TB: 6400 * time.Millisecond, TD: 32 * time.Second, TF: 6400 * time.Millisecond, TH: 6400 * time.Millisecond, TJ: 6400 * time.Millisecond},
+			want:  TransactionTimers{T1: 100 * time.Millisecond, T2: 800 * time.Millisecond, T4: 900 * time.Millisecond, TB: 6400 * time.Millisecond, TD: 32 * time.Second, TF: 6400 * time.Millisecond, TH: 6400 * time.Millisecond, TJ: 6400 * time.Millisecond, TL: 6400 * time.Millisecond, TM: 6400 * time.Millisecond},
 		},
 	}
 
@@ -2308,7 +2975,7 @@ func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
 	}
 }
 
-func TestExchangeMapsReliableTransportSendErrorToServiceUnavailable(t *testing.T) {
+func TestExchangeReturnsReliableTransportSendError(t *testing.T) {
 	cause := errors.New("writing tcp packet: waiting for ack 42")
 	transport := newWriteErrorTransport(cause)
 	sess, err := Open(Config{}, transport)
@@ -2317,15 +2984,14 @@ func TestExchangeMapsReliableTransportSendErrorToServiceUnavailable(t *testing.T
 	}
 
 	resp, err := sess.Exchange(context.Background(), newRequest("INVITE", "call-transport-failure", "1 INVITE"))
-	if err != nil {
-		t.Fatalf("Exchange() error = %v", err)
+	if !errors.Is(err, cause) {
+		t.Fatalf("Exchange() error = %v, want %v", err, cause)
 	}
-	if resp.StatusCode() != sipStatusServiceUnavailable {
-		t.Fatalf("StatusCode() = %d, want %d", resp.StatusCode(), sipStatusServiceUnavailable)
+	if !TransactionTransportFailed(err) {
+		t.Fatalf("TransactionTransportFailed() = false for %v", err)
 	}
-	responseErr := sip.NewResponseError(resp)
-	if !strings.Contains(responseErr.Error(), cause.Error()) {
-		t.Fatalf("ResponseError = %q, want warning %q", responseErr.Error(), cause.Error())
+	if resp.StartLine != "" {
+		t.Fatalf("Exchange() response = %v, want zero response", resp)
 	}
 }
 
@@ -2340,6 +3006,9 @@ func TestExchangeReturnsUnreliableTransportSendError(t *testing.T) {
 	resp, err := sess.Exchange(context.Background(), newRequest("INVITE", "udp-transport-failure", "1 INVITE"))
 	if !errors.Is(err, cause) {
 		t.Fatalf("Exchange() error = %v, want %v", err, cause)
+	}
+	if !TransactionTransportFailed(err) {
+		t.Fatalf("TransactionTransportFailed() = false for %v", err)
 	}
 	if resp.StartLine != "" {
 		t.Fatalf("Exchange() response = %v, want zero response", resp)
@@ -2412,6 +3081,64 @@ func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
 	}
 }
 
+func TestInviteTransactionReportsACKTransportFailure(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "non-2xx ACK write failure terminates transaction"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cause := errors.New("ACK transport lost")
+			transport := &failAfterWritesTransport{stubTransport: newStubTransport(5062, 5060), failAfter: 1, err: cause}
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{T1: 10 * time.Millisecond, TD: time.Second}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			handler := &requestHandler{}
+			if _, err := sess.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			req := newRequest("INVITE", "ack-write-failure", "1 INVITE")
+			tx := newClientTransaction(sess, transport, req, ExchangeOptions{})
+			if err := tx.start(context.Background()); err != nil {
+				t.Fatalf("start() error = %v", err)
+			}
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 486, "Busy Here"), transport: transport})
+			resp, err := tx.await(context.Background())
+			if err != nil {
+				t.Fatalf("await() error = %v", err)
+			}
+			if resp.StatusCode() != 486 {
+				t.Fatalf("response status = %d, want 486", resp.StatusCode())
+			}
+			deadline := time.Now().Add(time.Second)
+			for {
+				handler.mu.Lock()
+				errs := append([]error(nil), handler.errs...)
+				handler.mu.Unlock()
+				if len(errs) != 0 {
+					if !errors.Is(errs[0], cause) {
+						t.Fatalf("HandleError() error = %v, want %v", errs[0], cause)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("waiting for ACK transport failure notification")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			sess.mu.Lock()
+			current := sess.transactions[tx.key]
+			sess.mu.Unlock()
+			if current != nil {
+				t.Fatal("transaction remains registered after ACK transport failure")
+			}
+		})
+	}
+}
+
 func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 	useTransactionTimers(t, TransactionTimers{
 		T1: 10 * time.Millisecond,
@@ -2481,6 +3208,200 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 	runCancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInviteTransactionPassesLate2xxToCore(t *testing.T) {
+	tests := []struct {
+		name               string
+		firstLateTransport bool
+		wantBeforeAccepted bool
+	}{
+		{name: "late 2xx during Timer D reaches core", firstLateTransport: true, wantBeforeAccepted: true},
+		{name: "disallowed response transport is ignored", firstLateTransport: false, wantBeforeAccepted: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			other := newStubTransport(5064, 5060)
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{T1: 10 * time.Millisecond, TD: time.Second}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			capture := &responseCaptureHandler{responses: make(chan sip.Message, 1)}
+			if _, err := sess.Attach(capture); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			req := newRequest("INVITE", "late-success", "1 INVITE")
+			tx := newClientTransaction(sess, transport, req, ExchangeOptions{
+				AcceptResponseTransport: func(got Transport) bool { return got == transport },
+			})
+			if err := tx.start(context.Background()); err != nil {
+				t.Fatalf("start() error = %v", err)
+			}
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 486, "Busy Here"), transport: transport})
+			resp, err := tx.await(context.Background())
+			if err != nil {
+				t.Fatalf("await() error = %v", err)
+			}
+			if resp.StatusCode() != 486 {
+				t.Fatalf("first response status = %d, want 486", resp.StatusCode())
+			}
+
+			lateTransport := Transport(other)
+			if tt.firstLateTransport {
+				lateTransport = transport
+			}
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: lateTransport})
+			select {
+			case got := <-capture.responses:
+				if !tt.wantBeforeAccepted || got.StatusCode() != 200 {
+					t.Fatalf("unexpected core response status %d", got.StatusCode())
+				}
+			case <-time.After(20 * time.Millisecond):
+				if tt.wantBeforeAccepted {
+					t.Fatal("late 2xx was not passed to core")
+				}
+			}
+			if !tt.firstLateTransport {
+				tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: transport})
+				select {
+				case got := <-capture.responses:
+					if got.StatusCode() != 200 {
+						t.Fatalf("core response status = %d, want 200", got.StatusCode())
+					}
+				case <-time.After(time.Second):
+					t.Fatal("accepted late 2xx was not passed to core")
+				}
+			}
+			sess.mu.Lock()
+			current := sess.transactions[tx.key]
+			sess.mu.Unlock()
+			if current != nil {
+				t.Fatal("INVITE transaction remains registered after late 2xx")
+			}
+		})
+	}
+}
+
+func TestInviteTransactionRetainsAcceptedResponsesUntilTimerM(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "additional 2xx reaches core before Timer M"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			other := newStubTransport(5064, 5060)
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{TM: 100 * time.Millisecond}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			capture := &responseCaptureHandler{responses: make(chan sip.Message, 1)}
+			if _, err := sess.Attach(capture); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			req := newRequest("INVITE", "accepted-timer-m", "1 INVITE")
+			tx := newClientTransaction(sess, transport, req, ExchangeOptions{
+				AcceptResponseTransport: func(got Transport) bool { return got == transport },
+			})
+			if err := tx.start(context.Background()); err != nil {
+				t.Fatalf("start() error = %v", err)
+			}
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: transport})
+			resp, err := tx.await(context.Background())
+			if err != nil {
+				t.Fatalf("await() error = %v", err)
+			}
+			if resp.StatusCode() != 200 {
+				t.Fatalf("first response status = %d, want 200", resp.StatusCode())
+			}
+			sess.mu.Lock()
+			current := sess.transactions[tx.key]
+			sess.mu.Unlock()
+			if current != tx {
+				t.Fatal("client transaction was removed before Timer M")
+			}
+
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: other})
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: transport})
+			select {
+			case got := <-capture.responses:
+				if got.StatusCode() != 200 {
+					t.Fatalf("additional response status = %d, want 200", got.StatusCode())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("additional 2xx did not reach core")
+			}
+			select {
+			case <-capture.responses:
+				t.Fatal("response from disallowed transport reached core")
+			case <-time.After(20 * time.Millisecond):
+			}
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				sess.mu.Lock()
+				current := sess.transactions[tx.key]
+				sess.mu.Unlock()
+				if current == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("client transaction remains registered after Timer M")
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestInviteTransactionDoesNotDropForked2xxBurst(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+	}{
+		{name: "burst exceeds former response buffer", count: 12},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{TM: time.Second}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			capture := &responseCaptureHandler{responses: make(chan sip.Message, tt.count)}
+			if _, err := sess.Attach(capture); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+			req := newRequest("INVITE", "forked-2xx-burst", "1 INVITE")
+			tx := newClientTransaction(sess, transport, req, ExchangeOptions{})
+			if err := tx.start(context.Background()); err != nil {
+				t.Fatalf("start() error = %v", err)
+			}
+			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: transport})
+			if _, err := tx.await(context.Background()); err != nil {
+				t.Fatalf("await() error = %v", err)
+			}
+
+			for i := range tt.count {
+				resp := newResponse(req, 200, "OK")
+				resp.Headers.Set("To", fmt.Sprintf("<sip:bob@example.com>;tag=fork-%d", i))
+				tx.handleResponse(inboundMessage{msg: resp, transport: transport})
+			}
+			for i := range tt.count {
+				select {
+				case <-capture.responses:
+				case <-time.After(time.Second):
+					t.Fatalf("received %d additional 2xx responses, want %d", i, tt.count)
+				}
+			}
+			tx.terminate()
+		})
 	}
 }
 

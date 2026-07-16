@@ -32,8 +32,10 @@ const (
 	akaAUTNLength            = 16
 	akaNonceMinLength        = akaRANDLength + akaAUTNLength
 	maxIPPort                = 65535
+	standardSIPPort          = 5060
+	standardSIPSPort         = 5061
 	minUnreservedESPSPI      = 256
-	// TS 33.203 Annex H defines spvalue as exactly 10DIGIT.
+	// Keep locally generated SPI values in the TS 33.203 10DIGIT wire form.
 	ipsecSPIDecimalWidth = 10
 )
 
@@ -57,6 +59,7 @@ type Challenge struct {
 	Nonce     string
 	Algorithm string
 	QOP       string
+	Opaque    string
 }
 
 type Info struct {
@@ -79,6 +82,7 @@ type Authorization struct {
 	NonceCount         string
 	CNonce             string
 	AUTS               string
+	Opaque             string
 }
 
 var (
@@ -154,7 +158,7 @@ func NormalizeParam(p Param) (Param, bool) {
 		return Param{}, false
 	}
 	alg, ok := normalizeIntegrityAlg(p.Alg)
-	if !ok || !validIPPort(p.PortC) || !validIPPort(p.PortS) || !validIPSecSPIs(p.SPIC, p.SPIS) {
+	if !ok || !validIPSecPorts(p.PortC, p.PortS) || !validIPSecSPIs(p.SPIC, p.SPIS) {
 		return Param{}, false
 	}
 	if !compatibleIPSecAlgorithms(alg, ealg) {
@@ -176,6 +180,14 @@ func validIPSecSPIs(client, server uint32) bool {
 
 func validIPPort(port int) bool {
 	return port > 0 && port <= maxIPPort
+}
+
+func validIPSecPorts(client, server int) bool {
+	return validProtectedIPPort(client) && validProtectedIPPort(server) && client != server
+}
+
+func validProtectedIPPort(port int) bool {
+	return validIPPort(port) && port != standardSIPPort && port != standardSIPSPort
 }
 
 func (c Challenge) SelectedQOP() (string, error) {
@@ -228,12 +240,17 @@ func BuildDigestAuthorization(id Identity, challenge Challenge, nonceCount uint3
 	if password == "" {
 		return Authorization{}, errors.New("building AKA authorization: digest password is empty")
 	}
+	realm := challenge.Realm
+	if strings.TrimSpace(realm) == "" {
+		realm = id.Realm
+	}
 	auth := Authorization{
 		Nonce:     challenge.Nonce,
 		URI:       id.RegisterURI,
 		Username:  id.PrivateIdentity,
-		Realm:     id.Realm,
+		Realm:     realm,
 		Algorithm: algorithm.name,
+		Opaque:    challenge.Opaque,
 	}
 	if strings.TrimSpace(auth.Realm) == "" {
 		auth.Realm = strings.TrimPrefix(id.RegisterURI, "sip:")
@@ -256,7 +273,23 @@ func BuildDigestAuthorization(id Identity, challenge Challenge, nonceCount uint3
 }
 
 func VerifyAuthenticationInfo(auth Authorization, info Info, password string) error {
-	if strings.TrimSpace(info.RSPAuth) == "" {
+	if auth.QOP != "" {
+		if info.RSPAuth == "" {
+			return errors.New("verifying authentication-info: qop requires rspauth")
+		}
+		if info.QOP == "" {
+			return errors.New("verifying authentication-info: qop is missing")
+		}
+		if info.CNonce == "" {
+			return errors.New("verifying authentication-info: qop requires cnonce")
+		}
+		if info.NonceCount == "" {
+			return errors.New("verifying authentication-info: qop requires nonce count")
+		}
+	} else if info.QOP != "" || info.CNonce != "" || info.NonceCount != "" {
+		return errors.New("verifying authentication-info: unexpected qop parameters")
+	}
+	if info.RSPAuth == "" {
 		return nil
 	}
 	algorithm, ok := normalizeAKAAlgorithm(auth.Algorithm)
@@ -266,28 +299,22 @@ func VerifyAuthenticationInfo(auth Authorization, info Info, password string) er
 	if password == "" {
 		return errors.New("verifying authentication-info: digest password is empty")
 	}
-	qop := auth.QOP
 	if info.QOP != "" {
-		if qop != "" && !strings.EqualFold(info.QOP, qop) {
-			return fmt.Errorf("verifying authentication-info: qop %q does not match authorization qop %q", info.QOP, qop)
+		if !strings.EqualFold(info.QOP, auth.QOP) {
+			return fmt.Errorf("verifying authentication-info: qop %q does not match authorization qop %q", info.QOP, auth.QOP)
 		}
-		qop = info.QOP
 	}
-	cnonce := auth.CNonce
 	if info.CNonce != "" {
-		if cnonce != "" && info.CNonce != cnonce {
+		if info.CNonce != auth.CNonce {
 			return errors.New("verifying authentication-info: cnonce does not match authorization")
 		}
-		cnonce = info.CNonce
 	}
-	nonceCount := auth.NonceCount
 	if info.NonceCount != "" {
-		if nonceCount != "" && !strings.EqualFold(info.NonceCount, nonceCount) {
+		if info.NonceCount != auth.NonceCount {
 			return errors.New("verifying authentication-info: nonce count does not match authorization")
 		}
-		nonceCount = info.NonceCount
 	}
-	expected, err := computeAKAResponse(algorithm.hash, "", auth.Username, auth.Realm, auth.URI, auth.Nonce, password, qop, cnonce, nonceCount)
+	expected, err := computeAKAResponse(algorithm.hash, "", auth.Username, auth.Realm, auth.URI, auth.Nonce, password, auth.QOP, auth.CNonce, auth.NonceCount)
 	if err != nil {
 		return fmt.Errorf("verifying authentication-info: %w", err)
 	}
@@ -299,26 +326,16 @@ func VerifyAuthenticationInfo(auth Authorization, info Info, password string) er
 
 func authenticateDigestAKA(ctx context.Context, card AKAProvider, nonce []byte) (usim.AKAResult, error) {
 	aka, err := card.AKA(ctx, nonce[:akaRANDLength], nonce[akaRANDLength:akaNonceMinLength])
-	if err == nil {
-		if digestAKAUsable(aka) {
-			return aka, nil
-		}
-		if failure := akaChallengeFailure(aka); failure != nil {
-			return usim.AKAResult{}, failure
-		}
-		err = errors.New("standard nonce order response missing RES, CK, or IK")
+	if err != nil {
+		return usim.AKAResult{}, err
 	}
-	reversed, reverseErr := card.AKA(ctx, nonce[akaRANDLength:akaNonceMinLength], nonce[:akaRANDLength])
-	if reverseErr == nil {
-		if digestAKAUsable(reversed) {
-			return reversed, nil
-		}
-		if failure := akaChallengeFailure(reversed); failure != nil {
-			return usim.AKAResult{}, failure
-		}
-		reverseErr = errors.New("reversed nonce order response missing RES, CK, or IK")
+	if digestAKAUsable(aka) {
+		return aka, nil
 	}
-	return usim.AKAResult{}, errors.Join(err, reverseErr)
+	if failure := akaChallengeFailure(aka); failure != nil {
+		return usim.AKAResult{}, failure
+	}
+	return usim.AKAResult{}, errors.New("AKA response missing RES, CK, or IK")
 }
 
 func digestAKAUsable(aka usim.AKAResult) bool {
@@ -385,13 +402,25 @@ func (c *Challenge) UnmarshalText(text []byte) error {
 		return errors.New("parsing auth challenge: unsupported scheme")
 	}
 	challenge := Challenge{}
+	seen := make(map[string]struct{})
 	for _, field := range splitHeaderFields(value[len("Digest "):]) {
 		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !ok {
-			continue
+			return errors.New("parsing auth challenge: directive is missing value")
 		}
-		value := strings.Trim(strings.TrimSpace(rawValue), "\"")
-		switch strings.ToLower(name) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return errors.New("parsing auth challenge: directive name is empty")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("parsing auth challenge: duplicate %s directive", name)
+		}
+		seen[name] = struct{}{}
+		value, err := parseHeaderValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("parsing auth challenge %s: %w", name, err)
+		}
+		switch name {
 		case "realm":
 			challenge.Realm = value
 		case "nonce":
@@ -400,7 +429,12 @@ func (c *Challenge) UnmarshalText(text []byte) error {
 			challenge.Algorithm = value
 		case "qop":
 			challenge.QOP = value
+		case "opaque":
+			challenge.Opaque = value
 		}
+	}
+	if challenge.Realm == "" {
+		return errors.New("parsing auth challenge: realm is empty")
 	}
 	if challenge.Nonce == "" {
 		return errors.New("parsing auth challenge: nonce is empty")
@@ -416,22 +450,47 @@ func (c *Challenge) UnmarshalText(text []byte) error {
 
 func (i *Info) UnmarshalText(text []byte) error {
 	info := Info{}
+	if strings.TrimSpace(string(text)) == "" {
+		*i = info
+		return nil
+	}
+	seen := make(map[string]struct{})
 	for _, field := range splitHeaderFields(string(text)) {
+		if strings.TrimSpace(field) == "" {
+			return errors.New("parsing authentication-info: directive is empty")
+		}
 		name, rawValue, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !ok {
-			continue
+			return errors.New("parsing authentication-info: directive is missing value")
 		}
-		value := strings.Trim(strings.TrimSpace(rawValue), "\"")
-		switch strings.ToLower(strings.TrimSpace(name)) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return errors.New("parsing authentication-info: directive name is empty")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("parsing authentication-info: duplicate %s directive", name)
+		}
+		seen[name] = struct{}{}
+		value, err := parseHeaderValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("parsing authentication-info %s: %w", name, err)
+		}
+		switch name {
 		case "nextnonce":
 			info.NextNonce = value
 		case "qop":
 			info.QOP = value
 		case "rspauth":
+			if !lowerHexDigits(value, 0) {
+				return fmt.Errorf("parsing authentication-info rspauth %q: expected lowercase hexadecimal digits", value)
+			}
 			info.RSPAuth = value
 		case "cnonce":
 			info.CNonce = value
 		case "nc":
+			if !lowerHexDigits(value, digestNonceCountWidth) {
+				return fmt.Errorf("parsing authentication-info nc %q: expected %d lowercase hexadecimal digits", value, digestNonceCountWidth)
+			}
 			info.NonceCount = value
 		}
 	}
@@ -442,16 +501,16 @@ func (i *Info) UnmarshalText(text []byte) error {
 func (i Info) MarshalText() ([]byte, error) {
 	fields := make([]string, 0, 5)
 	if i.NextNonce != "" {
-		fields = append(fields, fmt.Sprintf(`nextnonce="%s"`, i.NextNonce))
+		fields = append(fields, "nextnonce="+quoteHeaderValue(i.NextNonce))
 	}
 	if i.QOP != "" {
 		fields = append(fields, "qop="+i.QOP)
 	}
 	if i.RSPAuth != "" {
-		fields = append(fields, fmt.Sprintf(`rspauth="%s"`, i.RSPAuth))
+		fields = append(fields, "rspauth="+quoteHeaderValue(i.RSPAuth))
 	}
 	if i.CNonce != "" {
-		fields = append(fields, fmt.Sprintf(`cnonce="%s"`, i.CNonce))
+		fields = append(fields, "cnonce="+quoteHeaderValue(i.CNonce))
 	}
 	if i.NonceCount != "" {
 		fields = append(fields, "nc="+i.NonceCount)
@@ -468,15 +527,18 @@ func authorizationString(a Authorization) string {
 	if algorithm == "" {
 		algorithm = AlgorithmAKAv1MD5
 	}
-	value := fmt.Sprintf(`Digest nonce="%s",uri="%s",realm="%s",username="%s",response="%s",algorithm=%s`, a.Nonce, a.URI, a.Realm, a.Username, a.Response, algorithm)
+	value := fmt.Sprintf("Digest nonce=%s,uri=%s,realm=%s,username=%s,response=%s,algorithm=%s", quoteHeaderValue(a.Nonce), quoteHeaderValue(a.URI), quoteHeaderValue(a.Realm), quoteHeaderValue(a.Username), quoteHeaderValue(a.Response), algorithm)
 	if a.IntegrityProtected != "" {
 		value += fmt.Sprintf(`,integrity-protected=%s`, a.IntegrityProtected)
 	}
 	if a.QOP != "" {
-		value += fmt.Sprintf(`,qop=%s,nc=%s,cnonce="%s"`, a.QOP, a.NonceCount, a.CNonce)
+		value += fmt.Sprintf(",qop=%s,nc=%s,cnonce=%s", a.QOP, a.NonceCount, quoteHeaderValue(a.CNonce))
 	}
 	if a.AUTS != "" {
-		value += fmt.Sprintf(`,auts="%s"`, a.AUTS)
+		value += ",auts=" + quoteHeaderValue(a.AUTS)
+	}
+	if a.Opaque != "" {
+		value += ",opaque=" + quoteHeaderValue(a.Opaque)
 	}
 	return value
 }
@@ -517,24 +579,36 @@ func (p *Param) unmarshalText(text string) error {
 		case "prot":
 			param.Prot = value
 		case "port-c":
+			if !decimalDigits(value, 0) {
+				return fmt.Errorf("parsing security header port-c %q: expected decimal digits", value)
+			}
 			port, err := strconv.Atoi(value)
 			if err != nil {
 				return fmt.Errorf("parsing security header port-c %q: %w", value, err)
 			}
 			param.PortC = port
 		case "port-s":
+			if !decimalDigits(value, 0) {
+				return fmt.Errorf("parsing security header port-s %q: expected decimal digits", value)
+			}
 			port, err := strconv.Atoi(value)
 			if err != nil {
 				return fmt.Errorf("parsing security header port-s %q: %w", value, err)
 			}
 			param.PortS = port
 		case "spi-c":
+			if !decimalDigits(value, 0) || len(value) > ipsecSPIDecimalWidth {
+				return fmt.Errorf("parsing security header spi-c %q: expected 1 to %d decimal digits", value, ipsecSPIDecimalWidth)
+			}
 			value64, err := strconv.ParseUint(value, 10, 32)
 			if err != nil {
 				return fmt.Errorf("parsing security header spi-c %q: %w", value, err)
 			}
 			param.SPIC = uint32(value64)
 		case "spi-s":
+			if !decimalDigits(value, 0) || len(value) > ipsecSPIDecimalWidth {
+				return fmt.Errorf("parsing security header spi-s %q: expected 1 to %d decimal digits", value, ipsecSPIDecimalWidth)
+			}
 			value64, err := strconv.ParseUint(value, 10, 32)
 			if err != nil {
 				return fmt.Errorf("parsing security header spi-s %q: %w", value, err)
@@ -546,6 +620,32 @@ func (p *Param) unmarshalText(text string) error {
 	}
 	*p = param
 	return nil
+}
+
+func decimalDigits(value string, width int) bool {
+	if value == "" || width > 0 && len(value) != width {
+		return false
+	}
+	for i := range len(value) {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerHexDigits(value string, width int) bool {
+	if value == "" || width > 0 && len(value) != width {
+		return false
+	}
+	for i := range len(value) {
+		if value[i] < '0' || value[i] > '9' {
+			if value[i] < 'a' || value[i] > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func normalizeIntegrityAlg(alg string) (string, bool) {
@@ -602,8 +702,17 @@ func splitHeaderFields(value string) []string {
 	fields := make([]string, 0, strings.Count(value, ",")+1)
 	start := 0
 	inQuotes := false
+	escaped := false
 	for i := range len(value) {
+		if escaped {
+			escaped = false
+			continue
+		}
 		switch value[i] {
+		case '\\':
+			if inQuotes {
+				escaped = true
+			}
 		case '"':
 			inQuotes = !inQuotes
 		case ',':
@@ -616,6 +725,67 @@ func splitHeaderFields(value string) []string {
 	}
 	fields = append(fields, value[start:])
 	return fields
+}
+
+func parseHeaderValue(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if value[0] != '"' {
+		if strings.ContainsAny(value, "\"\r\n") {
+			return "", errors.New("invalid token")
+		}
+		return value, nil
+	}
+	if len(value) < 2 || value[len(value)-1] != '"' {
+		return "", errors.New("unterminated quoted string")
+	}
+
+	payload := value[1 : len(value)-1]
+	var parsed strings.Builder
+	parsed.Grow(len(payload))
+	for i := 0; i < len(payload); i++ {
+		switch payload[i] {
+		case '\\':
+			if i+1 == len(payload) {
+				return "", errors.New("unterminated quoted pair")
+			}
+			i++
+			if payload[i] == '\r' || payload[i] == '\n' {
+				return "", errors.New("quoted pair contains CR or LF")
+			}
+			parsed.WriteByte(payload[i])
+		case '"':
+			return "", errors.New("unescaped quote in quoted string")
+		case '\r', '\n':
+			return "", errors.New("quoted string contains CR or LF")
+		default:
+			parsed.WriteByte(payload[i])
+		}
+	}
+	return parsed.String(), nil
+}
+
+func quoteHeaderValue(value string) string {
+	var quoted strings.Builder
+	quoted.Grow(len(value) + 2)
+	quoted.WriteByte('"')
+	for i := range len(value) {
+		switch value[i] {
+		case '\\', '"':
+			quoted.WriteByte('\\')
+			quoted.WriteByte(value[i])
+		case '\r':
+			quoted.WriteString(`\r`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		default:
+			quoted.WriteByte(value[i])
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 type akaAlgorithm struct {
@@ -709,9 +879,8 @@ func randomHex(length int) string {
 func randomString(length int, alphabet string) string {
 	buf := make([]byte, length)
 	rnd := make([]byte, length)
-	if _, err := rand.Read(rnd); err != nil {
-		panic(err)
-	}
+	// crypto/rand.Read always fills the buffer and never returns an error in Go 1.26.
+	_, _ = rand.Read(rnd)
 	for i, b := range rnd {
 		buf[i] = alphabet[int(b)%len(alphabet)]
 	}

@@ -167,6 +167,18 @@ func (s *Session) isClosed() bool {
 	return s.state == sessionStateClosed
 }
 
+func (s *Session) markInviteFinalResponseSent() {
+	s.mu.Lock()
+	s.inviteFinalSent = true
+	s.mu.Unlock()
+}
+
+func (s *Session) inviteHasFinalResponse() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inviteFinalSent
+}
+
 func (s *Session) waitForACK(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.networkInitiated || s.acked || s.ackCh == nil {
@@ -199,6 +211,11 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action sessionA
 	if err := s.waitForACK(ctx); err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
+	// RFC 3261 section 15.1.1 terminates the session when BYE is handed
+	// to the client transaction, independently of the eventual response.
+	if strings.EqualFold(msg.Method(), "BYE") {
+		s.finish(false)
+	}
 	resp, err := s.endpoint.sess.Exchange(ctx, msg)
 	if err != nil {
 		if imssession.TransactionTimerExpired(err, "B") || imssession.TransactionTimerExpired(err, "F") {
@@ -206,7 +223,7 @@ func (s *Session) exchange(ctx context.Context, msg sip.Message, action sessionA
 		}
 		return fmt.Errorf("%s: %w", action, err)
 	}
-	if resp.StatusCode() != sipStatusOK {
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
 		if ussdDialogTerminatedByResponse(resp.StatusCode()) {
 			s.finish(false)
 		}
@@ -258,6 +275,8 @@ func (s *Session) buildACK() sip.Message {
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d ACK", s.inviteSeq))
 	s.endpoint.reg.DialogRequestPolicy(s.routeSet).Apply(&msg)
+	msg.Headers.Del("Require")
+	msg.Headers.Del("Proxy-Require")
 	return msg
 }
 
@@ -459,7 +478,7 @@ func incomingInviteKey(msg sip.Message) string {
 
 func looksLikeDialogMessage(msg sip.Message) bool {
 	if strings.EqualFold(msg.Method(), "INFO") {
-		return sip.TokenListContains(msg.Header("Info-Package"), infoPackage) || strings.Contains(strings.ToLower(msg.Header("Content-Type")), xmlContentType)
+		return msg.HeaderHasToken("Info-Package", infoPackage) || strings.Contains(strings.ToLower(msg.Header("Content-Type")), xmlContentType)
 	}
 	if strings.EqualFold(msg.Method(), "BYE") {
 		return strings.Contains(strings.ToLower(msg.Header("Content-Type")), xmlContentType)
@@ -572,15 +591,23 @@ func (s *Session) handleInfo(ctx context.Context, req imssession.Request) error 
 }
 
 func (s *Session) handleBye(ctx context.Context, req imssession.Request) error {
+	defer s.finish(true)
 	s.releaseInfoExchange()
 	var payload Message
 	hasPayload := len(req.Message.Body) > 0 || strings.TrimSpace(req.Message.Header("Content-Type")) != ""
 	if hasPayload {
-		decoded, err := decodeSinglePayload(payloadContextUSSDBye, req.Message)
+		decoded, presence, err := decodeSinglePayloadWithPresence(payloadContextUSSDBye, req.Message)
 		if err != nil {
-			return s.endpoint.writeUnsupportedMediaType(ctx, req)
+			// A malformed optional body cannot reject an in-dialog BYE. RFC 3261
+			// section 15.1.2 requires a 2xx response and session termination.
+			s.endpoint.logger.Warn("ignoring invalid USSD BYE payload", "call_id", s.callID, "err", err)
+			hasPayload = false
+		} else if !presence.error && (!presence.text || !presence.language) {
+			s.endpoint.logger.Warn("ignoring incomplete USSD BYE payload", "call_id", s.callID)
+			hasPayload = false
+		} else {
+			payload = decoded
 		}
-		payload = decoded
 	}
 	if err := s.endpoint.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return err
@@ -591,6 +618,5 @@ func (s *Session) handleBye(ctx context.Context, req imssession.Request) error {
 	if hasPayload {
 		s.emit(payload)
 	}
-	s.finish(true)
 	return nil
 }

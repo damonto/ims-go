@@ -78,37 +78,65 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 	return nil, nil, fmt.Errorf("waiting message %d: timeout", messageID)
 }
 
-func (s *Session) exchangeProtectedIKE(ctx context.Context, addr *net.UDPAddr, requests [][]byte, nat bool, messageID uint32, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
-	if len(requests) == 0 {
-		return nil, nil, fmt.Errorf("%s: request is empty", action)
+type protectedIKEExchange struct {
+	peer                   *net.UDPAddr
+	requests               [][]byte
+	useNATT                bool
+	messageID              uint32
+	crypto                 *ikeCrypto
+	senderInitiator        bool
+	fragmentationSupported bool
+	action                 ikeAction
+}
+
+type protectedIKERead struct {
+	expected               ikeResponseMatch
+	useNATT                bool
+	crypto                 *ikeCrypto
+	senderInitiator        bool
+	fragmentationSupported bool
+	action                 ikeAction
+}
+
+func (s *Session) exchangeProtectedIKE(ctx context.Context, exchange protectedIKEExchange) ([]ike.Payload, *net.UDPAddr, error) {
+	if len(exchange.requests) == 0 {
+		return nil, nil, fmt.Errorf("%s: request is empty", exchange.action)
 	}
-	s.logger.Debug("sending protected IKE message", "message_id", messageID, "use_natt", nat, "remote_addr", addr, "fragment_count", len(requests))
-	expected, err := newIKEResponseMatch(requests[0], addr)
+	s.logger.Debug("sending protected IKE message", "message_id", exchange.messageID, "use_natt", exchange.useNATT, "remote_addr", exchange.peer, "fragment_count", len(exchange.requests))
+	expected, err := newIKEResponseMatch(exchange.requests[0], exchange.peer)
 	if err != nil {
 		return nil, nil, err
 	}
+	read := protectedIKERead{
+		expected:               expected,
+		useNATT:                exchange.useNATT,
+		crypto:                 exchange.crypto,
+		senderInitiator:        exchange.senderInitiator,
+		fragmentationSupported: exchange.fragmentationSupported,
+		action:                 exchange.action,
+	}
 	for attempt, delay := range s.ikeRetransmitDelays() {
-		for _, request := range requests {
-			if err := s.writeIKERequest(ctx, addr, request, nat, messageID); err != nil {
+		for _, request := range exchange.requests {
+			if err := s.writeIKERequest(ctx, exchange.peer, request, exchange.useNATT, exchange.messageID); err != nil {
 				return nil, nil, err
 			}
 		}
-		payloads, peer, err := s.awaitProtectedIKEAttempt(ctx, expected, delay, nat, crypto, senderInitiator, fragmentationSupported, action)
+		payloads, peer, err := s.awaitProtectedIKEAttempt(ctx, read, delay)
 		if err == nil {
 			return payloads, peer, nil
 		}
 		if !errors.Is(err, handshake.ErrIKETimeout) {
 			return nil, nil, err
 		}
-		s.logger.Debug("waiting for protected IKE message", "message_id", messageID, "attempt", attempt+1, "err", err)
+		s.logger.Debug("waiting for protected IKE message", "message_id", exchange.messageID, "attempt", attempt+1, "err", err)
 	}
-	return nil, nil, fmt.Errorf("%s: waiting message %d: timeout", action, messageID)
+	return nil, nil, fmt.Errorf("%s: waiting message %d: timeout", exchange.action, exchange.messageID)
 }
 
-func (s *Session) awaitProtectedIKEAttempt(ctx context.Context, expected ikeResponseMatch, timeout time.Duration, udpEncap bool, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
-	payloads, peer, err := s.readProtectedIKEMessage(ctx, expected, timeout, udpEncap, crypto, senderInitiator, fragmentationSupported, action)
+func (s *Session) awaitProtectedIKEAttempt(ctx context.Context, read protectedIKERead, timeout time.Duration) ([]ike.Payload, *net.UDPAddr, error) {
+	payloads, peer, err := s.readProtectedIKEMessage(ctx, read, timeout)
 	if peer != nil && (err == nil || payloads != nil) {
-		s.logger.Debug("received protected IKE message", "message_id", expected.messageID, "peer_addr", peer, "payload_count", len(payloads))
+		s.logger.Debug("received protected IKE message", "message_id", read.expected.messageID, "peer_addr", peer, "payload_count", len(payloads))
 	}
 	if err == nil {
 		return payloads, peer, nil
@@ -116,7 +144,7 @@ func (s *Session) awaitProtectedIKEAttempt(ctx context.Context, expected ikeResp
 	return nil, nil, err
 }
 
-func (s *Session) readProtectedIKEMessage(ctx context.Context, expected ikeResponseMatch, timeout time.Duration, udpEncap bool, crypto *ikeCrypto, senderInitiator bool, fragmentationSupported bool, action ikeAction) ([]ike.Payload, *net.UDPAddr, error) {
+func (s *Session) readProtectedIKEMessage(ctx context.Context, read protectedIKERead, timeout time.Duration) ([]ike.Payload, *net.UDPAddr, error) {
 	deadline := time.Now().Add(timeout)
 	buf := make([]byte, maxUDPPacketSize)
 	reassembly := ikeFragmentReassembly{}
@@ -127,14 +155,14 @@ func (s *Session) readProtectedIKEMessage(ctx context.Context, expected ikeRespo
 		if ikeReadTimedOut(deadline) {
 			return nil, nil, handshake.ErrIKETimeout
 		}
-		data, udpAddr, err := s.readIKECandidate(deadline, buf, udpEncap)
+		data, udpAddr, err := s.readIKECandidate(deadline, buf, read.useNATT)
 		if err != nil {
 			if errors.Is(err, handshake.ErrIKETimeout) {
 				continue
 			}
 			return nil, nil, err
 		}
-		if !matchesIKEMessage(data, udpAddr, expected) {
+		if !matchesIKEMessage(data, udpAddr, read.expected) {
 			continue
 		}
 		var packet ike.IKEPacket
@@ -142,19 +170,19 @@ func (s *Session) readProtectedIKEMessage(ctx context.Context, expected ikeRespo
 			if isIKEFragmentPacket(data) {
 				continue
 			}
-			return nil, nil, fmt.Errorf("%s: parsing response: %w", action, err)
+			return nil, nil, fmt.Errorf("%s: parsing response: %w", read.action, err)
 		}
-		payloads, complete, err := openIKEPacketMaybeFragmented(crypto, packet, senderInitiator, fragmentationSupported, &reassembly)
+		payloads, complete, err := openIKEPacketMaybeFragmented(read.crypto, packet, read.senderInitiator, read.fragmentationSupported, &reassembly)
 		if err != nil {
 			if !hasEncryptedPayload(packet.Payloads) {
 				if notifyErr := plaintextIKENotifyError(packet.Payloads); notifyErr != nil {
-					return nil, nil, fmt.Errorf("%s: %w", action, notifyErr)
+					return nil, nil, fmt.Errorf("%s: %w", read.action, notifyErr)
 				}
 			}
-			return nil, nil, fmt.Errorf("%s: opening response: %w", action, err)
+			return nil, nil, fmt.Errorf("%s: opening response: %w", read.action, err)
 		}
 		if complete {
-			if err := protectedIKEAuthNotifyError(action, payloads); err != nil {
+			if err := protectedIKEAuthNotifyError(read.action, payloads); err != nil {
 				return payloads, udpAddr, err
 			}
 			return payloads, udpAddr, nil

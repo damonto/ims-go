@@ -84,6 +84,12 @@ func (s dialogSnapshot) applyRequestPolicy(msg *sip.Message, routes []string) {
 	}
 }
 
+func (s dialogSnapshot) applyACKRequestPolicy(msg *sip.Message, routes []string) {
+	s.applyRequestPolicy(msg, routes)
+	msg.Headers.Del("Require")
+	msg.Headers.Del("Proxy-Require")
+}
+
 func (s dialogSnapshot) addDialogHeaders(msg *sip.Message, method string, cseq int64) {
 	msg.Headers.Add("Via", sip.BuildVia(s.transport, s.contactHost, s.messagePort, sip.RandomAlphaNum(15)))
 	msg.Headers.Add("From", fmt.Sprintf("<%s>;tag=%s", s.localURI, s.localTag))
@@ -99,7 +105,7 @@ func (s dialogSnapshot) buildACK() sip.Message {
 	msg := sip.NewRequest("ACK", s.targetURI)
 	s.addDialogHeaders(&msg, "ACK", s.inviteSeq)
 	msg.Headers.Del("Session-ID")
-	s.applyRequestPolicy(&msg, nil)
+	s.applyACKRequestPolicy(&msg, nil)
 	return msg
 }
 
@@ -109,7 +115,7 @@ func (s dialogSnapshot) buildACKForResponse(resp sip.Message) sip.Message {
 	s.addDialogHeaders(&msg, "ACK", s.inviteSeq)
 	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
 	msg.Headers.Del("Session-ID")
-	s.applyRequestPolicy(&msg, reverseValues(resp.HeadersByName("Record-Route")))
+	s.applyACKRequestPolicy(&msg, reverseValues(resp.HeaderList("Record-Route")))
 	return msg
 }
 
@@ -119,7 +125,7 @@ func (s dialogSnapshot) buildACKForSessionRefreshINVITE(resp sip.Message) sip.Me
 	s.addDialogHeaders(&msg, "ACK", sip.CSeqNumber(resp.Header("CSeq")))
 	msg.Headers.Set("To", nonEmpty(resp.Header("To"), s.remoteTo))
 	msg.Headers.Del("Session-ID")
-	s.applyRequestPolicy(&msg, nil)
+	s.applyACKRequestPolicy(&msg, nil)
 	return msg
 }
 
@@ -268,7 +274,7 @@ func (s dialogSnapshot) buildBYEForResponse(resp sip.Message, cseq int64, reason
 	if reason != "" {
 		msg.Headers.Add("Reason", reason)
 	}
-	s.applyRequestPolicy(&msg, reverseValues(resp.HeadersByName("Record-Route")))
+	s.applyRequestPolicy(&msg, reverseValues(resp.HeaderList("Record-Route")))
 	return msg
 }
 

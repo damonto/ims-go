@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -155,6 +157,9 @@ func BuildEAPIdentityResponse(id byte, identity string) ([]byte, error) {
 	if identity == "" {
 		return nil, errors.New("building eap identity response: identity is empty")
 	}
+	if !utf8.ValidString(identity) || strings.IndexByte(identity, 0) >= 0 {
+		return nil, errors.New("building eap identity response: identity is not valid UTF-8 text")
+	}
 	packet := EAPPacket{
 		Code:       eapCodeResponse,
 		Identifier: id,
@@ -276,8 +281,8 @@ func (m AKAMessage) zeroedMAC() (AKAMessage, []byte, bool, error) {
 		if clone.Attributes[i].Type != akaAttrMAC {
 			continue
 		}
-		if len(clone.Attributes[i].Value) < akaMACAttributeLen {
-			return AKAMessage{}, nil, false, errors.New("verifying aka mac: AT_MAC is truncated")
+		if len(clone.Attributes[i].Value) != akaMACAttributeLen {
+			return AKAMessage{}, nil, false, fmt.Errorf("verifying aka mac: AT_MAC length %d, want %d", len(clone.Attributes[i].Value), akaMACAttributeLen)
 		}
 		expected := append([]byte(nil), clone.Attributes[i].Value[akaAttributeReservedLen:akaMACAttributeLen]...)
 		clone.Attributes[i].Value = append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)
@@ -287,16 +292,19 @@ func (m AKAMessage) zeroedMAC() (AKAMessage, []byte, bool, error) {
 }
 
 func (m AKAMessage) MarshalSigned(autKey, extra []byte) ([]byte, error) {
-	return m.marshalSigned(autKey, extra, sha1.New)
+	return m.marshalSigned(autKey, extra, akaKAutLen, sha1.New)
 }
 
 func (m AKAMessage) MarshalSignedSHA256(autKey, extra []byte) ([]byte, error) {
-	return m.marshalSigned(autKey, extra, sha256.New)
+	return m.marshalSigned(autKey, extra, akaPrimeKAutLen, sha256.New)
 }
 
-func (m AKAMessage) marshalSigned(autKey, extra []byte, newHash func() hash.Hash) ([]byte, error) {
-	if len(autKey) == 0 {
-		return m.MarshalBinary()
+func (m AKAMessage) marshalSigned(autKey, extra []byte, wantKeyLen int, newHash func() hash.Hash) ([]byte, error) {
+	if len(autKey) != wantKeyLen {
+		return nil, fmt.Errorf("signing aka message: authentication key length %d, want %d", len(autKey), wantKeyLen)
+	}
+	if HasAttribute(m.Attributes, akaAttrMAC) {
+		return nil, errors.New("signing aka message: AT_MAC is already present")
 	}
 	attrs := append([]AKAAttribute(nil), m.Attributes...)
 	attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)})
@@ -314,16 +322,16 @@ func (m AKAMessage) marshalSigned(autKey, extra []byte, newHash func() hash.Hash
 }
 
 func (m AKAMessage) VerifyMAC(autKey, extra []byte) error {
-	return m.verifyMAC(autKey, extra, sha1.New)
+	return m.verifyMAC(autKey, extra, akaKAutLen, sha1.New)
 }
 
 func (m AKAMessage) VerifyMACSHA256(autKey, extra []byte) error {
-	return m.verifyMAC(autKey, extra, sha256.New)
+	return m.verifyMAC(autKey, extra, akaPrimeKAutLen, sha256.New)
 }
 
-func (m AKAMessage) verifyMAC(autKey, extra []byte, newHash func() hash.Hash) error {
-	if len(autKey) == 0 {
-		return errors.New("verifying aka mac: key is empty")
+func (m AKAMessage) verifyMAC(autKey, extra []byte, wantKeyLen int, newHash func() hash.Hash) error {
+	if len(autKey) != wantKeyLen {
+		return fmt.Errorf("verifying aka mac: authentication key length %d, want %d", len(autKey), wantKeyLen)
 	}
 	zeroed, expected, ok, err := m.zeroedMAC()
 	if err != nil {
@@ -348,23 +356,39 @@ func (m AKAMessage) verifyMAC(autKey, extra []byte, newHash func() hash.Hash) er
 }
 
 func (m AKAMessage) MarshalBinary() ([]byte, error) {
+	eapType, err := m.eapType()
+	if err != nil {
+		return nil, err
+	}
 	data := []byte{m.Subtype, 0x00, 0x00}
+	var seen [256]bool
 	for _, attr := range m.Attributes {
+		known := isKnownAKAAttribute(attr.Type)
+		if known && seen[attr.Type] && !repeatableAKAAttributeType(attr.Type) {
+			return nil, fmt.Errorf("marshalling aka message: duplicate attribute %d", attr.Type)
+		}
+		if known {
+			seen[attr.Type] = true
+		}
 		encoded, err := attr.MarshalBinary()
 		if err != nil {
 			return nil, err
 		}
 		data = append(data, encoded...)
 	}
-	packet := EAPPacket{Code: m.Code, Identifier: m.Identifier, Type: m.eapType(), HasType: true, Data: data}
+	packet := EAPPacket{Code: m.Code, Identifier: m.Identifier, Type: eapType, HasType: true, Data: data}
 	return packet.MarshalBinary()
 }
 
-func (m AKAMessage) eapType() byte {
-	if m.EAPType == 0 {
-		return eapTypeAKA
+func (m AKAMessage) eapType() (byte, error) {
+	switch m.EAPType {
+	case 0, eapTypeAKA:
+		return eapTypeAKA, nil
+	case eapTypeAKAPrime:
+		return eapTypeAKAPrime, nil
+	default:
+		return 0, fmt.Errorf("marshalling aka message: unsupported eap type %d", m.EAPType)
 	}
-	return m.EAPType
 }
 
 func (m *AKAMessage) UnmarshalBinary(data []byte) error {
@@ -387,18 +411,19 @@ func (m *AKAMessage) UnmarshalBinary(data []byte) error {
 }
 
 type AKAChallenge struct {
-	Identifier    byte
-	EAPType       byte
-	RAND          []byte
-	AUTN          []byte
-	KDF           uint16
-	NetworkName   []byte
-	IV            []byte
-	EncryptedData []byte
+	Identifier        byte
+	EAPType           byte
+	RAND              []byte
+	AUTN              []byte
+	KDF               uint16
+	NetworkName       []byte
+	IV                []byte
+	EncryptedData     []byte
+	TrustRelationship TrustRelationship
 }
 
-type AKAChallengeParseOptions struct {
-	AllowMissingMAC bool
+func (c AKAChallenge) IsAKAPrime() bool {
+	return c.EAPType == eapTypeAKAPrime
 }
 
 func (c AKAChallenge) AMFSeparationBitSet() bool {
@@ -406,20 +431,109 @@ func (c AKAChallenge) AMFSeparationBitSet() bool {
 }
 
 func (c *AKAChallenge) UnmarshalBinary(data []byte) error {
-	return c.UnmarshalBinaryWithOptions(data, AKAChallengeParseOptions{})
-}
-
-func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallengeParseOptions) error {
 	var message AKAMessage
 	if err := message.UnmarshalBinary(data); err != nil {
 		return err
 	}
+	return c.UnmarshalMessage(message)
+}
+
+func AKAParametersFromChallenge(message AKAMessage) (AKAChallenge, error) {
 	if message.Code != eapCodeRequest || message.Subtype != akaSubtypeChallenge {
-		return errors.New("parsing aka challenge: unsupported packet")
+		return AKAChallenge{}, errors.New("parsing aka challenge: unsupported packet")
 	}
 	challenge := AKAChallenge{Identifier: message.Identifier, EAPType: message.EAPType}
 	seenRAND := false
 	seenAUTN := false
+	for _, attr := range message.Attributes {
+		switch attr.Type {
+		case akaAttrRAND:
+			if seenRAND {
+				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate rand attribute")
+			}
+			if len(attr.Value) != akaVectorAttributeLen {
+				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid rand length %d", len(attr.Value))
+			}
+			challenge.RAND = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
+			seenRAND = true
+		case akaAttrAUTN:
+			if seenAUTN {
+				return AKAChallenge{}, errors.New("parsing aka challenge: duplicate autn attribute")
+			}
+			if len(attr.Value) != akaVectorAttributeLen {
+				return AKAChallenge{}, fmt.Errorf("parsing aka challenge: invalid autn length %d", len(attr.Value))
+			}
+			challenge.AUTN = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
+			seenAUTN = true
+		}
+	}
+	if !seenRAND || !seenAUTN {
+		return AKAChallenge{}, errors.New("parsing aka challenge: missing rand or autn")
+	}
+	return challenge, nil
+}
+
+func AKAPrimeParametersFromChallenge(message AKAMessage) (AKAChallenge, error) {
+	challenge, err := AKAParametersFromChallenge(message)
+	if err != nil {
+		return AKAChallenge{}, err
+	}
+	if message.EAPType != eapTypeAKAPrime {
+		return AKAChallenge{}, errors.New("parsing aka prime challenge parameters: unexpected eap type")
+	}
+	seenKDFInput := false
+	seenKDF := false
+	for _, attr := range message.Attributes {
+		switch attr.Type {
+		case akaAttrKDFInput:
+			if seenKDFInput {
+				return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: duplicate kdf input", ErrAKAPrimeAuthenticationFailure)
+			}
+			kdfInput, err := KDFInputFromAttribute(&attr)
+			if err != nil {
+				return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: %w", ErrAKAPrimeAuthenticationFailure, err)
+			}
+			challenge.NetworkName = kdfInput.NetworkName
+			seenKDFInput = true
+		case akaAttrKDF:
+			if seenKDF {
+				return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: duplicate kdf", ErrAKAPrimeAuthenticationFailure)
+			}
+			kdf, err := KDFFromAttribute(&attr)
+			if err != nil {
+				return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: %w", ErrAKAPrimeAuthenticationFailure, err)
+			}
+			challenge.KDF = kdf.Version
+			seenKDF = true
+		}
+	}
+	if !seenKDF {
+		return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: missing kdf", ErrAKAPrimeAuthenticationFailure)
+	}
+	if challenge.KDF != akaPrimeKDFDefault {
+		return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: unsupported kdf %d", ErrAKAPrimeAuthenticationFailure, challenge.KDF)
+	}
+	if !seenKDFInput {
+		return AKAChallenge{}, fmt.Errorf("parsing aka prime challenge parameters: %w: missing kdf input", ErrAKAPrimeAuthenticationFailure)
+	}
+	return challenge, nil
+}
+
+func (c *AKAChallenge) UnmarshalMessage(message AKAMessage) error {
+	challenge, err := AKAParametersFromChallenge(message)
+	if err != nil {
+		return err
+	}
+	allowed := []byte{akaAttrRAND, akaAttrAUTN, akaAttrMAC, akaAttrIV, akaAttrEncryptedData, akaAttrCheckcode, akaAttrResultInd, akaAttrTrustInd}
+	if message.EAPType == eapTypeAKAPrime {
+		allowed = append(allowed, akaAttrKDFInput, akaAttrKDF)
+	} else {
+		allowed = append(allowed, akaAttrBidding)
+	}
+	if err := validateAKAAttributes(message.Attributes, allowed...); err != nil {
+		return fmt.Errorf("parsing aka challenge: %w", err)
+	}
+
 	seenMAC := false
 	seenKDFInput := false
 	seenKDF := false
@@ -428,24 +542,8 @@ func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallenge
 	seenResultInd := false
 	for _, attr := range message.Attributes {
 		switch attr.Type {
-		case akaAttrRAND:
-			if seenRAND {
-				return errors.New("parsing aka challenge: duplicate rand attribute")
-			}
-			if len(attr.Value) != akaVectorAttributeLen {
-				return fmt.Errorf("parsing aka challenge: invalid rand length %d", len(attr.Value))
-			}
-			challenge.RAND = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
-			seenRAND = true
-		case akaAttrAUTN:
-			if seenAUTN {
-				return errors.New("parsing aka challenge: duplicate autn attribute")
-			}
-			if len(attr.Value) != akaVectorAttributeLen {
-				return fmt.Errorf("parsing aka challenge: invalid autn length %d", len(attr.Value))
-			}
-			challenge.AUTN = append([]byte(nil), attr.Value[akaAttributeReservedLen:]...)
-			seenAUTN = true
+		case akaAttrRAND, akaAttrAUTN:
+			continue
 		case akaAttrMAC:
 			if seenMAC {
 				return errors.New("parsing aka challenge: duplicate mac attribute")
@@ -463,7 +561,7 @@ func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallenge
 			}
 			kdfInput, err := KDFInputFromAttribute(&attr)
 			if err != nil {
-				return fmt.Errorf("parsing aka challenge: %w", err)
+				return fmt.Errorf("parsing aka challenge: %w: %w", ErrAKAPrimeAuthenticationFailure, err)
 			}
 			challenge.NetworkName = kdfInput.NetworkName
 			seenKDFInput = true
@@ -517,6 +615,12 @@ func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallenge
 			if _, err := BiddingFromAttribute(&attr); err != nil {
 				return fmt.Errorf("parsing aka challenge: %w", err)
 			}
+		case akaAttrTrustInd:
+			indication, err := TrustIndicationFromAttribute(&attr)
+			if err != nil {
+				return fmt.Errorf("parsing aka challenge: %w", err)
+			}
+			challenge.TrustRelationship = indication.Relationship
 		default:
 			// RFC 4187 section 8.1 requires peers to ignore unknown skippable
 			// attributes (128..255) while still rejecting unknown
@@ -527,10 +631,7 @@ func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallenge
 			return fmt.Errorf("parsing aka challenge: unexpected attribute %d", attr.Type)
 		}
 	}
-	if !seenRAND || !seenAUTN {
-		return errors.New("parsing aka challenge: missing rand or autn")
-	}
-	if !seenMAC && !opts.AllowMissingMAC {
+	if !seenMAC {
 		return errors.New("parsing aka challenge: missing mac")
 	}
 	if message.EAPType == eapTypeAKAPrime {
@@ -555,23 +656,20 @@ func (c *AKAChallenge) UnmarshalBinaryWithOptions(data []byte, opts AKAChallenge
 }
 
 func BuildAKAResponse(id byte, res, autKey []byte) ([]byte, error) {
+	if len(autKey) != akaKAutLen {
+		return nil, fmt.Errorf("building aka response: authentication key length %d, want %d", len(autKey), akaKAutLen)
+	}
 	resAttr, err := buildAKARESAttribute(res)
 	if err != nil {
 		return nil, err
 	}
 	attrs := []AKAAttribute{resAttr}
-	macIndex := -1
-	if len(autKey) != 0 {
-		attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)})
-		macIndex = len(attrs) - 1
-	}
+	attrs = append(attrs, AKAAttribute{Type: akaAttrMAC, Value: append(make([]byte, akaAttributeReservedLen), make([]byte, akaMACLen)...)})
+	macIndex := len(attrs) - 1
 	message := AKAMessage{Code: eapCodeResponse, Identifier: id, Subtype: akaSubtypeChallenge, Attributes: attrs}
 	packet, err := message.MarshalBinary()
 	if err != nil {
 		return nil, err
-	}
-	if macIndex < 0 {
-		return packet, nil
 	}
 	mac := hmac.New(sha1.New, autKey)
 	_, _ = mac.Write(packet)
@@ -604,6 +702,9 @@ func BuildAKAPrimeIdentityResponse(id byte, identity string) ([]byte, error) {
 func buildAKAIdentityResponse(id, eapType byte, identity string) ([]byte, error) {
 	if identity == "" {
 		return nil, errors.New("building aka identity response: identity is empty")
+	}
+	if !utf8.ValidString(identity) || strings.IndexByte(identity, 0) >= 0 {
+		return nil, errors.New("building aka identity response: identity is not valid UTF-8 text")
 	}
 	message := AKAMessage{Code: eapCodeResponse, Identifier: id, EAPType: eapType, Subtype: akaSubtypeIdentity, Attributes: []AKAAttribute{buildAKAStringAttribute(akaAttrIdentity, identity)}}
 	return message.MarshalBinary()

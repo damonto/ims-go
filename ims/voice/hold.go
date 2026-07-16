@@ -10,6 +10,13 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
+type localHoldSnapshot struct {
+	hold          CallHoldState
+	localSDP      []byte
+	rtcpOff       bool
+	negotiatedOff bool
+}
+
 func (c *Call) HoldState() CallHoldState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -32,7 +39,7 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 		action = callActionHold
 	}
 
-	snap, timer, body, previousHold, previousSDP, clearPending, err := c.beginLocalHoldModification(action, hold, direction)
+	snap, timer, body, previous, clearPending, err := c.beginLocalHoldModification(action, hold, direction)
 	if err != nil {
 		return err
 	}
@@ -47,60 +54,71 @@ func (c *Call) modifyLocalHold(ctx context.Context, hold bool) error {
 		resp, err = c.retrySessionRefreshesWithMinSE(ctx, req, resp)
 	}
 	if err != nil {
-		c.restoreHoldModification(previousHold, previousSDP)
+		c.restoreHoldModification(previous)
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	if resp.StatusCode() < sipStatusOK || resp.StatusCode() >= sipStatusMultipleChoices {
-		c.restoreHoldModification(previousHold, previousSDP)
+		c.restoreHoldModification(previous)
 		return fmt.Errorf("%s: expected 2xx, got %w", action, sip.NewResponseError(resp))
 	}
 	if err := c.acknowledgeSessionRefreshINVITE(ctx, resp); err != nil {
-		c.restoreHoldModification(previousHold, previousSDP)
+		c.restoreHoldModification(previous)
 		return err
 	}
 	c.updateRemoteTargetFromResponse(resp)
 	if err := c.applyMediaReINVITEAnswer(ctx, resp); err != nil {
-		c.restoreHoldModification(previousHold, previousSDP)
+		c.restoreHoldModification(previous)
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	if err := c.applySessionTimerUACResponse(resp, false); err != nil {
-		c.restoreHoldModification(previousHold, previousSDP)
+		c.restoreHoldModification(previous)
 		return fmt.Errorf("%s: %w", action, err)
 	}
 
-	nextHold := setLocalHold(previousHold, hold)
+	nextHold := setLocalHold(previous.hold, hold)
 	c.mu.Lock()
 	c.localSDP = append([]byte(nil), body...)
+	if hold {
+		c.localHoldRTCPOff = previous.negotiatedOff
+	} else {
+		c.localHoldRTCPOff = false
+	}
 	c.mu.Unlock()
 	c.setHoldState(nextHold, action)
 	return nil
 }
 
-func (c *Call) beginLocalHoldModification(action callAction, hold bool, direction MediaDirection) (dialogSnapshot, sessionTimerState, []byte, CallHoldState, []byte, func(), error) {
+func (c *Call) beginLocalHoldModification(action callAction, hold bool, direction MediaDirection) (dialogSnapshot, sessionTimerState, []byte, localHoldSnapshot, func(), error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, fmt.Errorf("%s: call is closed", action)
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, fmt.Errorf("%s: call is closed", action)
 	}
 	if c.state != CallStateActive && c.state != CallStateConfirmed {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, fmt.Errorf("%s: call state is %s", action, c.state)
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, fmt.Errorf("%s: call state is %s", action, c.state)
 	}
 	if c.emergency && hold && !c.endpoint.cfg.AllowHoldDuringEmergency {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, errors.New("holding call: emergency hold is disabled")
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, errors.New("holding call: emergency hold is disabled")
 	}
 	if c.localINVITEPending {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, fmt.Errorf("%s: local re-INVITE is already pending", action)
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, fmt.Errorf("%s: local re-INVITE is already pending", action)
 	}
 	if c.remoteINVITEPending {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, fmt.Errorf("%s: remote re-INVITE is pending", action)
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, fmt.Errorf("%s: remote re-INVITE is pending", action)
 	}
 	if holdHasLocal(c.hold) == hold {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, nil
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, nil
 	}
 
+	previous := localHoldSnapshot{
+		hold:          c.hold,
+		localSDP:      append([]byte(nil), c.localSDP...),
+		rtcpOff:       c.localHoldRTCPOff,
+		negotiatedOff: c.media.RTCPDisabled || audioRTCPDisabled(c.localSDP),
+	}
 	body, err := c.localSDPWithDirection(direction)
 	if err != nil {
-		return dialogSnapshot{}, sessionTimerState{}, nil, "", nil, nil, err
+		return dialogSnapshot{}, sessionTimerState{}, nil, localHoldSnapshot{}, nil, err
 	}
 	c.localINVITEPending = true
 	clearPending := func() {
@@ -108,12 +126,16 @@ func (c *Call) beginLocalHoldModification(action callAction, hold bool, directio
 		c.localINVITEPending = false
 		c.mu.Unlock()
 	}
-	return c.dialogSnapshot(), c.sessionTimer, body, c.hold, append([]byte(nil), c.localSDP...), clearPending, nil
+	return c.dialogSnapshot(), c.sessionTimer, body, previous, clearPending, nil
 }
 
 func (c *Call) localSDPWithDirection(direction MediaDirection) ([]byte, error) {
 	if len(c.localSDP) != 0 {
-		return sdpWithDirection(c.localSDP, direction, c.endpoint.cfg.Preconditions), nil
+		body := sdpWithDirection(c.localSDP, direction, c.endpoint.cfg.Preconditions)
+		if direction == MediaDirectionSendRecv && c.localHoldRTCPOff {
+			body = disableAudioRTCP(body)
+		}
+		return body, nil
 	}
 	offer := MediaOffer{}
 	if c.media.Codec != "" {
@@ -132,6 +154,7 @@ func (c *Call) localSDPWithDirection(direction MediaDirection) ([]byte, error) {
 
 func sdpWithDirection(body []byte, direction MediaDirection, qosMet bool) []byte {
 	lines := strings.FieldsFunc(string(body), func(r rune) bool { return r == '\r' || r == '\n' })
+	rtcpDisabled := direction != MediaDirectionSendRecv && audioRTCPDisabledLines(lines)
 	out := make([]string, 0, len(lines)+1)
 	inAudio := false
 	replaced := false
@@ -139,6 +162,9 @@ func sdpWithDirection(body []byte, direction MediaDirection, qosMet bool) []byte
 		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
+		}
+		if rtcpDisabled && inAudio && strings.EqualFold(line, "b=RR:0") {
+			line = fmt.Sprintf("b=RR:%d", rtcpReceiverBandwidth)
 		}
 		if strings.HasPrefix(line, "m=") {
 			if inAudio && !replaced {
@@ -176,10 +202,61 @@ func sdpWithDirection(body []byte, direction MediaDirection, qosMet bool) []byte
 	return []byte(strings.Join(out, "\r\n") + "\r\n")
 }
 
-func (c *Call) restoreHoldModification(hold CallHoldState, localSDP []byte) {
+func audioRTCPDisabled(body []byte) bool {
+	lines := strings.FieldsFunc(string(body), func(r rune) bool { return r == '\r' || r == '\n' })
+	return audioRTCPDisabledLines(lines)
+}
+
+func audioRTCPDisabledLines(lines []string) bool {
+	var inAudio, rsZero, rrZero bool
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "m=") {
+			if inAudio && rsZero && rrZero {
+				return true
+			}
+			inAudio = strings.HasPrefix(line, "m=audio ")
+			rsZero, rrZero = false, false
+			continue
+		}
+		if !inAudio {
+			continue
+		}
+		modifier, bandwidth, ok, err := parseRTCPBandwidth(line)
+		if err != nil || !ok || bandwidth != 0 {
+			continue
+		}
+		rsZero = rsZero || modifier == "RS"
+		rrZero = rrZero || modifier == "RR"
+	}
+	return inAudio && rsZero && rrZero
+}
+
+func disableAudioRTCP(body []byte) []byte {
+	lines := strings.FieldsFunc(string(body), func(r rune) bool { return r == '\r' || r == '\n' })
+	inAudio := false
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "m=") {
+			inAudio = strings.HasPrefix(line, "m=audio ")
+			continue
+		}
+		if !inAudio {
+			continue
+		}
+		modifier, _, ok, err := parseRTCPBandwidth(line)
+		if err == nil && ok && (modifier == "RS" || modifier == "RR") {
+			lines[i] = "b=" + modifier + ":0"
+		}
+	}
+	return []byte(strings.Join(lines, "\r\n") + "\r\n")
+}
+
+func (c *Call) restoreHoldModification(previous localHoldSnapshot) {
 	c.mu.Lock()
-	c.hold = hold
-	c.localSDP = append([]byte(nil), localSDP...)
+	c.hold = previous.hold
+	c.localSDP = append([]byte(nil), previous.localSDP...)
+	c.localHoldRTCPOff = previous.rtcpOff
 	c.mu.Unlock()
 	c.restartMediaInactivityWatch()
 }

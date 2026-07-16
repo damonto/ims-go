@@ -187,6 +187,9 @@ func swuBackoffKeyFor(cfg Config, card Card, scope swutunnel.BackoffScope) (swuB
 }
 
 func swuBackoffAPNFor(cfg Config) string {
+	if cfg.Access.VoWiFi.Tunnel.RequestDefaultAPN {
+		return ""
+	}
 	apn := strings.ToLower(strings.TrimSpace(cfg.Access.VoWiFi.Tunnel.APN))
 	if apn == "" {
 		return swutunnel.DefaultAPN
@@ -284,6 +287,9 @@ func swuPDNTypeRestrictionKeyFor(card Card, cfg swutunnel.Config) (swuPDNTypeRes
 }
 
 func swuPDNTypeRestrictionAPNFor(cfg swutunnel.Config) string {
+	if cfg.RequestDefaultAPN {
+		return ""
+	}
 	apn := strings.ToLower(strings.TrimSpace(cfg.APN))
 	if apn == "" {
 		return swutunnel.DefaultAPN

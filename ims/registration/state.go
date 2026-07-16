@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/damonto/ims-go/ims/security"
 	"github.com/damonto/ims-go/ims/sip"
 )
 
@@ -35,26 +36,161 @@ func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration,
 }
 
 func sameContactURI(got, want string) bool {
-	got = strings.TrimSpace(got)
-	want = strings.TrimSpace(want)
-	if strings.EqualFold(got, want) {
-		return true
+	gotURI, gotOK := parseComparableSIPURI(got)
+	wantURI, wantOK := parseComparableSIPURI(want)
+	if !gotOK || !wantOK {
+		return false
 	}
-	gotHostPort := contactURIHostPort(got)
-	wantHostPort := contactURIHostPort(want)
-	return gotHostPort != "" && strings.EqualFold(gotHostPort, wantHostPort)
+	return gotURI.scheme == wantURI.scheme &&
+		gotURI.userinfo == wantURI.userinfo &&
+		strings.EqualFold(gotURI.hostPort, wantURI.hostPort) &&
+		uriParametersMatch(gotURI.parameters, wantURI.parameters) &&
+		uriComponentsMatch(gotURI.headers, wantURI.headers)
 }
 
-func contactURIHostPort(uri string) string {
-	uri = strings.TrimSpace(uri)
-	uri = strings.TrimPrefix(strings.ToLower(uri), "sip:")
-	if user, hostPort, ok := strings.Cut(uri, "@"); ok && user != "" {
-		uri = hostPort
+type comparableSIPURI struct {
+	scheme     string
+	userinfo   string
+	hostPort   string
+	parameters map[string]string
+	headers    map[string]string
+}
+
+func parseComparableSIPURI(value string) (comparableSIPURI, bool) {
+	value = strings.TrimSpace(value)
+	colon := strings.IndexByte(value, ':')
+	if colon <= 0 {
+		return comparableSIPURI{}, false
 	}
-	if hostPort, _, ok := strings.Cut(uri, ";"); ok {
-		uri = hostPort
+	scheme := strings.ToLower(value[:colon])
+	if scheme != "sip" && scheme != "sips" {
+		return comparableSIPURI{}, false
 	}
-	return strings.TrimSpace(uri)
+	rest := value[colon+1:]
+	userinfo := ""
+	if at := strings.IndexByte(rest, '@'); at >= 0 {
+		userinfo = normalizeURIPercentEncoding(rest[:at])
+		rest = rest[at+1:]
+		if userinfo == "" || rest == "" {
+			return comparableSIPURI{}, false
+		}
+	}
+	rest, headerText, _ := strings.Cut(rest, "?")
+	authority, parameterText, _ := strings.Cut(rest, ";")
+	if authority == "" || strings.ContainsAny(authority, " \t\r\n") {
+		return comparableSIPURI{}, false
+	}
+	hostPort := authority
+	parameters, parametersOK := parseURIComponents(parameterText, ";")
+	headers, headersOK := parseURIComponents(headerText, "&")
+	if !parametersOK || !headersOK {
+		return comparableSIPURI{}, false
+	}
+	return comparableSIPURI{
+		scheme:     scheme,
+		userinfo:   userinfo,
+		hostPort:   hostPort,
+		parameters: parameters,
+		headers:    headers,
+	}, true
+}
+
+func parseURIComponents(value, separator string) (map[string]string, bool) {
+	if value == "" {
+		return nil, true
+	}
+	components := make(map[string]string)
+	for component := range strings.SplitSeq(value, separator) {
+		name, componentValue, hasValue := strings.Cut(strings.TrimSpace(component), "=")
+		name = strings.ToLower(normalizeURIPercentEncoding(name))
+		if name == "" {
+			return nil, false
+		}
+		if _, exists := components[name]; exists {
+			return nil, false
+		}
+		if hasValue {
+			componentValue = strings.ToLower(normalizeURIPercentEncoding(strings.TrimSpace(componentValue)))
+		} else {
+			componentValue = ""
+		}
+		components[name] = componentValue
+	}
+	return components, true
+}
+
+func uriParametersMatch(left, right map[string]string) bool {
+	for name, leftValue := range left {
+		if rightValue, ok := right[name]; ok && leftValue != rightValue {
+			return false
+		}
+	}
+	for _, name := range []string{"transport", "user", "ttl", "method", "maddr"} {
+		_, leftHas := left[name]
+		_, rightHas := right[name]
+		if leftHas != rightHas {
+			return false
+		}
+	}
+	return true
+}
+
+func uriComponentsMatch(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, leftValue := range left {
+		if rightValue, ok := right[name]; !ok || leftValue != rightValue {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeURIPercentEncoding(value string) string {
+	var normalized strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] != '%' || i+2 >= len(value) {
+			normalized.WriteByte(value[i])
+			continue
+		}
+		high, highOK := hexDigit(value[i+1])
+		low, lowOK := hexDigit(value[i+2])
+		if !highOK || !lowOK {
+			normalized.WriteByte(value[i])
+			continue
+		}
+		decoded := high<<4 | low
+		if uriUnreserved(decoded) {
+			normalized.WriteByte(decoded)
+		} else {
+			normalized.WriteByte('%')
+			normalized.WriteByte("0123456789ABCDEF"[high])
+			normalized.WriteByte("0123456789ABCDEF"[low])
+		}
+		i += 2
+	}
+	return normalized.String()
+}
+
+func hexDigit(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func uriUnreserved(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		strings.ContainsRune("-_.!~*'()", rune(value))
 }
 
 func (s *Registrar) currentRegisterContactURI() string {
@@ -159,6 +295,59 @@ func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
 	s.extendActiveSecureAssociationLifetime(s.secureAssociationExpiresAt(time.Now()))
 	s.setRegistered(true)
 	s.applyRegisterKeepAlive(msg)
+}
+
+func (s *Registrar) clearRegistrationState() error {
+	secureErr := s.clearSecureResources()
+	s.resetRegistrationState()
+	return secureErr
+}
+
+func (s *Registrar) resetRegistrationState() {
+	flow := s.CurrentFlow()
+	nextFlow := newFlow(flow.ContactHost, flow.RegisterPort)
+	callID, sessionID, tag, _ := sip.NewTransaction()
+
+	s.mu.Lock()
+	s.state.Registered = false
+	s.state.DefaultPublicID = s.state.PublicIdentity
+	s.state.SIPPublicID = ""
+	s.state.TelPublicID = ""
+	s.state.RegisterExpires = s.cfg.RegisterExpires
+	s.state.Flow = Flow{}
+	s.state.ServiceRoutes = nil
+	s.state.SecurityClient = nextFlow.SecurityClient
+	s.state.SecurityClients = append(security.Params(nil), nextFlow.SecurityClients...)
+	s.state.SecurityVerify = nil
+	s.state.ContactHost = nextFlow.ContactHost
+	s.state.RegisterPort = nextFlow.RegisterPort
+	s.state.MessagePort = nextFlow.MessagePort
+	s.flow = nextFlow
+	s.authCK = nil
+	s.authIK = nil
+	s.authNonce = ""
+	s.authRealm = ""
+	s.authAlgorithm = ""
+	s.authQOP = ""
+	s.authOpaque = ""
+	s.authHeader = ""
+	s.authNonceCount = 0
+	s.authDigestNonce = ""
+	s.authDigestAlgorithm = ""
+	s.authDigestPassword = ""
+	s.callID = callID
+	s.sessionID = sessionID
+	s.tag = tag
+	s.cseq = 0
+	s.lastRegisterCallID = ""
+	s.lastRegisterCSeq = 0
+	s.subscribeExpires = 0
+	s.subscribeUnsupported = false
+	s.subscription = subscriptionDialog{}
+	s.regInfoVersion = 0
+	s.regInfoVersionSet = false
+	s.regInfoRegistrations = make(map[string]regInfoRegistrationEntry)
+	s.mu.Unlock()
 }
 
 func (s *Registrar) rememberRegisterTransaction(msg sip.Message) {

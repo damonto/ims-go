@@ -5,16 +5,20 @@ import (
 )
 
 type Incoming struct {
-	CallID        string
-	From          string
-	FromURI       string
-	To            string
-	ToURI         string
-	ServiceCenter string
-	Text          string
-	RawTPDU       []byte
-	RawTPDUs      [][]byte
-	ReservedMTI   bool
+	CallID             string
+	From               string
+	FromURI            string
+	To                 string
+	ToURI              string
+	ServiceCenter      string
+	Text               string
+	ProtocolIdentifier byte
+	DataCodingScheme   byte
+	UserData           []byte
+	UserDataHeader     []byte
+	RawTPDU            []byte
+	RawTPDUs           [][]byte
+	ReservedMTI        bool
 }
 
 type StatusReport struct {
@@ -32,5 +36,7 @@ type StatusReport struct {
 	HasProtocolIdentifier bool
 	DataCodingScheme      byte
 	HasDataCodingScheme   bool
+	UserDataLength        int
 	UserData              []byte
+	RawTPDU               []byte
 }

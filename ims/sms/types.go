@@ -19,10 +19,13 @@ type Config struct {
 	SubmitReportTimeout   time.Duration
 	DeliveryReportTimeout time.Duration
 	RequestStatusReport   bool
-	OnIncoming            func(Incoming)
-	OnStatusReport        func(StatusReport)
-	OnError               func(error)
-	Logger                *slog.Logger
+	// AcceptIncoming synchronously persists or accepts an incoming RP-DATA.
+	// Returning an *RPError sends the corresponding negative delivery report.
+	AcceptIncoming func(context.Context, Incoming) error
+	OnIncoming     func(Incoming)
+	OnStatusReport func(StatusReport)
+	OnError        func(error)
+	Logger         *slog.Logger
 }
 
 type Card interface {
@@ -40,18 +43,19 @@ type Endpoint struct {
 	done chan struct{}
 	bgWG sync.WaitGroup
 
-	mu        sync.Mutex
-	cseq      int64
-	rpRef     uint32
-	tpRef     uint32
-	rpRefs    map[byte]struct{}
-	pending   map[string]pendingEntry
-	submitted map[string]submittedEntry
-	recent    map[string]time.Time
-	concat    map[string]concatState
-	moState   moTransferState
-	mtState   mtTransferState
-	closed    bool
+	mu            sync.Mutex
+	cseq          int64
+	rpRef         uint32
+	tpRef         uint32
+	submitTimeout atomic.Int64
+	rpRefs        map[byte]struct{}
+	pending       map[string]pendingEntry
+	submitted     map[string]submittedEntry
+	recent        map[string]time.Time
+	concat        map[string]concatState
+	moState       moTransferState
+	mtState       mtTransferState
+	closed        bool
 }
 
 type SubmissionSegment struct {
@@ -111,7 +115,22 @@ type SubmissionUpdate struct {
 	State         SubmissionState
 	RPCause       byte
 	HasRPCause    bool
+	SubmitReport  *SubmitReport
 	At            time.Time
+}
+
+// SubmitReport contains the SMS-SUBMIT-REPORT carried in RP-ACK or RP-ERROR.
+type SubmitReport struct {
+	FailureCause          byte
+	HasFailureCause       bool
+	ServiceCenterTime     time.Time
+	ProtocolIdentifier    byte
+	HasProtocolIdentifier bool
+	DataCodingScheme      byte
+	HasDataCodingScheme   bool
+	UserDataLength        int
+	UserData              []byte
+	RawTPDU               []byte
 }
 
 type outboundSegment struct {
@@ -201,6 +220,7 @@ const (
 	submitRetention   = 5 * time.Minute
 	defaultTR1Timeout = 40 * time.Second
 	defaultTR2Timeout = 15 * time.Second
+	defaultTRATimeout = 30 * time.Second
 )
 
 const acceptContact = "*;+g.3gpp.smsip;require;explicit"
@@ -213,5 +233,6 @@ const (
 )
 
 var submitReportTimeoutNanos atomic.Int64
+var memoryAvailableRetryTimeoutNanos atomic.Int64
 
 const defaultSubmitReportTimeout = defaultTR1Timeout

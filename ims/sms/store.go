@@ -42,6 +42,14 @@ func (s *Endpoint) markSeen(msg sip.Message) bool {
 	return s.markRecentKey("sip|"+key, 2*time.Minute)
 }
 
+func (s *Endpoint) clearSeen(msg sip.Message) {
+	key, ok := seenKey(msg)
+	if !ok {
+		return
+	}
+	s.clearRecentKey("sip|" + key)
+}
+
 func (s *Endpoint) markDeliveryReportSent(msg sip.Message) bool {
 	key, ok := seenKey(msg)
 	if !ok {

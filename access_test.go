@@ -1,12 +1,41 @@
 package ims
 
 import (
+	"context"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 
+	imsvoice "github.com/damonto/ims-go/ims/voice"
 	"github.com/damonto/ims-go/lte"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
+
+const testVoLTEPANI = "3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=1112233C476B4321"
+
+type imsPDNSessionStub struct {
+	info       imsPDNInfo
+	closeCalls int
+}
+
+func (s *imsPDNSessionStub) Info() imsPDNInfo {
+	return s.info
+}
+
+func (s *imsPDNSessionStub) Close() error {
+	s.closeCalls++
+	return nil
+}
+
+type imsPDNReaderStub struct {
+	readerStub
+	session imsPDNSession
+}
+
+func (s *imsPDNReaderStub) OpenIMSPDN(context.Context, imsPDNConfig) (imsPDNSession, error) {
+	return s.session, nil
+}
 
 func TestConfigNormalizedAccess(t *testing.T) {
 	tests := []struct {
@@ -41,19 +70,28 @@ func TestConfigNormalizedAccess(t *testing.T) {
 			name: "volte defaults qmi ims pdn",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoLTE(lte.Config{AccessNetworkInfo: testVoLTEPANI}),
+			},
+			wantVoLTE:      true,
+			wantAPN:        lte.DefaultAPN,
+			wantPDNType:    lte.DefaultPDNType,
+			wantTransport:  "udp",
+			wantAccessInfo: testVoLTEPANI,
+		},
+		{
+			name: "volte requires access network info",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoLTE(lte.Config{}),
 			},
-			wantVoLTE:     true,
-			wantAPN:       lte.DefaultAPN,
-			wantPDNType:   lte.DefaultPDNType,
-			wantTransport: "udp",
+			wantErr: true,
 		},
 		{
 			name: "volte access network info feeds ims",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access: VoLTE(lte.Config{
-					AccessNetworkInfo: " 3GPP-E-UTRAN-FDD ",
+					AccessNetworkInfo: " 3gpp-e-utran-fdd; utran-cell-id-3gpp=1112233c476b4321 ",
 					APN:               " ims ",
 					PDNType:           " IPV6 ",
 				}),
@@ -62,7 +100,37 @@ func TestConfigNormalizedAccess(t *testing.T) {
 			wantAPN:        lte.DefaultAPN,
 			wantPDNType:    "ipv6",
 			wantTransport:  "udp",
-			wantAccessInfo: "3GPP-E-UTRAN-FDD",
+			wantAccessInfo: testVoLTEPANI,
+		},
+		{
+			name: "volte accepts valid ims access network override",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoLTE(lte.Config{}),
+				IMS:      IMSConfig{AccessNetworkInfo: testVoLTEPANI},
+			},
+			wantVoLTE:      true,
+			wantAPN:        lte.DefaultAPN,
+			wantPDNType:    lte.DefaultPDNType,
+			wantTransport:  "udp",
+			wantAccessInfo: testVoLTEPANI,
+		},
+		{
+			name: "volte rejects WLAN access network override",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoLTE(lte.Config{}),
+				IMS:      IMSConfig{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbccddeeff"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "volte rejects E-UTRAN without cell identity",
+			cfg: Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoLTE(lte.Config{AccessNetworkInfo: "3GPP-E-UTRAN-FDD"}),
+			},
+			wantErr: true,
 		},
 		{
 			name: "invalid volte pdn type fails",
@@ -125,21 +193,23 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 		cfg       lte.Config
 		pdn       imsPDNInfo
 		wantIPv4  net.IP
+		wantIPv6  net.IP
 		wantPCSCF []net.IP
 		wantPANI  string
 	}{
 		{
 			name: "uses modem info",
-			cfg:  lte.Config{InterfaceName: "wwan0", AccessNetworkInfo: "3GPP-E-UTRAN-FDD"},
+			cfg:  lte.Config{InterfaceName: "wwan0", AccessNetworkInfo: testVoLTEPANI},
 			pdn: imsPDNInfo{
 				LocalIPv4:       net.IPv4(10, 0, 0, 2),
 				PCSCFIPs:        []net.IP{net.IPv4(198, 51, 100, 10)},
+				VoPSKnown:       true,
 				VoPSSupported:   true,
 				PacketDataReady: true,
 			},
 			wantIPv4:  net.IPv4(10, 0, 0, 2),
 			wantPCSCF: []net.IP{net.IPv4(198, 51, 100, 10)},
-			wantPANI:  "3GPP-E-UTRAN-FDD",
+			wantPANI:  testVoLTEPANI,
 		},
 		{
 			name: "configured values override modem info",
@@ -155,6 +225,24 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 			wantIPv4:  net.IPv4(10, 1, 0, 2),
 			wantPCSCF: []net.IP{net.ParseIP("2001:db8::1")},
 		},
+		{
+			name: "ipv4 PDN ignores unexpected modem IPv6 address",
+			cfg:  lte.Config{PDNType: "ipv4"},
+			pdn: imsPDNInfo{
+				LocalIPv4: net.IPv4(10, 0, 0, 2),
+				LocalIPv6: net.ParseIP("2001:db8::2"),
+			},
+			wantIPv4: net.IPv4(10, 0, 0, 2),
+		},
+		{
+			name: "ipv6 PDN ignores unexpected modem IPv4 address",
+			cfg:  lte.Config{PDNType: "ipv6"},
+			pdn: imsPDNInfo{
+				LocalIPv4: net.IPv4(10, 0, 0, 2),
+				LocalIPv6: net.ParseIP("2001:db8::2"),
+			},
+			wantIPv6: net.ParseIP("2001:db8::2"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,6 +250,9 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 			got := lteInfoFromIMSPDN(tt.cfg, tt.pdn)
 			if !got.LocalIPv4.Equal(tt.wantIPv4) {
 				t.Fatalf("LocalIPv4 = %v, want %v", got.LocalIPv4, tt.wantIPv4)
+			}
+			if !got.LocalIPv6.Equal(tt.wantIPv6) {
+				t.Fatalf("LocalIPv6 = %v, want %v", got.LocalIPv6, tt.wantIPv6)
 			}
 			if len(got.PCSCFIPs) != len(tt.wantPCSCF) {
 				t.Fatalf("PCSCFIPs len = %d, want %d", len(got.PCSCFIPs), len(tt.wantPCSCF))
@@ -174,11 +265,131 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 			if got.IMSPDNConnected != tt.pdn.PacketDataReady {
 				t.Fatalf("IMSPDNConnected = %v, want %v", got.IMSPDNConnected, tt.pdn.PacketDataReady)
 			}
-			if got.VoiceBearerReady != tt.pdn.PacketDataReady {
-				t.Fatalf("VoiceBearerReady = %v, want %v", got.VoiceBearerReady, tt.pdn.PacketDataReady)
+			if got.VoPSKnown != tt.pdn.VoPSKnown || got.VoPSSupported != tt.pdn.VoPSSupported {
+				t.Fatalf("VoPS = known %v supported %v, want known %v supported %v", got.VoPSKnown, got.VoPSSupported, tt.pdn.VoPSKnown, tt.pdn.VoPSSupported)
+			}
+			if got.VoiceBearerReady {
+				t.Fatal("VoiceBearerReady = true without a dedicated bearer indication")
 			}
 			if got.AccessNetworkInfo != tt.wantPANI {
 				t.Fatalf("AccessNetworkInfo = %q, want %q", got.AccessNetworkInfo, tt.wantPANI)
+			}
+		})
+	}
+}
+
+func TestOpenVoLTEAccessRequiresReadyIMSPDN(t *testing.T) {
+	tests := []struct {
+		name    string
+		ready   bool
+		wantErr bool
+	}{
+		{name: "ready IMS PDN", ready: true},
+		{name: "packet data not ready", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := &imsPDNSessionStub{info: imsPDNInfo{
+				LocalIPv4:       net.IPv4(192, 0, 2, 10),
+				PCSCFIPs:        []net.IP{net.IPv4(198, 51, 100, 20)},
+				PacketDataReady: tt.ready,
+			}}
+			client := &Client{
+				cfg: Config{
+					Logger: slog.Default(),
+					Access: VoLTE(lte.Config{
+						APN:               lte.DefaultAPN,
+						PDNType:           lte.DefaultPDNType,
+						AccessNetworkInfo: testVoLTEPANI,
+					}),
+				},
+				reader: &imsPDNReaderStub{session: session},
+			}
+
+			access, err := client.openVoLTEAccess(context.Background(), &connectSetup{})
+			if tt.wantErr {
+				if err == nil {
+					_ = access.Close()
+					t.Fatal("openVoLTEAccess() error = nil, want non-nil")
+				}
+				if session.closeCalls != 1 {
+					t.Fatalf("IMS PDN Close() calls = %d, want 1", session.closeCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("openVoLTEAccess() error = %v", err)
+			}
+			if err := access.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if session.closeCalls != 1 {
+				t.Fatalf("IMS PDN Close() calls = %d, want 1", session.closeCalls)
+			}
+		})
+	}
+}
+
+func TestVoLTEMediaRejectsKnownUnsupportedVoPS(t *testing.T) {
+	tests := []struct {
+		name string
+		info lte.Info
+	}{
+		{name: "known unsupported", info: lte.Info{VoPSKnown: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			access := &voLTEAccess{info: tt.info}
+			transport, err := access.openMedia(context.Background(), imsvoice.MediaConfig{})
+			if err == nil {
+				if transport != nil {
+					_ = transport.Close()
+				}
+				t.Fatal("openMedia() error = nil, want VoPS unavailable error")
+			}
+		})
+	}
+}
+
+func TestVoLTEMediaUsesRegisteredSIPFamily(t *testing.T) {
+	tests := []struct {
+		name       string
+		info       lte.Info
+		sipLocalIP net.IP
+		remoteIP   net.IP
+		wantErr    string
+	}{
+		{
+			name: "rejects IPv4 media after IPv6 SIP registration",
+			info: lte.Info{
+				LocalIPv4: net.IPv4(192, 0, 2, 10),
+				LocalIPv6: net.ParseIP("2001:db8::10"),
+			},
+			sipLocalIP: net.ParseIP("2001:db8::10"),
+			remoteIP:   net.IPv4(198, 51, 100, 20),
+			wantErr:    "differs from registered SIP flow",
+		},
+		{
+			name: "rejects media before SIP flow is known",
+			info: lte.Info{
+				LocalIPv4: net.IPv4(192, 0, 2, 10),
+			},
+			remoteIP: net.IPv4(198, 51, 100, 20),
+			wantErr:  "registered SIP local address is unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			access := &voLTEAccess{info: tt.info, sipLocalIP: tt.sipLocalIP}
+			transport, err := access.openMedia(context.Background(), imsvoice.MediaConfig{RemoteIP: tt.remoteIP})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				if transport != nil {
+					_ = transport.Close()
+				}
+				t.Fatalf("openMedia() error = %v, want containing %q", err, tt.wantErr)
 			}
 		})
 	}

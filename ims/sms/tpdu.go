@@ -15,25 +15,33 @@ const (
 )
 
 const (
-	tpduRejectDuplicatesFlag      = 0x04
-	tpduNoMoreMessagesFlag        = 0x04
-	tpduLoopPreventionFlag        = 0x08
-	tpduStatusReportRequestFlag   = 0x20
-	tpduStatusReportFromCommand   = 0x20
-	tpduUserDataHeaderFlag        = 0x40
-	tpduParameterIndicatorNone    = 0x00
-	tpduParameterIndicatorPID     = 0x01
-	tpduParameterIndicatorDCS     = 0x02
-	tpduParameterIndicatorUDL     = 0x04
-	tpduParameterIndicatorExtFlag = 0x80
-	tpduTimestampOctets           = 7
-	tpduStatusReportTimeStatusLen = tpduTimestampOctets*2 + 1
+	tpduRejectDuplicatesFlag           = 0x04
+	tpduNoMoreMessagesFlag             = 0x04
+	tpduLoopPreventionFlag             = 0x08
+	tpduStatusReportRequestFlag        = 0x20
+	tpduStatusReportFromCommand        = 0x20
+	tpduUserDataHeaderFlag             = 0x40
+	tpduParameterIndicatorNone         = 0x00
+	tpduParameterIndicatorPID          = 0x01
+	tpduParameterIndicatorDCS          = 0x02
+	tpduParameterIndicatorUDL          = 0x04
+	tpduParameterIndicatorReservedMask = 0x78
+	tpduParameterIndicatorExtFlag      = 0x80
+	tpduTimestampOctets                = 7
+	tpduStatusReportTimeStatusLen      = tpduTimestampOctets*2 + 1
+	tpduReportUnusedMask               = 0xBC
 )
 
 const (
 	tpPIDUSIMDataDownload = 0x7F
 	tpDCSGSM7             = 0x00
 	tpDCSUCS2             = 0x08
+)
+
+const (
+	tpFailureCauseMemoryCapacityExceeded = 0xD3
+	tpFailureCauseUSIMDataDownloadError  = 0xD5
+	tpFailureCauseUnspecified            = 0xFF
 )
 
 const (

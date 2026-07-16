@@ -8,6 +8,7 @@ import (
 
 func init() {
 	setSubmitReportTimeout(defaultSubmitReportTimeout)
+	setMemoryAvailableRetryTimeout(defaultTRATimeout)
 }
 
 func DefaultSubmitReportTimeout() time.Duration {
@@ -32,6 +33,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.DeliveryReportTimeout == 0 {
 		cfg.DeliveryReportTimeout = DefaultDeliveryReportTimeout()
 	}
+	if cfg.SubmitReportTimeout <= 35*time.Second || cfg.SubmitReportTimeout >= 45*time.Second {
+		return Config{}, errors.New("creating SMS endpoint: submit report timeout must be > 35s and < 45s")
+	}
+	if cfg.DeliveryReportTimeout <= 12*time.Second || cfg.DeliveryReportTimeout >= 20*time.Second {
+		return Config{}, errors.New("creating SMS endpoint: delivery report timeout must be > 12s and < 20s")
+	}
 	return cfg, nil
 }
 
@@ -41,4 +48,12 @@ func currentSubmitReportTimeout() time.Duration {
 
 func setSubmitReportTimeout(timeout time.Duration) {
 	submitReportTimeoutNanos.Store(int64(timeout))
+}
+
+func currentMemoryAvailableRetryTimeout() time.Duration {
+	return time.Duration(memoryAvailableRetryTimeoutNanos.Load())
+}
+
+func setMemoryAvailableRetryTimeout(timeout time.Duration) {
+	memoryAvailableRetryTimeoutNanos.Store(int64(timeout))
 }

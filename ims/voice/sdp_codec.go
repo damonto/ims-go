@@ -742,7 +742,7 @@ func applyCodecFMTP(codec AudioCodecConfig, fmtp string) AudioCodecConfig {
 	codec.Bandwidth = fmtpParam(fmtp, "bw")
 	codec.HFOnly = fmtpFlag(fmtp, "hf-only")
 	if codec.Name == CodecTelephoneEvent {
-		codec.DTMFEventMask = parseTelephoneEventMask(fmtp)
+		codec.DTMFEventMask = dtmfEventMaskOrDefault(parseTelephoneEventMask(fmtp))
 	}
 	if value, ok := fmtpSignedParam(fmtp, "ch-aw-recv"); ok {
 		codec.ChAwRecv = &value
@@ -807,6 +807,30 @@ func parseTelephoneEventMask(fmtp string) uint16 {
 		}
 	}
 	return mask
+}
+
+func validTelephoneEventFMTP(fmtp string) bool {
+	if strings.TrimSpace(fmtp) == "" {
+		return true
+	}
+	for part := range strings.SplitSeq(fmtp, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		startText, endText, hasRange := strings.Cut(part, "-")
+		start, ok := parseBoundedDecimal(startText, 0, 15)
+		if !ok {
+			return false
+		}
+		if hasRange {
+			end, ok := parseBoundedDecimal(endText, start, 15)
+			if !ok || end < start {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func dtmfEventMaskOrDefault(mask uint16) uint16 {

@@ -479,7 +479,7 @@ func (c *Call) releaseCancelledInvite2xx(resp sip.Message) error {
 	c.remoteTo = nonEmpty(resp.Header("To"), c.remoteTo)
 	c.remoteURI = nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), c.remoteURI)
 	c.targetURI = c.remoteURI
-	c.routeSet = reverseValues(resp.HeadersByName("Record-Route"))
+	c.routeSet = reverseValues(resp.HeaderList("Record-Route"))
 	c.earlyDialogs = nil
 	snap := c.dialogSnapshot()
 	c.mu.Unlock()

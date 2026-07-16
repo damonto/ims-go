@@ -63,8 +63,8 @@ func TestNormalizeConfigSubmitReportTimeout(t *testing.T) {
 		},
 		{
 			name:               "explicit timeouts",
-			cfg:                Config{SubmitReportTimeout: 45 * time.Second, DeliveryReportTimeout: 17 * time.Second},
-			wantSubmitReport:   45 * time.Second,
+			cfg:                Config{SubmitReportTimeout: 44 * time.Second, DeliveryReportTimeout: 17 * time.Second},
+			wantSubmitReport:   44 * time.Second,
 			wantDeliveryReport: 17 * time.Second,
 		},
 		{
@@ -75,6 +75,16 @@ func TestNormalizeConfigSubmitReportTimeout(t *testing.T) {
 		{
 			name:    "negative delivery report timeout",
 			cfg:     Config{DeliveryReportTimeout: -time.Second},
+			wantErr: true,
+		},
+		{
+			name:    "submit report timeout at upper boundary",
+			cfg:     Config{SubmitReportTimeout: 45 * time.Second},
+			wantErr: true,
+		},
+		{
+			name:    "delivery report timeout at lower boundary",
+			cfg:     Config{DeliveryReportTimeout: 12 * time.Second},
 			wantErr: true,
 		},
 	}
@@ -163,7 +173,7 @@ func (c *smsppDownloadStubCard) SMSPPDownload(ctx context.Context, req usimcard.
 }
 
 func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
-	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222"
+	const wantSecurityVerify = "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222"
 
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
@@ -348,22 +358,27 @@ func TestSendRequestsStatusReportWhenConfigured(t *testing.T) {
 
 func TestNotifyMemoryAvailableSendsRPSMMA(t *testing.T) {
 	tests := []struct {
-		name        string
-		reportType  byte
-		reportCause byte
-		wantErr     string
+		name         string
+		reportType   byte
+		reportCause  byte
+		wantErr      string
+		wantAttempts int
 	}{
-		{name: "rp-ack", reportType: rpAckNetworkToMS},
-		{name: "rp-error", reportType: rpErrorNetworkToMS, reportCause: rpCauseMemoryCapacityExceeded, wantErr: "memory capacity exceeded"},
+		{name: "rp-ack", reportType: rpAckNetworkToMS, wantAttempts: 1},
+		{name: "permanent rp-error", reportType: rpErrorNetworkToMS, reportCause: rpCauseProtocolErrorUnspecified, wantErr: "protocol error", wantAttempts: 1},
+		{name: "temporary rp-error is retried once", reportType: rpErrorNetworkToMS, reportCause: rpCauseTemporaryFailure, wantErr: "temporary failure", wantAttempts: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newServiceTransport()
 			sess, reg := registeredService(t, transport)
-			svc, err := New(Config{Logger: testLogger(), SubmitReportTimeout: time.Second}, sess, reg, serviceStubCard{})
+			svc, err := New(Config{Logger: testLogger(), SubmitReportTimeout: 40 * time.Second}, sess, reg, serviceStubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
+			setMemoryAvailableRetryTimeout(10 * time.Millisecond)
+			defer setMemoryAvailableRetryTimeout(defaultTRATimeout)
+			var references []byte
 
 			transport.onWrite = func(data []byte) {
 				req := mustParseMessage(t, data)
@@ -380,6 +395,7 @@ func TestNotifyMemoryAvailableSendsRPSMMA(t *testing.T) {
 				if rp.Type != rpSMMAMSToNetwork {
 					t.Fatalf("RP type = 0x%02X, want RP-SMMA", rp.Type)
 				}
+				references = append(references, rp.Reference)
 				transport.queue(newResponse(req, 202, "Accepted"))
 
 				report := rpMessage{Type: tt.reportType, Reference: rp.Reference, Cause: tt.reportCause, HasCause: tt.reportType == rpErrorNetworkToMS}
@@ -397,6 +413,12 @@ func TestNotifyMemoryAvailableSendsRPSMMA(t *testing.T) {
 			}
 
 			err = svc.NotifyMemoryAvailable(context.Background(), "sip:ipsmgw.example.net")
+			if len(references) != tt.wantAttempts {
+				t.Fatalf("RP-SMMA attempts = %d, want %d", len(references), tt.wantAttempts)
+			}
+			if len(references) == 2 && references[0] == references[1] {
+				t.Fatalf("retry RP reference = %d, want a new reference", references[1])
+			}
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("NotifyMemoryAvailable() error = %v", err)
@@ -522,7 +544,15 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	transport := newServiceTransport()
 	sess, reg := registeredService(t, transport)
 	gotCh := make(chan Incoming, 1)
-	svc, err := New(Config{Logger: testLogger(), OnIncoming: func(in Incoming) { gotCh <- in }}, sess, reg, serviceStubCard{})
+	accepted := 0
+	svc, err := New(Config{
+		Logger: testLogger(),
+		AcceptIncoming: func(context.Context, Incoming) error {
+			accepted++
+			return nil
+		},
+		OnIncoming: func(in Incoming) { gotCh <- in },
+	}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -552,6 +582,12 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	if !handled {
 		t.Fatal("HandleRequest() handled = false, want true")
 	}
+	if _, err := svc.HandleRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleRequest(retransmission) error = %v", err)
+	}
+	if accepted != 1 {
+		t.Fatalf("AcceptIncoming calls = %d, want 1", accepted)
+	}
 	select {
 	case got := <-gotCh:
 		if got.Text != "hello" || got.From != "+15551234567" || got.ServiceCenter != "+15550000000" {
@@ -568,6 +604,11 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting for incoming sms callback")
+	}
+	select {
+	case got := <-gotCh:
+		t.Fatalf("duplicate OnIncoming callback = %+v", got)
+	default:
 	}
 }
 
@@ -1765,12 +1806,13 @@ func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 	errCh := make(chan error, 1)
 	svc, err := New(Config{
 		Logger:              testLogger(),
-		SubmitReportTimeout: 20 * time.Millisecond,
+		SubmitReportTimeout: 40 * time.Second,
 		OnError:             func(err error) { errCh <- err },
 	}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	svc.submitTimeout.Store(int64(20 * time.Millisecond))
 	defer func() {
 		if err := svc.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -1845,12 +1887,13 @@ func TestSendReturnsPartialSubmissionAfterMultipartFailure(t *testing.T) {
 	errCh := make(chan error, 1)
 	svc, err := New(Config{
 		Logger:              testLogger(),
-		SubmitReportTimeout: 20 * time.Millisecond,
+		SubmitReportTimeout: 40 * time.Second,
 		OnError:             func(err error) { errCh <- err },
 	}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	svc.submitTimeout.Store(int64(20 * time.Millisecond))
 	defer func() {
 		if err := svc.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -1925,7 +1968,7 @@ func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
 			errCh := make(chan error, 1)
 			svc, err := New(Config{
 				Logger:              testLogger(),
-				SubmitReportTimeout: time.Second,
+				SubmitReportTimeout: 40 * time.Second,
 				OnError:             func(err error) { errCh <- err },
 			}, sess, reg, serviceStubCard{})
 			if err != nil {
@@ -2000,7 +2043,7 @@ func TestSendSIPURIRequiresInReplyToForSubmitReport(t *testing.T) {
 	sess, reg := registeredService(t, transport)
 	svc, err := New(Config{
 		Logger:              testLogger(),
-		SubmitReportTimeout: time.Second,
+		SubmitReportTimeout: 40 * time.Second,
 	}, sess, reg, serviceStubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -2099,7 +2142,7 @@ func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 	errCh := make(chan error, 1)
 	svc, err := New(Config{
 		Logger:              testLogger(),
-		SubmitReportTimeout: time.Second,
+		SubmitReportTimeout: 40 * time.Second,
 		OnError:             func(err error) { errCh <- err },
 	}, sess, reg, serviceStubCard{})
 	if err != nil {
@@ -2436,7 +2479,7 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 			if len(transport.writes) == 1 {
 				transport.queue(newResponse(req, 401, "Unauthorized",
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`},
 				))
 				return
 			}
@@ -2469,7 +2512,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 			if len(transport.writes) == 1 {
 				transport.queue(newResponse(req, 401, "Unauthorized",
 					sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`},
-					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`},
+					sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`},
 				))
 				return
 			}

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ type serverTransactionState uint8
 const (
 	serverTransactionProceeding serverTransactionState = iota
 	serverTransactionCompleted
+	serverTransactionAccepted
 	serverTransactionConfirmed
 	serverTransactionTerminated
 )
@@ -91,7 +93,10 @@ func (s *Session) processServerTransaction(ctx context.Context, req Request) (bo
 		if tx == nil {
 			return true, s.WriteStatus(ctx, req, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist")
 		}
-		if err := s.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
+		resp := sip.NewResponse(sipStatusOK, "OK")
+		resp.Headers = sip.ResponseHeaders(req.Message, sipStatusOK)
+		resp.Headers.Set("To", sip.WithTag(req.Message.Header("To"), "", sip.ResponseTag(tx.request)))
+		if err := s.WriteResponse(ctx, req, resp); err != nil {
 			return true, err
 		}
 		if err := tx.handleCancel(ctx); err != nil {
@@ -101,11 +106,48 @@ func (s *Session) processServerTransaction(ctx context.Context, req Request) (bo
 		return true, err
 	default:
 		if tx := s.lookupServerTransaction(req.Message); tx != nil {
+			if tx.acceptedInvite() {
+				return false, nil
+			}
 			return true, tx.retransmit(ctx)
+		}
+		if s.isMergedRequest(req.Message) {
+			s.registerServerTransaction(newServerTransaction(s, req))
+			return true, s.WriteStatus(ctx, req, sipStatusLoopDetected, "Loop Detected")
 		}
 		s.registerServerTransaction(newServerTransaction(s, req))
 		return false, nil
 	}
+}
+
+func (tx *serverTransaction) acceptedInvite() bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return tx.method == "INVITE" && tx.state == serverTransactionAccepted
+}
+
+func (s *Session) isMergedRequest(msg sip.Message) bool {
+	if sip.HeaderTag(msg.Header("To")) != "" {
+		return false
+	}
+	callID := strings.TrimSpace(msg.Header("Call-ID"))
+	fromTag := strings.TrimSpace(sip.HeaderTag(msg.Header("From")))
+	cseq := strings.TrimSpace(msg.Header("CSeq"))
+	if callID == "" || cseq == "" {
+		return false
+	}
+	s.mu.Lock()
+	transactions := make([]*serverTransaction, 0, len(s.serverTxs))
+	for _, tx := range s.serverTxs {
+		transactions = append(transactions, tx)
+	}
+	s.mu.Unlock()
+	for _, tx := range transactions {
+		if tx.toTag == "" && tx.callID == callID && tx.fromTag == fromTag && strings.EqualFold(strings.TrimSpace(tx.request.Header("CSeq")), cseq) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) registerServerTransaction(tx *serverTransaction) {
@@ -224,6 +266,10 @@ func (tx *serverTransaction) recordResponse(resp sip.Message) {
 		}
 		tx.startLifetimeTimer(timers.TH)
 	}
+	if final && method == "INVITE" && status < 300 {
+		tx.state = serverTransactionAccepted
+		tx.startLifetimeTimer(timers.TL)
+	}
 	tx.mu.Unlock()
 	stopTimer(tryingTimer)
 	if !final {
@@ -233,7 +279,6 @@ func (tx *serverTransaction) recordResponse(resp sip.Message) {
 		return
 	}
 	if method == "INVITE" {
-		tx.terminate()
 		return
 	}
 	if reliable {
@@ -264,6 +309,9 @@ func (tx *serverTransaction) sendAutomaticTrying() {
 	peer := tx.peer
 	resp := sip.NewResponse(sipStatusTrying, "Trying")
 	resp.Headers = sip.ResponseHeaders(req, sipStatusTrying)
+	if timestamp := req.Header("Timestamp"); timestamp != "" {
+		resp.Headers.Add("Timestamp", timestamp)
+	}
 	tx.session.applyResponseDecorator(&resp)
 	tx.lastResponse = cloneSIPMessage(resp)
 	tx.finalStatus = sipStatusTrying
@@ -273,8 +321,7 @@ func (tx *serverTransaction) sendAutomaticTrying() {
 	ctx, cancel := tx.session.timeoutContext(max(tx.session.cfg.TransactionTimers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
-		tx.session.logger.Warn("sending automatic invite trying response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "err", err)
-		tx.terminate()
+		tx.fail(fmt.Errorf("sending automatic invite trying response: %w", err))
 	}
 }
 
@@ -364,7 +411,8 @@ func (tx *serverTransaction) retransmitInviteFinal() {
 	ctx, cancel := tx.session.timeoutContext(max(timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
-		tx.session.logger.Warn("retransmitting invite final response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "status", resp.StatusCode(), "err", err)
+		tx.fail(fmt.Errorf("retransmitting invite final response: %w", err))
+		return
 	}
 
 	tx.mu.Lock()
@@ -394,8 +442,20 @@ func (tx *serverTransaction) startLifetimeTimer(timeout time.Duration) {
 		return
 	}
 	tx.lifetimeTimer = time.AfterFunc(timeout, func() {
+		tx.mu.Lock()
+		completed := tx.state == serverTransactionCompleted
+		tx.mu.Unlock()
+		if completed {
+			tx.fail(&TransactionTimeoutError{Method: tx.method, Timer: "H"})
+			return
+		}
 		tx.session.unregisterServerTransaction(tx)
 	})
+}
+
+func (tx *serverTransaction) fail(err error) {
+	tx.terminate()
+	tx.session.notifyHandlers(err)
 }
 
 func (tx *serverTransaction) markTerminated() {
@@ -425,7 +485,7 @@ func serverTransactionKey(msg sip.Message) string {
 		if sentBy == "" {
 			return ""
 		}
-		return "3261|" + branch + "|" + sentBy + "|" + method
+		return "3261|" + branch + "|" + canonicalSIPSentBy(sentBy) + "|" + method
 	}
 
 	requestURI := strings.TrimSpace(sip.RequestURI(msg))
@@ -433,7 +493,7 @@ func serverTransactionKey(msg sip.Message) string {
 	cseq := strings.TrimSpace(msg.Header("CSeq"))
 	fromTag := strings.TrimSpace(sip.HeaderTag(msg.Header("From")))
 	toTag := strings.TrimSpace(sip.HeaderTag(msg.Header("To")))
-	if requestURI == "" || via == "" || callID == "" || cseq == "" || fromTag == "" {
+	if requestURI == "" || via == "" || callID == "" || cseq == "" {
 		return ""
 	}
 	return "2543|" + requestURI + "|" + toTag + "|" + fromTag + "|" + callID + "|" + cseq + "|" + via
@@ -445,14 +505,13 @@ func cancelMatchesServerTransaction(msg sip.Message, tx *serverTransaction) bool
 	if strings.HasPrefix(branch, "z9hG4bK") {
 		return branch != "" &&
 			branch == tx.branch &&
-			strings.TrimSpace(sip.TopViaSentBy(via)) == tx.sentBy &&
-			strings.TrimSpace(msg.Header("Call-ID")) == tx.callID &&
-			sip.CSeqNumber(msg.Header("CSeq")) == tx.cseqNumber
+			sameSIPSentBy(strings.TrimSpace(sip.TopViaSentBy(via)), tx.sentBy)
 	}
 	return strings.TrimSpace(sip.RequestURI(msg)) == tx.requestURI &&
 		strings.TrimSpace(msg.Header("Via")) == tx.topVia &&
 		strings.TrimSpace(msg.Header("Call-ID")) == tx.callID &&
 		strings.TrimSpace(sip.HeaderTag(msg.Header("From"))) == tx.fromTag &&
+		strings.TrimSpace(sip.HeaderTag(msg.Header("To"))) == tx.toTag &&
 		sip.CSeqNumber(msg.Header("CSeq")) == tx.cseqNumber
 }
 
@@ -464,7 +523,7 @@ func ackMatchesServerTransaction(msg sip.Message, tx *serverTransaction) bool {
 	branch := strings.TrimSpace(sip.TopViaBranch(via))
 	if strings.HasPrefix(branch, "z9hG4bK") {
 		return branch == tx.branch &&
-			strings.TrimSpace(sip.TopViaSentBy(via)) == tx.sentBy &&
+			sameSIPSentBy(strings.TrimSpace(sip.TopViaSentBy(via)), tx.sentBy) &&
 			strings.TrimSpace(msg.Header("Call-ID")) == tx.callID &&
 			sip.CSeqNumber(msg.Header("CSeq")) == tx.cseqNumber
 	}

@@ -158,3 +158,27 @@ func TestNextSIPMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestNextCRLFKeepAlive(t *testing.T) {
+	tests := []struct {
+		name       string
+		stream     string
+		wantPacket string
+		wantRest   string
+		wantOK     bool
+	}{
+		{"pong", "\r\nSIP/2.0", "\r\n", "SIP/2.0", true},
+		{"ping", "\r\n\r\nINVITE", "\r\n\r\n", "INVITE", true},
+		{"partial", "\r", "", "\r", false},
+		{"SIP", "MESSAGE", "", "MESSAGE", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packet, rest, ok := nextCRLFKeepAlive([]byte(tt.stream))
+			if string(packet) != tt.wantPacket || string(rest) != tt.wantRest || ok != tt.wantOK {
+				t.Fatalf("nextCRLFKeepAlive() = (%q, %q, %t), want (%q, %q, %t)", packet, rest, ok, tt.wantPacket, tt.wantRest, tt.wantOK)
+			}
+		})
+	}
+}

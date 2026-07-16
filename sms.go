@@ -81,6 +81,7 @@ type SMSReport struct {
 	HasProtocolIdentifier bool
 	DataCodingScheme      byte
 	HasDataCodingScheme   bool
+	UserDataLength        int
 	UserData              []byte
 	ReceivedAt            time.Time
 }
@@ -275,6 +276,7 @@ func (c *Client) handleSMSStatusReport(report imssms.StatusReport) {
 		HasProtocolIdentifier: report.HasProtocolIdentifier,
 		DataCodingScheme:      report.DataCodingScheme,
 		HasDataCodingScheme:   report.HasDataCodingScheme,
+		UserDataLength:        report.UserDataLength,
 		UserData:              append([]byte(nil), report.UserData...),
 		ReceivedAt:            time.Now(),
 	}

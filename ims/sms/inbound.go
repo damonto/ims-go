@@ -136,7 +136,13 @@ func (s *Endpoint) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMe
 			tpdu.Message.FromURI = fromURI
 			tpdu.Message.From = identity.MSISDN(fromURI)
 		}
-		s.deliverIncoming(msg, rp, tpdu)
+		if err := s.deliverIncoming(ctx, msg, rp, tpdu); err != nil {
+			cause := incomingRPCause(err)
+			failureCause := incomingTPFailureCause(err)
+			s.logger.Debug("rejecting inbound sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "cause", cause, "err", err)
+			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, cause, failureCause), ackInfo)
+			return nil
+		}
 		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), ackInfo); !ok {
 			return nil
 		}
@@ -161,7 +167,7 @@ func (s *Endpoint) handlePPDataDownload(ctx context.Context, msg sip.Message, rp
 	downloader, ok := s.card.(ppDownloader)
 	if !ok {
 		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", "card does not support SMS-PP download")
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseProtocolErrorUnspecified), info)
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, rpCauseProtocolErrorUnspecified, tpFailureCauseUSIMDataDownloadError), info)
 		return
 	}
 
@@ -171,7 +177,7 @@ func (s *Endpoint) handlePPDataDownload(ctx context.Context, msg sip.Message, rp
 	})
 	if err != nil {
 		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseProtocolErrorUnspecified), info)
+		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, rpCauseProtocolErrorUnspecified, tpFailureCauseUSIMDataDownloadError), info)
 		return
 	}
 	s.logger.Debug("sms-pp data download delivered", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "sw1", resp.SW1, "sw2", resp.SW2, "response_len", len(resp.Data))
@@ -227,18 +233,59 @@ func (s *Endpoint) sendDeliveryReport(ctx context.Context, msg sip.Message, repo
 	return nil
 }
 
-func (s *Endpoint) deliverIncoming(msg sip.Message, rp rpMessage, tpdu deliverTPDU) {
+func (s *Endpoint) deliverIncoming(ctx context.Context, msg sip.Message, rp rpMessage, tpdu deliverTPDU) error {
 	incoming := tpdu.Message
 	recipient := incomingRecipient(msg)
 	incoming.CallID = strings.TrimSpace(msg.Header("Call-ID"))
 	incoming.To = recipient.Number
 	incoming.ToURI = recipient.URI
 	incoming.ServiceCenter = rp.Originator
+	if !s.markSeen(msg) {
+		s.logger.Debug("suppressing duplicate sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "from", incoming.From, "from_uri", incoming.FromURI)
+		return nil
+	}
+	if s.cfg.AcceptIncoming != nil {
+		acceptCtx, cancel := context.WithTimeout(ctx, s.cfg.DeliveryReportTimeout)
+		defer cancel()
+		if err := s.cfg.AcceptIncoming(acceptCtx, incoming); err != nil {
+			s.clearSeen(msg)
+			return err
+		}
+	}
 	if tpdu.Concat != nil {
 		s.deliverConcat(incoming, *tpdu.Concat)
-		return
+		return nil
 	}
 	s.deliverSingle(msg, incoming)
+	return nil
+}
+
+func incomingRPCause(err error) byte {
+	var rpErr *RPError
+	if !errors.As(err, &rpErr) {
+		return rpCauseProtocolErrorUnspecified
+	}
+	switch rpErr.Cause {
+	case rpCauseMemoryCapacityExceeded,
+		rpCauseInvalidShortMessageTransferReference,
+		rpCauseSemanticallyIncorrectMessage,
+		rpCauseInvalidMandatoryInformation,
+		rpCauseMessageTypeNotImplemented,
+		rpCauseMessageNotCompatibleWithState,
+		rpCauseInformationElementNotImplemented,
+		rpCauseProtocolErrorUnspecified:
+		return rpErr.Cause
+	default:
+		return rpCauseProtocolErrorUnspecified
+	}
+}
+
+func incomingTPFailureCause(err error) byte {
+	var rpErr *RPError
+	if errors.As(err, &rpErr) && rpErr.Cause == rpCauseMemoryCapacityExceeded {
+		return tpFailureCauseMemoryCapacityExceeded
+	}
+	return tpFailureCauseUnspecified
 }
 
 func (s *Endpoint) deliverIncomingStatusReport(msg sip.Message, rp rpMessage, report StatusReport) {
@@ -286,11 +333,7 @@ func (s *Endpoint) deliverSingle(msg sip.Message, incoming Incoming) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}
-	if s.markSeen(msg) {
-		s.cfg.OnIncoming(incoming)
-		return
-	}
-	s.logger.Debug("suppressing duplicate sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "from", incoming.From, "from_uri", incoming.FromURI, "text", incoming.Text)
+	s.cfg.OnIncoming(incoming)
 }
 
 func hasMSISDNLessFeatureCaps(msg sip.Message) bool {

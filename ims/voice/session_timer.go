@@ -175,6 +175,9 @@ func (c *Call) refreshSession() {
 	}
 	switch {
 	case resp.StatusCode() >= sipStatusOK && resp.StatusCode() < sipStatusMultipleChoices:
+		c.mu.Lock()
+		c.refreshGlareRetried = false
+		c.mu.Unlock()
 		if req.Method() == "INVITE" {
 			if err := c.acknowledgeSessionRefreshINVITE(ctx, resp); err != nil {
 				c.endpoint.emitError(err)
@@ -196,10 +199,49 @@ func (c *Call) refreshSession() {
 		}
 	case resp.StatusCode() == sipStatusRequestTimeout || resp.StatusCode() == sipStatusCallTransactionDoesNotExist:
 		c.terminateAfterSessionRefreshFailure()
+	case resp.StatusCode() == sipStatusRequestPending && req.Method() == "INVITE":
+		if c.markSessionRefreshGlareRetry() {
+			c.retrySessionRefreshAfterGlare()
+			return
+		}
+		c.endpoint.emitError(fmt.Errorf("refreshing session timer: repeated 491 response: %w", sip.NewResponseError(resp)))
 	default:
 		c.endpoint.emitError(fmt.Errorf("refreshing session timer: expected 2xx, got %w", sip.NewResponseError(resp)))
 		c.terminateAfterSessionRefreshFailure()
 	}
+}
+
+func (c *Call) markSessionRefreshGlareRetry() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refreshGlareRetried {
+		return false
+	}
+	c.refreshGlareRetried = true
+	return true
+}
+
+func (c *Call) retrySessionRefreshAfterGlare() {
+	ownerDelay := time.Duration(2100+rand.Int64N(1901)) * time.Millisecond
+	if c.Direction() == CallDirectionIncoming {
+		ownerDelay = time.Duration(rand.Int64N(2001)) * time.Millisecond
+	}
+	c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
+		timer := time.NewTimer(ownerDelay)
+		defer timer.Stop()
+		select {
+		case <-done:
+			return
+		case <-timer.C:
+		}
+		c.mu.Lock()
+		if c.closed || c.state == CallStateEnding || c.state == CallStateEnded || c.state == CallStateFailed {
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+		c.refreshSession()
+	})
 }
 
 func (c *Call) exchangeSessionRefresh(ctx context.Context, req sip.Message) (sip.Message, error) {

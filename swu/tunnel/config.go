@@ -12,9 +12,12 @@ import (
 )
 
 type Config struct {
-	LocalAddr                        string
-	RemoteAddr                       string
-	APN                              string
+	LocalAddr  string
+	RemoteAddr string
+	APN        string
+	// RequestDefaultAPN omits IDr so the ePDG selects the default APN.
+	// APN must be empty when this option is enabled.
+	RequestDefaultAPN                bool
 	PDNType                          PDNType
 	AKAPrimeNetworkName              string
 	AllowAKAPrimeNetworkNameMismatch bool
@@ -97,7 +100,10 @@ func (cfg Config) Normalized() (Config, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.APN == "" {
+	if cfg.RequestDefaultAPN && cfg.APN != "" {
+		return Config{}, errors.New("normalizing swu config: apn must be empty when requesting the default apn")
+	}
+	if !cfg.RequestDefaultAPN && cfg.APN == "" {
 		cfg.APN = DefaultAPN
 	}
 	if cfg.AKAPrimeNetworkName == "" {
@@ -224,6 +230,7 @@ func handshakeConfig(cfg Config) handshake.Config {
 		LocalAddr:                cfg.LocalAddr,
 		RemoteAddr:               cfg.RemoteAddr,
 		APN:                      cfg.APN,
+		RequestDefaultAPN:        cfg.RequestDefaultAPN,
 		PDNType:                  cfg.PDNType,
 		InitialPort:              cfg.InitialPort,
 		NATTPort:                 cfg.NATTPort,

@@ -608,12 +608,13 @@ func TestTCPSegmentAcceptable(t *testing.T) {
 		{name: "zero window exact ack", seq: 100, recv: 100, want: true},
 		{name: "zero window data rejected", seq: 100, length: 1, recv: 100},
 		{name: "left edge ack", seq: 100, recv: 100, window: 10, want: true},
-		{name: "right edge ack follows gvisor linux behavior", seq: 110, recv: 100, window: 10, want: true},
+		{name: "right edge ack is outside window", seq: 110, recv: 100, window: 10},
 		{name: "ack beyond right edge rejected", seq: 111, recv: 100, window: 10},
 		{name: "old overlap accepted", seq: 95, length: 10, recv: 100, window: 10, want: true},
-		{name: "right edge payload follows gvisor linux behavior", seq: 110, length: 1, recv: 100, window: 10, want: true},
+		{name: "right edge payload is outside window", seq: 110, length: 1, recv: 100, window: 10},
 		{name: "payload beyond right edge rejected", seq: 111, length: 1, recv: 100, window: 10},
-		{name: "wrapped right edge ack accepted", seq: 4, recv: ^uint32(0) - 5, window: 10, want: true},
+		{name: "wrapped value inside window", seq: 0, recv: ^uint32(0) - 5, window: 10, want: true},
+		{name: "wrapped right edge ack is outside window", seq: 4, recv: ^uint32(0) - 5, window: 10},
 		{name: "wrapped ack beyond right edge rejected", seq: 5, recv: ^uint32(0) - 5, window: 10},
 	}
 
@@ -621,6 +622,27 @@ func TestTCPSegmentAcceptable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tcpSegmentAcceptable(tt.seq, tt.length, tt.recv, tt.window); got != tt.want {
 				t.Fatalf("tcpSegmentAcceptable(%d, %d, %d, %d) = %t, want %t", tt.seq, tt.length, tt.recv, tt.window, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTCPControlSequenceLen(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags byte
+		want  uint32
+	}{
+		{name: "no control"},
+		{name: "syn", flags: packet.TCPFlagSYN, want: 1},
+		{name: "fin", flags: packet.TCPFlagFIN, want: 1},
+		{name: "syn and fin each occupy sequence space", flags: packet.TCPFlagSYN | packet.TCPFlagFIN, want: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tcpControlSequenceLen(tt.flags); got != tt.want {
+				t.Fatalf("tcpControlSequenceLen(%#02x) = %d, want %d", tt.flags, got, tt.want)
 			}
 		})
 	}
@@ -698,11 +720,13 @@ func TestTCPConnIgnoresAckNumberWithoutACKFlag(t *testing.T) {
 
 func TestTCPConnResetValidation(t *testing.T) {
 	tests := []struct {
-		name         string
-		segment      packet.TCPSegment
-		synSent      bool
-		wantErr      string
-		wantResponse tcpSegmentResponse
+		name            string
+		segment         packet.TCPSegment
+		synSent         bool
+		passive         bool
+		wantErr         string
+		wantRecoverable bool
+		wantResponse    tcpSegmentResponse
 	}{
 		{
 			name: "valid ack reset closes",
@@ -720,6 +744,17 @@ func TestTCPConnResetValidation(t *testing.T) {
 				Flags: packet.TCPFlagRST,
 			},
 			wantErr: "peer reset connection",
+		},
+		{
+			name:    "valid passive reset returns to listen",
+			passive: true,
+			segment: packet.TCPSegment{
+				Seq:   2001,
+				Ack:   1001,
+				Flags: packet.TCPFlagRST | packet.TCPFlagACK,
+			},
+			wantErr:         "peer reset connection",
+			wantRecoverable: true,
 		},
 		{
 			name: "in-window nonexact reset gets challenge ack",
@@ -752,6 +787,7 @@ func TestTCPConnResetValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := newEstablishedTCPConnForTest(t)
+			conn.passive = tt.passive
 			if tt.synSent {
 				conn.established = false
 				conn.passive = false
@@ -765,6 +801,20 @@ func TestTCPConnResetValidation(t *testing.T) {
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("processSegment() error = %v, want %q", err, tt.wantErr)
+				}
+				var usable interface{ TransportUsable() bool }
+				if got := errors.As(err, &usable) && usable.TransportUsable(); got != tt.wantRecoverable {
+					t.Fatalf("processSegment() recoverable = %t, want %t", got, tt.wantRecoverable)
+				}
+				if tt.wantRecoverable {
+					conn.mu.Lock()
+					established := conn.established
+					recvSeq := conn.recvSeq
+					closed := conn.closed
+					conn.mu.Unlock()
+					if established || recvSeq != 0 || closed {
+						t.Fatalf("passive state after reset = established %t recvSeq %d closed %t, want false/0/false", established, recvSeq, closed)
+					}
 				}
 				return
 			}
@@ -868,6 +918,61 @@ func TestTCPConnPassiveResetReturnsToListen(t *testing.T) {
 	}
 	if peerMSS != 768 {
 		t.Fatalf("peerMSS = %d, want 768", peerMSS)
+	}
+}
+
+func TestTCPConnPassiveEstablishedResetAcceptsNewConnection(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags byte
+		ack   uint32
+	}{
+		{name: "rst", flags: packet.TCPFlagRST},
+		{name: "rst ack", flags: packet.TCPFlagRST | packet.TCPFlagACK, ack: 1001},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.passive = true
+
+			conn.mu.Lock()
+			_, resetErr := conn.processSegment(packet.TCPSegment{
+				Seq:   2001,
+				Ack:   tt.ack,
+				Flags: tt.flags,
+			})
+			synResponse, synErr := conn.processSegment(packet.TCPSegment{
+				Seq:   3000,
+				Flags: packet.TCPFlagSYN,
+			})
+			_, ackErr := conn.processSegment(packet.TCPSegment{
+				Seq:   3001,
+				Ack:   synResponse.seq + 1,
+				Flags: packet.TCPFlagACK,
+			})
+			established := conn.established
+			closed := conn.closed
+			conn.mu.Unlock()
+
+			var usable interface{ TransportUsable() bool }
+			if !errors.As(resetErr, &usable) || !usable.TransportUsable() {
+				t.Fatalf("processSegment(RST) error = %v, want usable transport error", resetErr)
+			}
+			if synErr != nil {
+				t.Fatalf("processSegment(SYN) error = %v", synErr)
+			}
+			wantSYN := packet.TCPFlagSYN | packet.TCPFlagACK
+			if synResponse.flags != wantSYN || synResponse.ack != 3001 || !synResponse.retransmit {
+				t.Fatalf("SYN response = %+v, want SYN|ACK with ack 3001 and retransmit", synResponse)
+			}
+			if ackErr != nil {
+				t.Fatalf("processSegment(ACK) error = %v", ackErr)
+			}
+			if !established || closed {
+				t.Fatalf("new connection state = established %t closed %t, want true/false", established, closed)
+			}
+		})
 	}
 }
 
@@ -1880,11 +1985,12 @@ func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
 
 func TestTCPConnHandlesTerminalInboundSegment(t *testing.T) {
 	tests := []struct {
-		name      string
-		passive   bool
-		peerClose bool
-		segment   packet.TCPSegment
-		wantErr   string
+		name        string
+		passive     bool
+		peerClose   bool
+		recoverable bool
+		segment     packet.TCPSegment
+		wantErr     string
 	}{
 		{
 			name:      "peer fin",
@@ -1923,8 +2029,9 @@ func TestTCPConnHandlesTerminalInboundSegment(t *testing.T) {
 			wantErr: "peer closed connection",
 		},
 		{
-			name:    "passive peer reset",
-			passive: true,
+			name:        "passive peer reset",
+			passive:     true,
+			recoverable: true,
 			segment: packet.TCPSegment{
 				Src:   &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
 				Dst:   &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
@@ -1953,6 +2060,28 @@ func TestTCPConnHandlesTerminalInboundSegment(t *testing.T) {
 			conn := newEstablishedTCPConnForTest(t)
 			conn.passive = tt.passive
 			conn.handleSegment(tt.segment)
+			if tt.recoverable {
+				_, _, err := conn.ReadPacket(context.Background())
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ReadPacket() error = %v, want %q", err, tt.wantErr)
+				}
+				var usable interface{ TransportUsable() bool }
+				if !errors.As(err, &usable) || !usable.TransportUsable() {
+					t.Fatalf("ReadPacket() error = %v, want usable transport error", err)
+				}
+				conn.mu.Lock()
+				closed := conn.closed
+				established := conn.established
+				conn.mu.Unlock()
+				if closed || established {
+					t.Fatalf("passive reset state = closed %t established %t, want false/false", closed, established)
+				}
+				if err := conn.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+				waitTCPDone(t, conn)
+				return
+			}
 			if tt.peerClose {
 				conn.mu.Lock()
 				closed := conn.closed

@@ -108,12 +108,13 @@ type MediaEvent struct {
 }
 
 type Endpoint struct {
-	cfg        Config
-	sess       *session.Session
-	reg        *registration.Registrar
-	logger     *slog.Logger
-	attachment session.Attachment
-	timers     session.TransactionTimers
+	cfg          Config
+	sess         *session.Session
+	reg          *registration.Registrar
+	logger       *slog.Logger
+	attachment   session.Attachment
+	timers       session.TransactionTimers
+	rtcpInterval func(NegotiatedMedia) time.Duration
 
 	mu        sync.Mutex
 	cseq      int64
@@ -152,6 +153,7 @@ type Call struct {
 	inviteCancel        func()
 	cancelledInviteStop chan struct{}
 	localINVITEPending  bool
+	refreshGlareRetried bool
 	remoteINVITEPending bool
 	remoteINVITECSeq    int64
 	remoteCSeq          int64
@@ -182,7 +184,10 @@ type Call struct {
 	dialogAttachment    session.Attachment
 	media               NegotiatedMedia
 	rtpSend             rtpSendState
+	rtcpSend            rtcpSendState
+	rtcpRecv            rtcpReceiveState
 	hold                CallHoldState
+	localHoldRTCPOff    bool
 	transport           MediaTransport
 	rtcpSSRC            uint32
 	emergency           bool
@@ -195,6 +200,29 @@ type rtpSendState struct {
 	ssrc          uint32
 	nextSequence  uint16
 	nextTimestamp uint32
+}
+
+type rtcpSendState struct {
+	packetCount       uint32
+	octetCount        uint32
+	lastRTPTimestamp  uint32
+	lastRTPSentAt     time.Time
+	lastRTPClockRate  int
+	reportsWithoutRTP int
+}
+
+type rtcpReceiveState struct {
+	initialized   bool
+	ssrc          uint32
+	baseSequence  uint16
+	maxSequence   uint16
+	cycles        uint32
+	received      uint32
+	expectedPrior uint32
+	receivedPrior uint32
+	jitter        uint32
+	transit       int64
+	lastArrival   time.Time
 }
 
 type earlyDialog struct {

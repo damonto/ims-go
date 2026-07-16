@@ -169,6 +169,12 @@ func TestApplyRouteSet(t *testing.T) {
 			wantRoutes:     []string{"<sip:pcscf.example.com;lr>", "<sip:user@example.com>"},
 		},
 		{
+			name:           "lr text in uri headers is still strict",
+			routes:         []string{"<sip:edge.example.com?X-Test=a;lr>"},
+			wantRequestURI: "sip:edge.example.com?X-Test=a;lr",
+			wantRoutes:     []string{"<sip:user@example.com>"},
+		},
+		{
 			name:           "empty routes leaves request untouched",
 			wantRequestURI: "sip:user@example.com",
 		},

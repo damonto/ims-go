@@ -10,6 +10,7 @@ import (
 )
 
 type Info struct {
+	APN                       string
 	InnerIPv4                 net.IP
 	InnerIPv6                 IPAddress
 	InnerIPv6Prefix           IPPrefix
@@ -165,6 +166,7 @@ func innerAddrsForInfo(info Info, remoteIP net.IP, localPort, remotePort int) (*
 
 func handshakeInfo(info Info) handshake.Info {
 	return handshake.Info{
+		APN:                       info.APN,
 		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
 		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
 		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),
@@ -185,6 +187,7 @@ func handshakeInfo(info Info) handshake.Info {
 
 func infoFromHandshake(info handshake.Info) Info {
 	return Info{
+		APN:                       info.APN,
 		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
 		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
 		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),

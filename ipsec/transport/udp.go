@@ -78,8 +78,8 @@ func newSecureUDPConn(s PacketSession, cfg SecureUDPConfig, action transportActi
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
 	}
-	if cfg.LocalPort == 0 || cfg.RemotePort == 0 {
-		return nil, fmt.Errorf("%s: ports are required", action)
+	if err := validateSecureTransportPorts(cfg.LocalPort, cfg.RemotePort); err != nil {
+		return nil, fmt.Errorf("%s: %w", action, err)
 	}
 	if err := validateSecureSPIs(cfg.OutboundSPI, cfg.InboundSPI); err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
@@ -123,6 +123,12 @@ func (t *UDPConn) LocalAddr() net.Addr {
 
 func (t *UDPConn) RemoteAddr() net.Addr {
 	return cloneUDPAddr(t.remote)
+}
+
+func (t *UDPConn) SupportsSIPKeepAlive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.secureMode != SecureModeUDPEncTunnel
 }
 
 func (t *UDPConn) WritePacket(ctx context.Context, data []byte) error {
@@ -244,6 +250,9 @@ func (t *UDPConn) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	t.mu.Unlock()
 	espPayload, ok := secureESPPayload(pkt, mode)
 	if !ok {
+		return false
+	}
+	if !secureOuterDestinationMatches(pkt, t.local.IP, mode) {
 		return false
 	}
 	spi := packetSPI(espPayload)

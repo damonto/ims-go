@@ -810,6 +810,40 @@ func TestBuildSDPAnswerPreservesTelephoneEventMask(t *testing.T) {
 	}
 }
 
+func TestBuildSDPAnswerDefaultsTelephoneEventWithoutFMTP(t *testing.T) {
+	tests := []struct {
+		name string
+		sdp  string
+	}{
+		{
+			name: "missing fmtp defaults to events zero through fifteen",
+			sdp:  "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104 110\r\na=rtpmap:104 AMR-WB/16000\r\na=rtpmap:110 telephone-event/16000\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := (Config{}).Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			remote, err := unmarshalSDP([]byte(tt.sdp))
+			if err != nil {
+				t.Fatalf("unmarshalSDP() error = %v", err)
+			}
+			body, media, err := buildSDPAnswer(cfg, net.IPv4(10, 0, 0, 2), 40000, remote, MediaOffer{})
+			if err != nil {
+				t.Fatalf("buildSDPAnswer() error = %v", err)
+			}
+			if media.DTMF == nil || media.DTMF.DTMFEventMask != dtmfAllEventsMask {
+				t.Fatalf("DTMF = %+v, want default events 0-15", media.DTMF)
+			}
+			if !strings.Contains(string(body), "a=fmtp:110 0-15\r\n") {
+				t.Fatalf("SDP answer missing default telephone-event range:\n%s", body)
+			}
+		})
+	}
+}
+
 func TestBuildSDPAnswerRejectsTelephoneEventWithoutDTMFDigits(t *testing.T) {
 	cfg, err := (Config{}).Normalized()
 	if err != nil {
@@ -843,6 +877,29 @@ func TestParseTelephoneEventMask(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := parseTelephoneEventMask(tt.fmtp); got != tt.want {
 				t.Fatalf("parseTelephoneEventMask() = %#04x, want %#04x", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidTelephoneEventFMTP(t *testing.T) {
+	tests := []struct {
+		name string
+		fmtp string
+		want bool
+	}{
+		{name: "empty uses default", fmtp: "", want: true},
+		{name: "all events", fmtp: "0-15", want: true},
+		{name: "list and ranges", fmtp: "0-2,10,12-15", want: true},
+		{name: "invalid token", fmtp: "digits", want: false},
+		{name: "out of range", fmtp: "0-16", want: false},
+		{name: "reversed range", fmtp: "8-2", want: false},
+		{name: "empty item", fmtp: "0,,1", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validTelephoneEventFMTP(tt.fmtp); got != tt.want {
+				t.Fatalf("validTelephoneEventFMTP(%q) = %t, want %t", tt.fmtp, got, tt.want)
 			}
 		})
 	}
@@ -1139,6 +1196,28 @@ func TestBuildSDPAnswerPreconditionConfirmation(t *testing.T) {
 	}
 }
 
+func TestParseQoSConfirmationRemote(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{name: "remote sendrecv", line: "a=conf:qos remote sendrecv", want: true},
+		{name: "case insensitive", line: "a=conf:qos REMOTE SENDRECV", want: true},
+		{name: "none is not confirmation", line: "a=conf:qos remote none"},
+		{name: "local confirmation", line: "a=conf:qos local sendrecv"},
+		{name: "missing status", line: "a=conf:qos remote"},
+		{name: "extra field", line: "a=conf:qos remote sendrecv extra"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseQoSConfirmationRemote(tt.line); got != tt.want {
+				t.Fatalf("parseQoSConfirmationRemote(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSDPAudioLineTextRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1226,27 +1305,23 @@ func TestConfigNormalizedMediaInactivityTimers(t *testing.T) {
 		cfg      Config
 		wantRTP  time.Duration
 		wantRTCP time.Duration
-		wantSend time.Duration
 	}{
 		{
 			name:     "zero values use carrier defaults",
 			wantRTP:  10 * time.Second,
 			wantRTCP: 30 * time.Second,
-			wantSend: defaultRTCPSend,
 		},
 		{
 			name:     "explicit zero disables timers",
-			cfg:      Config{RTPInactivityTimeout: Duration(0), RTCPInactivityTimeout: Duration(0), RTCPSendInterval: Duration(0)},
+			cfg:      Config{RTPInactivityTimeout: Duration(0), RTCPInactivityTimeout: Duration(0)},
 			wantRTP:  0,
 			wantRTCP: 0,
-			wantSend: 0,
 		},
 		{
 			name:     "explicit non-zero timers",
-			cfg:      Config{RTPInactivityTimeout: Duration(10 * time.Second), RTCPInactivityTimeout: Duration(11 * time.Second), RTCPSendInterval: Duration(3 * time.Second)},
+			cfg:      Config{RTPInactivityTimeout: Duration(10 * time.Second), RTCPInactivityTimeout: Duration(11 * time.Second)},
 			wantRTP:  10 * time.Second,
 			wantRTCP: 11 * time.Second,
-			wantSend: 3 * time.Second,
 		},
 	}
 	for _, tt := range tests {
@@ -1255,10 +1330,9 @@ func TestConfigNormalizedMediaInactivityTimers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Normalized() error = %v", err)
 			}
-			if *got.RTPInactivityTimeout != tt.wantRTP || *got.RTCPInactivityTimeout != tt.wantRTCP || *got.RTCPSendInterval != tt.wantSend {
-				t.Fatalf("media timers = %v/%v/%v, want %v/%v/%v",
-					*got.RTPInactivityTimeout, *got.RTCPInactivityTimeout, *got.RTCPSendInterval,
-					tt.wantRTP, tt.wantRTCP, tt.wantSend)
+			if *got.RTPInactivityTimeout != tt.wantRTP || *got.RTCPInactivityTimeout != tt.wantRTCP {
+				t.Fatalf("inactivity timers = %v/%v, want %v/%v",
+					*got.RTPInactivityTimeout, *got.RTCPInactivityTimeout, tt.wantRTP, tt.wantRTCP)
 			}
 		})
 	}
@@ -1496,6 +1570,64 @@ func TestSDPWithDirectionMarksSessionModificationQoSMet(t *testing.T) {
 				if !strings.Contains(got, want) {
 					t.Fatalf("SDP missing %q:\n%s", want, got)
 				}
+			}
+		})
+	}
+}
+
+func TestSDPWithDirectionKeepsRTCPBandwidthScopedToAudio(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "zero modifiers split across video and audio",
+			body: "v=0\r\nb=RR:0\r\nm=video 50002 RTP/AVP 96\r\nb=RS:0\r\nm=audio 50000 RTP/AVP 104\r\nb=RR:0\r\na=sendrecv\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(sdpWithDirection([]byte(tt.body), MediaDirectionSendOnly, true))
+			if strings.Contains(got, "b=RR:2500") {
+				t.Fatalf("bandwidth from different SDP scopes disabled audio RTCP:\n%s", got)
+			}
+			if strings.Count(got, "b=RR:0") != 2 {
+				t.Fatalf("session/audio b=RR:0 was modified:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestLocalSDPWithDirectionRestoresDisabledRTCP(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "resume disables RTCP enabled only for hold",
+			body: "v=0\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 50000 RTP/AVP 104\r\nb=RS:0\r\nb=RR:2500\r\na=sendonly\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{
+				endpoint:         &Endpoint{},
+				localSDP:         []byte(tt.body),
+				localHoldRTCPOff: true,
+			}
+			got, err := call.localSDPWithDirection(MediaDirectionSendRecv)
+			if err != nil {
+				t.Fatalf("localSDPWithDirection() error = %v", err)
+			}
+			body := string(got)
+			for _, want := range []string{"b=RS:0\r\n", "b=RR:0\r\n", "a=sendrecv\r\n"} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("resumed SDP missing %q:\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, "b=RR:2500") {
+				t.Fatalf("resumed SDP kept temporary hold RTCP bandwidth:\n%s", body)
 			}
 		})
 	}

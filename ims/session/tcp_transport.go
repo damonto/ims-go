@@ -96,6 +96,14 @@ func (t *tcpTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error)
 		n, err := t.conn.Read(buf)
 		if n > 0 {
 			t.stream = append(t.stream, buf[:n]...)
+			for {
+				keepalive, rest, ok := nextCRLFKeepAlive(t.stream)
+				if !ok {
+					break
+				}
+				t.queued = append(t.queued, keepalive)
+				t.stream = rest
+			}
 			messages, rest, parseErr := StageSIPMessages(t.stream)
 			if parseErr != nil {
 				return nil, nil, fmt.Errorf("reading tcp packet: %w", parseErr)
@@ -115,6 +123,16 @@ func (t *tcpTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error)
 		}
 		return nil, nil, fmt.Errorf("reading tcp packet: %w", err)
 	}
+}
+
+func nextCRLFKeepAlive(stream []byte) ([]byte, []byte, bool) {
+	if len(stream) >= 4 && string(stream[:4]) == "\r\n\r\n" {
+		return append([]byte(nil), stream[:4]...), stream[4:], true
+	}
+	if len(stream) >= 2 && string(stream[:2]) == "\r\n" {
+		return append([]byte(nil), stream[:2]...), stream[2:], true
+	}
+	return nil, stream, false
 }
 
 func (t *tcpTransport) Close() error {

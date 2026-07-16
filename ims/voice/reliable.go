@@ -313,16 +313,11 @@ func earlyMediaAuthorized(msg sip.Message) bool {
 }
 
 func tokenHeaderContains(msg sip.Message, name string, want string) bool {
-	for _, value := range msg.HeadersByName(name) {
-		if sip.TokenListContains(value, want) {
-			return true
-		}
-	}
-	return false
+	return msg.HeaderHasToken(name, want)
 }
 
 func routeSetFromResponse(msg sip.Message) []string {
-	routes := reverseValues(msg.HeadersByName("Record-Route"))
+	routes := reverseValues(msg.HeaderList("Record-Route"))
 	if routes == nil {
 		return []string{}
 	}

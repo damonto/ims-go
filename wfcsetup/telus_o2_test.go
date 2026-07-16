@@ -1,6 +1,7 @@
 package wfcsetup
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/base64"
@@ -13,12 +14,48 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/damonto/ims-go/eapaka"
 	usim "github.com/damonto/wwan-go/sim"
 )
 
 const testAKAChallenge = "AQIAfBcBAAABBQAAXOZSkCjxysgE43GWqHJvgQIFAABrikWGrekAALNU4TxmCDPoCwUAAJT0nqXeAYlqzT0UGXINENWBBQAA7z3fhImkg+vcCKWIZBdvuYIJAAAPRUFp7KWFo+Thr78Qj9hEkB2zA0i6KakODsufBC+BJQ=="
 const testTelusAKAChallengeResponse = "AgIAKBcBAAADAwBAx58CpZ/Jo48LBQAAkfZGP8zKZP5Pr0jlb913NA=="
 const testO2AKAChallengeResponse = "AgIAKBcBAAADAwBAx58CpZ/Jo48LBQAA4F7rN+J4dlTRddqJyg9UYw=="
+
+func TestDecodeEAPAKAChallengeRejectsAKAPrime(t *testing.T) {
+	wire, err := (eapaka.AKAMessage{
+		Code:       1,
+		Identifier: 2,
+		EAPType:    50,
+		Subtype:    1,
+		Attributes: []eapaka.AKAAttribute{
+			{Type: 1, Value: append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x11}, 16)...)},
+			{Type: 2, Value: append([]byte{0x00, 0x00}, bytes.Repeat([]byte{0x22}, 16)...)},
+			{Type: 23, Value: []byte{0x00, 0x04, 'W', 'L', 'A', 'N'}},
+			{Type: 24, Value: []byte{0x00, 0x01}},
+			{Type: 11, Value: append([]byte{0x00, 0x00}, make([]byte, 16)...)},
+		},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	challenge := base64.StdEncoding.EncodeToString(wire)
+	tests := []struct {
+		name string
+		kind akaChallengeKind
+	}{
+		{name: "complete eap challenge", kind: akaChallengeKindEAPAKA},
+		{name: "nsds challenge", kind: akaChallengeKindNSDS},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeEAPAKAChallenge(challenge, tt.kind); err == nil || !strings.Contains(err.Error(), "unsupported") {
+				t.Fatalf("decodeEAPAKAChallenge() error = %v, want unsupported AKA prime", err)
+			}
+		})
+	}
+}
 
 func testAKAResult(t *testing.T) usim.AKAResult {
 	t.Helper()

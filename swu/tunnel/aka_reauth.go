@@ -14,20 +14,17 @@ func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, e
 	if f.reauthIdentity == "" {
 		return f.clientErrorResponse(message.Identifier, errors.New("validating reauth state: reauth identity is unavailable"))
 	}
-	discardStoredAKAReauthState(f.card, f.currentState)
 	if err := f.verifyMessageMAC(message.EAPType, eapData, f.currentState.KAut, nil); err != nil {
 		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying reauth mac: %w", err))
 	}
 	if err := f.verifyCheckcode(message.Attributes, message.EAPType); err != nil {
 		return f.clientErrorResponse(message.Identifier, fmt.Errorf("verifying reauth checkcode: %w", err))
 	}
-	if response, ok, err := f.biddingDownRejectResponse(message); ok || err != nil {
-		return response, err
-	}
 	var reauth eapaka.AKAReauthentication
 	if err := reauth.UnmarshalMessage(message, f.currentState.KEncr); err != nil {
 		return f.clientErrorResponse(message.Identifier, fmt.Errorf("parsing reauth request: %w", err))
 	}
+	discardStoredAKAReauthState(f.card, f.currentState)
 	if reauth.Counter <= f.currentState.Counter {
 		data, err := eapaka.BuildReauthenticationResponsePacketForType(message.Identifier, message.EAPType, reauth.Counter, true, reauth.UseResultInd, f.currentState.KAut, f.currentState.KEncr, reauth.NonceS)
 		if err != nil {

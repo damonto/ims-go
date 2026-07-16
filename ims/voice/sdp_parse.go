@@ -192,6 +192,14 @@ func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
 		if !ok {
 			continue
 		}
+		if codec.Name == CodecTelephoneEvent && !validTelephoneEventFMTP(fmtp) {
+			// A malformed optional telephone-event format must not reject the
+			// audio offer; discard only that payload instead of treating it as
+			// the RFC 4733 default event set.
+			delete(offer.Codecs, payloadType)
+			delete(offer.FMTP, payloadType)
+			continue
+		}
 		offer.Codecs[payloadType] = applyCodecFMTP(codec, fmtp)
 	}
 	return nil
@@ -216,7 +224,7 @@ func parseCurrentQoSLocal(line string) (string, bool) {
 
 func parseQoSConfirmationRemote(line string) bool {
 	fields := strings.Fields(strings.TrimPrefix(line, "a=conf:qos"))
-	return len(fields) == 2 && strings.EqualFold(fields[0], "remote")
+	return len(fields) == 2 && strings.EqualFold(fields[0], "remote") && strings.EqualFold(fields[1], qosStatusSendRecv)
 }
 
 func applyStaticRTPPayloads(offer *sdpOffer) {

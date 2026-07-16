@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	DefaultClientAllow     = "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,REFER,UPDATE"
-	DefaultClientSupported = "199,path,replaces,sec-agree"
+	DefaultClientAllow     = "ACK,BYE,CANCEL,INFO,INVITE,MESSAGE,NOTIFY,OPTIONS,PRACK,UPDATE"
+	DefaultClientSupported = "199,path,sec-agree"
 	DefaultMaxForwards     = 70
 )
 
@@ -168,17 +168,28 @@ func RandomUint32() uint32 {
 
 func randomString(length int, alphabet string) string {
 	buf := make([]byte, length)
-	rnd := make([]byte, length)
-	if _, err := rand.Read(rnd); err != nil {
-		panic(err)
-	}
-	for i, b := range rnd {
-		buf[i] = alphabet[int(b)%len(alphabet)]
+	limit := 256 - 256%len(alphabet)
+	var rnd [32]byte
+	for written := 0; written < len(buf); {
+		if _, err := rand.Read(rnd[:]); err != nil {
+			panic(err)
+		}
+		for _, b := range rnd {
+			if int(b) >= limit {
+				continue
+			}
+			buf[written] = alphabet[int(b)%len(alphabet)]
+			written++
+			if written == len(buf) {
+				break
+			}
+		}
 	}
 	return string(buf)
 }
 
 func routeHasParam(uri, want string) bool {
+	uri, _, _ = strings.Cut(uri, "?")
 	for _, field := range strings.Split(uri, ";")[1:] {
 		name, _, _ := strings.Cut(strings.TrimSpace(field), "=")
 		if strings.EqualFold(name, want) {

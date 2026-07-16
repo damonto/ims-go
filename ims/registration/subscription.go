@@ -30,7 +30,6 @@ type subscriptionDialog struct {
 type regInfoRegistrationEntry struct {
 	AOR      string
 	State    string
-	Event    string
 	Contacts map[string]regInfoContact
 }
 
@@ -181,7 +180,7 @@ func (s *Registrar) applySubscribeDialog(req, resp sip.Message) {
 		localTag:     sip.HeaderTag(localHeader),
 		remoteTag:    remoteTag,
 		targetURI:    targetURI,
-		routeSet:     reverseHeaderValues(resp.HeadersByName("Record-Route")),
+		routeSet:     reverseHeaderValues(resp.HeaderList("Record-Route")),
 	}
 	s.mu.Unlock()
 }
@@ -270,22 +269,18 @@ func (s *Registrar) recordNotifyCSeq(msg sip.Message) (int, string) {
 	return 0, ""
 }
 
-func (s *Registrar) applySubscriptionStateFromNotify(msg sip.Message) {
+func (s *Registrar) applySubscriptionStateFromNotify(msg sip.Message) bool {
 	if !strings.EqualFold(strings.TrimSpace(msg.Header("Event")), regEventPackage) {
-		return
+		return false
 	}
 	var subscription subscriptionStateHeader
 	if err := subscription.UnmarshalText([]byte(msg.Header("Subscription-State"))); err != nil {
-		return
+		return false
 	}
 	if subscription.expires > 0 {
 		s.setSubscribeExpires(subscription.expires)
 	}
-	if strings.EqualFold(subscription.state, subscriptionStateTerminated) {
-		s.resetSubscription()
-		s.resetRegInfoState()
-		s.requestSubscribeRefresh()
-	}
+	return strings.EqualFold(subscription.state, subscriptionStateTerminated)
 }
 
 func (s *Registrar) applyRegInfoNotify(msg sip.Message) error {
@@ -305,6 +300,10 @@ func (s *Registrar) applyRegInfoNotify(msg sip.Message) error {
 		return nil
 	}
 	refresh, err := s.applyRegInfo(info)
+	if errors.Is(err, errInvalidRegInfo) {
+		s.logger.Debug("applying registration event body failed", "err", err)
+		return nil
+	}
 	if refresh {
 		s.requestSubscribeRefresh()
 	}
@@ -349,23 +348,26 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 	defer s.mu.Unlock()
 
 	version, ok := info.version()
+	if !ok {
+		return false, fmtRegInfoError("version must be a 32-bit non-negative integer")
+	}
 	refresh := false
-	if ok {
-		if !s.regInfoVersionSet {
-			s.regInfoVersion = version
-			s.regInfoVersionSet = true
-		} else if version <= s.regInfoVersion {
+	if s.regInfoVersionSet {
+		if version <= s.regInfoVersion {
 			return false, nil
-		} else {
-			refresh = version > s.regInfoVersion+1
-			if refresh {
-				versionGap = true
-				currentVersion = s.regInfoVersion
-				receivedVersion = version
-			}
-			s.regInfoVersion = version
+		}
+		refresh = version > s.regInfoVersion+1
+		if refresh {
+			versionGap = true
+			currentVersion = s.regInfoVersion
+			receivedVersion = version
 		}
 	}
+	if err := s.validateRegInfoIDsLocked(info); err != nil {
+		return false, err
+	}
+	s.regInfoVersion = version
+	s.regInfoVersionSet = true
 
 	s.updateRegInfoTable(info)
 	state := s.state
@@ -379,6 +381,8 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 	fullState := strings.EqualFold(strings.TrimSpace(info.State), regInfoStateFull)
 	foundOwnContact := false
 	foundActiveContact := false
+	var networkTermination bool
+	var networkEvent string
 	var initialRequired bool
 	var initialReason string
 
@@ -386,14 +390,10 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 		if !samePublicIdentity(reg.AOR, state) {
 			continue
 		}
-		if reg.terminatedByNetwork() {
-			s.state.Registered = false
-			return refresh, networkDeregisteredError(reg.Event)
-		}
-		if reg.terminated() {
+		registrationTerminated := reg.terminated()
+		if registrationTerminated {
 			initialRequired = true
 			initialReason = "registration terminated"
-			continue
 		}
 		for _, contact := range reg.Contacts {
 			if !contactMatchesCurrentBinding(contact, state, contactURI, registerCallID, registerCSeq) {
@@ -401,6 +401,9 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 			}
 			foundOwnContact = true
 			if contact.active() {
+				if registrationTerminated {
+					continue
+				}
 				foundActiveContact = true
 				s.state.Registered = true
 				if expires, ok := contact.expiresDuration(); ok {
@@ -410,8 +413,9 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 			}
 			if contact.terminated() {
 				if contact.terminatedByNetwork() {
-					s.state.Registered = false
-					return refresh, networkDeregisteredError(contact.Event)
+					networkTermination = true
+					networkEvent = contact.Event
+					continue
 				}
 				initialRequired = true
 				initialReason = "registration contact terminated"
@@ -419,6 +423,10 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 		}
 	}
 
+	if networkTermination && !foundActiveContact {
+		s.state.Registered = false
+		return refresh, networkDeregisteredError(networkEvent)
+	}
 	if (initialRequired && !foundActiveContact) || (fullState && (!foundOwnContact || !foundActiveContact)) {
 		s.state.Registered = false
 		if initialReason == "" {
@@ -427,6 +435,49 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 		return refresh, initialRegistrationRequiredFromRegInfo(initialReason)
 	}
 	return refresh, nil
+}
+
+func (s *Registrar) validateRegInfoIDsLocked(info regInfo) error {
+	contacts := make(map[string]string)
+	for _, registration := range s.regInfoRegistrations {
+		for contactID, contact := range registration.Contacts {
+			contacts[contactID] = contact.URI
+		}
+	}
+	for _, registration := range info.Registration {
+		registrationID := strings.TrimSpace(registration.ID)
+		if previous, ok := s.regInfoRegistrations[registrationID]; ok && !sameRegInfoURI(previous.AOR, registration.AOR) {
+			return fmtRegInfoError("registration id changed address-of-record")
+		}
+		for previousID, previous := range s.regInfoRegistrations {
+			if previousID != registrationID && sameRegInfoURI(previous.AOR, registration.AOR) {
+				return fmtRegInfoError("address-of-record changed registration id")
+			}
+		}
+		for _, contact := range registration.Contact {
+			contactID := strings.TrimSpace(contact.ID)
+			previous, ok := contacts[contactID]
+			if !ok {
+				continue
+			}
+			if !sameRegInfoURI(previous, contact.URI) {
+				return fmtRegInfoError("contact id changed contact URI")
+			}
+		}
+	}
+	return nil
+}
+
+func sameRegInfoURI(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	leftLower := strings.ToLower(left)
+	rightLower := strings.ToLower(right)
+	if (strings.HasPrefix(leftLower, "sip:") || strings.HasPrefix(leftLower, "sips:")) &&
+		(strings.HasPrefix(rightLower, "sip:") || strings.HasPrefix(rightLower, "sips:")) {
+		return sameContactURI(left, right)
+	}
+	return strings.EqualFold(left, right)
 }
 
 func (s *Registrar) updateRegInfoTable(info regInfo) {
@@ -443,7 +494,6 @@ func (s *Registrar) updateRegInfoTable(info regInfo) {
 		}
 		entry.AOR = strings.TrimSpace(reg.AOR)
 		entry.State = strings.TrimSpace(reg.State)
-		entry.Event = strings.TrimSpace(reg.Event)
 		if entry.Contacts == nil {
 			entry.Contacts = make(map[string]regInfoContact, len(reg.Contact))
 		}
@@ -459,10 +509,6 @@ func cloneRegInfoContact(contact regInfoContact) regInfoContact {
 	return contact
 }
 
-func (r regInfoRegistrationEntry) terminatedByNetwork() bool {
-	return r.terminated() && networkDeregistrationEvent(r.Event)
-}
-
 func (r regInfoRegistrationEntry) terminated() bool {
 	return strings.EqualFold(strings.TrimSpace(r.State), regInfoRegistrationStateTerminated)
 }
@@ -473,7 +519,7 @@ func (c regInfoContact) terminatedByNetwork() bool {
 
 func networkDeregistrationEvent(event string) bool {
 	switch strings.ToLower(strings.TrimSpace(event)) {
-	case regInfoContactEventDeactivated, regInfoContactEventRejected:
+	case regInfoContactEventUnregistered, regInfoContactEventDeactivated, regInfoContactEventRejected:
 		return true
 	default:
 		return false
@@ -550,6 +596,9 @@ func samePublicIdentity(aor string, state State) bool {
 		state.TelPublicID,
 	}
 	return slices.ContainsFunc(identities, func(identity string) bool {
+		if strings.HasPrefix(strings.ToLower(aor), "sip:") || strings.HasPrefix(strings.ToLower(aor), "sips:") {
+			return sameContactURI(aor, identity)
+		}
 		return strings.EqualFold(strings.TrimSpace(identity), aor)
 	})
 }

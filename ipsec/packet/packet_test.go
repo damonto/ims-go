@@ -224,6 +224,36 @@ func TestUDPSegmentMarshalNormalizesZeroChecksum(t *testing.T) {
 	}
 }
 
+func TestUDPSegmentZeroIPv4Checksum(t *testing.T) {
+	tests := []struct {
+		name     string
+		src      net.IP
+		dst      net.IP
+		wantZero bool
+	}{
+		{name: "ipv4", src: net.IPv4(10, 0, 0, 1), dst: net.IPv4(10, 0, 0, 2), wantZero: true},
+		{name: "ipv6 still requires checksum", src: net.ParseIP("2001:db8::1"), dst: net.ParseIP("2001:db8::2")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire, err := (UDPSegment{
+				Src:              &net.UDPAddr{IP: tt.src, Port: 4500},
+				Dst:              &net.UDPAddr{IP: tt.dst, Port: 4500},
+				Payload:          []byte("esp"),
+				ZeroIPv4Checksum: true,
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			gotZero := binary.BigEndian.Uint16(wire[6:8]) == 0
+			if gotZero != tt.wantZero {
+				t.Fatalf("UDP checksum zero = %t, want %t", gotZero, tt.wantZero)
+			}
+		})
+	}
+}
+
 func TestIPPacketUnmarshalRejectsInvalidIPv4Checksum(t *testing.T) {
 	wire, err := (IPPacket{
 		Version:  IPVersion4,
@@ -536,6 +566,50 @@ func TestPacketsRejectLengthOverflow(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := tt.marshal(); err == nil {
 				t.Fatal("MarshalBinary() error = nil, want length overflow error")
+			}
+		})
+	}
+}
+
+func TestIPPacketRejectsFragmentsBeforeESPProcessing(t *testing.T) {
+	ipv4, err := (IPPacket{
+		Version:  IPVersion4,
+		Protocol: ProtocolESP,
+		SrcIP:    net.IPv4(10, 0, 0, 1),
+		DstIP:    net.IPv4(10, 0, 0, 2),
+		Payload:  []byte{0x01},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() IPv4 fixture error = %v", err)
+	}
+	binary.BigEndian.PutUint16(ipv4[6:8], 0x2000)
+	binary.BigEndian.PutUint16(ipv4[10:12], 0)
+	binary.BigEndian.PutUint16(ipv4[10:12], ipv4HeaderChecksum(ipv4[:20]))
+
+	ipv6, err := (IPPacket{
+		Version:  IPVersion6,
+		Protocol: 44,
+		SrcIP:    net.ParseIP("2001:db8::1"),
+		DstIP:    net.ParseIP("2001:db8::2"),
+		Payload:  make([]byte, 8),
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() IPv6 fixture error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		packet []byte
+	}{
+		{name: "ipv4 more fragments", packet: ipv4},
+		{name: "ipv6 fragment header", packet: ipv6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var packet IPPacket
+			if err := packet.UnmarshalBinary(tt.packet); err == nil {
+				t.Fatal("UnmarshalBinary() error = nil, want fragment rejection")
 			}
 		})
 	}

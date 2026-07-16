@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/damonto/ims-go/ims/security"
@@ -22,6 +23,7 @@ type registerAuthChallenge struct {
 	authorizationHeader string
 	verify              *security.Param
 	rawSecurityServer   []string
+	publicContactHost   string
 }
 
 func (s *Registrar) storeAuthChallenge(challenge security.Challenge, authorizationHeader string) {
@@ -40,19 +42,31 @@ func (s *Registrar) storeAuthChallenge(challenge security.Challenge, authorizati
 	s.authNonce = challenge.Nonce
 	s.authAlgorithm = challenge.Algorithm
 	s.authQOP = challenge.QOP
+	s.authOpaque = challenge.Opaque
 	s.authHeader = authorizationHeader
 	s.authNonceCount = 0
 	s.mu.Unlock()
 }
 
 func (s *Registrar) currentAuthState() (string, string, string, string) {
+	challenge := s.currentAuthChallenge()
+	return challenge.Realm, challenge.Nonce, challenge.Algorithm, challenge.QOP
+}
+
+func (s *Registrar) currentAuthChallenge() security.Challenge {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	realm := s.authRealm
 	if realm == "" {
 		realm = strings.TrimPrefix(s.state.RegisterURI, "sip:")
 	}
-	return realm, s.authNonce, s.authAlgorithm, s.authQOP
+	return security.Challenge{
+		Realm:     realm,
+		Nonce:     s.authNonce,
+		Algorithm: s.authAlgorithm,
+		QOP:       s.authQOP,
+		Opaque:    s.authOpaque,
+	}
 }
 
 func (s *Registrar) currentAuthorizationHeaderName() string {
@@ -68,19 +82,19 @@ func (s *Registrar) nextAuthNonceCount() uint32 {
 	return s.authNonceCount
 }
 
-func (s *Registrar) buildRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string) (*security.Authorization, error) {
-	if nonce == "" {
+func (s *Registrar) buildRegisterAuthorization(ctx context.Context, challenge security.Challenge) (*security.Authorization, error) {
+	if challenge.Nonce == "" {
 		return nil, nil
 	}
 	nonceCount := s.nextAuthNonceCount()
-	if password, ok := s.currentDigestCredential(nonce, algorithm); ok {
-		auth, err := s.calculateDigestRegisterAuthorization(realm, nonce, algorithm, qop, nonceCount, password)
+	if password, ok := s.currentDigestCredential(challenge.Nonce, challenge.Algorithm); ok {
+		auth, err := s.calculateDigestRegisterAuthorization(challenge, nonceCount, password)
 		if err != nil {
 			return nil, err
 		}
 		return auth, nil
 	}
-	auth, ck, ik, password, err := s.calculateRegisterAuthorization(ctx, realm, nonce, algorithm, qop, nonceCount)
+	auth, ck, ik, password, err := s.calculateRegisterAuthorization(ctx, challenge, nonceCount)
 	if err != nil {
 		return nil, err
 	}
@@ -88,20 +102,15 @@ func (s *Registrar) buildRegisterAuthorization(ctx context.Context, realm, nonce
 	return auth, nil
 }
 
-func (s *Registrar) calculateRegisterAuthorization(ctx context.Context, realm, nonce, algorithm, qop string, nonceCount uint32) (*security.Authorization, []byte, []byte, string, error) {
-	if nonce == "" {
+func (s *Registrar) calculateRegisterAuthorization(ctx context.Context, challenge security.Challenge, nonceCount uint32) (*security.Authorization, []byte, []byte, string, error) {
+	if challenge.Nonce == "" {
 		return nil, nil, nil, "", nil
 	}
 	result, err := security.BuildAKAAuthorization(ctx, akaProvider{s.card}, security.Identity{
 		PrivateIdentity: s.State().PrivateIdentity,
 		RegisterURI:     s.State().RegisterURI,
-		Realm:           defaultRealm(realm, s.State().RegisterURI),
-	}, security.Challenge{
-		Realm:     realm,
-		Nonce:     nonce,
-		Algorithm: algorithm,
-		QOP:       qop,
-	}, nonceCount)
+		Realm:           defaultRealm(challenge.Realm, s.State().RegisterURI),
+	}, challenge, nonceCount)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
@@ -110,17 +119,12 @@ func (s *Registrar) calculateRegisterAuthorization(ctx context.Context, realm, n
 	return &auth, result.EncryptionKey, result.IntegrityKey, result.DigestPassword, nil
 }
 
-func (s *Registrar) calculateDigestRegisterAuthorization(realm, nonce, algorithm, qop string, nonceCount uint32, password string) (*security.Authorization, error) {
+func (s *Registrar) calculateDigestRegisterAuthorization(challenge security.Challenge, nonceCount uint32, password string) (*security.Authorization, error) {
 	result, err := security.BuildDigestAuthorization(security.Identity{
 		PrivateIdentity: s.State().PrivateIdentity,
 		RegisterURI:     s.State().RegisterURI,
-		Realm:           defaultRealm(realm, s.State().RegisterURI),
-	}, security.Challenge{
-		Realm:     realm,
-		Nonce:     nonce,
-		Algorithm: algorithm,
-		QOP:       qop,
-	}, nonceCount, password)
+		Realm:           defaultRealm(challenge.Realm, s.State().RegisterURI),
+	}, challenge, nonceCount, password)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +166,7 @@ func (s *Registrar) applyRegisterChallenge(resp sip.Message) (security.Challenge
 	if err != nil {
 		return security.Challenge{}, err
 	}
-	s.applySelectedSecurityServer(parsed.verify, parsed.rawSecurityServer)
+	s.applySelectedSecurityServer(parsed.verify, parsed.rawSecurityServer, parsed.publicContactHost)
 	s.storeAuthChallenge(parsed.challenge, parsed.authorizationHeader)
 	return parsed.challenge, nil
 }
@@ -185,7 +189,44 @@ func parseRegisterChallenge(resp sip.Message, offered security.Params) (register
 	}
 	parsed.verify = verify
 	parsed.rawSecurityServer = raw
+	publicHost, behindNAT, err := registerResponseNAT(resp)
+	if err != nil {
+		return registerAuthChallenge{}, fmt.Errorf("applying registration NAT information: %w", err)
+	}
+	if behindNAT && !strings.EqualFold(verify.Mod, "UDP-enc-tun") {
+		return registerAuthChallenge{}, fmt.Errorf("%w: applying Security-Server: NAT requires UDP-enc-tun mode", errSecurityAgreementInvalid)
+	}
+	if behindNAT {
+		parsed.publicContactHost = publicHost
+	}
 	return parsed, nil
+}
+
+func registerResponseNAT(resp sip.Message) (publicHost string, behind bool, err error) {
+	via := resp.Header("Via")
+	received := strings.TrimSpace(sip.TopViaReceived(via))
+	if received == "" {
+		return "", false, nil
+	}
+	received = sanitizeHost(received)
+	receivedIP := net.ParseIP(received)
+	if receivedIP == nil {
+		return "", false, fmt.Errorf("parsing Via received address %q", received)
+	}
+
+	sentBy := sip.TopViaSentBy(via)
+	if sentBy == "" {
+		return "", false, errors.New("parsing Via sent-by: value is empty")
+	}
+	sentHost := sentBy
+	if host, _, splitErr := net.SplitHostPort(sentBy); splitErr == nil {
+		sentHost = host
+	}
+	sentHost = sanitizeHost(sentHost)
+	if sentIP := net.ParseIP(sentHost); sentIP != nil {
+		return received, !receivedIP.Equal(sentIP), nil
+	}
+	return received, !strings.EqualFold(received, sentHost), nil
 }
 
 func selectRegisterChallengeForResponse(resp sip.Message) (registerAuthChallenge, error) {
@@ -246,19 +287,20 @@ func selectRegisterChallenge(headerName string, values []string) (security.Chall
 }
 
 func (s *Registrar) verifyAuthenticationInfo(msg sip.Message, auth *security.Authorization) error {
-	var info security.Info
-	if err := info.UnmarshalText([]byte(msg.Header("Authentication-Info"))); err != nil {
-		return err
-	}
-	if info.RSPAuth == "" {
+	raw := strings.TrimSpace(msg.Header("Authentication-Info"))
+	if raw == "" {
 		return nil
 	}
+	var info security.Info
+	if err := info.UnmarshalText([]byte(raw)); err != nil {
+		return err
+	}
 	if auth == nil {
-		return errors.New("authentication-info rspauth without authorization")
+		return errors.New("authentication-info without authorization")
 	}
 	password, ok := s.currentDigestCredential(auth.Nonce, auth.Algorithm)
 	if !ok {
-		return errors.New("authentication-info rspauth without digest credential")
+		return errors.New("authentication-info without digest credential")
 	}
 	if err := security.VerifyAuthenticationInfo(*auth, info, password); err != nil {
 		return err
@@ -280,13 +322,13 @@ func (s *Registrar) applyAuthenticationInfo(msg sip.Message) {
 	s.mu.Unlock()
 }
 
-func (s *Registrar) exchangeAKAFailure(ctx context.Context, challenge security.Challenge, authorizationHeader string, cause error) (sip.Message, error) {
+func (s *Registrar) exchangeAKAFailure(ctx context.Context, challenge security.Challenge, authorizationHeader string, flow Flow, cause error) (sip.Message, error) {
 	var failure *security.AKAChallengeFailure
 	if !errors.As(cause, &failure) {
 		return sip.Message{}, cause
 	}
 	auth := s.akaFailureAuthorization(challenge, failure)
-	req := s.buildRegisterWithAuthorizationHeader(&auth, s.currentSecurityVerify(), authorizationHeader)
+	req := s.buildRegisterForFlowWithAuthorizationHeader(&auth, flow.SecurityVerify, flow, authorizationHeader)
 	if !failure.SynchronizationFailure() {
 		if err := s.sess.Send(ctx, req); err != nil {
 			return sip.Message{}, fmt.Errorf("reporting AKA failure: %w", err)
@@ -304,14 +346,9 @@ func (s *Registrar) exchangeAKAFailure(ctx context.Context, challenge security.C
 }
 
 func (s *Registrar) exchangeCurrentAKAFailure(ctx context.Context, cause error) (sip.Message, error) {
-	realm, nonce, algorithm, qop := s.currentAuthState()
 	authorizationHeader := s.currentAuthorizationHeaderName()
-	return s.exchangeAKAFailure(ctx, security.Challenge{
-		Realm:     realm,
-		Nonce:     nonce,
-		Algorithm: algorithm,
-		QOP:       qop,
-	}, authorizationHeader, cause)
+	flow := s.CurrentFlow()
+	return s.exchangeAKAFailure(ctx, s.currentAuthChallenge(), authorizationHeader, flow, cause)
 }
 
 func (s *Registrar) akaFailureAuthorization(challenge security.Challenge, failure *security.AKAChallengeFailure) security.Authorization {
@@ -323,6 +360,7 @@ func (s *Registrar) akaFailureAuthorization(challenge security.Challenge, failur
 		Realm:              defaultRealm(challenge.Realm, s.State().RegisterURI),
 		Algorithm:          challenge.Algorithm,
 		IntegrityProtected: registerIntegrityProtectedValue(challenge.Algorithm),
+		Opaque:             challenge.Opaque,
 	}
 	if failure.SynchronizationFailure() {
 		auth.AUTS = base64.StdEncoding.EncodeToString(failure.AUTS)

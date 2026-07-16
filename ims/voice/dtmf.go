@@ -201,6 +201,12 @@ func (c *Call) writeDTMFRTPPacket(ctx context.Context, transport MediaTransport,
 	if err := transport.WritePacket(ctx, wire); err != nil {
 		return fmt.Errorf("sending dtmf: %w", err)
 	}
+	c.mu.Lock()
+	c.rtcpSend.packetCount++
+	c.rtcpSend.octetCount += uint32(len(payload))
+	c.rtcpSend.lastRTPTimestamp = timestamp
+	c.rtcpSend.reportsWithoutRTP = 0
+	c.mu.Unlock()
 	rtp.nextSequence++
 	return nil
 }

@@ -39,6 +39,10 @@ func (k *registrationKeepAlive) done() <-chan struct{} {
 }
 
 func (s *Registrar) applyRegisterKeepAlive(resp sip.Message) {
+	if !s.sess.SupportsKeepAlive() {
+		s.stopRegistrationKeepAlive("transport_not_supported")
+		return
+	}
 	recommended, interval, ok := registerKeepAliveTimingFromResponse(resp)
 	if !ok {
 		s.stopRegistrationKeepAlive("not_negotiated")

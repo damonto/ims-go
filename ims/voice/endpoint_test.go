@@ -718,12 +718,11 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				if transport.countMethod("REGISTER") == 1 {
 					resp := callStatus(msg, 401, "Unauthorized")
 					resp.Headers.Add("WWW-Authenticate", `Digest realm="one.att.net",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`)
-					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`)
+					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`)
 					transport.queue(resp)
 					return
 				}
 				resp := callStatus(msg, 200, "OK")
-				resp.Headers.Add("Authentication-Info", `nextnonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="`)
 				resp.Headers.Add("P-Associated-URI", "<tel:+15551234567>,<sip:+15551234567@one.att.net;user=phone>")
 				resp.Headers.Add("Service-Route", "<sip:pcscf.example.com;lr>")
 				transport.queue(resp)
@@ -1279,6 +1278,13 @@ func TestDialogSnapshotAddsSessionTimerSupportToNonACKRequests(t *testing.T) {
 				t.Fatalf("Supported = %q, timer present %t, want %t", tt.msg.Header("Supported"), got, tt.wantTimer)
 			}
 		})
+	}
+	ack := sip.NewRequest("ACK", snap.targetURI)
+	ack.Headers.Add("Require", "sec-agree")
+	ack.Headers.Add("Proxy-Require", "sec-agree")
+	snap.applyACKRequestPolicy(&ack, nil)
+	if ack.Headers.Has("Require") || ack.Headers.Has("Proxy-Require") {
+		t.Fatalf("ACK contains forbidden extension requirements: %#v", ack.Headers)
 	}
 }
 
@@ -3684,6 +3690,25 @@ func TestIncomingReINVITEGlareWhileLocalINVITEPending(t *testing.T) {
 	}
 }
 
+func TestSessionRefreshGlareRetriesOnlyOnce(t *testing.T) {
+	tests := []struct {
+		name string
+		want []bool
+	}{
+		{name: "same 491 is not retried continuously", want: []bool{true, false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{}
+			for i, want := range tt.want {
+				if got := call.markSessionRefreshGlareRetry(); got != want {
+					t.Fatalf("retry decision %d = %v, want %v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestIncomingRemoteHoldReINVITEUpdatesHoldState(t *testing.T) {
 	tests := []struct {
 		name string
@@ -5249,9 +5274,11 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 }
 func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 	tests := []struct {
-		name string
+		name         string
+		rtcpDisabled bool
 	}{
 		{name: "local hold and resume modify dialog media"},
+		{name: "resume restores disabled RTCP", rtcpDisabled: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5297,15 +5324,26 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 				<-runErr
 			}()
 
+			initialInvite := true
 			transport.onWrite = func(msg sip.Message) {
 				if msg.Method() == "INVITE" {
-					transport.queue(callOK(msg))
+					resp := callOK(msg)
+					if tt.rtcpDisabled && initialInvite {
+						resp.Body = bytes.Replace(resp.Body,
+							[]byte("m=audio 50000 RTP/AVP 104 110\r\n"),
+							[]byte("m=audio 50000 RTP/AVP 104 110\r\nb=RS:0\r\nb=RR:0\r\n"), 1)
+					}
+					initialInvite = false
+					transport.queue(resp)
 				}
 			}
 
 			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
+			}
+			if tt.rtcpDisabled && !call.Media().RTCPDisabled {
+				t.Fatal("negotiated RTCPDisabled = false, want true")
 			}
 			if err := call.Hold(context.Background()); err != nil {
 				t.Fatalf("Hold() error = %v", err)
@@ -5329,6 +5367,16 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 			}
 			if !strings.Contains(string(invites[2].Body), "a=sendrecv\r\n") {
 				t.Fatalf("resume re-INVITE body missing sendrecv:\n%s", string(invites[2].Body))
+			}
+			if tt.rtcpDisabled {
+				if !strings.Contains(string(invites[1].Body), "b=RR:2500\r\n") {
+					t.Fatalf("hold re-INVITE did not enable RTCP receiver reports:\n%s", string(invites[1].Body))
+				}
+				for _, want := range []string{"b=RS:0\r\n", "b=RR:0\r\n"} {
+					if !strings.Contains(string(invites[2].Body), want) {
+						t.Fatalf("resume re-INVITE missing %q:\n%s", want, string(invites[2].Body))
+					}
+				}
 			}
 			if got := transport.countMethod("ACK"); got != 3 {
 				t.Fatalf("ACK count = %d, want initial plus hold plus resume", got)
@@ -5640,7 +5688,7 @@ func TestCallHoldAllowsEmergencyOverride(t *testing.T) {
 				emergency: true,
 				localSDP:  inviteWithSDP().Body,
 			}
-			if _, _, _, _, _, clearPending, err := call.beginLocalHoldModification(callActionHold, true, MediaDirectionSendOnly); err != nil {
+			if _, _, _, _, clearPending, err := call.beginLocalHoldModification(callActionHold, true, MediaDirectionSendOnly); err != nil {
 				t.Fatalf("beginLocalHoldModification() error = %v", err)
 			} else {
 				clearPending()
@@ -6229,7 +6277,6 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  Duration(time.Second),
 				RTCPInactivityTimeout: Duration(time.Second),
-				RTCPSendInterval:      Duration(20 * time.Millisecond),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					if cfg.OnPacket == nil {
 						t.Fatal("OpenMedia OnPacket is nil")
@@ -6242,6 +6289,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
+			svc.rtcpInterval = func(NegotiatedMedia) time.Duration { return 20 * time.Millisecond }
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -6325,7 +6373,6 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  Duration(time.Second),
 				RTCPInactivityTimeout: Duration(40 * time.Millisecond),
-				RTCPSendInterval:      Duration(20 * time.Millisecond),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket
@@ -6396,7 +6443,6 @@ func TestEarlyMediaHoldInactivityWatchDoesNotEndCall(t *testing.T) {
 				Logger:                testLogger(),
 				RTPInactivityTimeout:  Duration(rtpTimeout),
 				RTCPInactivityTimeout: Duration(rtcpTimeout),
-				RTCPSendInterval:      Duration(0),
 				AudioInactivityCallEndReasons: []AudioInactivityCallEndReason{
 					AudioInactivityRTPOnConnected,
 					AudioInactivityRTCPOnHold,
@@ -6470,7 +6516,6 @@ func TestHeldCallInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
 			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  Duration(rtpTimeout),
 				RTCPInactivityTimeout: Duration(rtcpTimeout),
-				RTCPSendInterval:      Duration(0),
 				AudioInactivityCallEndReasons: []AudioInactivityCallEndReason{
 					AudioInactivityRTPOnConnected,
 					AudioInactivityRTCPOnHold,
@@ -6567,7 +6612,6 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 			svc, err := New(Config{Logger: testLogger(),
 				RTPInactivityTimeout:  Duration(time.Second),
 				RTCPInactivityTimeout: Duration(time.Second),
-				RTCPSendInterval:      Duration(20 * time.Millisecond),
 				OpenMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
 					media.onPacket = cfg.OnPacket
@@ -6842,12 +6886,11 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				if transport.countMethod("REGISTER") == 1 {
 					resp := callStatus(msg, 401, "Unauthorized")
 					resp.Headers.Add("WWW-Authenticate", `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",algorithm=AKAv1-MD5,qop="auth"`)
-					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`)
+					resp.Headers.Add("Security-Server", `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`)
 					transport.queue(resp)
 					return
 				}
 				resp := callStatus(msg, 200, "OK")
-				resp.Headers.Add("Authentication-Info", `nextnonce="AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="`)
 				resp.Headers.Add("Service-Route", "<sip:pcscf.example.com;lr>")
 				transport.queue(resp)
 			}

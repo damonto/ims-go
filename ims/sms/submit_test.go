@@ -51,6 +51,46 @@ func TestCompletePendingRequiresInReplyToForSIPURI(t *testing.T) {
 	}
 }
 
+func TestClosePendingSubmissionsCompletesTrackers(t *testing.T) {
+	tests := []struct {
+		name      string
+		async     bool
+		wantState SubmissionState
+	}{
+		{name: "exchange in progress"},
+		{name: "waiting for submit report", async: true, wantState: SubmissionSubmitUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := newSubmissionTracker(1)
+			segment := outboundSegment{callID: "call-1", rpRef: 7, tracker: tracker}
+			svc := &Endpoint{
+				logger:    slog.Default(),
+				pending:   map[string]pendingEntry{"call-1": {rpRef: 7, segment: segment, async: tt.async}},
+				submitted: map[string]submittedEntry{"call-1": {rpRef: 7}},
+				rpRefs:    map[byte]struct{}{7: {}},
+			}
+
+			svc.closePendingSubmissions()
+
+			var updates []SubmissionUpdate
+			for update := range tracker.updates {
+				updates = append(updates, update)
+			}
+			if tt.wantState == "" {
+				if len(updates) != 0 {
+					t.Fatalf("updates = %+v, want none", updates)
+				}
+			} else if len(updates) != 1 || updates[0].State != tt.wantState {
+				t.Fatalf("updates = %+v, want state %s", updates, tt.wantState)
+			}
+			if len(svc.pending) != 0 || len(svc.submitted) != 0 || len(svc.rpRefs) != 0 {
+				t.Fatalf("state not cleared: pending=%d submitted=%d refs=%d", len(svc.pending), len(svc.submitted), len(svc.rpRefs))
+			}
+		})
+	}
+}
+
 func TestCompletePendingAllowsReferenceFallbackForTelURI(t *testing.T) {
 	reportCh := make(chan rpMessage, 1)
 	svc := &Endpoint{

@@ -142,7 +142,7 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	call.remoteAllow = nonEmpty(resp.Header("Allow"), call.remoteAllow)
 	call.remoteURI = nonEmpty(sip.AddressURI(resp.Header("Contact")), sip.AddressURI(resp.Header("To")), call.remoteURI)
 	call.targetURI = call.remoteURI
-	call.routeSet = reverseValues(resp.HeadersByName("Record-Route"))
+	call.routeSet = reverseValues(resp.HeaderList("Record-Route"))
 	call.media = answerMedia
 	call.earlyDialogs = nil
 	snap := call.dialogSnapshot()

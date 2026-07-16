@@ -115,7 +115,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 		remoteTo:        req.Message.Header("From"),
 		remoteAllow:     req.Message.Header("Allow"),
 		targetURI:       nonEmpty(sip.AddressURI(req.Message.Header("Contact")), sip.AddressURI(req.Message.Header("From"))),
-		routeSet:        append([]string(nil), req.Message.HeadersByName("Record-Route")...),
+		routeSet:        req.Message.HeaderList("Record-Route"),
 		inviteSeq:       sip.CSeqNumber(req.Message.Header("CSeq")),
 		localCSeq:       0,
 		remoteCSeq:      sip.CSeqNumber(req.Message.Header("CSeq")),
@@ -308,7 +308,14 @@ func (s *Endpoint) addAccessNetworkInfo(resp *sip.Message) {
 	if value := strings.TrimSpace(state.UserAgent); value != "" && strings.TrimSpace(resp.Header("Server")) == "" {
 		resp.Headers.Add("Server", value)
 	}
+	if !responseCanCarryAccessNetworkInfo(*resp) {
+		return
+	}
 	if value := strings.TrimSpace(state.AccessNetworkInfo); value != "" && strings.TrimSpace(resp.Header("P-Access-Network-Info")) == "" {
 		resp.Headers.Add("P-Access-Network-Info", value)
 	}
+}
+
+func responseCanCarryAccessNetworkInfo(resp sip.Message) bool {
+	return !strings.EqualFold(sip.CSeqMethod(resp.Header("CSeq")), "CANCEL")
 }

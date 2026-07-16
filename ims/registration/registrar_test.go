@@ -3,9 +3,11 @@ package registration
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -47,6 +49,10 @@ type stubTransport struct {
 	writeErr   error
 	closeCount int
 }
+
+type keepAliveDisabledTransport struct{ *stubTransport }
+
+func (t *keepAliveDisabledTransport) SupportsSIPKeepAlive() bool { return false }
 
 type stubCard struct{}
 
@@ -171,7 +177,7 @@ func (c identityStubCard) PrivateIdentity() string { return c.privateIdentity }
 
 func (c identityStubCard) PublicIdentity() string { return c.publicIdentity }
 
-func newTestService(t *testing.T, cfg Config, transport *stubTransport, card Card) *Registrar {
+func newTestService(t *testing.T, cfg Config, transport session.Transport, card Card) *Registrar {
 	t.Helper()
 	cfg.Logger = testLogger()
 	if cfg.DialSecureTCP == nil {
@@ -203,7 +209,7 @@ func registerService(t *testing.T, svc *Registrar, transport *stubTransport) {
 		case 1:
 			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
 		case 2:
-			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Authentication-Info", Value: `nextnonce="` + testNonce + `"`}))
+			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Authentication-Info", Value: authenticationInfoForRequest(t, req, testNonce)}))
 		default:
 			t.Fatalf("unexpected write count %d", countWrites(transport))
 		}
@@ -211,6 +217,64 @@ func registerService(t *testing.T, svc *Registrar, transport *stubTransport) {
 	if err := svc.Register(context.Background()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
+}
+
+func authenticationInfoForRequest(t *testing.T, req sip.Message, nextNonce string) string {
+	t.Helper()
+	authorization := req.Header("Authorization")
+	if authorization == "" {
+		authorization = req.Header("Proxy-Authorization")
+	}
+	username := digestTestDirective(t, authorization, "username")
+	realm := digestTestDirective(t, authorization, "realm")
+	nonce := digestTestDirective(t, authorization, "nonce")
+	uri := digestTestDirective(t, authorization, "uri")
+	qop := digestTestDirective(t, authorization, "qop")
+	cnonce := digestTestDirective(t, authorization, "cnonce")
+	nonceCount := digestTestDirective(t, authorization, "nc")
+	h1 := digestTestMD5(username + ":" + realm + ":password")
+	h2 := digestTestMD5(":" + uri)
+	rspauth := digestTestMD5(h1 + ":" + nonce + ":" + nonceCount + ":" + cnonce + ":" + qop + ":" + h2)
+	info := security.Info{
+		NextNonce:  nextNonce,
+		QOP:        qop,
+		RSPAuth:    rspauth,
+		CNonce:     cnonce,
+		NonceCount: nonceCount,
+	}
+	text, err := info.MarshalText()
+	if err != nil {
+		t.Fatalf("marshalling Authentication-Info: %v", err)
+	}
+	return string(text)
+}
+
+func digestTestDirective(t *testing.T, authorization, want string) string {
+	t.Helper()
+	_, fields, ok := strings.Cut(authorization, " ")
+	if !ok {
+		t.Fatalf("Authorization = %q, want Digest directives", authorization)
+	}
+	for _, field := range sip.SplitHeaderList(fields) {
+		name, value, found := strings.Cut(strings.TrimSpace(field), "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(name), want) {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+			value = value[1 : len(value)-1]
+			value = strings.ReplaceAll(value, `\"`, `"`)
+			value = strings.ReplaceAll(value, `\\`, `\`)
+		}
+		return value
+	}
+	t.Fatalf("Authorization = %q, want %s directive", authorization, want)
+	return ""
+}
+
+func digestTestMD5(value string) string {
+	sum := md5.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func newUDPTransport(localPort, remotePort int) *stubTransport {
@@ -239,12 +303,15 @@ func mustParseMessage(t *testing.T, data []byte) sip.Message {
 }
 
 func newUnauthorizedRegisterResponse(req sip.Message, nonce string, portC int) sip.Message {
-	securityServer := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`
+	securityServer := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`
 	if portC != 0 {
-		securityServer = `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=` + strconv.Itoa(portC) + `;port-s=4060;prot=esp;spi-c=1111;spi-s=2222`
+		securityServer = `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=` + strconv.Itoa(portC) + `;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`
+	}
+	if portC == 4600 {
+		securityServer = `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4600;port-s=4060;prot=esp;spi-c=0000003333;spi-s=0000004444`
 	}
 	return newResponse(req, 401, "Unauthorized",
-		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + nonce + `",algorithm=AKAv1-MD5,qop="auth"`},
+		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + nonce + `",algorithm=AKAv1-MD5,qop="auth",opaque="test-opaque"`},
 		sip.Header{Name: "Security-Server", Value: securityServer},
 	)
 }
@@ -466,6 +533,38 @@ func TestContactURIFormatting(t *testing.T) {
 				t.Fatalf("SUBSCRIBE Contact = %q, want %q", got, tt.wantSubscribe)
 			} else if strings.Contains(got, "+sip.instance") {
 				t.Fatalf("SUBSCRIBE Contact = %q, want no +sip.instance", got)
+			}
+		})
+	}
+}
+
+func TestSameContactURIUsesRFC3261ComparisonRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  string
+		right string
+		want  bool
+	}{
+		{name: "same URI", left: "sip:alice@example.com:5060", right: "sip:alice@EXAMPLE.com:5060", want: true},
+		{name: "userinfo is case sensitive", left: "sip:Alice@example.com:5060", right: "sip:alice@example.com:5060"},
+		{name: "semicolon in userinfo is case sensitive", left: "sip:alice;Day=Tue@example.com", right: "sip:alice;day=tue@example.com"},
+		{name: "semicolon in userinfo precedes URI parameters", left: "sip:alice;day=tuesday@example.com;transport=udp", right: "sip:alice;day=tuesday@EXAMPLE.COM;TRANSPORT=UDP", want: true},
+		{name: "question mark in userinfo is case sensitive", left: "sip:alice?Mode=A@example.com", right: "sip:alice?mode=a@example.com"},
+		{name: "different userinfo", left: "sip:alice@example.com:5060", right: "sip:bob@example.com:5060"},
+		{name: "SIP and SIPS differ", left: "sip:alice@example.com:5060", right: "sips:alice@example.com:5060"},
+		{name: "parameter order is insignificant", left: "sip:alice@example.com:5060;transport=udp;user=phone", right: "sip:alice@example.com:5060;USER=PHONE;TRANSPORT=UDP", want: true},
+		{name: "different parameter", left: "sip:alice@example.com:5060;transport=udp", right: "sip:alice@example.com:5060;transport=tcp"},
+		{name: "unreserved percent encoding is equivalent", left: "sip:%61lice@example.com", right: "sip:alice@example.com", want: true},
+		{name: "one-sided extension parameter is ignored", left: "sip:alice@example.com;newparam=5", right: "sip:alice@example.com", want: true},
+		{name: "one-sided transport parameter differs", left: "sip:alice@example.com;transport=udp", right: "sip:alice@example.com"},
+		{name: "header order is insignificant", left: "sip:alice@example.com?priority=urgent&subject=project%20x", right: "sip:alice@example.com?subject=project%20x&priority=urgent", want: true},
+		{name: "missing header differs", left: "sip:alice@example.com?priority=urgent", right: "sip:alice@example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sameContactURI(tt.left, tt.right); got != tt.want {
+				t.Fatalf("sameContactURI(%q, %q) = %t, want %t", tt.left, tt.right, got, tt.want)
 			}
 		})
 	}
@@ -898,7 +997,7 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 	secondNonce := "AgICAgICAgICAgICAgICAQMDAwMDAwMDAwMDAwMDAwM="
 	initial.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		initial.queue(newUnauthorizedRegisterResponse(req, firstNonce, 4060))
+		initial.queue(newUnauthorizedRegisterResponse(req, firstNonce, 4062))
 	}
 	firstOutbound.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
@@ -979,7 +1078,7 @@ func TestRegisterSuccessMaintainsSecureAssociationLifetime(t *testing.T) {
 			svc := newTestService(t, Config{}, transport, stubCard{})
 			defer svc.closeSecureResources()
 			if !tt.wantZero {
-				if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+				if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 					t.Fatalf("applyRegisterChallenge() error = %v", err)
 				}
 			}
@@ -1030,7 +1129,7 @@ func TestSecureAssociationLifetimeUsesIMSGrace(t *testing.T) {
 			transport := newTCPTransport(5062, 4060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 			if tt.secured {
-				if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+				if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 					t.Fatalf("applyRegisterChallenge() error = %v", err)
 				}
 			}
@@ -1316,7 +1415,7 @@ func TestEstablishUpgradesSecureTransport(t *testing.T) {
 
 	initial.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		initial.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 4060))
+		initial.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 4062))
 	}
 	secure.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
@@ -1332,8 +1431,62 @@ func TestEstablishUpgradesSecureTransport(t *testing.T) {
 	if dialCfg.LocalPort == 0 || listenTCPCfg.LocalPort == 0 || listenUDPCfg.LocalPort == 0 {
 		t.Fatalf("secure transport configs not captured: %+v %+v %+v", dialCfg, listenTCPCfg, listenUDPCfg)
 	}
-	if initial.closeCount != 1 {
-		t.Fatalf("initial closeCount = %d, want 1", initial.closeCount)
+	if initial.closeCount != 0 {
+		t.Fatalf("initial closeCount = %d, want retained for security association cleanup", initial.closeCount)
+	}
+}
+
+func TestClearRegistrationStateRestoresUnprotectedTransport(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "delete promoted security association"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := newTCPTransport(5062, 5060)
+			secure := newTCPTransport(45000, 4060)
+			sess, err := session.Open(session.Config{}, plain)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			secureAttachment, err := sess.AddTransport(secure)
+			if err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			registration := &registerSecurity{outbound: secure, outboundAttachment: secureAttachment}
+			if err := svc.commitRegisterSecurity(registration); err != nil {
+				t.Fatalf("commitRegisterSecurity() error = %v", err)
+			}
+			if sess.LocalAddr() != secure.LocalAddr() {
+				t.Fatalf("LocalAddr() = %v, want secure %v", sess.LocalAddr(), secure.LocalAddr())
+			}
+			if got := closeCount(plain); got != 0 {
+				t.Fatalf("plain closeCount = %d, want retained", got)
+			}
+
+			if err := svc.clearRegistrationState(); err != nil {
+				t.Fatalf("clearRegistrationState() error = %v", err)
+			}
+			if sess.LocalAddr() != plain.LocalAddr() {
+				t.Fatalf("LocalAddr() = %v, want restored plain %v", sess.LocalAddr(), plain.LocalAddr())
+			}
+			if got := closeCount(secure); got != 1 {
+				t.Fatalf("secure closeCount = %d, want deleted once", got)
+			}
+			if got := closeCount(plain); got != 0 {
+				t.Fatalf("plain closeCount = %d, want open", got)
+			}
+			if svc.unprotectedPrimary != nil {
+				t.Fatal("unprotectedPrimary retained after reset")
+			}
+		})
 	}
 }
 
@@ -1351,7 +1504,7 @@ func TestEstablishKeepsPlainTransportWhenSecureInboundSetupFails(t *testing.T) {
 
 	initial.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 4060))
+		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 4062))
 	}
 
 	err := svc.Establish(context.Background())
@@ -1387,7 +1540,7 @@ func TestRegisterFailureDeletesIncompleteSecurityAssociations(t *testing.T) {
 
 	initial.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 4060))
+		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 4062))
 	}
 	outbound.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
@@ -1436,7 +1589,7 @@ func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 
 	initial.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		initial.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 4060))
+		initial.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 4062))
 	}
 	secure.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
@@ -1454,8 +1607,8 @@ func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 	if dialCfg.LocalPort == 0 || listenUDPCfg.LocalPort == 0 {
 		t.Fatalf("secure UDP configs not captured: %+v %+v", dialCfg, listenUDPCfg)
 	}
-	if initial.closeCount != 1 {
-		t.Fatalf("initial closeCount = %d, want 1", initial.closeCount)
+	if initial.closeCount != 0 {
+		t.Fatalf("initial closeCount = %d, want retained for security association cleanup", initial.closeCount)
 	}
 }
 func TestApplyRegisterChallengeSelectsHighestQSecurityServer(t *testing.T) {
@@ -1464,8 +1617,8 @@ func TestApplyRegisterChallengeSelectsHighestQSecurityServer(t *testing.T) {
 	req := svc.buildRegister(nil, nil)
 	resp := newResponse(req, 401, "Unauthorized",
 		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
-		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222;q=0.1`},
-		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`},
+		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222;q=0.1`},
+		sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000333;spi-s=0000000444;q=0.9`},
 	)
 
 	if _, err := svc.applyRegisterChallenge(resp); err != nil {
@@ -1479,13 +1632,13 @@ func TestApplyRegisterChallengeSelectsHighestQSecurityServer(t *testing.T) {
 	if got := state.SecurityVerify.PortC; got != 5062 {
 		t.Fatalf("SecurityVerify.PortC = %d, want 5062", got)
 	}
-	if got := state.SecurityVerify.PortS; got != 5060 {
-		t.Fatalf("SecurityVerify.PortS = %d, want 5060", got)
+	if got := state.SecurityVerify.PortS; got != 5063 {
+		t.Fatalf("SecurityVerify.PortS = %d, want 5063", got)
 	}
 	if got := state.MessagePort; got != state.SecurityClient.PortS {
 		t.Fatalf("MessagePort = %d, want %d", got, state.SecurityClient.PortS)
 	}
-	wantVerify := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=1111;spi-s=2222;q=0.1,ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444;q=0.9`
+	wantVerify := `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222;q=0.1,ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000333;spi-s=0000000444;q=0.9`
 	if got := svc.SecurityVerifyValue(); got != wantVerify {
 		t.Fatalf("SecurityVerifyValue() = %q, want %q", got, wantVerify)
 	}
@@ -1505,7 +1658,7 @@ func TestApplyRegisterChallengeSelectsSupportedWWWAuthenticate(t *testing.T) {
 			headers: []sip.Header{
 				{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="legacy",algorithm=MD5,qop="auth"`},
 				{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
-				{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444`},
+				{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000333;spi-s=0000000444`},
 			},
 			wantAlg: security.AlgorithmAKAv1MD5,
 		},
@@ -1514,7 +1667,7 @@ func TestApplyRegisterChallengeSelectsSupportedWWWAuthenticate(t *testing.T) {
 			headers: []sip.Header{
 				{Name: "WWW-Authenticate", Value: `Basic realm="ims.mnc001.mcc001.3gppnetwork.org"`},
 				{Name: "WWW-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
-				{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444`},
+				{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000333;spi-s=0000000444`},
 			},
 			wantAlg: security.AlgorithmAKAv1MD5,
 		},
@@ -1549,7 +1702,7 @@ func TestRegisterHandlesProxyAuthenticationChallenge(t *testing.T) {
 			}
 			transport.queue(newResponse(req, sipStatusProxyAuthenticationRequired, "Proxy Authentication Required",
 				sip.Header{Name: "Proxy-Authenticate", Value: `Digest realm="ims.mnc001.mcc001.3gppnetwork.org",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
-				sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=333;spi-s=444`},
+				sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000333;spi-s=0000000444`},
 			))
 		case 2:
 			if got := req.Header("Authorization"); got != "" {
@@ -1586,13 +1739,22 @@ func TestBuildRegisterAuthorizationIntegrityProtected(t *testing.T) {
 		t.Fatalf("initial Authorization = %q, want integrity-protected=no", got)
 	}
 
-	auth, err := svc.buildRegisterAuthorization(context.Background(), "ims.mnc001.mcc001.3gppnetwork.org", testNonce, security.AlgorithmAKAv1MD5, "auth")
+	auth, err := svc.buildRegisterAuthorization(context.Background(), security.Challenge{
+		Realm:     "ims.mnc001.mcc001.3gppnetwork.org",
+		Nonce:     testNonce,
+		Algorithm: security.AlgorithmAKAv1MD5,
+		QOP:       "auth",
+		Opaque:    "test-opaque",
+	})
 	if err != nil {
 		t.Fatalf("buildRegisterAuthorization() error = %v", err)
 	}
 	protected := svc.buildRegister(auth, nil)
 	if got := protected.Header("Authorization"); !strings.Contains(got, "integrity-protected=yes") {
 		t.Fatalf("protected Authorization = %q, want integrity-protected=yes", got)
+	}
+	if got := protected.Header("Authorization"); !strings.Contains(got, `opaque="test-opaque"`) {
+		t.Fatalf("protected Authorization = %q, want opaque", got)
 	}
 }
 
@@ -1611,14 +1773,14 @@ func TestBuildRegisterAKAv2MD5BootstrapUsesIPSecSecurityAgreement(t *testing.T) 
 	if err := clients.UnmarshalText([]byte(msg.Header("Security-Client"))); err != nil {
 		t.Fatalf("parsing Security-Client: %v", err)
 	}
-	if len(clients) != 2 {
-		t.Fatalf("Security-Client count = %d, want 2", len(clients))
+	if len(clients) != 4 {
+		t.Fatalf("Security-Client count = %d, want 4", len(clients))
 	}
-	if clients[0].EAlg != "null" || clients[1].EAlg != "aes-cbc" {
-		t.Fatalf("Security-Client ealgs = %q/%q, want null/aes-cbc", clients[0].EAlg, clients[1].EAlg)
+	if clients[0].EAlg != "null" || clients[1].EAlg != "null" || clients[2].EAlg != "aes-cbc" || clients[3].EAlg != "aes-cbc" {
+		t.Fatalf("Security-Client ealgs = %q/%q/%q/%q, want null/null/aes-cbc/aes-cbc", clients[0].EAlg, clients[1].EAlg, clients[2].EAlg, clients[3].EAlg)
 	}
-	if clients[0].Mod != "trans" || clients[1].Mod != "trans" {
-		t.Fatalf("Security-Client modes = %q/%q, want trans/trans", clients[0].Mod, clients[1].Mod)
+	if clients[0].Mod != "trans" || clients[1].Mod != "UDP-enc-tun" || clients[2].Mod != "trans" || clients[3].Mod != "UDP-enc-tun" {
+		t.Fatalf("Security-Client modes = %q/%q/%q/%q, want trans/UDP-enc-tun/trans/UDP-enc-tun", clients[0].Mod, clients[1].Mod, clients[2].Mod, clients[3].Mod)
 	}
 	if got := msg.Header("Require"); got != "sec-agree" {
 		t.Fatalf("Require = %q, want sec-agree", got)
@@ -1698,7 +1860,7 @@ func TestRegisterRetriesInitialChallengeWithInvalidSecurityServer(t *testing.T) 
 			if got := req.Header("CSeq"); got != "1 REGISTER" {
 				t.Fatalf("retried CSeq = %q, want 1 REGISTER", got)
 			}
-			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 5060))
+			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 4062))
 		case 3:
 			if got := req.Header("Call-ID"); got != retriedCallID {
 				t.Fatalf("authenticated Call-ID = %q, want retried %q", got, retriedCallID)
@@ -1714,6 +1876,33 @@ func TestRegisterRetriesInitialChallengeWithInvalidSecurityServer(t *testing.T) 
 	}
 	if got := countWrites(transport); got != 3 {
 		t.Fatalf("write count = %d, want initial retry plus authenticated REGISTER", got)
+	}
+}
+
+func TestRegisterTreatsTransportFailureAsInitialRegistrationRequired(t *testing.T) {
+	tests := []struct {
+		name      string
+		transport *stubTransport
+	}{
+		{"TCP fatal transport error", newTCPTransport(5062, 5060)},
+		{"UDP fatal transport error", newUDPTransport(5062, 5060)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cause := errors.New("transport connection lost")
+			tt.transport.writeErr = cause
+			svc := newTestService(t, Config{}, tt.transport, stubCard{})
+			t.Cleanup(func() { _ = svc.Close() })
+			err := svc.Register(context.Background())
+			if !errors.Is(err, cause) {
+				t.Fatalf("Register() error = %v, want %v", err, cause)
+			}
+			var initial *initialRegistrationRequired
+			if !errors.As(err, &initial) {
+				t.Fatalf("Register() error = %v, want initial registration required", err)
+			}
+		})
 	}
 }
 
@@ -1735,7 +1924,7 @@ func TestRegisterSynchronizationFailureSendsAUTSAndContinues(t *testing.T) {
 		req := mustParseMessage(t, data)
 		switch countWrites(transport) {
 		case 1:
-			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 4060))
+			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 4062))
 		case 2:
 			auth := req.Header("Authorization")
 			if !strings.Contains(auth, `response=""`) {
@@ -1744,7 +1933,10 @@ func TestRegisterSynchronizationFailureSendsAUTSAndContinues(t *testing.T) {
 			if !strings.Contains(auth, `auts="`+base64.StdEncoding.EncodeToString(auts)+`"`) {
 				t.Fatalf("synchronization failure Authorization = %q, want auts", auth)
 			}
-			transport.queue(newUnauthorizedRegisterResponse(req, nextNonce, 4060))
+			if !strings.Contains(auth, `opaque="test-opaque"`) {
+				t.Fatalf("synchronization failure Authorization = %q, want opaque", auth)
+			}
+			transport.queue(newUnauthorizedRegisterResponse(req, nextNonce, 4062))
 		case 3:
 			auth := req.Header("Authorization")
 			if strings.Contains(auth, "auts=") {
@@ -1799,7 +1991,7 @@ func TestRegisterAppliesChallengeAndSuccessState(t *testing.T) {
 			transport.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 0))
 		case 2:
 			transport.queue(newResponse(req, 200, "OK",
-				sip.Header{Name: "Authentication-Info", Value: `nextnonce="` + testNonce + `"`},
+				sip.Header{Name: "Authentication-Info", Value: authenticationInfoForRequest(t, req, testNonce)},
 				sip.Header{Name: "P-Associated-URI", Value: "<tel:+15551234567>"},
 				sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"},
 				sip.Header{Name: "Expires", Value: "600"},
@@ -1962,6 +2154,10 @@ func TestRegisterRejectsInvalidAuthenticationInfoRspauth(t *testing.T) {
 		{
 			name: "rspauth mismatch",
 			info: `rspauth="00000000000000000000000000000000"`,
+		},
+		{
+			name: "nextnonce without required qop fields",
+			info: `nextnonce="` + testNonce + `"`,
 		},
 	}
 
@@ -2151,18 +2347,19 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 			},
 		},
 		{
-			name: "matches registered contact with network user part",
+			name: "does not match contact with different userinfo",
 			headersFor: func(req sip.Message) []sip.Header {
 				uri, params := sip.AddressURIAndParams(req.Header("Contact"))
 				hostPort := strings.TrimPrefix(uri, "sip:")
 				return []sip.Header{
 					{Name: "Contact", Value: `<sip:001010123456789@` + hostPort + `>` + params + `;expires=1800`},
+					{Name: "Expires", Value: "600"},
 				}
 			},
 			checkState: func(t *testing.T, state State) {
 				t.Helper()
-				if state.RegisterExpires != 30*time.Minute {
-					t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 30*time.Minute)
+				if state.RegisterExpires != 10*time.Minute {
+					t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 10*time.Minute)
 				}
 			},
 		},
@@ -2284,7 +2481,7 @@ func TestRegisterKeepsUDPResponseTransportForTCPFlow(t *testing.T) {
 	}
 	outboundTCP.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		outboundTCP.queue(newResponse(req, 200, "OK", sip.Header{Name: "Authentication-Info", Value: `nextnonce="` + testNonce + `"`}))
+		outboundTCP.queue(newResponse(req, 200, "OK", sip.Header{Name: "Authentication-Info", Value: authenticationInfoForRequest(t, req, testNonce)}))
 	}
 
 	if err := svc.Register(context.Background()); err != nil {
@@ -2393,7 +2590,7 @@ func TestRefreshReauthenticationRequiresSecureDialer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
@@ -2420,7 +2617,7 @@ func TestRefreshReauthenticationRequiresSecureInboundTransport(t *testing.T) {
 		},
 	}, old, stubCard{})
 
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 	old.onWrite = func(data []byte) {
@@ -2455,10 +2652,11 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 		},
 	}, old, stubCard{})
 
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 	oldSecurityClient := svc.CurrentFlow().SecurityClient
+	var challengedSecurityClient string
 
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
@@ -2475,6 +2673,14 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 		if countWrites(old) != 1 {
 			t.Fatalf("old write count = %d, want 1", countWrites(old))
 		}
+		challengedSecurityClient = req.Header("Security-Client")
+		var offered security.Params
+		if err := offered.UnmarshalText([]byte(challengedSecurityClient)); err != nil {
+			t.Fatalf("parsing challenged Security-Client: %v", err)
+		}
+		if len(offered) == 0 || offered[0].PortC == oldSecurityClient.PortC || offered[0].SPIC == oldSecurityClient.SPIC || offered[0].SPIS == oldSecurityClient.SPIS {
+			t.Fatalf("challenged Security-Client = %q, want new port-c and SPIs", challengedSecurityClient)
+		}
 		old.queue(newUnauthorizedRegisterResponse(req, testNonce, 4600))
 	}
 	nextOutbound.onWrite = func(data []byte) {
@@ -2488,15 +2694,18 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 		if got := req.Header("Security-Verify"); !strings.Contains(got, "port-c=4600") {
 			t.Fatalf("Security-Verify = %q, want new Security-Server", got)
 		}
+		if got := req.Header("Security-Client"); got != challengedSecurityClient {
+			t.Fatalf("protected Security-Client = %q, want challenged value %q", got, challengedSecurityClient)
+		}
 		var securityClients security.Params
 		if err := securityClients.UnmarshalText([]byte(req.Header("Security-Client"))); err != nil {
 			t.Fatalf("parsing Security-Client: %v", err)
 		}
-		if len(securityClients) != 2 {
-			t.Fatalf("Security-Client count = %d, want 2", len(securityClients))
+		if len(securityClients) != 4 {
+			t.Fatalf("Security-Client count = %d, want 4", len(securityClients))
 		}
-		if strings.Contains(req.Header("Security-Client"), "mod=UDP-enc-tun") {
-			t.Fatalf("Security-Client = %q, want conservative trans-only capabilities", req.Header("Security-Client"))
+		if !strings.Contains(req.Header("Security-Client"), "mod=UDP-enc-tun") {
+			t.Fatalf("Security-Client = %q, want UDP encapsulated tunnel capability", req.Header("Security-Client"))
 		}
 		securityClient := securityClients[0]
 		if securityClient.PortS != oldSecurityClient.PortS {
@@ -2556,7 +2765,7 @@ func TestRefreshReauthenticationCompletesBeforeSessionRun(t *testing.T) {
 		},
 	}, old, stubCard{})
 
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 	old.onWrite = func(data []byte) {
@@ -2592,7 +2801,7 @@ func TestRefreshReauthenticationAcceptsTCPResponseOnOutboundSecurityAssociation(
 		},
 	}, old, stubCard{})
 
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
@@ -2693,7 +2902,7 @@ func TestRefreshReauthenticationDrainsOldInboundSecurityAssociations(t *testing.
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 	oldInboundAttachment, err := sess.AddTransport(oldInbound)
@@ -2767,7 +2976,7 @@ func TestRefreshReauthenticationKeepsOldSAsUntilPendingTransactionCompletes(t *t
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 	oldInboundAttachment, err := sess.AddTransport(oldInbound)
@@ -2850,7 +3059,7 @@ func TestRefreshReauthenticationFailureDeletesIncompleteSecurityAssociations(t *
 			return nextInbound, nil
 		},
 	}, old, stubCard{})
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
@@ -2934,7 +3143,7 @@ func TestRefreshReauthenticationSynchronizationFailureRetriesWithAUTS(t *testing
 			successAKA,
 		},
 	})
-	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4060)); err != nil {
+	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
@@ -3006,7 +3215,7 @@ func TestRegistrationRefreshRejectsConcurrentRefresh(t *testing.T) {
 		case 1:
 			startedOnce.Do(func() { close(started) })
 			<-unblock
-			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 4060))
+			transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 4062))
 		case 2:
 			transport.queue(newResponse(req, 200, "OK"))
 		default:
@@ -3163,6 +3372,12 @@ func TestDeregisterRetriesAfterChallenge(t *testing.T) {
 	transport := newUDPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
+	svc.mu.Lock()
+	svc.flow.ServiceRoutes = []string{"<sip:scscf.example.com;lr>"}
+	svc.subscription = subscriptionDialog{active: true, callID: "subscription-call"}
+	svc.regInfoVersion = 3
+	svc.regInfoVersionSet = true
+	svc.mu.Unlock()
 
 	transport.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
@@ -3183,8 +3398,28 @@ func TestDeregisterRetriesAfterChallenge(t *testing.T) {
 	if err := svc.Deregister(context.Background()); err != nil {
 		t.Fatalf("Deregister() error = %v", err)
 	}
-	if svc.State().Registered {
+	state := svc.State()
+	if state.Registered {
 		t.Fatal("Registered = true, want false")
+	}
+	if len(state.ServiceRoutes) != 0 || state.SecurityVerify != nil {
+		t.Fatalf("registration flow after deregistration = %+v, want routes and security cleared", state.Flow)
+	}
+	if state.MessagePort != state.RegisterPort {
+		t.Fatalf("MessagePort = %d, want unprotected RegisterPort %d", state.MessagePort, state.RegisterPort)
+	}
+	if subscription := svc.currentSubscription(); subscription.active {
+		t.Fatalf("subscription after deregistration = %+v, want inactive", subscription)
+	}
+	if svc.regInfoVersionSet {
+		t.Fatal("regInfoVersionSet = true, want false")
+	}
+	realm, nonce, algorithm, qop := svc.currentAuthState()
+	if realm == "" || nonce != "" || algorithm != "" || qop != "" {
+		t.Fatalf("auth state after deregistration = %q/%q/%q/%q, want realm fallback and empty challenge", realm, nonce, algorithm, qop)
+	}
+	if opaque := svc.currentAuthChallenge().Opaque; opaque != "" {
+		t.Fatalf("auth opaque after deregistration = %q, want empty", opaque)
 	}
 }
 
@@ -3882,6 +4117,7 @@ func TestNotifySubscriptionStateTerminatedRequestsNewSubscription(t *testing.T) 
 	if err := svc.Subscribe(context.Background()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
+	svc.setRegistered(true)
 	subscription := svc.currentSubscription()
 
 	transport.onWrite = nil
@@ -3912,6 +4148,57 @@ func TestNotifySubscriptionStateTerminatedRequestsNewSubscription(t *testing.T) 
 	resp := lastWrite(t, transport)
 	if got := resp.StatusCode(); got != 200 {
 		t.Fatalf("status = %d, want 200", got)
+	}
+}
+
+func TestNotifyTerminatedSubscriptionRefreshesOnlyWhileRegistered(t *testing.T) {
+	tests := []struct {
+		name         string
+		contactState string
+		event        string
+		wantRefresh  bool
+	}{
+		{name: "active registration continues subscription", contactState: "active", event: "refreshed", wantRefresh: true},
+		{name: "network deregistration cancels subscription", contactState: "terminated", event: "deactivated"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			svc.setRegistered(true)
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			notify.Headers.Add("Event", regEventPackage)
+			notify.Headers.Add("Subscription-State", "terminated;reason=timeout")
+			notify.Headers.Add("Content-Type", regInfoContentType)
+			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="%s" event="%s"><uri>%s</uri></contact>
+  </registration>
+</reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.event, svc.currentRegisterContactURI()))
+
+			if handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport}); err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			} else if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			select {
+			case <-svc.subscribeRefreshRequests:
+				if !tt.wantRefresh {
+					t.Fatal("unexpected subscription refresh after deregistration")
+				}
+			default:
+				if tt.wantRefresh {
+					t.Fatal("subscription refresh request missing")
+				}
+			}
+			if tt.wantRefresh {
+				expectNoRegistrationEvent(t, svc)
+			} else {
+				expectRegistrationEvent(t, svc, errNetworkDeregistered)
+			}
+		})
 	}
 }
 
@@ -4110,6 +4397,143 @@ func TestNotifyRegInfoMaintainsTableAcrossPartialUpdates(t *testing.T) {
 	}
 }
 
+func TestRegInfoIDsRemainStableAcrossNotifications(t *testing.T) {
+	tests := []struct {
+		name         string
+		registration regInfoRegistration
+	}{
+		{
+			name: "registration id changes address of record",
+			registration: regInfoRegistration{
+				ID: "reg-1", AOR: "sip:other@example.com", State: regInfoRegistrationStateActive,
+				Contact: []regInfoContact{{ID: "contact-2", State: regInfoContactStateActive, Event: regInfoContactEventRegistered, URI: "sip:other@192.0.2.11"}},
+			},
+		},
+		{
+			name: "address of record changes registration id",
+			registration: regInfoRegistration{
+				ID: "reg-2", State: regInfoRegistrationStateActive,
+				Contact: []regInfoContact{{ID: "contact-2", State: regInfoContactStateActive, Event: regInfoContactEventRegistered, URI: "sip:other@192.0.2.11"}},
+			},
+		},
+		{
+			name: "contact id changes URI",
+			registration: regInfoRegistration{
+				ID: "reg-1", State: regInfoRegistrationStateActive,
+				Contact: []regInfoContact{{ID: "contact-1", State: regInfoContactStateActive, Event: regInfoContactEventRefreshed, URI: "sip:changed@192.0.2.12"}},
+			},
+		},
+		{
+			name: "contact id moves to another registration",
+			registration: regInfoRegistration{
+				ID: "reg-2", AOR: "sip:other@example.com", State: regInfoRegistrationStateActive,
+				Contact: []regInfoContact{{ID: "contact-1", State: regInfoContactStateActive, Event: regInfoContactEventRegistered, URI: "sip:other@192.0.2.11"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{}, newTCPTransport(5062, 5060), stubCard{})
+			state := svc.State()
+			contact := svc.currentRegisterContactURI()
+			seed := regInfo{
+				Version: "1",
+				State:   regInfoStateFull,
+				Registration: []regInfoRegistration{{
+					ID: "reg-1", AOR: state.PublicIdentity, State: regInfoRegistrationStateActive,
+					Contact: []regInfoContact{{ID: "contact-1", State: regInfoContactStateActive, Event: regInfoContactEventRegistered, URI: contact}},
+				}},
+			}
+			if _, err := svc.applyRegInfo(seed); err != nil {
+				t.Fatalf("applyRegInfo(seed) error = %v", err)
+			}
+
+			update := tt.registration
+			if update.AOR == "" {
+				update.AOR = state.PublicIdentity
+			}
+			_, err := svc.applyRegInfo(regInfo{Version: "2", State: regInfoStatePartial, Registration: []regInfoRegistration{update}})
+			if !errors.Is(err, errInvalidRegInfo) {
+				t.Fatalf("applyRegInfo(update) error = %v, want invalid reginfo", err)
+			}
+			if svc.regInfoVersion != 1 {
+				t.Fatalf("regInfoVersion = %d, want unchanged 1", svc.regInfoVersion)
+			}
+		})
+	}
+}
+
+func TestRegInfoSharedContactIDAcrossRegistrations(t *testing.T) {
+	tests := []struct {
+		name      string
+		secondURI func(string) string
+		wantErr   bool
+	}{
+		{
+			name:      "same contact for tel and sip addresses of record",
+			secondURI: func(uri string) string { return uri },
+		},
+		{
+			name:      "same id identifies a different contact",
+			secondURI: func(string) string { return "sip:other@192.0.2.20" },
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{}, newTCPTransport(5062, 5060), stubCard{})
+			svc.setRegistered(true)
+			contact := svc.currentRegisterContactURI()
+			body := fmt.Sprintf(`<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="0" state="full">
+  <registration aor="%s" id="reg-sip" state="active">
+    <contact id="shared-contact" state="active" event="registered"><uri>%s</uri></contact>
+  </registration>
+  <registration aor="tel:+19293101226" id="reg-tel" state="active">
+    <contact id="shared-contact" state="active" event="registered"><uri>%s</uri></contact>
+  </registration>
+</reginfo>`, svc.State().PublicIdentity, contact, tt.secondURI(contact))
+
+			var info regInfo
+			err := info.UnmarshalText([]byte(body))
+			if tt.wantErr {
+				if !errors.Is(err, errInvalidRegInfo) {
+					t.Fatalf("UnmarshalText() error = %v, want invalid reginfo", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			if _, err := svc.applyRegInfo(info); err != nil {
+				t.Fatalf("applyRegInfo(full) error = %v", err)
+			}
+			partial := regInfo{
+				Version: "1",
+				State:   regInfoStatePartial,
+				Registration: []regInfoRegistration{{
+					ID:    "reg-tel",
+					AOR:   "tel:+19293101226",
+					State: regInfoRegistrationStateActive,
+					Contact: []regInfoContact{{
+						ID:    "shared-contact",
+						State: regInfoContactStateActive,
+						Event: regInfoContactEventRefreshed,
+						URI:   contact,
+					}},
+				}},
+			}
+			if _, err := svc.applyRegInfo(partial); err != nil {
+				t.Fatalf("applyRegInfo(partial) error = %v", err)
+			}
+			if svc.regInfoVersion != 1 {
+				t.Fatalf("regInfoVersion = %d, want 1", svc.regInfoVersion)
+			}
+		})
+	}
+}
+
 func TestNotifyRegInfoAcceptsContentTypeParameters(t *testing.T) {
 	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
@@ -4139,23 +4563,75 @@ func TestNotifyRegInfoAcceptsContentTypeParameters(t *testing.T) {
 	}
 }
 
+func TestNotifyRegInfoRejectsInvalidProtocolHeaders(t *testing.T) {
+	tests := []struct {
+		name        string
+		event       string
+		contentType string
+		body        string
+		wantStatus  int
+		wantAccept  string
+	}{
+		{name: "missing event", contentType: regInfoContentType, body: `<reginfo/>`, wantStatus: sipStatusBadEvent},
+		{name: "wrong event package", event: "presence", contentType: regInfoContentType, body: `<reginfo/>`, wantStatus: sipStatusBadEvent},
+		{name: "body missing content type", event: regEventPackage, body: `<reginfo/>`, wantStatus: sipStatusBadRequest},
+		{name: "unsupported content type", event: regEventPackage, contentType: "application/xml", body: `<reginfo/>`, wantStatus: sipStatusUnsupportedMediaType, wantAccept: regInfoContentType},
+		{name: "malformed content type", event: regEventPackage, contentType: "application/reginfo+xml; charset", body: `<reginfo/>`, wantStatus: sipStatusUnsupportedMediaType, wantAccept: regInfoContentType},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			if tt.event != "" {
+				notify.Headers.Add("Event", tt.event)
+			}
+			if tt.contentType != "" {
+				notify.Headers.Add("Content-Type", tt.contentType)
+			}
+			notify.Body = []byte(tt.body)
+
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			resp := lastWrite(t, transport)
+			if got := resp.StatusCode(); got != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", got, tt.wantStatus)
+			}
+			if got := resp.Header("Accept"); got != tt.wantAccept {
+				t.Fatalf("Accept = %q, want %q", got, tt.wantAccept)
+			}
+		})
+	}
+}
+
 func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) {
 	tests := []struct {
-		name      string
-		event     string
-		wantEvent error
+		name       string
+		event      string
+		attributes string
+		wantEvent  error
+		wantClear  bool
 	}{
-		{name: "deactivated", event: "deactivated", wantEvent: errNetworkDeregistered},
-		{name: "rejected", event: "rejected", wantEvent: errNetworkDeregistered},
+		{name: "deactivated", event: "deactivated", wantEvent: errNetworkDeregistered, wantClear: true},
+		{name: "rejected", event: "rejected", wantEvent: errNetworkDeregistered, wantClear: true},
 		{name: "expired", event: "expired", wantEvent: errInitialRegistrationNeeded},
-		{name: "unregistered", event: "unregistered", wantEvent: errInitialRegistrationNeeded},
-		{name: "probation", event: "probation", wantEvent: errInitialRegistrationNeeded},
+		{name: "unregistered", event: "unregistered", wantEvent: errNetworkDeregistered, wantClear: true},
+		{name: "probation", event: "probation", attributes: ` retry-after="30"`, wantEvent: errInitialRegistrationNeeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 			svc.setRegistered(true)
+			svc.mu.Lock()
+			svc.flow.ServiceRoutes = []string{"<sip:scscf.example.com;lr>"}
+			svc.mu.Unlock()
 
 			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 			notify.Headers.Add("Event", "reg")
@@ -4163,11 +4639,11 @@ func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) 
 			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
   <registration aor="%s" id="reg-1" state="active">
-    <contact id="contact-1" state="terminated" event="%s">
+    <contact id="contact-1" state="terminated" event="%s"%s>
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, tt.event, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, tt.event, tt.attributes, svc.currentRegisterContactURI()))
 			req := session.Request{Message: notify, Transport: transport}
 
 			handled, err := svc.HandleRequest(context.Background(), req)
@@ -4181,6 +4657,9 @@ func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) 
 			if svc.State().Registered {
 				t.Fatal("Registered = true, want false")
 			}
+			if got := len(svc.State().ServiceRoutes); (got == 0) != tt.wantClear {
+				t.Fatalf("ServiceRoutes count = %d, want cleared=%t", got, tt.wantClear)
+			}
 			if got := countWrites(transport); got != 1 {
 				t.Fatalf("write count = %d, want NOTIFY 200 response", got)
 			}
@@ -4188,16 +4667,81 @@ func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) 
 	}
 }
 
+func TestRegInfoNetworkTerminationKeepsActiveSiblingBinding(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "active sibling flow prevents global deregistration"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{}, newTCPTransport(5062, 5060), stubCard{})
+			svc.setRegistered(true)
+			state := svc.State()
+			contact := svc.currentRegisterContactURI()
+			info := regInfo{
+				Version: "1",
+				State:   regInfoStateFull,
+				Registration: []regInfoRegistration{{
+					ID: "reg-1", AOR: state.PublicIdentity, State: regInfoRegistrationStateActive,
+					Contact: []regInfoContact{
+						{ID: "contact-terminated", State: regInfoContactStateTerminated, Event: regInfoContactEventDeactivated, URI: contact},
+						{ID: "contact-active", State: regInfoContactStateActive, Event: regInfoContactEventRegistered, URI: contact},
+					},
+				}},
+			}
+
+			if _, err := svc.applyRegInfo(info); err != nil {
+				t.Fatalf("applyRegInfo() error = %v, want active sibling to keep registration", err)
+			}
+			if !svc.State().Registered {
+				t.Fatal("Registered = false, want true")
+			}
+		})
+	}
+}
+
+func TestSecureCleanupCanWaitForServerTransaction(t *testing.T) {
+	tests := []struct {
+		name  string
+		delay time.Duration
+	}{
+		{name: "UDP Timer J delay", delay: 20 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newUDPTransport(5062, 5060)
+			secureInbound := newUDPTransport(5063, 4060)
+			svc := newTestService(t, Config{}, primary, stubCard{})
+			attachment, err := svc.sess.AddTransport(secureInbound)
+			if err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+			svc.replaceSecureServerAttachments([]session.Attachment{attachment})
+
+			svc.clearSecureResourcesAfter(tt.delay)
+			if got := closeCount(secureInbound); got != 0 {
+				t.Fatalf("secure closeCount before delay = %d, want 0", got)
+			}
+			waitForCloseCount(t, secureInbound, 1)
+		})
+	}
+}
+
 func TestNotifyRegInfoTerminatedRegistrationPublishesRegistrationEvent(t *testing.T) {
 	tests := []struct {
-		name      string
-		event     string
-		wantEvent error
+		name           string
+		contactEvent   string
+		includeContact bool
+		wantEvent      error
 	}{
-		{name: "deactivated", event: "deactivated", wantEvent: errNetworkDeregistered},
-		{name: "rejected", event: "rejected", wantEvent: errNetworkDeregistered},
-		{name: "expired", event: "expired", wantEvent: errInitialRegistrationNeeded},
-		{name: "unknown", event: "unknown", wantEvent: errInitialRegistrationNeeded},
+		{name: "deactivated contact", contactEvent: "deactivated", includeContact: true, wantEvent: errNetworkDeregistered},
+		{name: "rejected contact", contactEvent: "rejected", includeContact: true, wantEvent: errNetworkDeregistered},
+		{name: "unregistered contact", contactEvent: "unregistered", includeContact: true, wantEvent: errNetworkDeregistered},
+		{name: "expired contact", contactEvent: "expired", includeContact: true, wantEvent: errInitialRegistrationNeeded},
+		{name: "registration without contacts", wantEvent: errInitialRegistrationNeeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4208,10 +4752,14 @@ func TestNotifyRegInfoTerminatedRegistrationPublishesRegistrationEvent(t *testin
 			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 			notify.Headers.Add("Event", "reg")
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
+			contact := ""
+			if tt.includeContact {
+				contact = fmt.Sprintf(`<contact id="contact-1" state="terminated" event="%s"><uri>%s</uri></contact>`, tt.contactEvent, svc.currentRegisterContactURI())
+			}
 			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
-  <registration aor="%s" id="reg-1" state="terminated" event="%s"/>
-</reginfo>`, svc.State().PublicIdentity, tt.event))
+  <registration aor="%s" id="reg-1" state="terminated">%s</registration>
+</reginfo>`, svc.State().PublicIdentity, contact))
 
 			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
@@ -4436,6 +4984,54 @@ func TestNotifyRegInfoIgnoresStaleVersion(t *testing.T) {
 	}
 }
 
+func TestApplyRegInfoDiscardsOldVersionBeforeConsistencyChecks(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+	}{
+		{name: "stale", version: "1"},
+		{name: "duplicate", version: "2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{}, newTCPTransport(5062, 5060), stubCard{})
+			state := svc.State()
+			contact := svc.currentRegisterContactURI()
+			seed := regInfo{
+				Version: "2",
+				State:   regInfoStateFull,
+				Registration: []regInfoRegistration{{
+					ID: "reg-1", AOR: state.PublicIdentity, State: regInfoRegistrationStateActive,
+					Contact: []regInfoContact{{ID: "contact-1", State: regInfoContactStateActive, Event: regInfoContactEventRegistered, URI: contact}},
+				}},
+			}
+			if _, err := svc.applyRegInfo(seed); err != nil {
+				t.Fatalf("applyRegInfo(seed) error = %v", err)
+			}
+
+			old := regInfo{
+				Version: tt.version,
+				State:   regInfoStateFull,
+				Registration: []regInfoRegistration{{
+					ID: "reg-1", AOR: "sip:changed@example.com", State: regInfoRegistrationStateTerminated,
+					Contact: []regInfoContact{{ID: "contact-1", State: regInfoContactStateTerminated, Event: regInfoContactEventDeactivated, URI: "sip:changed@192.0.2.20"}},
+				}},
+			}
+			if refresh, err := svc.applyRegInfo(old); err != nil || refresh {
+				t.Fatalf("applyRegInfo(old) = refresh %t, error %v; want discarded", refresh, err)
+			}
+			if svc.regInfoVersion != 2 {
+				t.Fatalf("regInfoVersion = %d, want unchanged 2", svc.regInfoVersion)
+			}
+			entry := svc.regInfoRegistrations["reg-1"]
+			if entry.AOR != state.PublicIdentity || !entry.Contacts["contact-1"].active() {
+				t.Fatalf("reginfo table = %+v, want original active binding", entry)
+			}
+		})
+	}
+}
+
 func TestNotifyRegInfoRejectsInvalidEnvelope(t *testing.T) {
 	tests := []struct {
 		name string
@@ -4530,6 +5126,66 @@ func TestNotifyRegInfoRejectsInvalidEnvelope(t *testing.T) {
 			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="sip:other@example.com" id="reg-1" state="active">
     <contact id="contact-1" state="active" event="registered"/>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "shortened contact missing expires",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:other@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="shortened"><uri>sip:other@192.0.2.10</uri></contact>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "probation contact missing retry after",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:other@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="terminated" event="probation"><uri>sip:other@192.0.2.10</uri></contact>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "negative expires",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:other@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="shortened" expires="-1"><uri>sip:other@192.0.2.10</uri></contact>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "negative cseq",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:other@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="registered" cseq="-1"><uri>sip:other@192.0.2.10</uri></contact>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "unknown parameter missing name",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:other@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="registered"><uri>sip:other@192.0.2.10</uri><unknown-param>value</unknown-param></contact>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "duplicate contact id within registration",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:one@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="registered"><uri>sip:one@192.0.2.10</uri></contact>
+    <contact id="contact-1" state="active" event="refreshed"><uri>sip:one@192.0.2.10</uri></contact>
+  </registration>
+</reginfo>`,
+		},
+		{
+			name: "duplicate contact id across registrations",
+			body: `<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="sip:one@example.com" id="reg-1" state="active">
+    <contact id="contact-1" state="active" event="registered"><uri>sip:one@192.0.2.10</uri></contact>
+  </registration>
+  <registration aor="sip:two@example.com" id="reg-2" state="active">
+    <contact id="contact-1" state="active" event="registered"><uri>sip:two@192.0.2.11</uri></contact>
   </registration>
 </reginfo>`,
 		},
@@ -4669,15 +5325,15 @@ func TestRegisterSuccessStartsRFC6223KeepAlive(t *testing.T) {
 			},
 		},
 		{
-			name:      "udp stun binding indication",
+			name:      "udp stun binding request",
 			transport: newUDPTransport(5062, 5060),
 			assertData: func(t *testing.T, data []byte) {
 				t.Helper()
 				if len(data) != 20 {
 					t.Fatalf("STUN packet length = %d, want 20", len(data))
 				}
-				if got := binary.BigEndian.Uint16(data[0:2]); got != 0x0011 {
-					t.Fatalf("STUN message type = %#x, want Binding Indication", got)
+				if got := binary.BigEndian.Uint16(data[0:2]); got != 0x0001 {
+					t.Fatalf("STUN message type = %#x, want Binding Request", got)
 				}
 				if got := binary.BigEndian.Uint16(data[2:4]); got != 0 {
 					t.Fatalf("STUN message length = %d, want 0", got)
@@ -4700,6 +5356,35 @@ func TestRegisterSuccessStartsRFC6223KeepAlive(t *testing.T) {
 			svc.applyRegisterSuccess(registerResponseWithViaKeep(svc, "30"))
 			waitForWriteCount(t, tt.transport, 1)
 			tt.assertData(t, transportWriteAt(t, tt.transport, 0))
+		})
+	}
+}
+
+func TestRegisterSuccessSkipsKeepAliveWhenTransportDisablesIt(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "UDP encapsulated IPsec capability"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useRegistrationKeepAliveInterval(t, time.Millisecond)
+			transport := &keepAliveDisabledTransport{newUDPTransport(5062, 5060)}
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			t.Cleanup(func() { _ = svc.Close() })
+
+			svc.applyRegisterSuccess(registerResponseWithViaKeep(svc, "30"))
+			time.Sleep(10 * time.Millisecond)
+			if got := countWrites(transport.stubTransport); got != 0 {
+				t.Fatalf("keepalive write count = %d, want 0", got)
+			}
+			svc.mu.Lock()
+			keepalive := svc.registrationKeepAlive
+			svc.mu.Unlock()
+			if keepalive != nil {
+				t.Fatal("registration keepalive started for disabled transport")
+			}
 		})
 	}
 }

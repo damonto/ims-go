@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"hash"
+	"strings"
 	"testing"
 
 	usim "github.com/damonto/wwan-go/sim"
@@ -23,65 +24,75 @@ func (stubAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResu
 	}, nil
 }
 
-type orderAKAProvider struct {
-	firstRAND []byte
-	firstAUTN []byte
-	first     usim.AKAResult
-	firstErr  error
-}
-
-func (p orderAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
-	if bytes.Equal(rand, p.firstRAND) && bytes.Equal(autn, p.firstAUTN) {
-		return p.first, p.firstErr
-	}
-	return usim.AKAResult{
-		RES: []byte("password"),
-		CK:  []byte("client-test-ck"),
-		IK:  []byte("client-test-ik"),
-	}, nil
-}
-
 type fixedAKAProvider struct {
 	result usim.AKAResult
+	err    error
 	calls  int
 }
 
 func (p *fixedAKAProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
 	p.calls++
-	return p.result, nil
+	return p.result, p.err
 }
 
 func TestParamUnmarshalText(t *testing.T) {
 	tests := []struct {
-		name  string
-		value string
-		want  Params
+		name    string
+		value   string
+		want    Params
+		wantErr bool
 	}{
 		{
-			name:  "compact",
-			value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=310;spi-s=320",
+			name:  "compact spis from security server",
+			value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=trans;port-c=33118;port-s=6000;prot=esp;spi-c=46283817;spi-s=46283816;q=0.1",
 			want: Params{{
 				Mechanism: "ipsec-3gpp",
 				Alg:       "hmac-sha-1-96",
-				EAlg:      "null",
+				EAlg:      "aes-cbc",
 				Mod:       "trans",
-				PortC:     5062,
-				PortS:     5060,
+				PortC:     33118,
+				PortS:     6000,
 				Prot:      "esp",
-				SPIC:      310,
-				SPIS:      320,
+				SPIC:      46283817,
+				SPIS:      46283816,
+				Q:         "0.1",
 			}},
 		},
 		{
+			name:    "rejects signed port",
+			value:   "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=+5062;port-s=5063;prot=esp;spi-c=0000000310;spi-s=0000000320",
+			wantErr: true,
+		},
+		{
+			name:    "rejects non-decimal spi",
+			value:   "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=000000031x;spi-s=0000000320",
+			wantErr: true,
+		},
+		{
+			name:    "rejects signed spi",
+			value:   "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=+310;spi-s=320",
+			wantErr: true,
+		},
+		{
+			name:    "rejects spi wider than uint32 decimal form",
+			value:   "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=42949672960;spi-s=320",
+			wantErr: true,
+		},
+		{
+			name:    "rejects uint32 overflow spi",
+			value:   "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=4294967296;spi-s=320",
+			wantErr: true,
+		},
+		{
 			name:  "optional whitespace",
-			value: " ipsec-3gpp ; alg = hmac-sha-1-96 ; ealg = null ; mod = trans ; port-c = 5062 ; port-s= 5060 ; prot = esp ; spi-c = 2291967259 ; spi-s = 320 ; q = 0.9 ",
+			value: " ipsec-3gpp ; alg = hmac-sha-1-96 ; ealg = null ; mod = trans ; port-c = 5062 ; port-s= 5063 ; prot = esp ; spi-c = 2291967259 ; spi-s = 0000000320 ; q = 0.9 ",
 			want: Params{{
 				Mechanism: "ipsec-3gpp",
 				Alg:       "hmac-sha-1-96",
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      2291967259,
 				SPIS:      320,
@@ -90,14 +101,14 @@ func TestParamUnmarshalText(t *testing.T) {
 		},
 		{
 			name:  "padded spis",
-			value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5060;prot=esp;spi-c=0000000310;spi-s=4294967295",
+			value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=5062;port-s=5063;prot=esp;spi-c=0000000310;spi-s=4294967295",
 			want: Params{{
 				Mechanism: "ipsec-3gpp",
 				Alg:       "hmac-sha-1-96",
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      4294967295,
@@ -108,7 +119,14 @@ func TestParamUnmarshalText(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got Params
-			if err := got.UnmarshalText([]byte(tt.value)); err != nil {
+			err := got.UnmarshalText([]byte(tt.value))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalText() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("UnmarshalText() error = %v", err)
 			}
 			if len(got) != len(tt.want) {
@@ -162,7 +180,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -174,7 +192,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -187,7 +205,7 @@ func TestNormalizeParam(t *testing.T) {
 				Alg:       "hmac-sha-1-96",
 				EAlg:      "null",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				SPIC:      310,
 				SPIS:      320,
 			},
@@ -198,7 +216,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -211,7 +229,7 @@ func TestNormalizeParam(t *testing.T) {
 				Alg:       "hmac-sha-1-96",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				SPIC:      310,
 				SPIS:      320,
 			},
@@ -222,7 +240,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -236,7 +254,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -251,7 +269,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -266,7 +284,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "aes-gcm",
 				Mod:       "UDP-enc-tun",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -278,7 +296,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "aes-gcm",
 				Mod:       "UDP-enc-tun",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -292,7 +310,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -304,7 +322,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -318,7 +336,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -333,7 +351,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "aes-gcm",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -348,7 +366,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "tun",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -363,7 +381,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -377,7 +395,7 @@ func TestNormalizeParam(t *testing.T) {
 				Alg:       "hmac-sha-1-96",
 				EAlg:      "null",
 				Mod:       "trans",
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      320,
@@ -392,7 +410,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      255,
 				SPIS:      320,
@@ -407,7 +425,7 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      255,
@@ -422,10 +440,55 @@ func TestNormalizeParam(t *testing.T) {
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
-				PortS:     5060,
+				PortS:     5063,
 				Prot:      "esp",
 				SPIC:      310,
 				SPIS:      310,
+			},
+			ok: false,
+		},
+		{
+			name: "rejects standard SIP client port",
+			in: Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5060,
+				PortS:     5063,
+				Prot:      "esp",
+				SPIC:      310,
+				SPIS:      320,
+			},
+			ok: false,
+		},
+		{
+			name: "rejects standard SIPS server port",
+			in: Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5061,
+				Prot:      "esp",
+				SPIC:      310,
+				SPIS:      320,
+			},
+			ok: false,
+		},
+		{
+			name: "rejects duplicate protected ports",
+			in: Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5062,
+				Prot:      "esp",
+				SPIC:      310,
+				SPIS:      320,
 			},
 			ok: false,
 		},
@@ -461,15 +524,18 @@ func TestNormalizeParam(t *testing.T) {
 
 func TestChallengeUnmarshalText(t *testing.T) {
 	tests := []struct {
-		name    string
-		value   string
-		wantAlg string
-		wantErr bool
+		name       string
+		value      string
+		wantAlg    string
+		wantRealm  string
+		wantOpaque string
+		wantErr    bool
 	}{
 		{
-			name:    "ak v1",
-			value:   `Digest realm="ims.example",nonce="abc",algorithm=AKAv1-MD5,qop="auth,auth-int"`,
-			wantAlg: AlgorithmAKAv1MD5,
+			name:      "ak v1",
+			value:     `Digest realm="ims.example",nonce="abc",algorithm=AKAv1-MD5,qop="auth,auth-int"`,
+			wantAlg:   AlgorithmAKAv1MD5,
+			wantRealm: "ims.example",
 		},
 		{
 			name:    "missing algorithm",
@@ -477,14 +543,38 @@ func TestChallengeUnmarshalText(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "ak v2",
-			value:   `Digest realm="ims.example",nonce="abc",algorithm=AKAv2-MD5,qop="auth,auth-int"`,
-			wantAlg: AlgorithmAKAv2MD5,
+			name:      "ak v2",
+			value:     `Digest realm="ims.example",nonce="abc",algorithm=AKAv2-MD5,qop="auth,auth-int"`,
+			wantAlg:   AlgorithmAKAv2MD5,
+			wantRealm: "ims.example",
 		},
 		{
-			name:    "ak v2 sha256",
-			value:   `Digest realm="ims.example",nonce="abc",algorithm=AKAv2-SHA-256,qop="auth,auth-int"`,
-			wantAlg: AlgorithmAKAv2SHA256,
+			name:      "ak v2 sha256",
+			value:     `Digest realm="ims.example",nonce="abc",algorithm=AKAv2-SHA-256,qop="auth,auth-int"`,
+			wantAlg:   AlgorithmAKAv2SHA256,
+			wantRealm: "ims.example",
+		},
+		{
+			name:       "quoted pairs and opaque",
+			value:      `Digest realm="ims\"example",nonce="abc",algorithm=AKAv1-MD5,qop="auth,auth-int",opaque="a\"b\\c"`,
+			wantAlg:    AlgorithmAKAv1MD5,
+			wantRealm:  `ims"example`,
+			wantOpaque: `a"b\c`,
+		},
+		{
+			name:    "rejects unterminated quoted string",
+			value:   `Digest realm="ims.example,nonce="abc",algorithm=AKAv1-MD5`,
+			wantErr: true,
+		},
+		{
+			name:    "rejects missing realm",
+			value:   `Digest nonce="abc",algorithm=AKAv1-MD5`,
+			wantErr: true,
+		},
+		{
+			name:    "rejects duplicate nonce",
+			value:   `Digest realm="ims.example",nonce="abc",nonce="def",algorithm=AKAv1-MD5`,
+			wantErr: true,
 		},
 	}
 
@@ -501,7 +591,7 @@ func TestChallengeUnmarshalText(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UnmarshalText() error = %v", err)
 			}
-			if got.Realm != "ims.example" || got.Nonce != "abc" || got.Algorithm != tt.wantAlg {
+			if got.Realm != tt.wantRealm || got.Nonce != "abc" || got.Algorithm != tt.wantAlg || got.Opaque != tt.wantOpaque {
 				t.Fatalf("UnmarshalText() = %+v", got)
 			}
 			qop, err := got.SelectedQOP()
@@ -515,11 +605,71 @@ func TestChallengeUnmarshalText(t *testing.T) {
 	}
 }
 
+func TestBuildDigestAuthorizationChallengeFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		identity   Identity
+		challenge  Challenge
+		wantRealm  string
+		wantOpaque string
+	}{
+		{
+			name: "uses challenged realm and opaque",
+			identity: Identity{
+				PrivateIdentity: "user@private.example",
+				RegisterURI:     "sip:home.example",
+				Realm:           "configured.example",
+			},
+			challenge: Challenge{
+				Realm:     `ims"example`,
+				Nonce:     "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",
+				Algorithm: AlgorithmAKAv1MD5,
+				Opaque:    `a"b\c`,
+			},
+			wantRealm:  `ims"example`,
+			wantOpaque: `a"b\c`,
+		},
+		{
+			name: "falls back to identity realm",
+			identity: Identity{
+				PrivateIdentity: "user@private.example",
+				RegisterURI:     "sip:home.example",
+				Realm:           "configured.example",
+			},
+			challenge: Challenge{
+				Nonce:     "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",
+				Algorithm: AlgorithmAKAv1MD5,
+			},
+			wantRealm: "configured.example",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := BuildDigestAuthorization(tt.identity, tt.challenge, 1, "password")
+			if err != nil {
+				t.Fatalf("BuildDigestAuthorization() error = %v", err)
+			}
+			if got.Realm != tt.wantRealm || got.Opaque != tt.wantOpaque {
+				t.Fatalf("BuildDigestAuthorization() = %+v", got)
+			}
+			text := got.String()
+			if strings.ContainsAny(text, "\r\n") {
+				t.Fatalf("Authorization contains CR/LF: %q", text)
+			}
+			if tt.wantOpaque != "" && !strings.Contains(text, `opaque="a\"b\\c"`) {
+				t.Fatalf("Authorization = %q, want escaped opaque", text)
+			}
+		})
+	}
+}
+
 func TestInfoUnmarshalText(t *testing.T) {
 	tests := []struct {
-		name  string
-		value string
-		want  Info
+		name    string
+		value   string
+		want    Info
+		wantErr bool
 	}{
 		{name: "empty", value: "", want: Info{}},
 		{
@@ -533,12 +683,24 @@ func TestInfoUnmarshalText(t *testing.T) {
 				NonceCount: "00000001",
 			},
 		},
+		{name: "rejects duplicate qop", value: `qop=auth,qop=auth`, wantErr: true},
+		{name: "rejects directive without value", value: `qop`, wantErr: true},
+		{name: "rejects trailing comma", value: `qop=auth,`, wantErr: true},
+		{name: "rejects malformed nonce count", value: `nc=0000000G`, wantErr: true},
+		{name: "rejects malformed rspauth", value: `rspauth="not-hex"`, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got Info
-			if err := got.UnmarshalText([]byte(tt.value)); err != nil {
+			err := got.UnmarshalText([]byte(tt.value))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("UnmarshalText() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("UnmarshalText() error = %v", err)
 			}
 			if got != tt.want {
@@ -678,6 +840,50 @@ func TestVerifyAuthenticationInfoRspauth(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:      "rejects missing rspauth",
+			algorithm: AlgorithmAKAv1MD5,
+			newHash:   md5.New,
+			mutate: func(info *Info, auth Authorization) {
+				info.RSPAuth = ""
+			},
+			wantErr: true,
+		},
+		{
+			name:      "rejects missing qop",
+			algorithm: AlgorithmAKAv1MD5,
+			newHash:   md5.New,
+			mutate: func(info *Info, auth Authorization) {
+				info.QOP = ""
+			},
+			wantErr: true,
+		},
+		{
+			name:      "rejects missing cnonce",
+			algorithm: AlgorithmAKAv1MD5,
+			newHash:   md5.New,
+			mutate: func(info *Info, auth Authorization) {
+				info.CNonce = ""
+			},
+			wantErr: true,
+		},
+		{
+			name:      "rejects missing nonce count",
+			algorithm: AlgorithmAKAv1MD5,
+			newHash:   md5.New,
+			mutate: func(info *Info, auth Authorization) {
+				info.NonceCount = ""
+			},
+			wantErr: true,
+		},
+		{
+			name:      "qop comparison does not alter digest input",
+			algorithm: AlgorithmAKAv1MD5,
+			newHash:   md5.New,
+			mutate: func(info *Info, auth Authorization) {
+				info.QOP = "AUTH"
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -715,6 +921,32 @@ func TestVerifyAuthenticationInfoRspauth(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("VerifyAuthenticationInfo() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyAuthenticationInfoRejectsUnexpectedParameters(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+	}{
+		{name: "qop", info: Info{QOP: "auth", RSPAuth: "00"}},
+		{name: "cnonce", info: Info{CNonce: "unexpected", RSPAuth: "00"}},
+		{name: "nonce count", info: Info{NonceCount: "00000001", RSPAuth: "00"}},
+	}
+	auth := Authorization{
+		Nonce:     "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=",
+		URI:       "sip:ims.example",
+		Username:  "user@ims.example",
+		Realm:     "ims.example",
+		Algorithm: AlgorithmAKAv1MD5,
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := VerifyAuthenticationInfo(auth, tt.info, "password"); err == nil {
+				t.Fatal("VerifyAuthenticationInfo() error = nil, want mismatch")
 			}
 		})
 	}
@@ -765,19 +997,19 @@ func TestAKAv2DigestMaterial(t *testing.T) {
 	}
 }
 
-func TestBuildAKAAuthorizationRetriesReversedNonceOrder(t *testing.T) {
+func TestBuildAKAAuthorizationDoesNotRetryInvalidAKA(t *testing.T) {
 	tests := []struct {
-		name     string
-		first    usim.AKAResult
-		firstErr error
+		name   string
+		result usim.AKAResult
+		err    error
 	}{
 		{
-			name:     "first order returns error",
-			firstErr: errors.New("authentication rejected"),
+			name: "provider returns error",
+			err:  errors.New("authentication rejected"),
 		},
 		{
-			name: "first order returns incomplete security material",
-			first: usim.AKAResult{
+			name: "provider returns incomplete security material",
+			result: usim.AKAResult{
 				RES: []byte("password"),
 			},
 		},
@@ -792,24 +1024,17 @@ func TestBuildAKAAuthorizationRetriesReversedNonceOrder(t *testing.T) {
 				QOP:       "auth",
 			}
 
-			got, err := BuildAKAAuthorization(context.Background(), orderAKAProvider{
-				firstRAND: bytes.Repeat([]byte{0x01}, 16),
-				firstAUTN: bytes.Repeat([]byte{0x02}, 16),
-				first:     tt.first,
-				firstErr:  tt.firstErr,
-			}, Identity{
+			provider := &fixedAKAProvider{result: tt.result, err: tt.err}
+			_, err := BuildAKAAuthorization(context.Background(), provider, Identity{
 				PrivateIdentity: "310280123456789@private.att.net",
 				RegisterURI:     "sip:one.att.net",
 				Realm:           "one.att.net",
 			}, challenge, 1)
-			if err != nil {
-				t.Fatalf("BuildAKAAuthorization() error = %v", err)
+			if err == nil {
+				t.Fatal("BuildAKAAuthorization() error = nil, want non-nil")
 			}
-			if got.Authorization.Response == "" {
-				t.Fatal("Authorization.Response = empty, want non-empty")
-			}
-			if len(got.EncryptionKey) == 0 || len(got.IntegrityKey) == 0 {
-				t.Fatalf("security keys = CK:%X IK:%X, want non-empty", got.EncryptionKey, got.IntegrityKey)
+			if provider.calls != 1 {
+				t.Fatalf("AKA calls = %d, want 1", provider.calls)
 			}
 		})
 	}

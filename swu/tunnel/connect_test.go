@@ -223,6 +223,55 @@ func TestTunnelAddressesAcceptsIPv6Subnet(t *testing.T) {
 	}
 }
 
+func TestTunnelAddressesRejectsMoreInternalAddressesThanRequested(t *testing.T) {
+	tests := []struct {
+		name  string
+		attrs []ike.Attribute
+	}{
+		{
+			name: "multiple ipv4 addresses",
+			attrs: []ike.Attribute{
+				ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 0, 0, 1).To4()),
+				ike.NewTLVAttribute(configAttrInternalIPv4Address, net.IPv4(10, 0, 0, 2).To4()),
+			},
+		},
+		{
+			name: "multiple ipv6 addresses",
+			attrs: []ike.Attribute{
+				ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::1").To16(), 64)),
+				ike.NewTLVAttribute(configAttrInternalIPv6Address, append(net.ParseIP("2001:db8::2").To16(), 64)),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tunnelAddresses(tt.attrs, 0, 0); err == nil || !strings.Contains(err.Error(), "exceed request") {
+				t.Fatalf("tunnelAddresses() error = %v, want address count error", err)
+			}
+		})
+	}
+}
+
+func TestValidateLivenessConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		attr    ike.Attribute
+		wantErr bool
+	}{
+		{name: "four byte timeout", attr: ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, []byte{0, 0, 1, 44})},
+		{name: "short timeout", attr: ike.NewTLVAttribute(configAttrTimeoutPeriodForLivenessCheck, []byte{0, 1}), wantErr: true},
+		{name: "tv encoding", attr: ike.NewTVAttribute(configAttrTimeoutPeriodForLivenessCheck, 1), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLivenessConfig(ike.ConfigPayload{Attributes: []ike.Attribute{tt.attr}})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateLivenessConfig() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestTunnelAddressesAcceptsConfiguredPCSCFAttributes(t *testing.T) {
 	internalIPv6 := append(net.ParseIP("2001:db8::1").To16(), 64)
 
@@ -621,13 +670,15 @@ func TestDefaultIKEAuthInitPayloadsRequestsPDNTypeFamilies(t *testing.T) {
 
 func TestDefaultIKEAuthInitPayloadsUsesAPNAsResponderID(t *testing.T) {
 	tests := []struct {
-		name string
-		cfg  handshake.Config
-		want string
+		name    string
+		cfg     handshake.Config
+		want    string
+		wantIDr bool
 	}{
-		{name: "default ims apn", cfg: handshake.Config{}, want: DefaultAPN},
-		{name: "configured apn", cfg: handshake.Config{APN: "internet"}, want: "internet"},
-		{name: "trimmed configured apn", cfg: handshake.Config{APN: " ims.mnc001.mcc001.gprs "}, want: "ims.mnc001.mcc001.gprs"},
+		{name: "default ims apn", cfg: handshake.Config{}, want: DefaultAPN, wantIDr: true},
+		{name: "configured apn", cfg: handshake.Config{APN: "internet"}, want: "internet", wantIDr: true},
+		{name: "trimmed configured apn", cfg: handshake.Config{APN: " ims.mnc001.mcc001.gprs "}, want: "ims.mnc001.mcc001.gprs", wantIDr: true},
+		{name: "network default apn", cfg: handshake.Config{RequestDefaultAPN: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -635,9 +686,15 @@ func TestDefaultIKEAuthInitPayloadsUsesAPNAsResponderID(t *testing.T) {
 			if err != nil {
 				t.Fatalf("defaultIKEAuthInitPayloads() error = %v", err)
 			}
-			idr, ok := payloads[1].(*ike.IDPayload)
-			if !ok {
-				t.Fatalf("payload[1] = %T, want *ike.IDPayload", payloads[1])
+			idr := ike.FindIDPayload(payloads, payloadTypeIDr)
+			if !tt.wantIDr {
+				if idr != nil {
+					t.Fatalf("IDr = %q, want omitted payload", idr.Data)
+				}
+				return
+			}
+			if idr == nil {
+				t.Fatal("IDr is missing")
 			}
 			if got := string(idr.Data); got != tt.want {
 				t.Fatalf("IDr = %q, want %q", got, tt.want)

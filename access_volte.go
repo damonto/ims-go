@@ -29,6 +29,7 @@ type imsPDNInfo struct {
 	LocalIPv4       net.IP
 	LocalIPv6       net.IP
 	PCSCFIPs        []net.IP
+	VoPSKnown       bool
 	VoPSSupported   bool
 	PacketDataReady bool
 }
@@ -39,11 +40,12 @@ type imsPDNSession interface {
 }
 
 type voLTEAccess struct {
-	mu     sync.Mutex
-	info   lte.Info
-	pdn    imsPDNSession
-	ipsec  *lteipsec.Session
-	logger *slog.Logger
+	mu         sync.Mutex
+	info       lte.Info
+	sipLocalIP net.IP
+	pdn        imsPDNSession
+	ipsec      *lteipsec.Session
+	logger     *slog.Logger
 }
 
 func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voLTEAccess, error) {
@@ -60,9 +62,13 @@ func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voL
 		return nil, fmt.Errorf("opening VoLTE IMS PDN: %w", err)
 	}
 	info := lteInfoFromIMSPDN(*c.cfg.Access.VoLTE, pdn.Info())
-	if c.cfg.Access.VoLTE.RequireVoPS && !info.VoPSSupported {
+	if c.cfg.Access.VoLTE.RequireVoPS && (!info.VoPSKnown || !info.VoPSSupported) {
 		_ = pdn.Close()
-		return nil, errors.New("opening VoLTE access: LTE IMS voice over PS is unavailable")
+		return nil, errors.New("opening VoLTE access: LTE IMS voice over PS support is not confirmed")
+	}
+	if !info.IMSPDNConnected {
+		_ = pdn.Close()
+		return nil, errors.New("opening VoLTE access: IMS PDN packet data is not ready")
 	}
 	if len(info.LocalIPv4) == 0 && len(info.LocalIPv6) == 0 {
 		_ = pdn.Close()
@@ -99,6 +105,7 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 	}
 	a.mu.Lock()
 	a.ipsec = ipsecSession
+	a.sipLocalIP = append(net.IP(nil), route.LocalIP...)
 	a.mu.Unlock()
 	return imsAccess{
 		AccessNetworkInfo: accessNetworkInfo,
@@ -188,10 +195,20 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session
 func (a *voLTEAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 	a.mu.Lock()
 	info := a.info.Clone()
+	sipLocalIP := append(net.IP(nil), a.sipLocalIP...)
 	a.mu.Unlock()
+	if info.VoPSKnown && !info.VoPSSupported {
+		return nil, errors.New("opening voice media transport: LTE IMS voice over PS is unavailable")
+	}
 	route, ok := info.RouteTo(cfg.RemoteIP)
 	if !ok {
 		return nil, errors.New("opening voice media transport: local IMS PDN address is unavailable")
+	}
+	if len(sipLocalIP) == 0 {
+		return nil, errors.New("opening voice media transport: registered SIP local address is unavailable")
+	}
+	if !route.LocalIP.Equal(sipLocalIP) {
+		return nil, errors.New("opening voice media transport: media address family differs from registered SIP flow")
 	}
 	return openVoLTEMediaTransport(ctx, info.InterfaceName, route.LocalIP, cfg)
 }
@@ -200,6 +217,7 @@ func (a *voLTEAccess) Close() error {
 	a.mu.Lock()
 	ipsecSession := a.ipsec
 	a.ipsec = nil
+	a.sipLocalIP = nil
 	pdn := a.pdn
 	a.pdn = nil
 	a.mu.Unlock()
@@ -229,6 +247,7 @@ func (a *voLTEAccess) SelectNextPCSCF() error {
 	}
 	ipsecSession := a.ipsec
 	a.ipsec = nil
+	a.sipLocalIP = nil
 	a.mu.Unlock()
 	if ipsecSession != nil {
 		if err := ipsecSession.Close(); err != nil {
@@ -248,9 +267,9 @@ func lteInfoFromIMSPDN(cfg lte.Config, pdn imsPDNInfo) lte.Info {
 		LocalIPv6:         append(net.IP(nil), pdn.LocalIPv6...),
 		PCSCFIPs:          cloneNetIPs(pdn.PCSCFIPs),
 		AccessNetworkInfo: cfg.AccessNetworkInfo,
+		VoPSKnown:         pdn.VoPSKnown,
 		VoPSSupported:     pdn.VoPSSupported,
 		IMSPDNConnected:   pdn.PacketDataReady,
-		VoiceBearerReady:  pdn.PacketDataReady,
 	}
 	if len(cfg.LocalIPv4) != 0 {
 		info.LocalIPv4 = append(net.IP(nil), cfg.LocalIPv4...)
@@ -260,6 +279,12 @@ func lteInfoFromIMSPDN(cfg lte.Config, pdn imsPDNInfo) lte.Info {
 	}
 	if len(cfg.PCSCFIPs) != 0 {
 		info.PCSCFIPs = cloneNetIPs(cfg.PCSCFIPs)
+	}
+	switch cfg.PDNType {
+	case "ipv4":
+		info.LocalIPv6 = nil
+	case "ipv6":
+		info.LocalIPv4 = nil
 	}
 	return info
 }

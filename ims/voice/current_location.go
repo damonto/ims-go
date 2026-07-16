@@ -37,7 +37,7 @@ func (r currentLocationDiscoveryRequest) RequestsOneShot() bool {
 }
 
 func (c *Call) handleINFO(ctx context.Context, req session.Request) error {
-	if !sip.TokenListContains(req.Message.Header("Info-Package"), currentLocationDiscoveryInfoPackage) {
+	if !req.Message.HeaderHasToken("Info-Package", currentLocationDiscoveryInfoPackage) {
 		return c.endpoint.writeStatus(ctx, req, sipStatusBadInfoPackage, "Bad Info Package")
 	}
 	c.mu.Lock()

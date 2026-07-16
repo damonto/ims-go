@@ -543,6 +543,7 @@ func childSAFromCreateChildResponseWithRequests(payloads []ike.Payload, previous
 		peerPublic = append([]byte(nil), ke.Data...)
 	}
 	info.InnerIPv4 = append(net.IP(nil), previous.InnerIPv4...)
+	info.APN = previous.APN
 	info.InnerIPv6 = cloneIPAddress(previous.InnerIPv6)
 	info.InnerIPv6Prefix = cloneIPPrefix(previous.InnerIPv6Prefix)
 	info.PDNTypeRestriction = previous.PDNTypeRestriction
@@ -852,6 +853,7 @@ func (s *Session) childSALifetimeState() (time.Time, time.Time) {
 
 func cloneInfo(info Info) Info {
 	return Info{
+		APN:                       info.APN,
 		InnerIPv4:                 append(net.IP(nil), info.InnerIPv4...),
 		InnerIPv6:                 cloneIPAddress(info.InnerIPv6),
 		InnerIPv6Prefix:           cloneIPPrefix(info.InnerIPv6Prefix),

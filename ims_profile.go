@@ -90,7 +90,6 @@ type imsVoiceProfile struct {
 	RTPInactivityTimeout          imsProfileDuration                      `json:"rtpInactivityTimeout"`
 	RTCPInactivityTimeout         imsProfileDuration                      `json:"rtcpInactivityTimeout"`
 	AudioInactivityCallEndReasons []imsvoice.AudioInactivityCallEndReason `json:"audioInactivityCallEndReasons"`
-	RTCPSendInterval              imsProfileDuration                      `json:"rtcpSendInterval"`
 	LocalRTPPortMin               int                                     `json:"localRTPPortMin"`
 	LocalRTPPortMax               int                                     `json:"localRTPPortMax"`
 	Codecs                        []imsVoiceCodecProfile                  `json:"codecs"`
@@ -464,9 +463,6 @@ func (cfg Config) withIMSVoiceProfile(profile imsVoiceProfile) Config {
 	}
 	if cfg.IMS.Voice.AudioInactivityCallEndReasons == nil && profile.AudioInactivityCallEndReasons != nil {
 		cfg.IMS.Voice.AudioInactivityCallEndReasons = append([]imsvoice.AudioInactivityCallEndReason(nil), profile.AudioInactivityCallEndReasons...)
-	}
-	if cfg.IMS.Voice.RTCPSendInterval == nil {
-		cfg.IMS.Voice.RTCPSendInterval = imsvoice.Duration(profile.RTCPSendInterval.Duration)
 	}
 	if cfg.IMS.Voice.LocalRTPPortMin == 0 {
 		cfg.IMS.Voice.LocalRTPPortMin = profile.LocalRTPPortMin

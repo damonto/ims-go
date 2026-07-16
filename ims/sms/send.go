@@ -82,59 +82,93 @@ func (s *Endpoint) NotifyMemoryAvailable(ctx context.Context, target string) err
 	}
 	defer s.finishMOSend()
 
+	for attempt := range 2 {
+		retry, err := s.notifyMemoryAvailableAttempt(ctx, target)
+		if !retry || attempt == 1 {
+			return err
+		}
+		timer := time.NewTimer(currentMemoryAvailableRetryTimeout())
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("notifying SMS memory available: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+func (s *Endpoint) notifyMemoryAvailableAttempt(ctx context.Context, target string) (bool, error) {
 	rpRef, err := s.reserveReference()
 	if err != nil {
-		return err
+		return false, err
 	}
+	defer s.releaseReference(rpRef)
 	rpdu, err := newRPSMMAMessage(rpRef).MarshalBinary()
 	if err != nil {
-		s.releaseReference(rpRef)
-		return fmt.Errorf("notifying SMS memory available: %w", err)
+		return false, fmt.Errorf("notifying SMS memory available: %w", err)
 	}
 	msg, err := s.buildMessage(target, rpdu, "")
 	if err != nil {
-		s.releaseReference(rpRef)
-		return err
+		return false, err
 	}
 	callID := msg.Header("Call-ID")
 	reportCh, err := s.registerPending(callID, rpRef)
 	if err != nil {
-		s.releaseReference(rpRef)
-		return err
+		return false, err
 	}
 	defer s.removePending(callID)
-	defer s.releaseReference(rpRef)
 
 	resp, err := s.sess.Exchange(ctx, msg)
 	if err != nil {
-		return fmt.Errorf("notifying SMS memory available: %w", err)
+		return false, fmt.Errorf("notifying SMS memory available: %w", err)
 	}
 	if status := resp.StatusCode(); status != sipStatusOK && status != sipStatusAccepted {
-		return fmt.Errorf("notifying SMS memory available: unexpected response: %w", sip.NewResponseError(resp))
+		return false, fmt.Errorf("notifying SMS memory available: unexpected response: %w", sip.NewResponseError(resp))
 	}
 	return s.waitMemoryAvailableReport(ctx, rpRef, reportCh)
 }
 
-func (s *Endpoint) waitMemoryAvailableReport(ctx context.Context, rpRef byte, reportCh <-chan rpMessage) error {
-	timer := time.NewTimer(s.cfg.SubmitReportTimeout)
+func (s *Endpoint) waitMemoryAvailableReport(ctx context.Context, rpRef byte, reportCh <-chan rpMessage) (bool, error) {
+	timer := time.NewTimer(s.submitReportTimeout())
 	defer timer.Stop()
 	select {
 	case report := <-reportCh:
 		if report.Reference != rpRef {
-			return fmt.Errorf("notifying SMS memory available: unexpected rp reference %d", report.Reference)
+			return false, fmt.Errorf("notifying SMS memory available: unexpected rp reference %d", report.Reference)
 		}
 		switch report.Type {
 		case rpAckNetworkToMS:
-			return nil
+			return false, nil
 		case rpErrorNetworkToMS:
-			return fmt.Errorf("notifying SMS memory available: %w", &RPError{Cause: report.Cause})
+			return memoryAvailableCauseTemporary(report.Cause), fmt.Errorf("notifying SMS memory available: %w", &RPError{Cause: report.Cause})
 		default:
-			return fmt.Errorf("notifying SMS memory available: unexpected rp type 0x%02X", report.Type)
+			return false, fmt.Errorf("notifying SMS memory available: unexpected rp type 0x%02X", report.Type)
 		}
 	case <-ctx.Done():
-		return fmt.Errorf("notifying SMS memory available: %w", ctx.Err())
+		return false, fmt.Errorf("notifying SMS memory available: %w", ctx.Err())
+	case <-s.done:
+		return false, errors.New("notifying SMS memory available: endpoint is closed")
 	case <-timer.C:
-		return errors.New("notifying SMS memory available: submit report not received")
+		return true, errors.New("notifying SMS memory available: submit report not received")
+	}
+}
+
+func memoryAvailableCauseTemporary(cause byte) bool {
+	switch cause {
+	case rpCauseUnknownSubscriber,
+		rpCauseRequestedFacilityNotImplemented,
+		rpCauseSemanticallyIncorrectMessage,
+		rpCauseInvalidMandatoryInformation,
+		rpCauseMessageTypeNotImplemented,
+		rpCauseMessageNotCompatibleWithState,
+		rpCauseInformationElementNotImplemented,
+		rpCauseProtocolErrorUnspecified,
+		rpCauseInterworkingUnspecified:
+		return false
+	default:
+		// TS 24.011 table 8.4 part 3 treats every unlisted value as cause 41.
+		return true
 	}
 }
 

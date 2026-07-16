@@ -1,6 +1,7 @@
 package eapaka
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	crand "crypto/rand"
@@ -9,6 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 var (
@@ -41,6 +46,7 @@ const (
 	akaAttrBidding         byte = 136
 	akaAttrIPMSInd         byte = 137
 	akaAttrIPMSRes         byte = 138
+	akaAttrTrustInd        byte = 139
 )
 
 const (
@@ -72,6 +78,13 @@ const (
 	IPMSSelectionMIPv4   IPMSSelection = 3
 )
 
+type TrustRelationship byte
+
+const (
+	TrustRelationshipTrusted   TrustRelationship = 1
+	TrustRelationshipUntrusted TrustRelationship = 2
+)
+
 type IPMSIndication struct {
 	Support IPMSSupport
 }
@@ -87,6 +100,10 @@ type IPMSResult struct {
 	Selection IPMSSelection
 }
 
+type TrustIndication struct {
+	Relationship TrustRelationship
+}
+
 type Bidding struct {
 	SupportsAKAPrime bool
 }
@@ -100,8 +117,8 @@ type KDF struct {
 }
 
 func (i KDFInput) MarshalBinary() ([]byte, error) {
-	if len(i.NetworkName) > akaNetworkNameMaxLen {
-		return nil, fmt.Errorf("marshalling kdf input: network name length %d exceeds %d", len(i.NetworkName), akaNetworkNameMaxLen)
+	if err := validateAKANetworkName(i.NetworkName); err != nil {
+		return nil, fmt.Errorf("marshalling kdf input: %w", err)
 	}
 	value := make([]byte, akaAttributeReservedLen+len(i.NetworkName))
 	binary.BigEndian.PutUint16(value[:2], uint16(len(i.NetworkName)))
@@ -179,6 +196,19 @@ func (r *IPMSResult) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+func (i *TrustIndication) UnmarshalBinary(data []byte) error {
+	var attr AKAAttribute
+	if err := attr.UnmarshalBinary(data); err != nil {
+		return err
+	}
+	parsed, err := TrustIndicationFromAttribute(&attr)
+	if err != nil {
+		return err
+	}
+	*i = parsed
+	return nil
+}
+
 type AKANotification struct {
 	Code      uint16
 	Success   bool
@@ -243,14 +273,28 @@ func isKnownAKAAttribute(attrType byte) bool {
 		akaAttrResultInd,
 		akaAttrBidding,
 		akaAttrIPMSInd,
-		akaAttrIPMSRes:
+		akaAttrIPMSRes,
+		akaAttrTrustInd:
 		return true
 	default:
 		return false
 	}
 }
 
-func rejectUnsupportedAKAAttributes(attrs []AKAAttribute) error {
+func validateAKAAttributes(attrs []AKAAttribute, allowed ...byte) error {
+	for _, attr := range attrs {
+		if slices.Contains(allowed, attr.Type) {
+			continue
+		}
+		if attr.Type >= akaSkippableAttributeStart && !isKnownAKAAttribute(attr.Type) {
+			continue
+		}
+		return fmt.Errorf("unexpected attribute %d", attr.Type)
+	}
+	return nil
+}
+
+func rejectUnrecognizedAKAAttributes(attrs []AKAAttribute) error {
 	for _, attr := range attrs {
 		if attr.Type < akaSkippableAttributeStart && !isKnownAKAAttribute(attr.Type) {
 			return fmt.Errorf("unrecognized non-skippable attribute %d", attr.Type)
@@ -322,10 +366,29 @@ func KDFInputFromAttribute(attr *AKAAttribute) (KDFInput, error) {
 	if err != nil {
 		return KDFInput{}, fmt.Errorf("parsing kdf input: %w", err)
 	}
-	if len(networkName) > akaNetworkNameMaxLen {
-		return KDFInput{}, fmt.Errorf("parsing kdf input: network name length %d exceeds %d", len(networkName), akaNetworkNameMaxLen)
+	if err := validateAKANetworkName(networkName); err != nil {
+		return KDFInput{}, fmt.Errorf("parsing kdf input: %w", err)
 	}
 	return KDFInput{NetworkName: networkName}, nil
+}
+
+func validateAKANetworkName(networkName []byte) error {
+	if len(networkName) == 0 {
+		return errors.New("network name is empty")
+	}
+	if len(networkName) > akaNetworkNameMaxLen {
+		return fmt.Errorf("network name length %d exceeds %d", len(networkName), akaNetworkNameMaxLen)
+	}
+	if !utf8.Valid(networkName) {
+		return errors.New("network name is not valid UTF-8")
+	}
+	if bytes.IndexByte(networkName, 0) >= 0 {
+		return errors.New("network name contains NUL")
+	}
+	if !bytes.Equal(norm.NFKC.Bytes(networkName), networkName) {
+		return errors.New("network name is not NFKC-normalized")
+	}
+	return nil
 }
 
 func KDFFromAttribute(attr *AKAAttribute) (KDF, error) {
@@ -371,6 +434,26 @@ func IPMSSelectionFromAttributes(attrs []AKAAttribute) (IPMSSelection, bool, err
 	return selection, true, nil
 }
 
+func TrustIndicationFromAttribute(attr *AKAAttribute) (TrustIndication, error) {
+	if attr == nil {
+		return TrustIndication{}, errors.New("parsing trust indication: AT_TRUST_IND is missing")
+	}
+	if attr.Type != akaAttrTrustInd {
+		return TrustIndication{}, fmt.Errorf("parsing trust indication: unexpected attribute %d", attr.Type)
+	}
+	if len(attr.Value) != akaAttributeReservedLen {
+		return TrustIndication{}, fmt.Errorf("parsing trust indication: invalid value length %d", len(attr.Value))
+	}
+	if attr.Value[0] != 0 {
+		return TrustIndication{}, fmt.Errorf("parsing trust indication: reserved octet is %d, want 0", attr.Value[0])
+	}
+	relationship := TrustRelationship(attr.Value[1])
+	if relationship != TrustRelationshipTrusted && relationship != TrustRelationshipUntrusted {
+		return TrustIndication{}, fmt.Errorf("parsing trust indication: invalid relationship %d", relationship)
+	}
+	return TrustIndication{Relationship: relationship}, nil
+}
+
 func Uint16Value(attr *AKAAttribute) (uint16, error) {
 	if attr == nil {
 		return 0, errors.New("parsing aka uint16 attribute: attribute is nil")
@@ -397,6 +480,12 @@ func StringValue(attr *AKAAttribute) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !utf8.Valid(value) {
+		return "", errors.New("parsing aka string attribute: value is not valid UTF-8")
+	}
+	if bytes.IndexByte(value, 0) >= 0 {
+		return "", errors.New("parsing aka string attribute: value contains NUL")
+	}
 	return string(value), nil
 }
 
@@ -411,30 +500,38 @@ func BytesValue(attr *AKAAttribute) ([]byte, error) {
 	if len(attr.Value) < 2+length {
 		return nil, fmt.Errorf("parsing aka bytes attribute: value length %d is too short for %d", len(attr.Value), length)
 	}
+	for _, b := range attr.Value[2+length:] {
+		if b != 0 {
+			return nil, errors.New("parsing aka bytes attribute: padding is not zero")
+		}
+	}
 	return append([]byte(nil), attr.Value[2:2+length]...), nil
 }
 
-func (n *AKANotification) UnmarshalAttributes(attrs []AKAAttribute) error {
-	if err := rejectUnsupportedAKAAttributes(attrs); err != nil {
-		return fmt.Errorf("parsing aka notification: %w", err)
-	}
-	var attr *AKAAttribute
+func (n *AKANotification) UnmarshalHeader(attrs []AKAAttribute) error {
+	var notificationAttr *AKAAttribute
+	var macAttr *AKAAttribute
 	for i := range attrs {
-		if attrs[i].Type != akaAttrNotification {
-			continue
+		switch attrs[i].Type {
+		case akaAttrNotification:
+			if notificationAttr != nil {
+				return errors.New("parsing aka notification: duplicate AT_NOTIFICATION")
+			}
+			notificationAttr = &attrs[i]
+		case akaAttrMAC:
+			if macAttr != nil {
+				return errors.New("parsing aka notification: duplicate AT_MAC")
+			}
+			macAttr = &attrs[i]
 		}
-		if attr != nil {
-			return errors.New("parsing aka notification: duplicate AT_NOTIFICATION")
-		}
-		attr = &attrs[i]
 	}
-	if attr == nil {
+	if notificationAttr == nil {
 		return errors.New("parsing aka notification: AT_NOTIFICATION is missing")
 	}
-	if len(attr.Value) != akaNotificationAttributeLen {
-		return fmt.Errorf("parsing aka notification: invalid AT_NOTIFICATION length %d", len(attr.Value))
+	if len(notificationAttr.Value) != akaNotificationAttributeLen {
+		return fmt.Errorf("parsing aka notification: invalid AT_NOTIFICATION length %d", len(notificationAttr.Value))
 	}
-	code, err := Uint16Value(attr)
+	code, err := Uint16Value(notificationAttr)
 	if err != nil {
 		return err
 	}
@@ -443,7 +540,47 @@ func (n *AKANotification) UnmarshalAttributes(attrs []AKAAttribute) error {
 	if success && preChallenge {
 		return errors.New("parsing aka notification: success code cannot be pre-challenge")
 	}
-	*n = AKANotification{Code: code, Success: success, Protected: !preChallenge}
+	protected := !preChallenge
+	hasMAC := macAttr != nil
+	if protected && !hasMAC {
+		return errors.New("parsing aka notification: protected notification requires AT_MAC")
+	}
+	if !protected && hasMAC {
+		return errors.New("parsing aka notification: pre-challenge notification must not include AT_MAC")
+	}
+	if macAttr != nil && len(macAttr.Value) != akaMACAttributeLen {
+		return fmt.Errorf("parsing aka notification: invalid AT_MAC length %d", len(macAttr.Value))
+	}
+	*n = AKANotification{Code: code, Success: success, Protected: protected}
+	return nil
+}
+
+func (n *AKANotification) UnmarshalAttributes(attrs []AKAAttribute) error {
+	var notification AKANotification
+	if err := notification.UnmarshalHeader(attrs); err != nil {
+		return err
+	}
+	if err := validateAKAAttributes(attrs, akaAttrNotification, akaAttrMAC, akaAttrIV, akaAttrEncryptedData, akaAttrIPMSRes); err != nil {
+		return fmt.Errorf("parsing aka notification: %w", err)
+	}
+	if HasAttribute(attrs, akaAttrIV) != HasAttribute(attrs, akaAttrEncryptedData) {
+		return errors.New("parsing aka notification: AT_IV and AT_ENCR_DATA must appear together")
+	}
+	if ivAttr := FindAttribute(attrs, akaAttrIV); ivAttr != nil && len(ivAttr.Value) != akaVectorAttributeLen {
+		return fmt.Errorf("parsing aka notification: invalid AT_IV length %d", len(ivAttr.Value))
+	}
+	if encryptedAttr := FindAttribute(attrs, akaAttrEncryptedData); encryptedAttr != nil {
+		if len(encryptedAttr.Value) < akaAttributeReservedLen || (len(encryptedAttr.Value)-akaAttributeReservedLen)%aes.BlockSize != 0 {
+			return fmt.Errorf("parsing aka notification: invalid AT_ENCR_DATA length %d", len(encryptedAttr.Value))
+		}
+	}
+	if !notification.Protected && (HasAttribute(attrs, akaAttrIV) || HasAttribute(attrs, akaAttrIPMSRes)) {
+		return errors.New("parsing aka notification: pre-challenge notification contains protected attributes")
+	}
+	if HasAttribute(attrs, akaAttrIPMSRes) && !notification.Success {
+		return errors.New("parsing aka notification: failure notification contains AT_IPMS_RES")
+	}
+	*n = notification
 	return nil
 }
 
@@ -451,8 +588,27 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 	if message.Code != eapCodeRequest || message.Subtype != akaSubtypeReauthentication {
 		return errors.New("parsing aka reauthentication: unsupported packet")
 	}
-	if err := rejectUnsupportedAKAAttributes(message.Attributes); err != nil {
+	if err := validateAKAAttributes(message.Attributes, akaAttrMAC, akaAttrResultInd, akaAttrCheckcode, akaAttrIV, akaAttrEncryptedData); err != nil {
 		return fmt.Errorf("parsing aka reauthentication: %w", err)
+	}
+	macAttr := FindAttribute(message.Attributes, akaAttrMAC)
+	if macAttr == nil {
+		return errors.New("parsing aka reauthentication: AT_MAC is missing")
+	}
+	if len(macAttr.Value) != akaMACAttributeLen {
+		return fmt.Errorf("parsing aka reauthentication: invalid AT_MAC length %d", len(macAttr.Value))
+	}
+	if !HasAttribute(message.Attributes, akaAttrIV) || !HasAttribute(message.Attributes, akaAttrEncryptedData) {
+		return errors.New("parsing aka reauthentication: AT_IV or AT_ENCR_DATA is missing")
+	}
+	if attr := FindAttribute(message.Attributes, akaAttrCheckcode); attr != nil {
+		wantCheckcodeLen := akaCheckcodeSHA1Len
+		if message.EAPType == eapTypeAKAPrime {
+			wantCheckcodeLen = akaCheckcodeSHA256Len
+		}
+		if len(attr.Value) != akaCheckcodeEmptyLen && len(attr.Value) != wantCheckcodeLen {
+			return fmt.Errorf("parsing aka reauthentication: invalid AT_CHECKCODE length %d", len(attr.Value))
+		}
 	}
 	if attr := FindAttribute(message.Attributes, akaAttrResultInd); attr != nil && len(attr.Value) != akaResultIndAttributeLen {
 		return fmt.Errorf("parsing aka reauthentication: invalid result indication length %d", len(attr.Value))
@@ -460,6 +616,9 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 	nested, err := DecryptAttributes(message.Attributes, encrKey)
 	if err != nil {
 		return err
+	}
+	if err := validateAKAAttributes(nested, akaAttrCounter, akaAttrNonceS, akaAttrNextReauthID); err != nil {
+		return fmt.Errorf("parsing aka reauthentication: encrypted attributes: %w", err)
 	}
 	counter, err := Uint16Value(FindAttribute(nested, akaAttrCounter))
 	if err != nil {
@@ -491,6 +650,12 @@ func (r *AKAReauthentication) UnmarshalMessage(message AKAMessage, encrKey []byt
 
 func buildAKAMessageWithType(code, identifier, eapType, subtype byte, attrs []AKAAttribute, autKey, extra []byte) ([]byte, error) {
 	message := AKAMessage{Code: code, Identifier: identifier, EAPType: eapType, Subtype: subtype, Attributes: append([]AKAAttribute(nil), attrs...)}
+	if len(autKey) == 0 {
+		if len(extra) != 0 {
+			return nil, errors.New("building aka message: unsigned message has mac-specific data")
+		}
+		return message.MarshalBinary()
+	}
 	if eapType == eapTypeAKAPrime {
 		return message.MarshalSignedSHA256(autKey, extra)
 	}
@@ -514,6 +679,9 @@ func VerifyMessageMACSHA256(data, autKey, extra []byte) error {
 }
 
 func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, error) {
+	if len(encrKey) != akaKEncrLen {
+		return nil, fmt.Errorf("decrypting aka attributes: encryption key length %d, want %d", len(encrKey), akaKEncrLen)
+	}
 	ivAttr := FindAttribute(attrs, akaAttrIV)
 	encrAttr := FindAttribute(attrs, akaAttrEncryptedData)
 	if ivAttr == nil || encrAttr == nil {
@@ -539,7 +707,7 @@ func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, er
 	if err != nil {
 		return nil, fmt.Errorf("decrypting aka attributes: %w", err)
 	}
-	if err := rejectUnsupportedAKAAttributes(parsed); err != nil {
+	if err := rejectUnrecognizedAKAAttributes(parsed); err != nil {
 		return nil, fmt.Errorf("decrypting aka attributes: %w", err)
 	}
 	filtered := make([]AKAAttribute, 0, len(parsed))
@@ -564,7 +732,21 @@ func DecryptAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, er
 	return filtered, nil
 }
 
+func DecryptChallengeAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, error) {
+	nested, err := DecryptAttributes(attrs, encrKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateAKAAttributes(nested, akaAttrNextPseudonym, akaAttrNextReauthID); err != nil {
+		return nil, fmt.Errorf("decrypting aka challenge attributes: %w", err)
+	}
+	return nested, nil
+}
+
 func encryptAKAAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute, error) {
+	if len(encrKey) != akaKEncrLen {
+		return nil, fmt.Errorf("encrypting aka attributes: encryption key length %d, want %d", len(encrKey), akaKEncrLen)
+	}
 	plain, err := marshalAKAAttributes(attrs)
 	if err != nil {
 		return nil, err
@@ -617,6 +799,9 @@ func BuildChallengeResponsePacketWithCheckcode(identifier byte, res, autKey []by
 }
 
 func BuildChallengeResponsePacketWithOptions(opts ChallengeResponseOptions) ([]byte, error) {
+	if len(opts.AUTKey) == 0 {
+		return nil, errors.New("building aka response: authentication key is empty")
+	}
 	resAttr, err := buildAKARESAttribute(opts.RES)
 	if err != nil {
 		return nil, err
@@ -657,6 +842,15 @@ func BuildReauthenticationResponsePacket(identifier byte, counter uint16, counte
 }
 
 func BuildReauthenticationResponsePacketForType(identifier, eapType byte, counter uint16, counterTooSmall bool, useResultInd bool, autKey, encrKey, nonceS []byte) ([]byte, error) {
+	if len(autKey) == 0 {
+		return nil, errors.New("building aka reauthentication response: authentication key is empty")
+	}
+	if len(encrKey) != aes.BlockSize {
+		return nil, fmt.Errorf("building aka reauthentication response: encryption key length %d, want %d", len(encrKey), aes.BlockSize)
+	}
+	if len(nonceS) != akaVectorLen {
+		return nil, fmt.Errorf("building aka reauthentication response: nonce_s length %d, want %d", len(nonceS), akaVectorLen)
+	}
 	nested := []AKAAttribute{}
 	if counterTooSmall {
 		nested = append(nested, buildAKAUint16Attribute(akaAttrCounterTooSmall, 0))
@@ -678,6 +872,26 @@ func BuildNotificationResponsePacket(identifier byte, notification AKANotificati
 }
 
 func BuildNotificationResponsePacketForType(identifier, eapType byte, notification AKANotification, fastReauth bool, counter uint16, autKey, encrKey []byte) ([]byte, error) {
+	success := notification.Code&akaNotificationSuccessMask != 0
+	protected := notification.Code&akaNotificationPreChallengeMask == 0
+	if success && !protected {
+		return nil, errors.New("building aka notification response: success notification cannot be pre-challenge")
+	}
+	if notification.Success != success {
+		return nil, errors.New("building aka notification response: success flag does not match notification code")
+	}
+	if notification.Protected != protected {
+		return nil, errors.New("building aka notification response: protected flag does not match notification code")
+	}
+	if !protected && fastReauth {
+		return nil, errors.New("building aka notification response: pre-challenge notification cannot use fast reauthentication")
+	}
+	if notification.Protected && len(autKey) == 0 {
+		return nil, errors.New("building aka notification response: authentication key is empty")
+	}
+	if notification.Protected && fastReauth && len(encrKey) != aes.BlockSize {
+		return nil, fmt.Errorf("building aka notification response: encryption key length %d, want %d", len(encrKey), aes.BlockSize)
+	}
 	attrs := make([]AKAAttribute, 0, 2)
 	if notification.Protected && fastReauth {
 		encrypted, err := encryptAKAAttributes([]AKAAttribute{buildAKAUint16Attribute(akaAttrCounter, counter)}, encrKey)
@@ -701,8 +915,14 @@ func BuildClientErrorPacketForType(identifier, eapType byte, code uint16) ([]byt
 }
 
 func DeriveFastReauthKeys(identity []byte, counter uint16, nonceS, mk []byte) ([]byte, []byte, error) {
-	if len(identity) == 0 || len(nonceS) != akaVectorLen || len(mk) == 0 {
-		return nil, nil, errors.New("deriving fast reauth keys: invalid inputs")
+	if err := validateAKAIdentity(identity); err != nil {
+		return nil, nil, fmt.Errorf("deriving fast reauth keys: %w", err)
+	}
+	if len(nonceS) != akaVectorLen {
+		return nil, nil, fmt.Errorf("deriving fast reauth keys: nonce_s length %d, want %d", len(nonceS), akaVectorLen)
+	}
+	if len(mk) != sha1.Size {
+		return nil, nil, fmt.Errorf("deriving fast reauth keys: mk length %d, want %d", len(mk), sha1.Size)
 	}
 	seed := make([]byte, 0, len(identity)+2+len(nonceS)+len(mk))
 	seed = append(seed, identity...)

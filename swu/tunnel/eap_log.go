@@ -156,6 +156,8 @@ func akaAttributeName(attrType byte) string {
 		return "AT_IPMS_IND"
 	case akaAttrIPMSRes:
 		return "AT_IPMS_RES"
+	case akaAttrTrustInd:
+		return "AT_TRUST_IND"
 	default:
 		return fmt.Sprintf("ATTR_%d", attrType)
 	}

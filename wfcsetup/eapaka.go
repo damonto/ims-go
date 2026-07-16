@@ -33,7 +33,7 @@ func (k akaChallengeKind) String() string {
 }
 
 func eapAKAChallengeResponseForIdentity(ctx context.Context, card Card, identity, challengeText string, kind akaChallengeKind) (string, error) {
-	challenge, err := decodeEAPAKAChallenge(challengeText)
+	challenge, err := decodeEAPAKAChallenge(challengeText, kind)
 	if err != nil {
 		return "", fmt.Errorf("decoding %s challenge: %w", kind, err)
 	}
@@ -55,14 +55,26 @@ func eapAKAChallengeResponseForIdentity(ctx context.Context, card Card, identity
 	return text, nil
 }
 
-func decodeEAPAKAChallenge(text string) (eapaka.AKAChallenge, error) {
+func decodeEAPAKAChallenge(text string, kind akaChallengeKind) (eapaka.AKAChallenge, error) {
 	data, err := base64.StdEncoding.DecodeString(text)
 	if err != nil {
 		return eapaka.AKAChallenge{}, fmt.Errorf("decoding base64: %w", err)
 	}
-	var challenge eapaka.AKAChallenge
-	if err := challenge.UnmarshalBinaryWithOptions(data, eapaka.AKAChallengeParseOptions{AllowMissingMAC: true}); err != nil {
+	var message eapaka.AKAMessage
+	if err := message.UnmarshalBinary(data); err != nil {
 		return eapaka.AKAChallenge{}, err
+	}
+	var challenge eapaka.AKAChallenge
+	if kind == akaChallengeKindNSDS {
+		challenge, err = eapaka.AKAParametersFromChallenge(message)
+	} else {
+		err = challenge.UnmarshalMessage(message)
+	}
+	if err != nil {
+		return eapaka.AKAChallenge{}, err
+	}
+	if challenge.IsAKAPrime() {
+		return eapaka.AKAChallenge{}, errors.New("EAP-AKA' challenge is unsupported")
 	}
 	return challenge, nil
 }

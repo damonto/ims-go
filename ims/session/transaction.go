@@ -22,6 +22,8 @@ type TransactionTimers struct {
 	TF time.Duration
 	TH time.Duration
 	TJ time.Duration
+	TL time.Duration
+	TM time.Duration
 }
 
 type clientTransaction struct {
@@ -48,6 +50,7 @@ const (
 	clientTransactionTrying
 	clientTransactionProceeding
 	clientTransactionCompleted
+	clientTransactionAccepted
 	clientTransactionTerminated
 )
 
@@ -74,8 +77,7 @@ func TransactionTimerExpired(err error, timer string) bool {
 }
 
 type transactionSendError struct {
-	err      error
-	reliable bool
+	err error
 }
 
 func (e *transactionSendError) Error() string {
@@ -84,6 +86,11 @@ func (e *transactionSendError) Error() string {
 
 func (e *transactionSendError) Unwrap() error {
 	return e.err
+}
+
+func TransactionTransportFailed(err error) bool {
+	var transportErr *transactionSendError
+	return errors.As(err, &transportErr) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 var defaultTransactionTimers = TransactionTimers{
@@ -95,6 +102,8 @@ var defaultTransactionTimers = TransactionTimers{
 	TF: 32 * time.Second,
 	TH: 32 * time.Second,
 	TJ: 32 * time.Second,
+	TL: 32 * time.Second,
+	TM: 32 * time.Second,
 }
 
 func DefaultTransactionTimers() TransactionTimers {
@@ -126,6 +135,12 @@ func (timers TransactionTimers) Normalized() (TransactionTimers, error) {
 	if timers.TJ < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer J must be >= 0")
 	}
+	if timers.TL < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer L must be >= 0")
+	}
+	if timers.TM < 0 {
+		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer M must be >= 0")
+	}
 	defaults := DefaultTransactionTimers()
 	if timers.T1 == 0 {
 		timers.T1 = defaults.T1
@@ -150,6 +165,12 @@ func (timers TransactionTimers) Normalized() (TransactionTimers, error) {
 	}
 	if timers.TJ == 0 {
 		timers.TJ = 64 * timers.T1
+	}
+	if timers.TL == 0 {
+		timers.TL = 64 * timers.T1
+	}
+	if timers.TM == 0 {
+		timers.TM = 64 * timers.T1
 	}
 	return timers, nil
 }
@@ -176,31 +197,10 @@ func (tx *clientTransaction) start(ctx context.Context) error {
 	}
 	if err := tx.send(ctx, tx.request); err != nil {
 		tx.abort(nil)
-		return &transactionSendError{err: err, reliable: tx.reliable}
+		return &transactionSendError{err: err}
 	}
 	go tx.run()
 	return nil
-}
-
-func transactionLayerErrorResponse(req sip.Message, err error) (sip.Message, bool) {
-	var sendErr *transactionSendError
-	if !errors.As(err, &sendErr) {
-		return sip.Message{}, false
-	}
-	if !sendErr.reliable {
-		return sip.Message{}, false
-	}
-	cause := sendErr.Unwrap()
-	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
-		return sip.Message{}, false
-	}
-	resp := sip.NewResponse(sipStatusServiceUnavailable, "Service Unavailable")
-	resp.Headers = sip.ResponseHeaders(req, sipStatusServiceUnavailable)
-	warning := sip.WarningValue{Code: 399, Agent: "ims-go", Text: cause.Error()}
-	if text, marshalErr := warning.MarshalText(); marshalErr == nil {
-		resp.Headers.Add("Warning", string(text))
-	}
-	return resp, true
 }
 
 func (tx *clientTransaction) await(ctx context.Context) (sip.Message, error) {
@@ -219,9 +219,7 @@ func (tx *clientTransaction) await(ctx context.Context) (sip.Message, error) {
 func (tx *clientTransaction) handleResponse(inbound inboundMessage) {
 	select {
 	case tx.responseCh <- inbound:
-	default:
-		msg := inbound.msg
-		tx.session.logger.Warn("dropping buffered transaction response", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "status", msg.StatusCode())
+	case <-tx.cancelCh:
 	}
 }
 
@@ -370,15 +368,19 @@ func (tx *clientTransaction) runInvite() {
 				timerBC = nil
 				stopTimer(timerB)
 			case resp.StatusCode() >= 200 && resp.StatusCode() < 300:
-				state = clientTransactionTerminated
+				state = clientTransactionAccepted
 				tx.deliverResponse(resp)
-				tx.terminate()
+				tx.awaitInviteAccepted(tx.timers.TM)
 				return
 			default:
 				state = clientTransactionCompleted
 				ack := buildInviteErrorACK(tx.request, resp)
 				tx.deliverResponse(resp)
-				tx.sendACK(ack)
+				if err := tx.sendACK(ack); err != nil {
+					tx.abort(nil)
+					tx.session.notifyHandlers(err)
+					return
+				}
 				if tx.reliable {
 					state = clientTransactionTerminated
 					tx.terminate()
@@ -386,6 +388,34 @@ func (tx *clientTransaction) runInvite() {
 				}
 				tx.awaitInviteCompleted(ack, tx.timerD())
 				return
+			}
+		}
+	}
+}
+
+func (tx *clientTransaction) awaitInviteAccepted(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-tx.cancelCh:
+			return
+		case <-timer.C:
+			tx.terminate()
+			return
+		case inbound := <-tx.responseCh:
+			if tx.opts.AcceptResponseTransport != nil && !tx.opts.AcceptResponseTransport(inbound.transport) {
+				continue
+			}
+			resp := inbound.msg
+			if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+				continue
+			}
+			ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
+			err := tx.session.handleInboundResponse(ctx, resp)
+			cancel()
+			if err != nil {
+				tx.session.logger.Warn("handling additional invite success response", "call_id", resp.Header("Call-ID"), "cseq", resp.Header("CSeq"), "err", err)
 			}
 		}
 	}
@@ -407,7 +437,7 @@ func (tx *clientTransaction) resend() bool {
 	ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.send(ctx, tx.request); err != nil {
-		tx.abort(fmt.Errorf("sending %s retransmission: %w", tx.method, err))
+		tx.abort(&transactionSendError{err: fmt.Errorf("sending %s retransmission: %w", tx.method, err)})
 		return false
 	}
 	return true
@@ -443,20 +473,38 @@ func (tx *clientTransaction) awaitInviteCompleted(ack sip.Message, timeout time.
 			tx.terminate()
 			return
 		case inbound := <-tx.responseCh:
+			if tx.opts.AcceptResponseTransport != nil && !tx.opts.AcceptResponseTransport(inbound.transport) {
+				continue
+			}
 			resp := inbound.msg
+			if resp.StatusCode() >= 200 && resp.StatusCode() < 300 {
+				tx.terminate()
+				ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
+				err := tx.session.handleInboundResponse(ctx, resp)
+				cancel()
+				if err != nil {
+					tx.session.logger.Warn("handling late invite success response", "call_id", resp.Header("Call-ID"), "cseq", resp.Header("CSeq"), "err", err)
+				}
+				return
+			}
 			if resp.StatusCode() >= 300 && resp.StatusCode() < 700 {
-				tx.sendACK(ack)
+				if err := tx.sendACK(ack); err != nil {
+					tx.abort(nil)
+					tx.session.notifyHandlers(err)
+					return
+				}
 			}
 		}
 	}
 }
 
-func (tx *clientTransaction) sendACK(ack sip.Message) {
+func (tx *clientTransaction) sendACK(ack sip.Message) error {
 	ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.send(ctx, ack); err != nil {
-		tx.session.logger.Warn("sending invite error ack", "call_id", ack.Header("Call-ID"), "cseq", ack.Header("CSeq"), "err", err)
+		return fmt.Errorf("sending invite error ACK: %w", err)
 	}
+	return nil
 }
 
 func (tx *clientTransaction) timerD() time.Duration {
@@ -552,6 +600,9 @@ func buildInviteErrorACK(req, resp sip.Message) sip.Message {
 	ack.Headers.Add("To", resp.Header("To"))
 	ack.Headers.Add("Call-ID", req.Header("Call-ID"))
 	ack.Headers.Add("CSeq", fmt.Sprintf("%d ACK", sip.CSeqNumber(req.Header("CSeq"))))
+	if securityVerify := strings.TrimSpace(req.Header("Security-Verify")); securityVerify != "" {
+		ack.Headers.Add("Security-Verify", securityVerify)
+	}
 	return ack
 }
 

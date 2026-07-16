@@ -30,7 +30,6 @@ const (
 	smsIPFeatureTag             = "+g.3gpp.smsip"
 	srvccAlertingFeatureTag     = "+g.3gpp.srvcc-alerting"
 	defaultLang                 = "en"
-	undefinedLang               = "undefined"
 	defaultQueuedRequestTimeout = 30 * time.Second
 	inviteOKWriteTimeout        = 5 * time.Second
 	inviteOKTimeoutMultiplier   = 64
@@ -115,7 +114,9 @@ type Session struct {
 	language         string
 	networkInitiated bool
 	responseKind     dialogKind
+	inviteACK        sip.Message
 	inviteOK         sip.Message
+	inviteFinalSent  bool
 	inviteOKStop     chan struct{}
 	ackCh            chan struct{}
 	acked            bool
@@ -149,10 +150,20 @@ const (
 
 type xmlPayload struct {
 	XMLName   xml.Name `xml:"ussd-data"`
-	Language  string   `xml:"language,omitempty"`
-	String    string   `xml:"ussd-string,omitempty"`
+	Language  *string  `xml:"language,omitempty"`
+	String    *string  `xml:"ussd-string,omitempty"`
 	ErrorCode *int     `xml:"error-code,omitempty"`
 	AnyExt    *anyExt  `xml:"anyExt,omitempty"`
+
+	hasLanguage bool
+	hasString   bool
+	hasError    bool
+}
+
+type payloadPresence struct {
+	language bool
+	text     bool
+	error    bool
 }
 
 type anyExt struct {

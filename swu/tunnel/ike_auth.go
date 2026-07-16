@@ -17,12 +17,12 @@ func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) erro
 	if err != nil {
 		return err
 	}
-	peer, useNATT := s.connectIKEPeer(state)
-	finalPayloads, nextMessageID, err := s.authenticateEAPAKA(ctx, state.card, state.imei, state.identity, state.realm, state.initialAKAState, state.crypto, state.initiatorSPI, state.responderSPI, state.ikeInitRequest, state.ikeInitResponse, state.nonceI, state.responderNonce, idiData, peer, useNATT, state.ikeFragmentationSupported, challengePayloads)
+	auth, err := s.authenticateEAPAKA(ctx, state, idiData, challengePayloads)
 	if err != nil {
 		return err
 	}
-	return finalizeIKEAuthState(state, finalPayloads, nextMessageID)
+	state.responderAPN = auth.responderAPN
+	return finalizeIKEAuthState(state, auth.finalPayloads, auth.nextMessageID)
 }
 
 func buildIKEAuthRequest(state *connectState) ([][]byte, []byte, error) {
@@ -44,7 +44,15 @@ func buildIKEAuthRequest(state *connectState) ([][]byte, []byte, error) {
 
 func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState, requests [][]byte) ([]ike.Payload, error) {
 	peer, useNATT := s.connectIKEPeer(state)
-	challengePayloads, _, err := s.exchangeProtectedIKE(ctx, peer, requests, useNATT, 1, state.crypto, false, state.ikeFragmentationSupported, ikeActionOpenIKEAuthChallenge)
+	challengePayloads, _, err := s.exchangeProtectedIKE(ctx, protectedIKEExchange{
+		peer:                   peer,
+		requests:               requests,
+		useNATT:                useNATT,
+		messageID:              1,
+		crypto:                 state.crypto,
+		fragmentationSupported: state.ikeFragmentationSupported,
+		action:                 ikeActionOpenIKEAuthChallenge,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +78,7 @@ func finalizeIKEAuthState(state *connectState, finalPayloads []ike.Payload, next
 		return err
 	}
 	tunnel.ESPInitiatorSPI = state.espInitiatorSPI
+	tunnel.APN = state.responderAPN
 	espKeys, err := state.crypto.DeriveESPKeys(tunnel.EncryptionKeyLen, tunnel.Integrity)
 	if err != nil {
 		return fmt.Errorf("deriving esp keys: %w", err)

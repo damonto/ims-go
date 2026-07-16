@@ -13,6 +13,7 @@ import (
 	imssms "github.com/damonto/ims-go/ims/sms"
 	imsussd "github.com/damonto/ims-go/ims/ussd"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
+	"github.com/damonto/ims-go/lte"
 	"github.com/damonto/ims-go/swu/tunnel"
 )
 
@@ -221,6 +222,15 @@ func (cfg Config) normalizedIMS() (IMSConfig, error) {
 	imsCfg, err := imsCfg.Normalized()
 	if err != nil {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+	}
+	if cfg.usesVoLTE() && imsCfg.AccessNetworkInfo == "" {
+		return IMSConfig{}, errors.New("normalizing ims config: access network info is required for VoLTE")
+	}
+	if cfg.usesVoLTE() {
+		imsCfg.AccessNetworkInfo, err = lte.NormalizeAccessNetworkInfo(imsCfg.AccessNetworkInfo)
+		if err != nil {
+			return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		}
 	}
 	return imsCfg, nil
 }

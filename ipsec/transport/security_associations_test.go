@@ -36,7 +36,31 @@ func TestSecurityAssociationsSharesOutboundSequenceBySA(t *testing.T) {
 	}
 }
 
-func TestSecurityAssociationsKeepsOutboundSequencePerSalt(t *testing.T) {
+func TestSecurityAssociationsRejectsDummyESP(t *testing.T) {
+	associations := NewSecurityAssociations()
+	codec := esp.Codec{
+		SPI:          0x10203040,
+		Encryption:   esp.EncryptionNull,
+		Integrity:    esp.IntegrityHMACSHA196,
+		IntegrityKey: []byte("0123456789abcdef"),
+	}
+	if _, err := associations.sealESP(codec, esp.NextHeaderNoNext, []byte("dummy")); err == nil {
+		t.Fatal("sealESP() error = nil, want IMS dummy packet rejection")
+	}
+	wire, err := associations.sealESP(codec, packet.ProtocolUDP, []byte("payload"))
+	if err != nil {
+		t.Fatalf("sealESP() after rejected dummy error = %v", err)
+	}
+	decoded, err := codec.Decode(wire)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if decoded.Sequence != 1 {
+		t.Fatalf("sequence = %d, want 1 after rejected dummy", decoded.Sequence)
+	}
+}
+
+func TestSecurityAssociationsSharesOutboundSequenceAcrossSameSPI(t *testing.T) {
 	associations := NewSecurityAssociations()
 	base := esp.Codec{
 		SPI:           0x10203040,
@@ -52,9 +76,10 @@ func TestSecurityAssociationsKeepsOutboundSequencePerSalt(t *testing.T) {
 	tests := []struct {
 		name  string
 		codec esp.Codec
+		want  uint32
 	}{
-		{name: "first salt", codec: codecA},
-		{name: "second salt", codec: codecB},
+		{name: "first salt", codec: codecA, want: 1},
+		{name: "second salt", codec: codecB, want: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -66,8 +91,8 @@ func TestSecurityAssociationsKeepsOutboundSequencePerSalt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Decode() error = %v", err)
 			}
-			if espPacket.Sequence != 1 {
-				t.Fatalf("sequence = %d, want 1", espPacket.Sequence)
+			if espPacket.Sequence != tt.want {
+				t.Fatalf("sequence = %d, want %d", espPacket.Sequence, tt.want)
 			}
 		})
 	}

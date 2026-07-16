@@ -122,5 +122,15 @@ func MediaLocalUDPAddr(local *net.UDPAddr, rtcp bool, rtcpMux bool) *net.UDPAddr
 
 // MediaPacketFromPayload builds packet metadata for media activity tracking.
 func MediaPacketFromPayload(rtcp bool, payload []byte) MediaPacket {
-	return MediaPacket{RTCP: rtcp, RTCPBye: rtcp && HasRTCPBye(payload)}
+	packet := MediaPacket{RTCP: rtcp, RTCPBye: rtcp && HasRTCPBye(payload)}
+	if !rtcp {
+		var rtp RTPPacket
+		if err := rtp.UnmarshalBinary(payload); err == nil {
+			packet.RTPSequenceNumber = rtp.SequenceNumber
+			packet.RTPTimestamp = rtp.Timestamp
+			packet.RTPSSRC = rtp.SSRC
+			packet.RTPPayloadBytes = len(rtp.Payload)
+		}
+	}
+	return packet
 }

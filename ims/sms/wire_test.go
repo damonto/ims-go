@@ -7,6 +7,35 @@ import (
 	"time"
 )
 
+func TestSMSDeliver8BitUserData(t *testing.T) {
+	tests := []struct {
+		name       string
+		part       userDataPart
+		wantHeader []byte
+	}{
+		{name: "plain", part: userDataPart{dcs: 0x04, udl: 3, userData: []byte{0x01, 0x02, 0x03}}},
+		{name: "with UDH", part: userDataPart{udhi: true, dcs: 0x04, udl: 6, userData: []byte{0x02, 0x70, 0x00, 0x01, 0x02, 0x03}}, wantHeader: []byte{0x02, 0x70, 0x00}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := newDeliverTPDU("+15551234567", tt.part).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			var got deliverTPDU
+			if err := got.UnmarshalBinary(data); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got.Message.UserData, tt.part.userData) {
+				t.Fatalf("UserData = %x, want %x", got.Message.UserData, tt.part.userData)
+			}
+			if !bytes.Equal(got.Message.UserDataHeader, tt.wantHeader) {
+				t.Fatalf("UserDataHeader = %x, want %x", got.Message.UserDataHeader, tt.wantHeader)
+			}
+		})
+	}
+}
+
 func TestEncodeDecodeSMS(t *testing.T) {
 	tests := []struct {
 		name string
@@ -393,6 +422,10 @@ func TestRPMessageMarshalBinaryRoundTrip(t *testing.T) {
 			msg:  newRPErrorMessage(9, rpCauseInvalidMandatoryInformation),
 		},
 		{
+			name: "rp-error with SMS-DELIVER-REPORT",
+			msg:  newRPErrorDeliverReportMessage(9, rpCauseMemoryCapacityExceeded, tpFailureCauseMemoryCapacityExceeded),
+		},
+		{
 			name: "rp-smma",
 			msg:  newRPSMMAMessage(11),
 		},
@@ -410,7 +443,7 @@ func TestRPMessageMarshalBinaryRoundTrip(t *testing.T) {
 			if err := got.UnmarshalBinary(data); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			if got.Type != tt.msg.Type || got.Reference != tt.msg.Reference || got.Cause != tt.msg.Cause {
+			if got.Type != tt.msg.Type || got.Reference != tt.msg.Reference || got.Cause != tt.msg.Cause || !bytes.Equal(got.UserData, tt.msg.UserData) {
 				t.Fatalf("round trip = %+v, want %+v", got, tt.msg)
 			}
 		})
@@ -650,6 +683,9 @@ func TestSMSStatusReportTPDUParsesExtendedFields(t *testing.T) {
 	}
 	if !got.HasDataCodingScheme || got.DataCodingScheme != 0xF6 {
 		t.Fatalf("DataCodingScheme = 0x%02X, has = %t, want 0xF6/true", got.DataCodingScheme, got.HasDataCodingScheme)
+	}
+	if got.UserDataLength != 3 {
+		t.Fatalf("UserDataLength = %d, want 3", got.UserDataLength)
 	}
 	if !bytes.Equal(got.UserData, []byte{0xAA, 0xBB, 0xCC}) {
 		t.Fatalf("UserData = % X, want AA BB CC", got.UserData)

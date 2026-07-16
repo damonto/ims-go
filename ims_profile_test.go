@@ -145,7 +145,6 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
       "rtpInactivityTimeout": "20s",
       "rtcpInactivityTimeout": "21s",
       "audioInactivityCallEndReasons": [0, 1, 2],
-      "rtcpSendInterval": "5s",
       "localRTPPortMin": 41000,
       "localRTPPortMax": 41020,
       "codecs": [
@@ -272,8 +271,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if got.IMS.Voice.AudioASBandwidthKbps != 49 {
 					t.Fatalf("IMS voice AudioASBandwidthKbps = %d, want 49", got.IMS.Voice.AudioASBandwidthKbps)
 				}
-				if *got.IMS.Voice.RTPInactivityTimeout != 20*time.Second || *got.IMS.Voice.RTCPInactivityTimeout != 21*time.Second || *got.IMS.Voice.RTCPSendInterval != 5*time.Second {
-					t.Fatalf("IMS voice media timers = %v/%v/%v, want profile values", *got.IMS.Voice.RTPInactivityTimeout, *got.IMS.Voice.RTCPInactivityTimeout, *got.IMS.Voice.RTCPSendInterval)
+				if *got.IMS.Voice.RTPInactivityTimeout != 20*time.Second || *got.IMS.Voice.RTCPInactivityTimeout != 21*time.Second {
+					t.Fatalf("IMS voice inactivity timers = %v/%v, want profile values", *got.IMS.Voice.RTPInactivityTimeout, *got.IMS.Voice.RTCPInactivityTimeout)
 				}
 				wantReasons := []imsvoice.AudioInactivityCallEndReason{
 					imsvoice.AudioInactivityRTCPOnHold,
@@ -1073,7 +1072,7 @@ func TestIMSProfileAccessNetworkInfoFollowsAccessType(t *testing.T) {
 		want string
 	}{
 		{name: "vowifi uses profile value", cfg: Config{Access: VoWiFi(VoWiFiConfig{})}, want: "IEEE-802.11"},
-		{name: "volte keeps radio value", cfg: Config{Access: VoLTE(lte.Config{AccessNetworkInfo: "3GPP-E-UTRAN-FDD"})}},
+		{name: "volte keeps radio value", cfg: Config{Access: VoLTE(lte.Config{AccessNetworkInfo: testVoLTEPANI})}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
