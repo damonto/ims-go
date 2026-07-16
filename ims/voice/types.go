@@ -149,6 +149,8 @@ type Call struct {
 	inviteResponse      bool
 	cancelOnResponse    bool
 	cancelSent          bool
+	inviteCancel        func()
+	cancelledInviteStop chan struct{}
 	localINVITEPending  bool
 	remoteINVITEPending bool
 	remoteINVITECSeq    int64

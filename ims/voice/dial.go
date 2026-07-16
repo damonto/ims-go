@@ -14,6 +14,13 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
+var errInviteCleanupContinues = errors.New("cancelled INVITE cleanup continues")
+
+type inviteExchangeResult struct {
+	resp sip.Message
+	err  error
+}
+
 func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	start, err := s.newOutgoingInvite(req)
 	if err != nil {
@@ -32,10 +39,17 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	s.emit(CallEvent{Call: call, CallID: start.callID, State: CallStateDialing, At: time.Now()})
 
 	invite := start.invite
-	resp, err := s.exchangeCallInvite(ctx, invite)
+	resp, err := s.exchangeCallInvite(ctx, call, invite)
 	if err != nil {
 		call.stopRingbackTimer()
 		_ = call.closeMedia()
+		if errors.Is(err, errInviteCleanupContinues) {
+			return nil, errors.New("dialing call: cancelled")
+		}
+		if call.State() == CallStateEnding {
+			call.finish(CallStateEnded, "cancelled")
+			return nil, errors.New("dialing call: cancelled")
+		}
 		s.removeCall(start.callID)
 		call.setState(CallStateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
@@ -58,6 +72,13 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 		if err != nil {
 			call.stopRingbackTimer()
 			_ = call.closeMedia()
+			if errors.Is(err, errInviteCleanupContinues) {
+				return nil, errors.New("dialing call: cancelled")
+			}
+			if call.State() == CallStateEnding {
+				call.finish(CallStateEnded, "cancelled")
+				return nil, errors.New("dialing call: cancelled")
+			}
 			s.removeCall(start.callID)
 			call.setState(CallStateFailed, err.Error())
 			return nil, fmt.Errorf("dialing call: %w", err)
@@ -77,7 +98,7 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 		return nil, err
 	}
 	if call.State() == CallStateEnding {
-		if err := call.releaseCancelledInvite2xx(ctx, resp); err != nil {
+		if err := call.releaseCancelledInvite2xx(resp); err != nil {
 			call.finish(CallStateFailed, err.Error())
 			return nil, fmt.Errorf("dialing call: %w", err)
 		}
@@ -154,26 +175,92 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	return call, nil
 }
 
-func (s *Endpoint) exchangeCallInvite(ctx context.Context, invite sip.Message) (sip.Message, error) {
-	exchangeCtx, cancelExchange := context.WithCancel(ctx)
-	defer cancelExchange()
+func (s *Endpoint) exchangeCallInvite(ctx context.Context, call *Call, invite sip.Message) (sip.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return sip.Message{}, err
+	}
+
+	// The SIP transaction must survive a caller deadline after CANCEL so it can
+	// consume the final INVITE response and ACK a racing 2xx. Caller values are
+	// still useful for logging and tracing, so only cancellation is detached.
+	exchangeCtx, cancelExchange := context.WithCancel(context.WithoutCancel(ctx))
+	call.mu.Lock()
+	call.inviteCancel = cancelExchange
+	call.mu.Unlock()
 
 	var timedOut atomic.Bool
 	stopTimer := s.startMOCallRequestTimer(func() {
 		timedOut.Store(true)
 		cancelExchange()
 	})
-	defer stopTimer()
-
-	resp, err := s.sess.ExchangeWithOptions(exchangeCtx, invite, session.ExchangeOptions{
-		OnProvisional: func(sip.Message) {
-			stopTimer()
-		},
-	})
-	if err != nil && timedOut.Load() {
-		return sip.Message{}, errors.New("waiting for first provisional INVITE response: timeout")
+	finishExchange := func() {
+		stopTimer()
+		call.mu.Lock()
+		call.inviteCancel = nil
+		call.mu.Unlock()
+		cancelExchange()
 	}
-	return resp, err
+
+	resultCh := make(chan inviteExchangeResult, 1)
+	go func() {
+		resp, err := s.sess.ExchangeWithOptions(exchangeCtx, invite, session.ExchangeOptions{
+			OnProvisional: func(sip.Message) {
+				stopTimer()
+			},
+		})
+		resultCh <- inviteExchangeResult{resp: resp, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		finishExchange()
+		if result.err != nil && timedOut.Load() {
+			return sip.Message{}, errors.New("waiting for first provisional INVITE response: timeout")
+		}
+		return result.resp, result.err
+	case <-ctx.Done():
+		call.mu.Lock()
+		cancelled := call.state == CallStateEnding
+		call.mu.Unlock()
+		if !cancelled {
+			cancelExchange()
+			result := <-resultCh
+			finishExchange()
+			if result.err != nil && timedOut.Load() {
+				return sip.Message{}, errors.New("waiting for first provisional INVITE response: timeout")
+			}
+			return sip.Message{}, ctx.Err()
+		}
+
+		cleanup := func(done <-chan struct{}) {
+			select {
+			case result := <-resultCh:
+				finishExchange()
+				call.completeCancelledInvite(result)
+			case <-done:
+				cancelExchange()
+				<-resultCh
+				finishExchange()
+			}
+		}
+		if !s.startBackgroundTask(cleanup) {
+			cancelExchange()
+			<-resultCh
+			finishExchange()
+		}
+		return sip.Message{}, errInviteCleanupContinues
+	}
+}
+
+func (c *Call) completeCancelledInvite(result inviteExchangeResult) {
+	if result.err == nil && result.resp.StatusCode() >= sipStatusOK && result.resp.StatusCode() < sipStatusMultipleChoices {
+		if err := c.releaseCancelledInvite2xx(result.resp); err != nil {
+			c.endpoint.emitError(fmt.Errorf("cleaning up cancelled INVITE: %w", err))
+			c.finish(CallStateFailed, err.Error())
+			return
+		}
+	}
+	c.finish(CallStateEnded, "cancelled")
 }
 
 func (s *Endpoint) startMOCallRequestTimer(cancel func()) func() {
@@ -238,7 +325,7 @@ func (s *Endpoint) retryInviteWithMinSE(ctx context.Context, call *Call, invite 
 	call.cancelSent = false
 	call.mu.Unlock()
 
-	next, err := s.exchangeCallInvite(ctx, retry)
+	next, err := s.exchangeCallInvite(ctx, call, retry)
 	if err != nil {
 		return sip.Message{}, fmt.Errorf("session timer retry: %w", err)
 	}

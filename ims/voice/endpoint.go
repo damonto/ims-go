@@ -128,17 +128,18 @@ func (s *Endpoint) HandleError(err error) {
 	}
 }
 
-func (s *Endpoint) startBackgroundTask(task func(done <-chan struct{})) {
+func (s *Endpoint) startBackgroundTask(task func(done <-chan struct{})) bool {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	done := s.bgDone
 	s.bgWG.Go(func() {
 		task(done)
 	})
 	s.mu.Unlock()
+	return true
 }
 
 func (s *Endpoint) backgroundContext() (context.Context, context.CancelFunc) {

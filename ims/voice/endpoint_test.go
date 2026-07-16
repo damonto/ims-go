@@ -2075,14 +2075,62 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 
 func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 	tests := []struct {
-		name string
+		name             string
+		onCancel         func(*voiceStubTransport, sip.Message, sip.Message)
+		dialTimeout      time.Duration
+		wantACK          int
+		wantBYE          int
+		cleanupContinues bool
+		minCleanupWait   time.Duration
 	}{
-		{name: "180 ringing without final response is cancelled"},
+		{
+			name: "matched cancel receives 487",
+			onCancel: func(transport *voiceStubTransport, invite, cancel sip.Message) {
+				transport.queue(cancelOK(cancel))
+				transport.queue(inviteTerminated(invite))
+			},
+			wantACK: 1,
+		},
+		{
+			name:        "481 without invite final response expires after 64 T1",
+			dialTimeout: 50 * time.Millisecond,
+			onCancel: func(transport *voiceStubTransport, _, cancel sip.Message) {
+				transport.queue(callStatus(cancel, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist"))
+			},
+			cleanupContinues: true,
+			minCleanupWait:   100 * time.Millisecond,
+		},
+		{
+			name: "481 followed by late 487",
+			onCancel: func(transport *voiceStubTransport, invite, cancel sip.Message) {
+				transport.queue(callStatus(cancel, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist"))
+				time.AfterFunc(20*time.Millisecond, func() {
+					transport.queue(inviteTerminated(invite))
+				})
+			},
+			wantACK: 1,
+		},
+		{
+			name:        "481 followed by late 2xx is acknowledged and released after caller timeout",
+			dialTimeout: 50 * time.Millisecond,
+			onCancel: func(transport *voiceStubTransport, invite, cancel sip.Message) {
+				transport.queue(callStatus(cancel, sipStatusCallTransactionDoesNotExist, "Call/Transaction Does Not Exist"))
+				time.AfterFunc(60*time.Millisecond, func() {
+					transport.queue(callOK(invite))
+				})
+			},
+			wantACK:          1,
+			wantBYE:          1,
+			cleanupContinues: true,
+			minCleanupWait:   70 * time.Millisecond,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newVoiceStubTransport()
-			sess, err := session.Open(session.Config{}, transport)
+			sess, err := session.Open(session.Config{TransactionTimers: session.TransactionTimers{
+				T1: 2 * time.Millisecond,
+			}}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
@@ -2097,7 +2145,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 			}
 			events := make(chan CallEvent, 8)
 			svc, err := New(Config{Logger: testLogger(),
-				RingbackTimeout: 50 * time.Millisecond,
+				RingbackTimeout: 20 * time.Millisecond,
 				OnCallEvent:     func(event CallEvent) { events <- event },
 			}, sess, reg)
 			if err != nil {
@@ -2129,20 +2177,48 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 					resp.Headers = sip.UpsertHeader(resp.Headers, "To", sip.WithTag(msg.Header("To"), "", "remote-tag"))
 					transport.queue(resp)
 				case "CANCEL":
-					transport.queue(cancelOK(msg))
-					transport.queue(inviteTerminated(invite))
+					tt.onCancel(transport, invite, msg)
+				case "BYE":
+					transport.queue(okForRequest(msg))
 				}
 			}
 
-			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			dialTimeout := tt.dialTimeout
+			if dialTimeout == 0 {
+				dialTimeout = 750 * time.Millisecond
+			}
+			dialCtx, cancelDial := context.WithTimeout(context.Background(), dialTimeout)
+			defer cancelDial()
+			started := time.Now()
+			_, err = svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
 			if err == nil || !strings.Contains(err.Error(), "cancelled") {
 				t.Fatalf("Dial() error = %v, want cancelled", err)
 			}
-			if transport.countMethod("CANCEL") != 1 {
-				t.Fatalf("CANCEL count = %d, want 1", transport.countMethod("CANCEL"))
+			if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+				t.Fatalf("Dial() elapsed = %v, want RFC cancellation cleanup before caller deadline", elapsed)
+			}
+			if got := transport.countMethod("CANCEL"); got < 1 {
+				t.Fatalf("CANCEL count = %d, want at least 1", got)
+			}
+			if tt.cleanupContinues && svc.lookupCall(invite.Header("Call-ID")) == nil {
+				t.Fatal("cancelled INVITE cleanup stopped with the caller context")
+			}
+			matchesCount := func(got, want int) bool {
+				if want == 0 {
+					return got == 0
+				}
+				return got >= want
+			}
+			if !waitForCallTest(func() bool {
+				return matchesCount(transport.countMethod("ACK"), tt.wantACK) && matchesCount(transport.countMethod("BYE"), tt.wantBYE)
+			}) {
+				t.Fatalf("ACK/BYE count = %d/%d, want %d/%d (positive counts allow transaction retransmission)", transport.countMethod("ACK"), transport.countMethod("BYE"), tt.wantACK, tt.wantBYE)
 			}
 			if !waitForCallEvent(events, CallStateEnded, "cancelled", time.Second) {
 				t.Fatal("cancelled event was not observed")
+			}
+			if elapsed := time.Since(started); elapsed < tt.minCleanupWait {
+				t.Fatalf("cancellation cleanup elapsed = %v, want at least %v", elapsed, tt.minCleanupWait)
 			}
 		})
 	}

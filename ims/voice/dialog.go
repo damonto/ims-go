@@ -421,6 +421,7 @@ func (c *Call) markInviteResponse() {
 	c.mu.Unlock()
 
 	cancel := snap.buildCANCEL(reasonUserTriggered)
+	c.startCancelledInviteTimer()
 	c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
 		c.sendCancel(done, cancel)
 	})
@@ -472,7 +473,7 @@ func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error)
 	return dialog.answer, true, nil
 }
 
-func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) error {
+func (c *Call) releaseCancelledInvite2xx(resp sip.Message) error {
 	c.mu.Lock()
 	c.remoteTag = sip.HeaderTag(resp.Header("To"))
 	c.remoteTo = nonEmpty(resp.Header("To"), c.remoteTo)
@@ -485,6 +486,8 @@ func (c *Call) releaseCancelledInvite2xx(ctx context.Context, resp sip.Message) 
 
 	ack := snap.buildACK()
 	bye := snap.buildBYE(reasonUserTriggered, c.nextCSeq())
+	ctx, cancel := c.endpoint.timeoutContext(callReleaseTimeout)
+	defer cancel()
 	if err := c.refreshDialogRegistration(); err != nil {
 		return err
 	}

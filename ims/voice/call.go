@@ -197,31 +197,43 @@ func (c *Call) cancelOutgoingInvite(ctx context.Context) error {
 		c.mu.Unlock()
 		return nil
 	}
+	if c.state == CallStateEnding || c.state == CallStateEnded {
+		c.mu.Unlock()
+		return nil
+	}
 	if c.direction != CallDirectionOutgoing || (c.state != CallStateDialing && c.state != CallStateRinging && c.state != CallStateEarlyMedia) {
 		state := c.state
 		c.mu.Unlock()
 		return fmt.Errorf("cancelling call: call state is %s", state)
 	}
-	if !c.inviteResponse {
+
+	var snap dialogSnapshot
+	sendCancel := c.inviteResponse
+	if sendCancel {
+		if c.cancelSent {
+			c.mu.Unlock()
+			return nil
+		}
+		c.cancelSent = true
+		snap = c.dialogSnapshot()
+	} else {
 		c.cancelOnResponse = true
-		c.mu.Unlock()
-		c.stopRingbackTimer()
-		c.setState(CallStateEnding, "cancelled")
-		_ = c.closeMedia()
-		return nil
 	}
-	if c.cancelSent {
-		c.mu.Unlock()
-		return nil
-	}
-	c.cancelSent = true
-	snap := c.dialogSnapshot()
+	// Commit the cancellation intent and state together so Dial cannot
+	// accept a final INVITE response in between the two updates.
+	c.state = CallStateEnding
+	event := CallEvent{Call: c, CallID: c.id, State: CallStateEnding, Hold: normalizeHoldState(c.hold), Cause: "cancelled", At: time.Now()}
 	c.mu.Unlock()
 
-	cancel := snap.buildCANCEL(reasonUserTriggered)
-	c.setState(CallStateEnding, "cancelled")
+	c.endpoint.emit(event)
 	c.stopRingbackTimer()
 	_ = c.closeMedia()
+	if !sendCancel {
+		return nil
+	}
+
+	cancel := snap.buildCANCEL(reasonUserTriggered)
+	c.startCancelledInviteTimer()
 	return c.exchangeCancel(ctx, cancel)
 }
 
@@ -305,6 +317,8 @@ func (c *Call) finish(state CallState, cause string) {
 	reliableStop := c.reliableStop
 	sessionTimerStop := c.sessionTimerStop
 	provisionalReady := c.provisionalReady
+	cancelledInviteStop := c.cancelledInviteStop
+	inviteCancel := c.inviteCancel
 	c.inviteOKStop = nil
 	c.inviteOKCSeq = 0
 	c.ringbackStop = nil
@@ -314,6 +328,8 @@ func (c *Call) finish(state CallState, cause string) {
 	c.reliableStop = nil
 	c.sessionTimerStop = nil
 	c.provisionalReady = nil
+	c.cancelledInviteStop = nil
+	c.inviteCancel = nil
 	c.dialogAttachment = nil
 	c.mu.Unlock()
 
@@ -337,6 +353,12 @@ func (c *Call) finish(state CallState, cause string) {
 	}
 	if provisionalReady != nil {
 		close(provisionalReady)
+	}
+	if cancelledInviteStop != nil {
+		close(cancelledInviteStop)
+	}
+	if inviteCancel != nil {
+		inviteCancel()
 	}
 	if attachment != nil {
 		_ = attachment.Close()
@@ -485,6 +507,36 @@ func (c *Call) startRingbackTimer() {
 			defer cancel()
 			if err := c.cancelOutgoingInvite(ctx); err != nil {
 				c.endpoint.emitError(fmt.Errorf("ringback timeout: %w", err))
+			}
+		}
+	})
+}
+
+func (c *Call) startCancelledInviteTimer() {
+	timeout := sipTransactionTimeoutMultiplier * c.endpoint.timers.T1
+	c.mu.Lock()
+	if c.cancelledInviteStop != nil || c.closed {
+		c.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	c.cancelledInviteStop = stop
+	c.mu.Unlock()
+
+	// RFC 3261 section 9.1 keeps the original INVITE transaction alive
+	// independently of CANCEL, but only for 64*T1 without a final response.
+	c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-stop:
+		case <-timer.C:
+			c.mu.Lock()
+			cancel := c.inviteCancel
+			c.mu.Unlock()
+			if cancel != nil {
+				cancel()
 			}
 		}
 	})
