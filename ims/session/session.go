@@ -805,10 +805,15 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 		return fmt.Errorf("writing response: %w", err)
 	}
 	s.applyResponseDecorator(&resp)
+	// Record the response before writing it so the INVITE transaction's
+	// automatic 100 Trying timer cannot race a response already in flight.
+	tx := s.recordServerTransactionResponse(req, resp)
 	if err := s.writeResponse(ctx, req.Transport, req.PeerAddr, req.Message, resp); err != nil {
+		if tx != nil {
+			tx.terminate()
+		}
 		return err
 	}
-	s.recordServerTransactionResponse(req, resp)
 	return nil
 }
 

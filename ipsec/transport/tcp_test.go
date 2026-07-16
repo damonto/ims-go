@@ -84,6 +84,33 @@ func TestTCPConnAckContext(t *testing.T) {
 	}
 }
 
+func TestTCPConnAdvertisesTunnelSafeMSS(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags byte
+		want  uint16
+	}{
+		{name: "syn", flags: packet.TCPFlagSYN, want: uint16(tcpDefaultSegmentSize)},
+		{name: "syn ack", flags: packet.TCPFlagSYN | packet.TCPFlagACK, want: uint16(tcpDefaultSegmentSize)},
+		{name: "ack", flags: packet.TCPFlagACK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, packetConn := newEstablishedTCPConnWithCapture(t)
+			if err := conn.sendSegmentWithSeq(context.Background(), 1000, 2000, tt.flags, nil); err != nil {
+				t.Fatalf("sendSegmentWithSeq() error = %v", err)
+			}
+			writes := packetConn.snapshotWrites()
+			if len(writes) != 1 {
+				t.Fatalf("writes = %d, want 1", len(writes))
+			}
+			if got := decodeTCPWrite(t, writes[0]).MSS; got != tt.want {
+				t.Fatalf("MSS = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizedTCPDataACKTimeouts(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -844,6 +871,48 @@ func TestTCPConnPassiveResetReturnsToListen(t *testing.T) {
 	}
 }
 
+func TestTCPConnEstablishedChallengesUnexpectedSYN(t *testing.T) {
+	tests := []struct {
+		name    string
+		passive bool
+	}{
+		{name: "active connection"},
+		{name: "passive connection", passive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.passive = tt.passive
+			conn.stream = []byte("partial")
+			conn.pendingRcvdSegments = []tcpReceivedSegment{{seq: 3000, payload: []byte("pending")}}
+			conn.pendingRcvdBytes = len("pending")
+
+			conn.mu.Lock()
+			response, err := conn.processSegment(packet.TCPSegment{
+				Seq:   3000,
+				Flags: packet.TCPFlagSYN,
+				MSS:   768,
+			})
+			established := conn.established
+			recvSeq := conn.recvSeq
+			streamLen := len(conn.stream)
+			pendingLen := len(conn.pendingRcvdSegments)
+			conn.mu.Unlock()
+
+			if err != nil {
+				t.Fatalf("processSegment() error = %v", err)
+			}
+			want := tcpSegmentResponse{seq: 1001, ack: 2001, flags: packet.TCPFlagACK}
+			if response != want {
+				t.Fatalf("response = %+v, want %+v", response, want)
+			}
+			if !established || recvSeq != 2001 || streamLen != len("partial") || pendingLen != 1 {
+				t.Fatalf("connection state = established %t recvSeq %d stream %d pending %d, want true/2001/%d/1", established, recvSeq, streamLen, pendingLen, len("partial"))
+			}
+		})
+	}
+}
+
 func TestTCPConnPassiveSYNACKRetransmitsUntilACK(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1440,6 +1509,31 @@ func TestTCPConnHandshakeTracksPeerMSS(t *testing.T) {
 	}
 }
 
+func TestTCPConnMaxPayloadSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		remote  net.IP
+		peerMSS uint16
+		want    int
+	}{
+		{name: "ipv4 default", remote: net.IPv4(192, 0, 2, 2), want: tcpDefaultIPv4SendMSS},
+		{name: "ipv6 default capped by tunnel", remote: net.ParseIP("2001:db8::2"), want: tcpDefaultSegmentSize},
+		{name: "peer advertises smaller mss", remote: net.IPv4(192, 0, 2, 2), peerMSS: 512, want: 512},
+		{name: "peer advertises larger mss", remote: net.IPv4(192, 0, 2, 2), peerMSS: 1400, want: tcpDefaultSegmentSize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.remote.IP = tt.remote
+			conn.peerMSS = tt.peerMSS
+
+			if got := conn.maxPayloadSize(); got != tt.want {
+				t.Fatalf("maxPayloadSize() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTCPConnActiveHandshakeRequiresValidSYNACK(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -1652,6 +1746,48 @@ func TestTCPConnIgnoresOutOfOrderFIN(t *testing.T) {
 	}
 }
 
+func TestTCPConnConsumesPendingFINAfterGap(t *testing.T) {
+	tests := []struct {
+		name    string
+		passive bool
+	}{
+		{name: "active connection"},
+		{name: "passive connection", passive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newEstablishedTCPConnForTest(t)
+			conn.passive = tt.passive
+
+			conn.mu.Lock()
+			_, err := conn.processSegment(packet.TCPSegment{
+				Seq:   2002,
+				Ack:   1001,
+				Flags: packet.TCPFlagFIN | packet.TCPFlagACK,
+			})
+			if err == nil {
+				_, err = conn.processSegment(packet.TCPSegment{
+					Seq:     2001,
+					Ack:     1001,
+					Flags:   packet.TCPFlagACK,
+					Payload: []byte("x"),
+				})
+			}
+			recvSeq := conn.recvSeq
+			peerClosed := conn.peerClosed
+			pending := len(conn.pendingRcvdSegments)
+			conn.mu.Unlock()
+
+			if !errors.Is(err, errTCPPeerClosed) {
+				t.Fatalf("processSegment() error = %v, want peer close", err)
+			}
+			if recvSeq != 2003 || !peerClosed || pending != 0 {
+				t.Fatalf("receive state = seq %d peerClosed %t pending %d, want 2003/true/0", recvSeq, peerClosed, pending)
+			}
+		})
+	}
+}
+
 func TestTCPConnConsumesFINSequence(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1713,6 +1849,7 @@ func TestTCPConnConsumesFINSequence(t *testing.T) {
 
 func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
 	conn := newEstablishedTCPConnForTest(t)
+	t.Cleanup(func() { _ = conn.Close() })
 	payload := "MESSAGE sip:test SIP/2.0\r\nContent-Length: 5\r\n\r\nhello"
 
 	conn.mu.Lock()
@@ -1726,7 +1863,6 @@ func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
 	if err == nil {
 		t.Fatal("processSegment() error = nil, want peer close")
 	}
-	conn.closeWithError(err)
 
 	got, _, err := conn.ReadPacket(context.Background())
 	if err != nil {
@@ -1742,14 +1878,17 @@ func TestTCPConnReadPacketDrainsMessageBeforeTerminalError(t *testing.T) {
 	}
 }
 
-func TestTCPConnClosesOnTerminalInboundSegment(t *testing.T) {
+func TestTCPConnHandlesTerminalInboundSegment(t *testing.T) {
 	tests := []struct {
-		name    string
-		segment packet.TCPSegment
-		wantErr string
+		name      string
+		passive   bool
+		peerClose bool
+		segment   packet.TCPSegment
+		wantErr   string
 	}{
 		{
-			name: "peer fin",
+			name:      "peer fin",
+			peerClose: true,
 			segment: packet.TCPSegment{
 				Src:   &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
 				Dst:   &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
@@ -1761,6 +1900,31 @@ func TestTCPConnClosesOnTerminalInboundSegment(t *testing.T) {
 		},
 		{
 			name: "peer reset",
+			segment: packet.TCPSegment{
+				Src:   &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
+				Dst:   &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+				Seq:   2001,
+				Ack:   1001,
+				Flags: packet.TCPFlagRST | packet.TCPFlagACK,
+			},
+			wantErr: "peer reset connection",
+		},
+		{
+			name:      "passive peer fin",
+			passive:   true,
+			peerClose: true,
+			segment: packet.TCPSegment{
+				Src:   &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
+				Dst:   &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+				Seq:   2001,
+				Ack:   1001,
+				Flags: packet.TCPFlagFIN | packet.TCPFlagACK,
+			},
+			wantErr: "peer closed connection",
+		},
+		{
+			name:    "passive peer reset",
+			passive: true,
 			segment: packet.TCPSegment{
 				Src:   &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5060},
 				Dst:   &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
@@ -1787,8 +1951,19 @@ func TestTCPConnClosesOnTerminalInboundSegment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := newEstablishedTCPConnForTest(t)
+			conn.passive = tt.passive
 			conn.handleSegment(tt.segment)
-			waitTCPDone(t, conn)
+			if tt.peerClose {
+				conn.mu.Lock()
+				closed := conn.closed
+				peerClosed := conn.peerClosed
+				conn.mu.Unlock()
+				if closed || !peerClosed {
+					t.Fatalf("close-wait state = closed %t peerClosed %t, want false/true", closed, peerClosed)
+				}
+			} else {
+				waitTCPDone(t, conn)
+			}
 
 			for range 2 {
 				_, _, err := conn.ReadPacket(context.Background())
@@ -1799,6 +1974,13 @@ func TestTCPConnClosesOnTerminalInboundSegment(t *testing.T) {
 					t.Fatalf("ReadPacket() error = %v, want %q", err, tt.wantErr)
 				}
 			}
+			if tt.peerClose {
+				if err := conn.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+				waitTCPDone(t, conn)
+				return
+			}
 			if err := conn.WritePacket(context.Background(), []byte("MESSAGE sip:test SIP/2.0\r\nContent-Length: 0\r\n\r\n")); err == nil {
 				t.Fatal("WritePacket() error = nil, want terminal error")
 			}
@@ -1807,24 +1989,35 @@ func TestTCPConnClosesOnTerminalInboundSegment(t *testing.T) {
 }
 
 func TestTCPConnCloseWithFINSendsFIN(t *testing.T) {
-	conn, packetConn := newEstablishedTCPConnWithCapture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
+	tests := []struct {
+		name       string
+		peerClosed bool
+	}{
+		{name: "local close"},
+		{name: "close wait", peerClosed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, packetConn := newEstablishedTCPConnWithCapture(t)
+			conn.peerClosed = tt.peerClosed
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
 
-	err := conn.closeWithFIN(ctx)
-	if err != nil {
-		t.Fatalf("closeWithFIN() error = %v", err)
-	}
-	writes := packetConn.snapshotWrites()
-	if len(writes) != 1 {
-		t.Fatalf("writes = %d, want FIN write", len(writes))
-	}
-	segment := decodeTCPWrite(t, writes[0])
-	if segment.Flags&(packet.TCPFlagFIN|packet.TCPFlagACK) != packet.TCPFlagFIN|packet.TCPFlagACK {
-		t.Fatalf("flags = %#x, want FIN|ACK", segment.Flags)
-	}
-	if segment.Seq != 1001 || segment.Ack != 2001 {
-		t.Fatalf("segment seq/ack = %d/%d, want 1001/2001", segment.Seq, segment.Ack)
+			if err := conn.closeWithFIN(ctx); err != nil {
+				t.Fatalf("closeWithFIN() error = %v", err)
+			}
+			writes := packetConn.snapshotWrites()
+			if len(writes) != 1 {
+				t.Fatalf("writes = %d, want FIN write", len(writes))
+			}
+			segment := decodeTCPWrite(t, writes[0])
+			if segment.Flags&(packet.TCPFlagFIN|packet.TCPFlagACK) != packet.TCPFlagFIN|packet.TCPFlagACK {
+				t.Fatalf("flags = %#x, want FIN|ACK", segment.Flags)
+			}
+			if segment.Seq != 1001 || segment.Ack != 2001 {
+				t.Fatalf("segment seq/ack = %d/%d, want 1001/2001", segment.Seq, segment.Ack)
+			}
+		})
 	}
 }
 

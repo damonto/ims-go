@@ -192,12 +192,13 @@ func (s *Session) matchServerACK(msg sip.Message) *serverTransaction {
 	return nil
 }
 
-func (s *Session) recordServerTransactionResponse(req Request, resp sip.Message) {
+func (s *Session) recordServerTransactionResponse(req Request, resp sip.Message) *serverTransaction {
 	tx := s.lookupServerTransaction(req.Message)
 	if tx == nil {
-		return
+		return nil
 	}
 	tx.recordResponse(resp)
+	return tx
 }
 
 func (tx *serverTransaction) recordResponse(resp sip.Message) {
@@ -273,6 +274,7 @@ func (tx *serverTransaction) sendAutomaticTrying() {
 	defer cancel()
 	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
 		tx.session.logger.Warn("sending automatic invite trying response", "call_id", req.Header("Call-ID"), "cseq", req.Header("CSeq"), "err", err)
+		tx.terminate()
 	}
 }
 
@@ -303,10 +305,11 @@ func (tx *serverTransaction) handleCancel(ctx context.Context) error {
 	resp := sip.NewResponse(sipStatusRequestTerminated, "Request Terminated")
 	resp.Headers = sip.ResponseHeaders(req, sipStatusRequestTerminated)
 	tx.session.applyResponseDecorator(&resp)
+	tx.recordResponse(resp)
 	if err := tx.session.writeResponse(ctx, transport, peer, req, resp); err != nil {
+		tx.terminate()
 		return err
 	}
-	tx.recordResponse(resp)
 	return nil
 }
 

@@ -239,7 +239,7 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := tcpOptionsForFlags(s.Flags)
+	options := tcpOptionsForFlags(s.Flags, s.MSS)
 	options = padTCPOptions(options)
 	headerLen := 20 + len(options)
 	if len(s.Payload) > maxTCPSegmentBytes-headerLen {
@@ -518,12 +518,15 @@ func decodeOpaqueESPPacket(data []byte) (esp.ESPPacket, error) {
 	return packet, nil
 }
 
-func tcpOptionsForFlags(flags byte) []byte {
+func tcpOptionsForFlags(flags byte, mss uint16) []byte {
 	if flags&TCPFlagSYN == 0 {
 		return nil
 	}
+	if mss == 0 {
+		mss = tcpDefaultMSS
+	}
 	return []byte{
-		0x02, 0x04, byte(tcpDefaultMSS >> 8), byte(tcpDefaultMSS & 0xff),
+		0x02, 0x04, byte(mss >> 8), byte(mss & 0xff),
 	}
 }
 

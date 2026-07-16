@@ -1643,6 +1643,110 @@ func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
 	}
 }
 
+func TestInviteServerTransactionDoesNotSendAutomaticTryingWhileResponseIsWriting(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "application response is in flight"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newBlockingWriteTransport()
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			req := Request{
+				Message:   newInboundRequest("INVITE", "call-writing-trying", "1 INVITE"),
+				Transport: transport,
+			}
+			tx := newServerTransaction(sess, req)
+			sess.registerServerTransaction(tx)
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.WriteStatus(context.Background(), req, 100, "Trying")
+			}()
+
+			select {
+			case <-transport.entered:
+			case <-time.After(time.Second):
+				t.Fatal("application response did not reach transport")
+			}
+
+			tx.mu.Lock()
+			tryingTimer := tx.tryingTimer
+			lastStatus := tx.lastResponse.StatusCode()
+			tx.mu.Unlock()
+			if tryingTimer != nil {
+				t.Fatal("automatic Trying timer is still armed")
+			}
+			if lastStatus != sipStatusTrying {
+				t.Fatalf("recorded response status = %d, want %d", lastStatus, sipStatusTrying)
+			}
+
+			tx.sendAutomaticTrying()
+			select {
+			case <-transport.entered:
+				t.Fatal("automatic Trying raced the application response")
+			default:
+			}
+
+			close(transport.release)
+			if err := <-errCh; err != nil {
+				t.Fatalf("WriteStatus() error = %v", err)
+			}
+			if got := transport.writeCount.Load(); got != 1 {
+				t.Fatalf("write count = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestWriteResponseTerminatesServerTransactionOnTransportError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		reason string
+	}{
+		{name: "provisional response", status: sipStatusTrying, reason: "Trying"},
+		{name: "final response", status: 486, reason: "Busy Here"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cause := errors.New("writing tcp response")
+			transport := newWriteErrorTransport(cause)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			req := Request{
+				Message:   newInboundRequest("INVITE", "call-response-error", "1 INVITE"),
+				Transport: transport,
+			}
+			tx := newServerTransaction(sess, req)
+			sess.registerServerTransaction(tx)
+
+			err = sess.WriteStatus(context.Background(), req, tt.status, tt.reason)
+			if !errors.Is(err, cause) {
+				t.Fatalf("WriteStatus() error = %v, want %v", err, cause)
+			}
+			if got := sess.lookupServerTransaction(req.Message); got != nil {
+				t.Fatalf("lookupServerTransaction() = %p, want nil", got)
+			}
+
+			tx.mu.Lock()
+			state := tx.state
+			tx.mu.Unlock()
+			if state != serverTransactionTerminated {
+				t.Fatalf("transaction state = %d, want terminated", state)
+			}
+		})
+	}
+}
+
 func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
 	transport.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062}

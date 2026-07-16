@@ -357,15 +357,17 @@ func TestTCPOptionsOnlyAdvertiseImplementedCapabilities(t *testing.T) {
 	tests := []struct {
 		name  string
 		flags byte
+		mss   uint16
 		want  []byte
 	}{
 		{name: "syn", flags: TCPFlagSYN, want: []byte{0x02, 0x04, 0x05, 0x50}},
 		{name: "syn ack", flags: TCPFlagSYN | TCPFlagACK, want: []byte{0x02, 0x04, 0x05, 0x50}},
+		{name: "custom mss", flags: TCPFlagSYN | TCPFlagACK, mss: 1024, want: []byte{0x02, 0x04, 0x04, 0x00}},
 		{name: "ack", flags: TCPFlagACK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tcpOptionsForFlags(tt.flags)
+			got := tcpOptionsForFlags(tt.flags, tt.mss)
 			if !slices.Equal(got, tt.want) {
 				t.Fatalf("tcpOptionsForFlags() = %x, want %x", got, tt.want)
 			}

@@ -47,7 +47,7 @@ func (t *TCPConn) consumeSegment(seq uint32, flags byte, payload []byte) error {
 	}
 	if len(payload) == 0 {
 		t.recvSeq = nextRecv
-		return errors.New("reading tcp packet: peer closed connection")
+		return errTCPPeerClosed
 	}
 
 	stream := append(append([]byte(nil), t.stream...), payload...)
@@ -77,7 +77,7 @@ func (t *TCPConn) consumeSegment(seq uint32, flags byte, payload []byte) error {
 		t.msgCh <- msg
 	}
 	if fin {
-		return errors.New("reading tcp packet: peer closed connection")
+		return errTCPPeerClosed
 	}
 	return nil
 }

@@ -15,6 +15,8 @@ import (
 
 const (
 	tcpDefaultSegmentSize = 1024
+	tcpDefaultIPv4SendMSS = 536
+	tcpDefaultIPv6SendMSS = 1220
 	tcpDefaultRemotePort  = 5060
 	tcpEphemeralPortBase  = 40000
 	tcpEphemeralPortRange = 20000
@@ -59,7 +61,10 @@ var tcpDataACKTimeoutsAfterSYNTimeout = []time.Duration{
 
 var tcpRandomISS = randomUint32
 
-var errPendingSegmentCanceled = errors.New("tcp pending segment canceled")
+var (
+	errPendingSegmentCanceled = errors.New("tcp pending segment canceled")
+	errTCPPeerClosed          = errors.New("reading tcp packet: peer closed connection")
+)
 
 var _ imssession.Transport = (*TCPConn)(nil)
 
@@ -102,6 +107,7 @@ type TCPConn struct {
 	writeMu     sync.Mutex
 	sendMu      sync.Mutex
 	established bool
+	peerClosed  bool
 	closed      bool
 	terminalErr error
 	sendSeq     uint32
@@ -394,6 +400,9 @@ func (t *TCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 		if msg, ok := t.nextMessage(); ok {
 			return msg, t.RemoteAddr(), nil
 		}
+		if err := t.peerClosedErr(); err != nil {
+			return nil, nil, err
+		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
@@ -426,6 +435,15 @@ func (t *TCPConn) nextMessage() ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func (t *TCPConn) peerClosedErr() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.peerClosed {
+		return nil
+	}
+	return t.terminalErrOr("reading tcp packet: peer closed connection")
 }
 
 func (t *TCPConn) Close() error {
@@ -562,14 +580,18 @@ func (t *TCPConn) closeWithError(err error) {
 		}
 		t.signalReady()
 		if err != nil {
-			select {
-			case t.errCh <- err:
-			default:
-			}
+			t.signalReadError(err)
 		}
 		close(t.done)
 		close(t.msgCh)
 	})
+}
+
+func (t *TCPConn) signalReadError(err error) {
+	select {
+	case t.errCh <- err:
+	default:
+	}
 }
 
 func (t *TCPConn) startUDPEncTunnelKeepalive() {
@@ -797,11 +819,14 @@ func tcpControlSequenceLen(flags byte) uint32 {
 func (t *TCPConn) maxPayloadSize() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	size := tcpDefaultSegmentSize
-	if t.peerMSS != 0 && int(t.peerMSS) < size {
-		size = int(t.peerMSS)
+	sendMSS := int(t.peerMSS)
+	if sendMSS == 0 {
+		sendMSS = tcpDefaultIPv6SendMSS
+		if t.remote.IP.To4() != nil {
+			sendMSS = tcpDefaultIPv4SendMSS
+		}
 	}
-	return max(size, 1)
+	return max(min(tcpDefaultSegmentSize, sendMSS), 1)
 }
 
 func (t *TCPConn) notePeerMSSLocked(mss uint16) {
@@ -878,7 +903,11 @@ func (t *TCPConn) handleSegment(segment packet.TCPSegment) {
 		}
 	}
 	if terminalErr != nil {
-		t.closeWithError(terminalErr)
+		if errors.Is(terminalErr, errTCPPeerClosed) {
+			t.signalReadError(terminalErr)
+		} else {
+			t.closeWithError(terminalErr)
+		}
 	}
 }
 
@@ -1006,6 +1035,7 @@ func (t *TCPConn) returnToPassiveListenLocked() {
 	t.peerMSS = 0
 	t.pending = nil
 	t.established = false
+	t.peerClosed = false
 	select {
 	case t.ackCh <- struct{}{}:
 	default:
@@ -1054,12 +1084,23 @@ func (t *TCPConn) processEstablishedSegment(segment packet.TCPSegment) (tcpSegme
 	if err := t.consumeSegment(seq, flags, payload); errors.Is(err, errTCPReceiveQueueFull) {
 		return tcpSegmentResponse{seq: t.sendSeq, ack: ack, flags: packet.TCPFlagACK}, nil
 	} else if err != nil {
+		if errors.Is(err, errTCPPeerClosed) {
+			t.notePeerClosedLocked()
+		}
 		return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, err
 	}
 	if err := t.consumePendingSegments(); err != nil {
+		if errors.Is(err, errTCPPeerClosed) {
+			t.notePeerClosedLocked()
+		}
 		return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, err
 	}
 	return tcpSegmentResponse{seq: t.sendSeq, ack: t.recvSeq, flags: packet.TCPFlagACK}, nil
+}
+
+func (t *TCPConn) notePeerClosedLocked() {
+	t.peerClosed = true
+	t.terminalErr = errTCPPeerClosed
 }
 
 func (t *TCPConn) signalReady() {
@@ -1114,6 +1155,7 @@ func (t *TCPConn) sendSegmentWithSeq(ctx context.Context, seq, ack uint32, flags
 		Ack:     ack,
 		Flags:   flags,
 		Window:  tcpDefaultWindow,
+		MSS:     uint16(tcpDefaultSegmentSize),
 		Payload: append([]byte(nil), payload...),
 	}
 	if !t.secure {
