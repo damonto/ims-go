@@ -47,17 +47,7 @@ type registerSecurity struct {
 }
 
 func (s *Registrar) protectedRegisterExchangeOptions() session.ExchangeOptions {
-	if !strings.EqualFold(sip.TransportToken(s.sess.LocalAddr()), "UDP") {
-		return session.ExchangeOptions{}
-	}
-	transports := s.currentSecureServerTransports()
-	if len(transports) == 0 {
-		return session.ExchangeOptions{}
-	}
-	return session.ExchangeOptions{
-		AcceptResponseTransport: acceptResponseFrom(transports),
-		ResponseTransports:      transports,
-	}
+	return protectedExchangeOptions(s.sess.PrimaryTransport(), s.currentSecureServerTransports())
 }
 
 func (s *Registrar) currentSecurityVerify() *security.Param {
@@ -107,11 +97,31 @@ func acceptResponseFrom(inbound []session.Transport) func(session.Transport) boo
 }
 
 func reauthResponseTransports(outbound session.Transport, inbound []session.Transport) []session.Transport {
-	transports := append([]session.Transport(nil), inbound...)
-	if strings.EqualFold(sip.TransportToken(outbound.LocalAddr()), "TCP") {
+	if outbound == nil {
+		return nil
+	}
+	protocol := sip.TransportToken(outbound.LocalAddr())
+	transports := make([]session.Transport, 0, len(inbound)+1)
+	for _, transport := range inbound {
+		if strings.EqualFold(sip.TransportToken(transport.LocalAddr()), protocol) {
+			transports = append(transports, transport)
+		}
+	}
+	if strings.EqualFold(protocol, "TCP") {
 		transports = append([]session.Transport{outbound}, transports...)
 	}
 	return uniqueSessionTransports(transports)
+}
+
+func protectedExchangeOptions(outbound session.Transport, inbound []session.Transport) session.ExchangeOptions {
+	transports := reauthResponseTransports(outbound, inbound)
+	if len(transports) == 0 {
+		return session.ExchangeOptions{}
+	}
+	return session.ExchangeOptions{
+		AcceptResponseTransport: acceptResponseFrom(transports),
+		ResponseTransports:      transports,
+	}
 }
 
 func uniqueSessionTransports(transports []session.Transport) []session.Transport {
@@ -150,16 +160,10 @@ func (r *registerSecurity) close() {
 }
 
 func (r *registerSecurity) exchangeOptions() session.ExchangeOptions {
-	if r == nil || r.outbound == nil || !strings.EqualFold(sip.TransportToken(r.outbound.LocalAddr()), "UDP") {
+	if r == nil || r.outbound == nil {
 		return session.ExchangeOptions{}
 	}
-	if len(r.inboundTransports) == 0 {
-		return session.ExchangeOptions{}
-	}
-	return session.ExchangeOptions{
-		AcceptResponseTransport: acceptResponseFrom(r.inboundTransports),
-		ResponseTransports:      r.inboundTransports,
-	}
+	return protectedExchangeOptions(r.outbound, r.inboundTransports)
 }
 
 func (s *Registrar) replaceSecureServerAttachments(next []session.Attachment) []session.Attachment {
@@ -213,6 +217,46 @@ func (s *Registrar) closeAttachmentsAfter(attachments []session.Attachment, dela
 			<-ctx.Done()
 		} else {
 			_ = s.sess.WaitTransportsIdle(ctx, transports...)
+		}
+		drain.close()
+		s.forgetDrain(drain)
+	})
+	s.mu.Unlock()
+}
+
+func (s *Registrar) closeOldSecurityAfterNewInbound(attachments []session.Attachment, expiresAt time.Time, watch *session.InboundWatch) {
+	attachments = compactAttachments(attachments)
+	if len(attachments) == 0 {
+		watch.Close()
+		return
+	}
+	if !expiresAt.IsZero() && !expiresAt.After(time.Now()) {
+		watch.Close()
+		closeAttachments(attachments)
+		return
+	}
+	drain := &attachmentDrain{attachments: append([]session.Attachment(nil), attachments...)}
+	oldTransports := attachmentTransports(attachments)
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		watch.Close()
+		closeAttachments(attachments)
+		return
+	}
+	ctx, cancel := contextWithDoneDeadline(s.done, expiresAt)
+	drain.cancel = cancel
+	s.drainTimers = append(s.drainTimers, drain)
+	s.startBackgroundTaskLocked(func() {
+		defer cancel()
+		if watch.Wait(ctx) == nil {
+			delay := saDrainDelayBefore(expiresAt, s.sess.TransactionTimers())
+			if delay > 0 && len(oldTransports) != 0 {
+				idleCtx, idleCancel := context.WithTimeout(ctx, delay)
+				_ = s.sess.WaitTransportsIdle(idleCtx, oldTransports...)
+				idleCancel()
+			}
 		}
 		drain.close()
 		s.forgetDrain(drain)
@@ -411,6 +455,31 @@ func saDrainDelayBefore(expiresAt time.Time, timers session.TransactionTimers) t
 		return 0
 	}
 	return min(delay, remaining)
+}
+
+func contextWithDoneDeadline(done <-chan struct{}, deadline time.Time) (context.Context, context.CancelFunc) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if deadline.IsZero() {
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		ctx, cancel = context.WithDeadline(context.Background(), deadline)
+	}
+	stop := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		once.Do(func() {
+			close(stop)
+			cancel()
+		})
+	}
 }
 
 func (s *Registrar) secureAssociationExpiresAt(now time.Time) time.Time {
@@ -957,6 +1026,16 @@ func securityClientCapabilities(base security.Param) security.Params {
 	return params
 }
 
+func reauthSecurityClientCapabilities(base, current security.Param) security.Params {
+	params := securityClientCapabilities(base)
+	if !strings.EqualFold(current.Mod, "UDP-enc-tun") {
+		return params
+	}
+	return slices.DeleteFunc(params, func(param security.Param) bool {
+		return !strings.EqualFold(param.Mod, "UDP-enc-tun")
+	})
+}
+
 func reauthSecurityClient(current, peer security.Param, registerPort int) security.Param {
 	next := current
 	next.PortC = randomIMSPort()
@@ -977,6 +1056,9 @@ func validateReauthenticationSecurityServer(current Flow, selected *security.Par
 	}
 	if selected.PortC == current.SecurityVerify.PortC {
 		return errors.New("applying re-authentication Security-Server: protected client port did not change")
+	}
+	if strings.EqualFold(current.SecurityVerify.Mod, "UDP-enc-tun") && !strings.EqualFold(selected.Mod, "UDP-enc-tun") {
+		return errors.New("applying re-authentication Security-Server: UDP encapsulated tunnel mode was not preserved")
 	}
 	if selected.SPIC == current.SecurityVerify.SPIC || selected.SPIC == current.SecurityVerify.SPIS ||
 		selected.SPIS == current.SecurityVerify.SPIC || selected.SPIS == current.SecurityVerify.SPIS {

@@ -81,9 +81,6 @@ func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (boo
 	if !strings.EqualFold(strings.TrimSpace(req.Message.Header("Event")), regEventPackage) {
 		return true, s.sess.WriteStatus(ctx, req, sipStatusBadEvent, "Bad Event")
 	}
-	if status, reason := s.recordNotifyCSeq(req.Message); status != 0 {
-		return true, s.sess.WriteStatus(ctx, req, status, reason)
-	}
 	if len(req.Message.Body) != 0 {
 		contentType := strings.TrimSpace(req.Message.Header("Content-Type"))
 		if contentType == "" {
@@ -93,11 +90,16 @@ func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (boo
 			return true, s.writeUnsupportedRegInfoMediaType(ctx, req)
 		}
 	}
+	pending, pendingAccepted := s.preparePendingSubscriptionNotify(req.Message)
+	if status, reason := s.recordNotifyCSeq(req.Message); status != 0 {
+		return true, s.sess.WriteStatus(ctx, req, status, reason)
+	}
 	subscriptionTerminated := s.applySubscriptionStateFromNotify(req.Message)
 	notifyErr := s.applyRegInfoNotify(req.Message)
 	if err := s.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 		return true, err
 	}
+	s.completePendingSubscription(pending, pendingAccepted && !subscriptionTerminated)
 	if subscriptionTerminated {
 		s.resetSubscription()
 		s.resetRegInfoState()

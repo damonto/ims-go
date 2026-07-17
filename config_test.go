@@ -196,46 +196,6 @@ func TestConfigNormalized(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid tcp data ack timeout fails",
-			cfg: Config{
-				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
-					TCPDataACKTimeouts: []time.Duration{0},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "sub second tcp data ack timeout fails",
-			cfg: Config{
-				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
-					TCPDataACKTimeouts: []time.Duration{500 * time.Millisecond, time.Second},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "aggressive tcp data ack backoff fails",
-			cfg: Config{
-				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
-					TCPDataACKTimeouts: []time.Duration{time.Second, time.Second, 4 * time.Second},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "short tcp data ack budget fails",
-			cfg: Config{
-				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
-					TCPDataACKTimeouts: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second},
-				},
-			},
-			wantErr: true,
-		},
-		{
 			name: "negative ims registration retry base fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},

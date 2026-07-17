@@ -174,7 +174,7 @@ func reregistrationInitialRequiredStatus(status int) bool {
 }
 
 func registrationTimeoutRequiresInitial(err error) bool {
-	return session.TransactionTimerExpired(err, "F") || session.TransactionTransportFailed(err)
+	return session.TransactionTimerExpired(err, "F") || session.TransportFailed(err)
 }
 
 func initialRegistrationRequiredError(resp sip.Message) error {

@@ -7,26 +7,24 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-	"time"
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
-	"github.com/damonto/ims-go/ipsec/packet"
+	ipsectransport "github.com/damonto/ims-go/ipsec/transport"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 
-const mediaTransportDrainDelay = 2 * time.Second
+var errVoiceMediaTransportClosed = errors.New("reading voice media packet: transport is closed")
 
-type tunnelMediaTransport struct {
-	session    *swutunnel.Session
-	logger     *slog.Logger
-	attachment swutunnel.Attachment
-	local      *net.UDPAddr
-	remote     imsvoice.MediaRemote
-	readCh     chan tunnelMediaPacket
-	rtcpCh     chan tunnelMediaPacket
-	done       chan struct{}
-	onPacket   func(imsvoice.MediaPacket)
-	closeOnce  sync.Once
+type netstackMediaTransport struct {
+	rtpConn  *ipsectransport.NetstackUDPConn
+	rtcpConn *ipsectransport.NetstackUDPConn
+	logger   *slog.Logger
+	local    *net.UDPAddr
+	remote   imsvoice.MediaRemote
+	readCh   chan mediaPacket
+	rtcpCh   chan mediaPacket
+	done     chan struct{}
+	onPacket func(imsvoice.MediaPacket)
 
 	mu          sync.Mutex
 	closed      bool
@@ -35,90 +33,94 @@ type tunnelMediaTransport struct {
 	inRTCP      int
 	outRTP      int
 	outRTCP     int
+	closeOnce   sync.Once
 }
 
-type tunnelMediaPacket struct {
+type mediaPacket struct {
 	data []byte
 	addr net.Addr
-	err  error
 }
 
-func newTunnelMediaTransport(ctx context.Context, session *swutunnel.Session, cfg imsvoice.MediaConfig) (*tunnelMediaTransport, error) {
+func newNetstackMediaTransport(ctx context.Context, session *swutunnel.Session, netstack *ipsectransport.Netstack, cfg imsvoice.MediaConfig) (*netstackMediaTransport, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
+	if netstack == nil {
+		return nil, errors.New("opening voice media transport: userspace network stack is unavailable")
+	}
+	if cfg.LocalPort <= 0 || cfg.LocalPort >= 65535 {
+		return nil, errors.New("opening voice media transport: local RTP port must be between 1 and 65534")
+	}
 	info, err := session.ReadyInfo()
 	if err != nil {
 		return nil, fmt.Errorf("opening voice media transport: %w", err)
 	}
-	if cfg.LocalPort == 0 {
-		return nil, errors.New("opening voice media transport: local port is required")
-	}
 	localIP := info.InnerIPForRemote(cfg.RemoteIP)
 	if len(localIP) == 0 {
-		return nil, errors.New("opening voice media transport: matching local ip is unavailable")
+		return nil, errors.New("opening voice media transport: matching local IP is unavailable")
 	}
-	transport := &tunnelMediaTransport{
-		session: session,
-		logger:  session.Logger(),
-		local: &net.UDPAddr{
-			IP:   localIP,
-			Port: cfg.LocalPort,
-		},
-		readCh:   make(chan tunnelMediaPacket, 32),
-		rtcpCh:   make(chan tunnelMediaPacket, 32),
+	rtpConn, err := netstack.ListenUDP(ctx, ipsectransport.UDPConfig{LocalPort: cfg.LocalPort, RemoteIP: cfg.RemoteIP})
+	if err != nil {
+		return nil, fmt.Errorf("opening voice media transport: RTP socket: %w", err)
+	}
+	rtcpConn, err := netstack.ListenUDP(ctx, ipsectransport.UDPConfig{LocalPort: cfg.LocalPort + 1, RemoteIP: cfg.RemoteIP})
+	if err != nil {
+		_ = rtpConn.Close()
+		return nil, fmt.Errorf("opening voice media transport: RTCP socket: %w", err)
+	}
+	transport := &netstackMediaTransport{
+		rtpConn:  rtpConn,
+		rtcpConn: rtcpConn,
+		logger:   session.Logger(),
+		local:    &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: cfg.LocalPort},
+		readCh:   make(chan mediaPacket, 32),
+		rtcpCh:   make(chan mediaPacket, 32),
 		done:     make(chan struct{}),
 		onPacket: cfg.OnPacket,
 	}
 	if len(cfg.RemoteIP) != 0 && cfg.RemotePort != 0 {
 		if err := transport.applyRemoteConfig(cfg); err != nil {
+			_ = rtpConn.Close()
+			_ = rtcpConn.Close()
 			return nil, err
 		}
 	}
-	attachment, err := session.Attach(transport)
-	if err != nil {
-		return nil, fmt.Errorf("opening voice media transport: %w", err)
-	}
-	transport.attachment = attachment
+	go transport.readLoop(rtpConn)
+	go transport.readLoop(rtcpConn)
 	return transport, nil
 }
 
-func (t *tunnelMediaTransport) LocalAddr() net.Addr {
+func (t *netstackMediaTransport) LocalAddr() net.Addr {
 	return imsvoice.CloneUDPAddr(t.local)
 }
 
-func (t *tunnelMediaTransport) RemoteAddr() net.Addr {
+func (t *netstackMediaTransport) RemoteAddr() net.Addr {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.remote.Addr(false)
 }
 
-func (t *tunnelMediaTransport) ConfigureRemote(ctx context.Context, cfg imsvoice.MediaConfig) error {
+func (t *netstackMediaTransport) ConfigureRemote(ctx context.Context, cfg imsvoice.MediaConfig) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-	if len(cfg.RemoteIP) == 0 || cfg.RemotePort == 0 {
-		return errors.New("configuring voice media remote: remote address is required")
-	}
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.closed {
-		t.mu.Unlock()
 		return errors.New("configuring voice media remote: transport is closed")
 	}
 	if err := t.applyRemoteConfig(cfg); err != nil {
-		t.mu.Unlock()
 		return err
 	}
 	t.onPacket = cfg.OnPacket
-	t.mu.Unlock()
 	return nil
 }
 
-func (t *tunnelMediaTransport) applyRemoteConfig(cfg imsvoice.MediaConfig) error {
+func (t *netstackMediaTransport) applyRemoteConfig(cfg imsvoice.MediaConfig) error {
 	remote, err := imsvoice.MediaRemoteFromConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("configuring voice media remote: %w", err)
@@ -127,123 +129,130 @@ func (t *tunnelMediaTransport) applyRemoteConfig(cfg imsvoice.MediaConfig) error
 	return nil
 }
 
-func (t *tunnelMediaTransport) WritePacket(ctx context.Context, data []byte) error {
-	return t.writeUDP(ctx, data, false)
+func (t *netstackMediaTransport) WritePacket(ctx context.Context, data []byte) error {
+	return t.write(ctx, data, false)
 }
 
-func (t *tunnelMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
-	return t.writeUDP(ctx, data, true)
+func (t *netstackMediaTransport) WriteRTCP(ctx context.Context, data []byte) error {
+	return t.write(ctx, data, true)
 }
 
-func (t *tunnelMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp bool) error {
+func (t *netstackMediaTransport) write(ctx context.Context, data []byte, rtcp bool) error {
 	t.mu.Lock()
-	closed := t.closed
-	local := t.localMediaAddr(rtcp)
-	remote := t.remote.Addr(rtcp)
-	count := t.nextMediaCount(rtcp, false)
-	t.mu.Unlock()
-	if closed {
+	if t.closed {
+		t.mu.Unlock()
 		return errors.New("writing voice media packet: transport is closed")
 	}
+	remote := t.remote.Addr(rtcp)
+	rtcpMux := t.remote.RTCPMux
+	local := imsvoice.MediaLocalUDPAddr(t.local, rtcp, rtcpMux)
+	count := t.nextMediaCount(rtcp, false)
+	t.mu.Unlock()
 	if remote == nil {
 		return errors.New("writing voice media packet: remote address is not configured")
 	}
+	conn := t.rtpConn
+	if rtcp && !rtcpMux {
+		conn = t.rtcpConn
+	}
 	t.logMediaPacket("send", rtcp, count, local, remote, len(data))
-	return t.session.WriteInnerPacket(ctx, packet.InnerPacket{
-		UDP: &packet.UDPSegment{
-			Src:     local,
-			Dst:     remote,
-			Payload: append([]byte(nil), data...),
-		},
-	})
-}
-
-func (t *tunnelMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	return t.readUDP(ctx, false)
-}
-
-func (t *tunnelMediaTransport) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {
-	return t.readUDP(ctx, true)
-}
-
-func (t *tunnelMediaTransport) readUDP(ctx context.Context, rtcp bool) ([]byte, net.Addr, error) {
-	readCh := t.readCh
-	if rtcp {
-		readCh = t.rtcpCh
+	if err := conn.WritePacketTo(ctx, data, remote); err != nil {
+		return fmt.Errorf("writing voice media packet: %w", err)
 	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-t.done:
-			return nil, nil, t.closedErr()
-		case inbound := <-readCh:
-			if inbound.err != nil {
-				return nil, nil, inbound.err
-			}
-			return inbound.data, inbound.addr, nil
-		}
-	}
-}
-
-func (t *tunnelMediaTransport) Close() error {
-	t.closeWithError(nil)
 	return nil
 }
 
-func (t *tunnelMediaTransport) HandleInnerPacket(pkt packet.InnerPacket) bool {
-	if pkt.UDP == nil || pkt.UDP.Src == nil || pkt.UDP.Dst == nil {
-		return false
-	}
-	t.mu.Lock()
-	closed := t.closed
-	local := imsvoice.CloneUDPAddr(t.local)
-	rtcpLocal := t.localMediaAddr(true)
-	remote := t.remote.Addr(false)
-	rtcpMux := t.remote.RTCPMux
-	t.mu.Unlock()
-	if local == nil {
-		return false
-	}
-	rtcp := false
-	switch {
-	case imsvoice.UDPAddrMatches(pkt.UDP.Dst, local):
-		rtcp = rtcpMux && imsvoice.IsRTCPPacket(pkt.UDP.Payload)
-	case imsvoice.UDPAddrMatches(pkt.UDP.Dst, rtcpLocal):
-		rtcp = true
-	default:
-		return false
-	}
-	if closed {
-		if remote == nil {
-			return false
-		}
-		t.mu.Lock()
-		wantRemote := t.remote.Addr(rtcp)
-		t.mu.Unlock()
-		return imsvoice.UDPAddrMatches(pkt.UDP.Src, wantRemote)
-	}
-	if remote == nil {
-		return true
-	}
-	t.mu.Lock()
-	count := t.nextMediaCount(rtcp, true)
-	t.mu.Unlock()
-	t.logMediaPacket("recv", rtcp, count, pkt.UDP.Dst, pkt.UDP.Src, len(pkt.UDP.Payload))
-	t.notifyPacket(rtcp, pkt.UDP.Payload)
+func (t *netstackMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	return t.read(ctx, false)
+}
+
+func (t *netstackMediaTransport) ReadRTCP(ctx context.Context) ([]byte, net.Addr, error) {
+	return t.read(ctx, true)
+}
+
+func (t *netstackMediaTransport) read(ctx context.Context, rtcp bool) ([]byte, net.Addr, error) {
 	readCh := t.readCh
 	if rtcp {
 		readCh = t.rtcpCh
 	}
 	select {
-	case readCh <- tunnelMediaPacket{data: append([]byte(nil), pkt.UDP.Payload...), addr: imsvoice.CloneUDPAddr(pkt.UDP.Src)}:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-t.done:
+		return nil, nil, t.closedErr()
+	case packet := <-readCh:
+		return packet.data, packet.addr, nil
+	}
+}
+
+func (t *netstackMediaTransport) readLoop(conn *ipsectransport.NetstackUDPConn) {
+	for {
+		data, peer, err := conn.ReadPacket(context.Background())
+		if err != nil {
+			select {
+			case <-t.done:
+				return
+			default:
+			}
+			t.closeWithError(fmt.Errorf("reading voice media packet: %w", err))
+			return
+		}
+		peerUDP, ok := peer.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		local, ok := conn.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		t.handlePacket(data, peerUDP, local)
+	}
+}
+
+func (t *netstackMediaTransport) handlePacket(data []byte, peer, local *net.UDPAddr) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	remote := t.remote.Addr(false)
+	rtcpMux := t.remote.RTCPMux
+	rtpLocal := imsvoice.CloneUDPAddr(t.local)
+	rtcpLocal := imsvoice.MediaLocalUDPAddr(t.local, true, rtcpMux)
+	rtcp := false
+	switch {
+	case imsvoice.UDPAddrMatches(local, rtpLocal):
+		rtcp = rtcpMux && imsvoice.IsRTCPPacket(data)
+	case imsvoice.UDPAddrMatches(local, rtcpLocal):
+		rtcp = true
+	default:
+		t.mu.Unlock()
+		return
+	}
+	if remote == nil {
+		t.mu.Unlock()
+		return
+	}
+	count := t.nextMediaCount(rtcp, true)
+	onPacket := t.onPacket
+	t.mu.Unlock()
+
+	t.logMediaPacket("recv", rtcp, count, local, peer, len(data))
+	if onPacket != nil {
+		onPacket(imsvoice.MediaPacketFromPayload(rtcp, data))
+	}
+	readCh := t.readCh
+	if rtcp {
+		readCh = t.rtcpCh
+	}
+	select {
+	case readCh <- mediaPacket{data: append([]byte(nil), data...), addr: imsvoice.CloneUDPAddr(peer)}:
 	case <-t.done:
 	default:
 	}
-	return true
 }
 
-func (t *tunnelMediaTransport) nextMediaCount(rtcp bool, inbound bool) int {
+func (t *netstackMediaTransport) nextMediaCount(rtcp, inbound bool) int {
 	if inbound {
 		if rtcp {
 			t.inRTCP++
@@ -260,7 +269,7 @@ func (t *tunnelMediaTransport) nextMediaCount(rtcp bool, inbound bool) int {
 	return t.outRTP
 }
 
-func (t *tunnelMediaTransport) logMediaPacket(direction string, rtcp bool, count int, local *net.UDPAddr, peer *net.UDPAddr, payloadLen int) {
+func (t *netstackMediaTransport) logMediaPacket(direction string, rtcp bool, count int, local, peer *net.UDPAddr, payloadLen int) {
 	if count != 1 && count%100 != 0 {
 		return
 	}
@@ -271,47 +280,28 @@ func (t *tunnelMediaTransport) logMediaPacket(direction string, rtcp bool, count
 	t.logger.Debug("voice media packet", "direction", direction, "kind", kind, "count", count, "local_addr", local, "peer_addr", peer, "payload_len", payloadLen)
 }
 
-func (t *tunnelMediaTransport) notifyPacket(rtcp bool, payload []byte) {
-	t.mu.Lock()
-	onPacket := t.onPacket
-	t.mu.Unlock()
-	if onPacket != nil {
-		onPacket(imsvoice.MediaPacketFromPayload(rtcp, payload))
-	}
+func (t *netstackMediaTransport) Close() error {
+	t.closeWithError(nil)
+	return nil
 }
 
-func (t *tunnelMediaTransport) HandleError(err error) {
-	t.closeWithError(fmt.Errorf("reading voice media packet: %w", err))
-}
-
-func (t *tunnelMediaTransport) closeWithError(err error) {
+func (t *netstackMediaTransport) closeWithError(err error) {
 	t.closeOnce.Do(func() {
 		t.mu.Lock()
 		t.closed = true
 		t.terminalErr = err
-		attachment := t.attachment
 		t.mu.Unlock()
-		if attachment != nil && err != nil {
-			_ = attachment.Close()
-		}
-		if attachment != nil && err == nil {
-			time.AfterFunc(mediaTransportDrainDelay, func() {
-				_ = attachment.Close()
-			})
-		}
 		close(t.done)
+		_ = t.rtpConn.Close()
+		_ = t.rtcpConn.Close()
 	})
 }
 
-func (t *tunnelMediaTransport) closedErr() error {
+func (t *netstackMediaTransport) closedErr() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.terminalErr != nil {
 		return t.terminalErr
 	}
-	return errors.New("reading voice media packet: transport is closed")
-}
-
-func (t *tunnelMediaTransport) localMediaAddr(rtcp bool) *net.UDPAddr {
-	return imsvoice.MediaLocalUDPAddr(t.local, rtcp, t.remote.RTCPMux)
+	return errVoiceMediaTransportClosed
 }

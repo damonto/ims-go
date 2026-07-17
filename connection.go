@@ -194,7 +194,11 @@ func (c *Client) openIMSWithPCSCFFailoverAttempts(ctx context.Context, setup *co
 		if err == nil {
 			return nil
 		}
-		errs = errors.Join(errs, err)
+		attemptErr := err
+		if attempts > 1 {
+			attemptErr = fmt.Errorf("connecting P-CSCF attempt %d: %w", attempt+1, err)
+		}
+		errs = errors.Join(errs, attemptErr)
 		if closeErr := setup.closeIMS(); closeErr != nil {
 			return errors.Join(errs, fmt.Errorf("closing failed IMS attempt: %w", closeErr))
 		}
@@ -214,7 +218,8 @@ func pcscfFailoverRequired(err error, timerF time.Duration) bool {
 	}
 	if registration.PCSCFFailoverRequired(err, timerF) ||
 		imssession.TransactionTimerExpired(err, "B") ||
-		imssession.TransactionTimerExpired(err, "F") {
+		imssession.TransactionTimerExpired(err, "F") ||
+		imssession.TransportFailed(err) {
 		return true
 	}
 	var netErr net.Error
@@ -924,7 +929,12 @@ func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn)
 	if active.tunnel == nil {
 		return nil, errors.New("restoring IMS after registration P-CSCF reselection: tunnel is missing")
 	}
-	tunnelInfo, ok := nextPCSCFInfo(active.tunnel.Info())
+	tunnelInfo := active.tunnel.Info()
+	if access, ok := active.access.(*voWiFiAccess); ok {
+		tunnelInfo = access.pcscfInfo()
+	}
+	current := pcscfIPFromAddr(active.ims.sip.RemoteAddr())
+	tunnelInfo, ok := nextPCSCFInfo(tunnelInfo, current)
 	if !ok {
 		return nil, errors.New("restoring IMS after registration P-CSCF reselection: no alternate P-CSCF")
 	}
@@ -932,6 +942,10 @@ func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn)
 }
 
 func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunnel.Info) (*activeConn, error) {
+	wifiAccess, ok := active.access.(*voWiFiAccess)
+	if !ok || wifiAccess.netstack == nil {
+		return nil, errors.New("restoring IMS after P-CSCF reselection: VoWiFi userspace network stack is missing")
+	}
 	closeErr := c.closeIMS(active)
 	if closeErr != nil {
 		return nil, closeErr
@@ -949,6 +963,7 @@ func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunn
 		scope:     active.scope,
 		access: &voWiFiAccess{
 			session:   active.tunnel,
+			netstack:  wifiAccess.netstack,
 			tunnelCfg: tunnelCfg,
 			info:      tunnelInfo,
 		},
@@ -956,7 +971,7 @@ func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunn
 		imsCfg:    imsCfg,
 		tunnel:    active.tunnel,
 	}
-	if err := c.openIMS(setupCtx, setup); err != nil {
+	if err := c.openIMSWithPCSCFFailover(setupCtx, setup); err != nil {
 		_ = setup.closeIMS()
 		return nil, err
 	}
@@ -968,25 +983,42 @@ func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunn
 	return active, nil
 }
 
-func nextPCSCFInfo(info swutunnel.Info) (swutunnel.Info, bool) {
+func nextPCSCFInfo(info swutunnel.Info, current net.IP) (swutunnel.Info, bool) {
 	ips := pcscfCandidateIPs(info)
 	if len(ips) < 2 {
 		return info, false
 	}
-	current := info.DefaultPCSCFIP()
 	if len(current) == 0 {
 		current = ips[0]
 	}
-	next := 0
+	currentIndex := -1
 	for i, ip := range ips {
 		if ip.Equal(current) {
-			next = (i + 1) % len(ips)
+			currentIndex = i
 			break
 		}
 	}
-	rotated := append(append(ips[:0:0], ips[next:]...), ips[:next]...)
-	info.PCSCFIPs = rotated
+	if currentIndex < 0 {
+		return info, false
+	}
+	remaining := make([]net.IP, 0, len(ips)-1)
+	for offset := 1; offset < len(ips); offset++ {
+		next := (currentIndex + offset) % len(ips)
+		remaining = append(remaining, ips[next])
+	}
+	info.PCSCFIPs = remaining
 	return info, true
+}
+
+func pcscfIPFromAddr(addr net.Addr) net.IP {
+	switch addr := addr.(type) {
+	case *net.TCPAddr:
+		return append(net.IP(nil), addr.IP...)
+	case *net.UDPAddr:
+		return append(net.IP(nil), addr.IP...)
+	default:
+		return nil
+	}
 }
 
 func (c *Client) commitIMSRestore(active *activeConn, setup *connectSetup) error {

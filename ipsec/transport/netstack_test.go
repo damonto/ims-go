@@ -1,0 +1,1327 @@
+package transport
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	imssession "github.com/damonto/ims-go/ims/session"
+	ipsecbase "github.com/damonto/ims-go/ipsec"
+	"github.com/damonto/ims-go/ipsec/esp"
+	"github.com/damonto/ims-go/ipsec/packet"
+	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/gonet"
+)
+
+type interruptedReadConn struct {
+	startedOnce sync.Once
+	stopOnce    sync.Once
+	started     chan struct{}
+	interrupted chan struct{}
+}
+
+func newInterruptedReadConn() *interruptedReadConn {
+	return &interruptedReadConn{
+		started:     make(chan struct{}),
+		interrupted: make(chan struct{}),
+	}
+}
+
+func (c *interruptedReadConn) Read(p []byte) (int, error) {
+	c.startedOnce.Do(func() { close(c.started) })
+	<-c.interrupted
+	return copy(p, "\r\n"), nil
+}
+
+func (*interruptedReadConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (c *interruptedReadConn) Close() error {
+	c.stopOnce.Do(func() { close(c.interrupted) })
+	return nil
+}
+
+func (*interruptedReadConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+}
+
+func (*interruptedReadConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+}
+
+func (c *interruptedReadConn) SetDeadline(deadline time.Time) error {
+	return c.SetReadDeadline(deadline)
+}
+
+func (c *interruptedReadConn) SetReadDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		c.stopOnce.Do(func() { close(c.interrupted) })
+	}
+	return nil
+}
+
+func (*interruptedReadConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestNetstackLoopback(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T, *Netstack, *Netstack)
+	}{
+		{name: "plain TCP", run: testNetstackPlainTCP},
+		{name: "protected TCP", run: testNetstackProtectedTCP},
+		{name: "plain UDP", run: testNetstackPlainUDP},
+		{name: "protected UDP", run: testNetstackProtectedUDP},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientSession, serverSession := newLoopbackPacketSessions()
+			client := newTestNetstack(t, clientSession)
+			server := newTestNetstack(t, serverSession)
+			tt.run(t, client, server)
+		})
+	}
+}
+
+func TestNetstackRejectsPlaintextForProtectedUDPFlow(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "transport mode", mode: SecureModeTransport},
+		{name: "UDP encapsulated tunnel", mode: SecureModeUDPEncTunnel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, serverSession := newLoopbackPacketSessions()
+			server := newTestNetstack(t, serverSession)
+			_, serverConfig := testSecureUDPConfigs()
+			serverConfig.Mode = tt.mode
+			conn, err := server.ListenSecureUDP(context.Background(), serverConfig)
+			if err != nil {
+				t.Fatalf("ListenSecureUDP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			if !server.HandleInnerPacket(packet.InnerPacket{UDP: &packet.UDPSegment{
+				Src:     &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
+				Dst:     &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6000},
+				Payload: []byte("plaintext must not enter the protected socket"),
+			}}) {
+				t.Fatal("HandleInnerPacket() = false, want protected flow consumed")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			_, _, err = conn.ReadPacket(ctx)
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				t.Fatalf("ReadPacket() error = %v, want timeout", err)
+			}
+		})
+	}
+}
+
+func TestNetstackRejectsPlaintextOnProtectedPortFromUnexpectedTuple(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   string
+		packet packet.InnerPacket
+	}{
+		{
+			name: "TCP from unnegotiated source port",
+			mode: SecureModeTransport,
+			packet: packet.InnerPacket{TCP: &packet.TCPSegment{
+				Src: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40001},
+				Dst: &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6000},
+				Seq: 1, Flags: 0x02, Window: 65535, MSS: 1024,
+			}},
+		},
+		{
+			name: "UDP on TCP protected port",
+			mode: SecureModeUDPEncTunnel,
+			packet: packet.InnerPacket{UDP: &packet.UDPSegment{
+				Src:     &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40001},
+				Dst:     &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6000},
+				Payload: []byte("plaintext"),
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, serverSession := newLoopbackPacketSessions()
+			server := newTestNetstack(t, serverSession)
+			_, cfg := testSecureTCPConfigs()
+			cfg.Mode = tt.mode
+			conn, err := server.ListenSecureTCP(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("ListenSecureTCP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			if !server.HandleInnerPacket(tt.packet) {
+				t.Fatal("HandleInnerPacket() = false, want protected port packet consumed")
+			}
+			time.Sleep(20 * time.Millisecond)
+			if got := len(serverSession.snapshotWrites()); got != 0 {
+				t.Fatalf("plaintext response packet count = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestNetstackRejectsPlaintextOutboundFromProtectedPort(t *testing.T) {
+	tests := []struct {
+		name   string
+		packet packet.InnerPacket
+	}{
+		{
+			name: "TCP policy miss",
+			packet: packet.InnerPacket{TCP: &packet.TCPSegment{
+				Src: &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6000},
+				Dst: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40001},
+				Seq: 1, Ack: 1, Flags: 0x10, Window: 65535,
+			}},
+		},
+		{
+			name: "UDP policy miss",
+			packet: packet.InnerPacket{UDP: &packet.UDPSegment{
+				Src:     &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 6000},
+				Dst:     &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40001},
+				Payload: []byte("plaintext"),
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, serverSession := newLoopbackPacketSessions()
+			server := newTestNetstack(t, serverSession)
+			_, cfg := testSecureTCPConfigs()
+			conn, err := server.ListenSecureTCP(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("ListenSecureTCP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			wire, err := tt.packet.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if err := server.writePacket(context.Background(), tt.packet, wire); err == nil {
+				t.Fatal("writePacket() error = nil, want protected port plaintext rejection")
+			}
+			if got := len(serverSession.snapshotWrites()); got != 0 {
+				t.Fatalf("plaintext packet count = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestNetstackIgnoresUDPEncapsulatedESPKeepalive(t *testing.T) {
+	_, serverSession := newLoopbackPacketSessions()
+	server := newTestNetstack(t, serverSession)
+	_, cfg := testSecureUDPConfigs()
+	cfg.Mode = SecureModeUDPEncTunnel
+	conn, err := server.ListenSecureUDP(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ListenSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	keepalive, err := udpEncTunnelKeepalivePacket(serverSession.remoteIP, serverSession.localIP)
+	if err != nil {
+		t.Fatalf("udpEncTunnelKeepalivePacket() error = %v", err)
+	}
+	if !server.HandleInnerPacket(keepalive) {
+		t.Fatal("HandleInnerPacket() = false, want keepalive consumed")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := len(serverSession.snapshotWrites()); got != 0 {
+		t.Fatalf("keepalive response packet count = %d, want 0", got)
+	}
+}
+
+func TestNetstackSharesUDPEncapsulatedESPKeepaliveByPeer(t *testing.T) {
+	_, serverSession := newLoopbackPacketSessions()
+	server := newTestNetstack(t, serverSession)
+	_, tcpCfg := testSecureTCPConfigs()
+	_, udpCfg := testSecureUDPConfigs()
+	tcpCfg.Mode = SecureModeUDPEncTunnel
+	udpCfg.Mode = SecureModeUDPEncTunnel
+	tcpConn, err := server.ListenSecureTCP(context.Background(), tcpCfg)
+	if err != nil {
+		t.Fatalf("ListenSecureTCP() error = %v", err)
+	}
+	udpConn, err := server.ListenSecureUDP(context.Background(), udpCfg)
+	if err != nil {
+		t.Fatalf("ListenSecureUDP() error = %v", err)
+	}
+
+	server.mu.Lock()
+	if got := len(server.udpKeepalives); got != 1 {
+		server.mu.Unlock()
+		t.Fatalf("UDP-enc-tun keepalive count = %d, want 1", got)
+	}
+	var keepalive *netstackUDPEncKeepalive
+	for _, candidate := range server.udpKeepalives {
+		keepalive = candidate
+	}
+	refs := keepalive.refs
+	server.mu.Unlock()
+	if refs != 2 {
+		t.Fatalf("UDP-enc-tun keepalive refs = %d, want 2", refs)
+	}
+
+	_ = tcpConn.Close()
+	server.mu.Lock()
+	refs = keepalive.refs
+	server.mu.Unlock()
+	if refs != 1 {
+		t.Fatalf("UDP-enc-tun keepalive refs after TCP close = %d, want 1", refs)
+	}
+	_ = udpConn.Close()
+	server.mu.Lock()
+	remaining := len(server.udpKeepalives)
+	server.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("UDP-enc-tun keepalive count after close = %d, want 0", remaining)
+	}
+}
+
+func TestNetstackUDPEncapsulatedTransportsSupportSIPKeepalive(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*Netstack) (imssession.Transport, error)
+	}{
+		{
+			name: "TCP",
+			open: func(n *Netstack) (imssession.Transport, error) {
+				_, cfg := testSecureTCPConfigs()
+				cfg.Mode = SecureModeUDPEncTunnel
+				return n.ListenSecureTCP(context.Background(), cfg)
+			},
+		},
+		{
+			name: "UDP",
+			open: func(n *Netstack) (imssession.Transport, error) {
+				_, cfg := testSecureUDPConfigs()
+				cfg.Mode = SecureModeUDPEncTunnel
+				return n.ListenSecureUDP(context.Background(), cfg)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, packetSession := newLoopbackPacketSessions()
+			n := newTestNetstack(t, packetSession)
+			transport, err := tt.open(n)
+			if err != nil {
+				t.Fatalf("opening transport: %v", err)
+			}
+			sess, err := imssession.Open(imssession.Config{}, transport)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			defer sess.Close()
+			if !sess.SupportsKeepAlive() {
+				t.Fatal("SupportsKeepAlive() = false, want RFC 6223 keepalive enabled")
+			}
+		})
+	}
+}
+
+func TestNetstackSharedESPAssociationDispatchesByTransport(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "transport mode", mode: SecureModeTransport},
+		{name: "UDP encapsulated tunnel", mode: SecureModeUDPEncTunnel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, session := newLoopbackPacketSessions()
+			n := newTestNetstack(t, session)
+			associations := NewSecurityAssociations()
+			const inboundSPI = 0x1001
+			base := netstackSecurityConfig{
+				localIP: session.localIP, remoteIP: session.remoteIP,
+				outboundSPI: 0x2001, inboundSPI: inboundSPI,
+				encryption: esp.EncryptionNull, integrity: esp.IntegrityHMACSHA196,
+				integrityKey: []byte("0123456789abcdefghij"), associations: associations,
+				mode: tt.mode,
+			}
+			tcpConfig := base
+			tcpConfig.protocol = packet.ProtocolTCP
+			tcpConfig.localPort, tcpConfig.remotePort = 6000, 40000
+			if _, err := n.registerSecurity(tcpConfig); err != nil {
+				t.Fatalf("registerSecurity(TCP) error = %v", err)
+			}
+			udpConfig := base
+			udpConfig.protocol = packet.ProtocolUDP
+			udpConfig.localPort, udpConfig.remotePort = 6001, 40001
+			if _, err := n.registerSecurity(udpConfig); err != nil {
+				t.Fatalf("registerSecurity(UDP) error = %v", err)
+			}
+
+			want := []byte("shared SPI must dispatch to TCP")
+			segment := packet.TCPSegment{
+				Src: &net.TCPAddr{IP: session.remoteIP, Port: tcpConfig.remotePort},
+				Dst: &net.TCPAddr{IP: session.localIP, Port: tcpConfig.localPort},
+				Seq: 1, Ack: 1, Flags: packet.TCPFlagACK, Window: 65535, Payload: want,
+			}
+			payload, err := segment.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			nextHeader := byte(packet.ProtocolTCP)
+			if tt.mode == SecureModeUDPEncTunnel {
+				payload, err = (packet.InnerPacket{TCP: &segment}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("InnerPacket.MarshalBinary() error = %v", err)
+				}
+				nextHeader, err = secureTunnelNextHeader(session.remoteIP, session.localIP)
+				if err != nil {
+					t.Fatalf("secureTunnelNextHeader() error = %v", err)
+				}
+			}
+			codec := secureESPCodec(inboundSPI, base.encryption, nil, base.integrity, base.integrityKey, [4]byte{})
+			sealed, err := codec.Encode(esp.ESPPacket{SPI: inboundSPI, Sequence: 1, NextHeader: nextHeader, Payload: payload})
+			if err != nil {
+				t.Fatalf("ESP Encode() error = %v", err)
+			}
+			outer, err := secureInnerPacket(session.remoteIP, session.localIP, tt.mode, sealed)
+			if err != nil {
+				t.Fatalf("secureInnerPacket() error = %v", err)
+			}
+
+			got, recognized, valid := n.unprotect(outer)
+			if !recognized || !valid {
+				t.Fatalf("unprotect() = recognized %t, valid %t; want true, true", recognized, valid)
+			}
+			if got.TCP == nil {
+				t.Fatal("unprotect() TCP = nil")
+			}
+			if !bytes.Equal(got.TCP.Payload, want) {
+				t.Fatalf("unprotect() TCP payload = %q, want %q", got.TCP.Payload, want)
+			}
+		})
+	}
+}
+
+func TestNetstackProtectedIPv6UDPLargerThanMinimumMTU(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "transport mode", mode: SecureModeTransport},
+		{name: "UDP encapsulated tunnel", mode: SecureModeUDPEncTunnel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientSession, serverSession := newLoopbackPacketSessions()
+			client := newTestNetstack(t, clientSession)
+			server := newTestNetstack(t, serverSession)
+			clientConfig, serverConfig := testSecureUDPConfigs()
+			clientConfig.Mode = tt.mode
+			serverConfig.Mode = tt.mode
+
+			clientConn, err := client.DialSecureUDP(context.Background(), clientConfig)
+			if err != nil {
+				t.Fatalf("DialSecureUDP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = clientConn.Close() })
+			serverConn, err := server.ListenSecureUDP(context.Background(), serverConfig)
+			if err != nil {
+				t.Fatalf("ListenSecureUDP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = serverConn.Close() })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			want := bytes.Repeat([]byte("R"), 2048)
+			if err := clientConn.WritePacket(ctx, want); err != nil {
+				t.Fatalf("WritePacket() error = %v", err)
+			}
+			got, _, err := serverConn.ReadPacket(ctx)
+			if err != nil {
+				t.Fatalf("ReadPacket() error = %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("packet length = %d, want %d", len(got), len(want))
+			}
+		})
+	}
+}
+
+func TestNetstackSecureServerPortReuse(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T, *Netstack, *Netstack)
+	}{
+		{name: "TCP", run: testNetstackSecureTCPServerPortReuse},
+		{name: "UDP", run: testNetstackSecureUDPServerPortReuse},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientSession, serverSession := newLoopbackPacketSessions()
+			client := newTestNetstack(t, clientSession)
+			server := newTestNetstack(t, serverSession)
+			tt.run(t, client, server)
+		})
+	}
+}
+
+func TestNetstackTCPUsesTunnelSafeMSS(t *testing.T) {
+	clientSession, serverSession := newLoopbackPacketSessions()
+	client := newTestNetstack(t, clientSession)
+	server := newTestNetstack(t, serverSession)
+	network, err := server.ensureAddress(serverSession.localIP)
+	if err != nil {
+		t.Fatalf("ensureAddress() error = %v", err)
+	}
+	listener, err := gonet.ListenTCP(server.stack, netstackFullAddress(serverSession.localIP, 5060), network)
+	if err != nil {
+		t.Fatalf("ListenTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
+	if err != nil {
+		t.Fatalf("DialTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	t.Cleanup(func() { _ = accepted.Close() })
+
+	synFound := false
+	for _, pkt := range clientSession.snapshotWrites() {
+		if pkt.TCP != nil && pkt.TCP.Flags&packet.TCPFlagSYN != 0 {
+			if pkt.TCP.MSS != netstackTCPMSS {
+				t.Fatalf("SYN MSS = %d, want %d", pkt.TCP.MSS, netstackTCPMSS)
+			}
+			synFound = true
+			break
+		}
+	}
+	if !synFound {
+		t.Fatal("outbound SYN not captured")
+	}
+	clientSession.clearWrites()
+	data := bytes.Repeat([]byte("x"), 3*netstackTCPMSS)
+	if err := conn.WritePacket(ctx, data); err != nil {
+		t.Fatalf("WritePacket() error = %v", err)
+	}
+	dataSegments := 0
+	for _, pkt := range clientSession.snapshotWrites() {
+		if pkt.TCP == nil || len(pkt.TCP.Payload) == 0 {
+			continue
+		}
+		dataSegments++
+		if got := len(pkt.TCP.Payload); got > netstackTCPMSS {
+			t.Fatalf("TCP payload length = %d, want <= %d", got, netstackTCPMSS)
+		}
+	}
+	if dataSegments < 2 {
+		t.Fatalf("TCP data segment count = %d, want at least 2", dataSegments)
+	}
+}
+
+func TestNetstackWriteUsesCallerContextWithoutClosingStack(t *testing.T) {
+	clientSession, serverSession := newLoopbackPacketSessions()
+	client := newTestNetstack(t, clientSession)
+	server := newTestNetstack(t, serverSession)
+	clientConn, err := client.DialUDP(context.Background(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
+	if err != nil {
+		t.Fatalf("DialUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	serverConn, err := server.DialUDP(context.Background(), UDPConfig{LocalPort: 5060, RemotePort: 40000})
+	if err != nil {
+		t.Fatalf("DialUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	clientSession.setWriteHook(func(ctx context.Context, _ packet.InnerPacket) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err = clientConn.WritePacket(ctx, []byte("blocked"))
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WritePacket() error = %v, want context deadline exceeded", err)
+	}
+	if client.Err() != nil {
+		t.Fatalf("Netstack.Err() = %v, want nil after flow write failure", client.Err())
+	}
+
+	clientSession.setWriteHook(nil)
+	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := clientConn.WritePacket(ctx, []byte("after failure")); err != nil {
+		t.Fatalf("WritePacket() after failure error = %v", err)
+	}
+	got, _, err := serverConn.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v", err)
+	}
+	if string(got) != "after failure" {
+		t.Fatalf("packet = %q, want %q", got, "after failure")
+	}
+}
+
+func TestNetstackSecureTCPCloseProtectsFIN(t *testing.T) {
+	clientSession, serverSession := newLoopbackPacketSessions()
+	client := newTestNetstack(t, clientSession)
+	server := newTestNetstack(t, serverSession)
+	clientConfig, serverConfig := testSecureTCPConfigs()
+	serverConn, err := server.ListenSecureTCP(context.Background(), serverConfig)
+	if err != nil {
+		t.Fatalf("ListenSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.DialSecureTCP(ctx, clientConfig)
+	if err != nil {
+		t.Fatalf("DialSecureTCP() error = %v", err)
+	}
+	clientSession.clearWrites()
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	codec := secureESPCodec(clientConfig.OutboundSPI, clientConfig.Encryption, clientConfig.EncryptionKey, clientConfig.Integrity, clientConfig.IntegrityKey, clientConfig.Salt)
+	for _, pkt := range clientSession.snapshotWrites() {
+		if pkt.TCP != nil {
+			t.Fatalf("Close() emitted plaintext TCP flags %#x", pkt.TCP.Flags)
+		}
+		if pkt.IP.Protocol != packet.ProtocolESP {
+			continue
+		}
+		decoded, err := codec.Decode(pkt.IP.Payload)
+		if err != nil || decoded.NextHeader != packet.ProtocolTCP {
+			continue
+		}
+		inner, err := packet.DecodePayload(packet.ProtocolTCP, pkt.IP.SrcIP, pkt.IP.DstIP, decoded.Payload)
+		if err == nil && inner.TCP != nil && inner.TCP.Flags&packet.TCPFlagFIN != 0 {
+			return
+		}
+	}
+	t.Fatal("Close() did not emit an ESP-protected TCP FIN")
+}
+
+func TestNetstackTCPReadReportsPacketSessionCause(t *testing.T) {
+	clientSession, serverSession := newLoopbackPacketSessions()
+	client := newTestNetstack(t, clientSession)
+	server := newTestNetstack(t, serverSession)
+	network, err := server.ensureAddress(serverSession.localIP)
+	if err != nil {
+		t.Fatalf("ensureAddress() error = %v", err)
+	}
+	listener, err := gonet.ListenTCP(server.stack, netstackFullAddress(serverSession.localIP, 5060), network)
+	if err != nil {
+		t.Fatalf("ListenTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
+	if err != nil {
+		t.Fatalf("DialTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	t.Cleanup(func() { _ = accepted.Close() })
+
+	want := errors.New("packet session stopped")
+	clientSession.fail(want)
+	_, _, err = conn.ReadPacket(context.Background())
+	if !errors.Is(err, want) {
+		t.Fatalf("ReadPacket() error = %v, want %v", err, want)
+	}
+}
+
+func TestNetstackTCPReadCancellationReleasesConnection(t *testing.T) {
+	tests := []struct {
+		name        string
+		readContext func() (context.Context, context.CancelFunc)
+		wantErr     error
+	}{
+		{
+			name: "explicit cancellation without deadline",
+			readContext: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			name: "parent context cancellation without deadline",
+			readContext: func() (context.Context, context.CancelFunc) {
+				parent, cancelParent := context.WithCancel(context.Background())
+				ctx, cancelChild := context.WithCancel(parent)
+				return ctx, func() {
+					cancelParent()
+					cancelChild()
+				}
+			},
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientSession, serverSession := newLoopbackPacketSessions()
+			client := newTestNetstack(t, clientSession)
+			server := newTestNetstack(t, serverSession)
+			network, err := server.ensureAddress(serverSession.localIP)
+			if err != nil {
+				t.Fatalf("ensureAddress() error = %v", err)
+			}
+			listener, err := gonet.ListenTCP(server.stack, netstackFullAddress(serverSession.localIP, 5060), network)
+			if err != nil {
+				t.Fatalf("ListenTCP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			conn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
+			if err != nil {
+				t.Fatalf("DialTCP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			accepted, err := listener.Accept()
+			if err != nil {
+				t.Fatalf("Accept() error = %v", err)
+			}
+			t.Cleanup(func() { _ = accepted.Close() })
+
+			readCtx, stopRead := tt.readContext()
+			readErr := make(chan error, 1)
+			go func() {
+				_, _, err := conn.ReadPacket(readCtx)
+				readErr <- err
+			}()
+			for conn.readMu.TryLock() {
+				conn.readMu.Unlock()
+				select {
+				case err := <-readErr:
+					stopRead()
+					t.Fatalf("ReadPacket() returned before cancellation: %v", err)
+				case <-time.After(time.Millisecond):
+				}
+			}
+			stopRead()
+			select {
+			case err := <-readErr:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ReadPacket() error = %v, want %v", err, tt.wantErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("ReadPacket() did not stop after context cancellation")
+			}
+
+			if _, err := accepted.Write([]byte("\r\n")); err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+			nextCtx, stopNext := context.WithTimeout(context.Background(), time.Second)
+			defer stopNext()
+			packet, _, err := conn.ReadPacket(nextCtx)
+			if err != nil {
+				t.Fatalf("ReadPacket() after cancellation error = %v", err)
+			}
+			if string(packet) != "\r\n" {
+				t.Fatalf("ReadPacket() after cancellation = %q, want CRLF keepalive", packet)
+			}
+		})
+	}
+}
+
+func TestNetstackTCPReadCancellationPreservesReceivedData(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "CRLF received while cancellation interrupts read", data: "\r\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := newInterruptedReadConn()
+			conn := &NetstackTCPConn{
+				local:  raw.LocalAddr().(*net.TCPAddr),
+				remote: raw.RemoteAddr().(*net.TCPAddr),
+				conn:   raw,
+				done:   make(chan struct{}),
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			readErr := make(chan error, 1)
+			go func() {
+				_, _, err := conn.ReadPacket(ctx)
+				readErr <- err
+			}()
+			<-raw.started
+			cancel()
+			if err := <-readErr; !errors.Is(err, context.Canceled) {
+				t.Fatalf("ReadPacket() error = %v, want context.Canceled", err)
+			}
+
+			packet, _, err := conn.ReadPacket(context.Background())
+			if err != nil {
+				t.Fatalf("ReadPacket() after cancellation error = %v", err)
+			}
+			if string(packet) != tt.data {
+				t.Fatalf("ReadPacket() after cancellation = %q, want %q", packet, tt.data)
+			}
+		})
+	}
+}
+
+func TestNetstackUDPReadReportsCloseCause(t *testing.T) {
+	packetSessionErr := errors.New("packet session stopped")
+	tests := []struct {
+		name string
+		stop func(*loopbackPacketSession, *Netstack, *NetstackUDPConn)
+		want error
+	}{
+		{
+			name: "connection closed",
+			stop: func(_ *loopbackPacketSession, _ *Netstack, conn *NetstackUDPConn) {
+				_ = conn.Close()
+			},
+			want: net.ErrClosed,
+		},
+		{
+			name: "netstack closed",
+			stop: func(_ *loopbackPacketSession, netstack *Netstack, _ *NetstackUDPConn) {
+				_ = netstack.Close()
+			},
+			want: errNetstackClosed,
+		},
+		{
+			name: "packet session failed",
+			stop: func(session *loopbackPacketSession, _ *Netstack, _ *NetstackUDPConn) {
+				session.fail(packetSessionErr)
+			},
+			want: packetSessionErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientSession, _ := newLoopbackPacketSessions()
+			client := newTestNetstack(t, clientSession)
+			conn, err := client.DialUDP(context.Background(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
+			if err != nil {
+				t.Fatalf("DialUDP() error = %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			tt.stop(clientSession, client, conn)
+			_, _, err = conn.ReadPacket(context.Background())
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("ReadPacket() error = %v, want %v", err, tt.want)
+			}
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("ReadPacket() error = %v, UDP must not report EOF", err)
+			}
+		})
+	}
+}
+
+func testNetstackPlainTCP(t *testing.T, client, server *Netstack) {
+	t.Helper()
+	network, err := server.ensureAddress(net.ParseIP("2001:db8::2"))
+	if err != nil {
+		t.Fatalf("ensureAddress() error = %v", err)
+	}
+	listener, err := gonet.ListenTCP(server.stack, netstackFullAddress(net.ParseIP("2001:db8::2"), 5060), network)
+	if err != nil {
+		t.Fatalf("gonet.ListenTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
+	if err != nil {
+		t.Fatalf("DialTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	serverConn, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	wantRequest := []byte("OPTIONS sip:ims.example SIP/2.0\r\nContent-Length: 0\r\n\r\n")
+	if err := clientConn.WritePacket(ctx, wantRequest); err != nil {
+		t.Fatalf("WritePacket() error = %v", err)
+	}
+	gotRequest := make([]byte, len(wantRequest))
+	if _, err := io.ReadFull(serverConn, gotRequest); err != nil {
+		t.Fatalf("ReadFull() error = %v", err)
+	}
+	if string(gotRequest) != string(wantRequest) {
+		t.Fatalf("request = %q, want %q", gotRequest, wantRequest)
+	}
+
+	wantResponse := []byte("SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n")
+	if _, err := serverConn.Write(wantResponse); err != nil {
+		t.Fatalf("server Write() error = %v", err)
+	}
+	gotResponse, _, err := clientConn.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v", err)
+	}
+	if string(gotResponse) != string(wantResponse) {
+		t.Fatalf("response = %q, want %q", gotResponse, wantResponse)
+	}
+}
+
+func testNetstackProtectedTCP(t *testing.T, client, server *Netstack) {
+	t.Helper()
+	clientConfig, serverConfig := testSecureTCPConfigs()
+	serverConn, err := server.ListenSecureTCP(context.Background(), serverConfig)
+	if err != nil {
+		t.Fatalf("ListenSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn, err := client.DialSecureTCP(ctx, clientConfig)
+	if err != nil {
+		t.Fatalf("DialSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	want := []byte("MESSAGE tel:+12245550100 SIP/2.0\r\nContent-Length: 0\r\n\r\n")
+	if err := clientConn.WritePacket(ctx, want); err != nil {
+		t.Fatalf("WritePacket() error = %v", err)
+	}
+	got, _, err := serverConn.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("packet = %q, want %q", got, want)
+	}
+}
+
+func testNetstackPlainUDP(t *testing.T, client, server *Netstack) {
+	t.Helper()
+	clientConn, err := client.DialUDP(context.Background(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
+	if err != nil {
+		t.Fatalf("client DialUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	serverConn, err := server.DialUDP(context.Background(), UDPConfig{LocalPort: 5060, RemotePort: 40000})
+	if err != nil {
+		t.Fatalf("server DialUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	want := []byte("plain UDP")
+	if err := clientConn.WritePacket(ctx, want); err != nil {
+		t.Fatalf("WritePacket() error = %v", err)
+	}
+	got, _, err := serverConn.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("packet = %q, want %q", got, want)
+	}
+}
+
+func testNetstackProtectedUDP(t *testing.T, client, server *Netstack) {
+	t.Helper()
+	clientConfig, serverConfig := testSecureUDPConfigs()
+	clientConn, err := client.DialSecureUDP(context.Background(), clientConfig)
+	if err != nil {
+		t.Fatalf("client DialSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+	serverConn, err := server.ListenSecureUDP(context.Background(), serverConfig)
+	if err != nil {
+		t.Fatalf("server ListenSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	want := []byte("protected UDP")
+	if err := clientConn.WritePacket(ctx, want); err != nil {
+		t.Fatalf("WritePacket() error = %v", err)
+	}
+	got, _, err := serverConn.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("packet = %q, want %q", got, want)
+	}
+}
+
+func testNetstackSecureTCPServerPortReuse(t *testing.T, client, server *Netstack) {
+	t.Helper()
+	clientConfig1, serverConfig1 := testSecureTCPConfigs()
+	clientConfig2, serverConfig2 := testSecureTCPConfigs()
+	clientConfig2.LocalPort = 40001
+	clientConfig2.OutboundSPI = 0x1003
+	clientConfig2.InboundSPI = 0x2003
+	clientConfig2.Associations = NewSecurityAssociations()
+	serverConfig2.RemotePort = clientConfig2.LocalPort
+	serverConfig2.OutboundSPI = clientConfig2.InboundSPI
+	serverConfig2.InboundSPI = clientConfig2.OutboundSPI
+	serverConfig2.Associations = NewSecurityAssociations()
+
+	serverConn1, err := server.ListenSecureTCP(context.Background(), serverConfig1)
+	if err != nil {
+		t.Fatalf("first ListenSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn1.Close() })
+	serverConn2, err := server.ListenSecureTCP(context.Background(), serverConfig2)
+	if err != nil {
+		t.Fatalf("second ListenSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn2.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientConn1, err := client.DialSecureTCP(ctx, clientConfig1)
+	if err != nil {
+		t.Fatalf("first DialSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn1.Close() })
+	clientConn2, err := client.DialSecureTCP(ctx, clientConfig2)
+	if err != nil {
+		t.Fatalf("second DialSecureTCP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn2.Close() })
+
+	tests := []struct {
+		name   string
+		client *NetstackTCPConn
+		server *NetstackTCPConn
+		want   string
+	}{
+		{name: "old SA", client: clientConn1, server: serverConn1, want: "OPTIONS sip:old.example SIP/2.0\r\nContent-Length: 0\r\n\r\n"},
+		{name: "new SA", client: clientConn2, server: serverConn2, want: "OPTIONS sip:new.example SIP/2.0\r\nContent-Length: 0\r\n\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeCtx, writeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer writeCancel()
+			if err := tt.client.WritePacket(writeCtx, []byte(tt.want)); err != nil {
+				t.Fatalf("WritePacket() error = %v", err)
+			}
+			got, _, err := tt.server.ReadPacket(writeCtx)
+			if err != nil {
+				t.Fatalf("ReadPacket() error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("packet = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	_ = clientConn1.Close()
+	_ = serverConn1.Close()
+	want := "OPTIONS sip:remaining.example SIP/2.0\r\nContent-Length: 0\r\n\r\n"
+	if err := clientConn2.WritePacket(ctx, []byte(want)); err != nil {
+		t.Fatalf("new SA WritePacket() after old SA close error = %v", err)
+	}
+	got, _, err := serverConn2.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("new SA ReadPacket() after old SA close error = %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("new SA packet after old SA close = %q, want %q", got, want)
+	}
+}
+
+func testNetstackSecureUDPServerPortReuse(t *testing.T, client, server *Netstack) {
+	t.Helper()
+	clientConfig1, serverConfig1 := testSecureUDPConfigs()
+	clientConfig2, serverConfig2 := testSecureUDPConfigs()
+	clientConfig2.LocalPort = 40001
+	clientConfig2.OutboundSPI = 0x1004
+	clientConfig2.InboundSPI = 0x2004
+	clientConfig2.Associations = NewSecurityAssociations()
+	serverConfig2.RemotePort = clientConfig2.LocalPort
+	serverConfig2.OutboundSPI = clientConfig2.InboundSPI
+	serverConfig2.InboundSPI = clientConfig2.OutboundSPI
+	serverConfig2.Associations = NewSecurityAssociations()
+
+	serverConn1, err := server.ListenSecureUDP(context.Background(), serverConfig1)
+	if err != nil {
+		t.Fatalf("first ListenSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn1.Close() })
+	serverConn2, err := server.ListenSecureUDP(context.Background(), serverConfig2)
+	if err != nil {
+		t.Fatalf("second ListenSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = serverConn2.Close() })
+	clientConn1, err := client.DialSecureUDP(context.Background(), clientConfig1)
+	if err != nil {
+		t.Fatalf("first DialSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn1.Close() })
+	clientConn2, err := client.DialSecureUDP(context.Background(), clientConfig2)
+	if err != nil {
+		t.Fatalf("second DialSecureUDP() error = %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn2.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tests := []struct {
+		name   string
+		client *NetstackUDPConn
+		server *NetstackUDPConn
+		want   string
+	}{
+		{name: "old SA", client: clientConn1, server: serverConn1, want: "old security association"},
+		{name: "new SA", client: clientConn2, server: serverConn2, want: "new security association"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.client.WritePacket(ctx, []byte(tt.want)); err != nil {
+				t.Fatalf("WritePacket() error = %v", err)
+			}
+			got, _, err := tt.server.ReadPacket(ctx)
+			if err != nil {
+				t.Fatalf("ReadPacket() error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("packet = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	_ = clientConn1.Close()
+	_ = serverConn1.Close()
+	want := "remaining security association"
+	if err := clientConn2.WritePacket(ctx, []byte(want)); err != nil {
+		t.Fatalf("new SA WritePacket() after old SA close error = %v", err)
+	}
+	got, _, err := serverConn2.ReadPacket(ctx)
+	if err != nil {
+		t.Fatalf("new SA ReadPacket() after old SA close error = %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("new SA packet after old SA close = %q, want %q", got, want)
+	}
+}
+
+func testSecureTCPConfigs() (SecureTCPConfig, SecureTCPConfig) {
+	client := SecureTCPConfig{
+		TCPConfig:   TCPConfig{LocalPort: 40000, RemotePort: 6000},
+		OutboundSPI: 0x1001, InboundSPI: 0x2001,
+		Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196,
+		IntegrityKey: []byte("0123456789abcdefghij"), Associations: NewSecurityAssociations(),
+	}
+	server := SecureTCPConfig{
+		TCPConfig:   TCPConfig{LocalPort: 6000, RemotePort: 40000},
+		OutboundSPI: client.InboundSPI, InboundSPI: client.OutboundSPI,
+		Encryption: client.Encryption, Integrity: client.Integrity,
+		IntegrityKey: append([]byte(nil), client.IntegrityKey...), Associations: NewSecurityAssociations(),
+	}
+	return client, server
+}
+
+func testSecureUDPConfigs() (SecureUDPConfig, SecureUDPConfig) {
+	client := SecureUDPConfig{
+		UDPConfig:   UDPConfig{LocalPort: 40000, RemotePort: 6000},
+		OutboundSPI: 0x1002, InboundSPI: 0x2002,
+		Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196,
+		IntegrityKey: []byte("0123456789abcdefghij"), Associations: NewSecurityAssociations(),
+	}
+	server := SecureUDPConfig{
+		UDPConfig:   UDPConfig{LocalPort: 6000, RemotePort: 40000},
+		OutboundSPI: client.InboundSPI, InboundSPI: client.OutboundSPI,
+		Encryption: client.Encryption, Integrity: client.Integrity,
+		IntegrityKey: append([]byte(nil), client.IntegrityKey...), Associations: NewSecurityAssociations(),
+	}
+	return client, server
+}
+
+func newTestNetstack(t *testing.T, session PacketSession) *Netstack {
+	t.Helper()
+	n, err := NewNetstack(session)
+	if err != nil {
+		t.Fatalf("NewNetstack() error = %v", err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+	return n
+}
+
+func newLoopbackPacketSessions() (*loopbackPacketSession, *loopbackPacketSession) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &loopbackPacketSession{
+		localIP: net.ParseIP("2001:db8::1"), remoteIP: net.ParseIP("2001:db8::2"),
+		logger: logger, handlers: make(map[*loopbackAttachment]ipsecbase.InnerHandler),
+	}
+	server := &loopbackPacketSession{
+		localIP: net.ParseIP("2001:db8::2"), remoteIP: net.ParseIP("2001:db8::1"),
+		logger: logger, handlers: make(map[*loopbackAttachment]ipsecbase.InnerHandler),
+	}
+	client.peer = server
+	server.peer = client
+	return client, server
+}
+
+type loopbackPacketSession struct {
+	mu        sync.RWMutex
+	localIP   net.IP
+	remoteIP  net.IP
+	peer      *loopbackPacketSession
+	logger    *slog.Logger
+	handlers  map[*loopbackAttachment]ipsecbase.InnerHandler
+	writes    []packet.InnerPacket
+	writeHook func(context.Context, packet.InnerPacket) error
+	closed    bool
+}
+
+func (s *loopbackPacketSession) InnerIPsForRemote(remoteIP net.IP) (net.IP, net.IP, error) {
+	if len(remoteIP) != 0 && !remoteIP.Equal(s.remoteIP) {
+		return nil, nil, errors.New("remote IP does not match loopback peer")
+	}
+	return append(net.IP(nil), s.localIP...), append(net.IP(nil), s.remoteIP...), nil
+}
+
+func (s *loopbackPacketSession) Attach(handler ipsecbase.InnerHandler) (ipsecbase.Attachment, error) {
+	if handler == nil {
+		return nil, errors.New("attaching loopback handler: handler is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("attaching loopback handler: session is closed")
+	}
+	attachment := &loopbackAttachment{session: s}
+	s.handlers[attachment] = handler
+	return attachment, nil
+}
+
+func (s *loopbackPacketSession) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	wire, err := pkt.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	var cloned packet.InnerPacket
+	if err := cloned.UnmarshalBinary(wire); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.writes = append(s.writes, cloned)
+	hook := s.writeHook
+	s.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, cloned); err != nil {
+			return err
+		}
+	}
+	return s.peer.dispatch(cloned)
+}
+
+func (s *loopbackPacketSession) snapshotWrites() []packet.InnerPacket {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]packet.InnerPacket(nil), s.writes...)
+}
+
+func (s *loopbackPacketSession) clearWrites() {
+	s.mu.Lock()
+	s.writes = nil
+	s.mu.Unlock()
+}
+
+func (s *loopbackPacketSession) setWriteHook(hook func(context.Context, packet.InnerPacket) error) {
+	s.mu.Lock()
+	s.writeHook = hook
+	s.mu.Unlock()
+}
+
+func (s *loopbackPacketSession) dispatch(pkt packet.InnerPacket) error {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return net.ErrClosed
+	}
+	handlers := make([]ipsecbase.InnerHandler, 0, len(s.handlers))
+	for _, handler := range s.handlers {
+		handlers = append(handlers, handler)
+	}
+	s.mu.RUnlock()
+	for _, handler := range handlers {
+		if handler.HandleInnerPacket(pkt) {
+			return nil
+		}
+	}
+	return errors.New("loopback packet was not handled")
+}
+
+func (s *loopbackPacketSession) fail(err error) {
+	s.mu.RLock()
+	handlers := make([]ipsecbase.InnerHandler, 0, len(s.handlers))
+	for _, handler := range s.handlers {
+		handlers = append(handlers, handler)
+	}
+	s.mu.RUnlock()
+	for _, handler := range handlers {
+		handler.HandleError(err)
+	}
+}
+
+func (s *loopbackPacketSession) Logger() *slog.Logger { return s.logger }
+
+func (s *loopbackPacketSession) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.handlers = nil
+	s.mu.Unlock()
+	return nil
+}
+
+type loopbackAttachment struct {
+	session *loopbackPacketSession
+	once    sync.Once
+}
+
+func (a *loopbackAttachment) Close() error {
+	a.once.Do(func() {
+		a.session.mu.Lock()
+		delete(a.session.handlers, a)
+		a.session.mu.Unlock()
+	})
+	return nil
+}

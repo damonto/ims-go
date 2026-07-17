@@ -256,7 +256,7 @@ func (s *Endpoint) deliverIncoming(ctx context.Context, msg sip.Message, rp rpMe
 		s.deliverConcat(incoming, *tpdu.Concat)
 		return nil
 	}
-	s.deliverSingle(msg, incoming)
+	s.deliverSingle(incoming)
 	return nil
 }
 
@@ -329,7 +329,7 @@ func envelopeEndpoint(value string) endpoint {
 	}
 }
 
-func (s *Endpoint) deliverSingle(msg sip.Message, incoming Incoming) {
+func (s *Endpoint) deliverSingle(incoming Incoming) {
 	if s.cfg.OnIncoming == nil {
 		return
 	}

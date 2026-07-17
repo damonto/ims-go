@@ -188,7 +188,7 @@ func (t *volteMediaTransport) readUDP(ctx context.Context, rtcp bool) ([]byte, n
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
 	case <-t.done:
-		return nil, nil, t.closedErr("reading voice media packet: transport is closed")
+		return nil, nil, t.closedErr()
 	case packet := <-ch:
 		return packet.data, packet.addr, packet.err
 	}
@@ -268,13 +268,13 @@ func (t *volteMediaTransport) notifyPacket(rtcp bool, payload []byte) {
 	}
 }
 
-func (t *volteMediaTransport) closedErr(fallback string) error {
+func (t *volteMediaTransport) closedErr() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.terminalErr != nil {
 		return t.terminalErr
 	}
-	return errors.New(fallback)
+	return errVoiceMediaTransportClosed
 }
 
 func volteMediaContextDeadline(ctx context.Context) (time.Time, bool) {

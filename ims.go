@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"time"
 
 	"github.com/damonto/ims-go/ims/registration"
 	imssession "github.com/damonto/ims-go/ims/session"
@@ -20,9 +19,8 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 		return errors.New("opening IMS: access session is missing")
 	}
 	accessIMS, err := setup.access.OpenIMS(ctx, accessIMSConfig{
-		Transport:          setup.imsCfg.Transport,
-		SIPServerPort:      setup.imsCfg.SIPServerPort,
-		TCPDataACKTimeouts: setup.imsCfg.TCPDataACKTimeouts,
+		Transport:     setup.imsCfg.Transport,
+		SIPServerPort: setup.imsCfg.SIPServerPort,
 	})
 	if err != nil {
 		return err
@@ -55,7 +53,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 		return fmt.Errorf("establishing IMS registration: %w", err)
 	}
 	if err := reg.Subscribe(ctx); err != nil {
-		return fmt.Errorf("subscribing IMS registration: %w", err)
+		return err
 	}
 
 	sms, err := imssms.New(imssms.Config{
@@ -106,20 +104,6 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 
 func pcscfCandidateIPs(info swutunnel.Info) []net.IP {
 	return uniqueIPs(info.PCSCFAddresses())
-}
-
-func firstPCSCFIP(ips []net.IP) net.IP {
-	if len(ips) == 0 {
-		return nil
-	}
-	return append(net.IP(nil), ips[0]...)
-}
-
-func configuredTCPDataACKTimeouts(primary, fallback []time.Duration) []time.Duration {
-	if len(primary) > 0 {
-		return append([]time.Duration(nil), primary...)
-	}
-	return append([]time.Duration(nil), fallback...)
 }
 
 func uniqueIPs(ips []net.IP) []net.IP {

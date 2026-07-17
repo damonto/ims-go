@@ -71,6 +71,7 @@ type TCPSegment struct {
 	Flags   byte
 	Window  uint16
 	MSS     uint16
+	Options []byte
 	Payload []byte
 }
 
@@ -244,7 +245,10 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := tcpOptionsForFlags(s.Flags, s.MSS)
+	options := append([]byte(nil), s.Options...)
+	if len(options) == 0 {
+		options = tcpOptionsForFlags(s.Flags, s.MSS)
+	}
 	options = padTCPOptions(options)
 	headerLen := 20 + len(options)
 	if len(s.Payload) > maxTCPSegmentBytes-headerLen {
@@ -478,6 +482,7 @@ func decodeTCPSegment(srcIP, dstIP net.IP, payload []byte) (TCPSegment, error) {
 		Flags:   payload[13],
 		Window:  binary.BigEndian.Uint16(payload[14:16]),
 		MSS:     tcpMSSOption(options),
+		Options: append([]byte(nil), options...),
 		Payload: append([]byte(nil), payload[offset:]...),
 	}, nil
 }

@@ -88,9 +88,45 @@ func (e *transactionSendError) Unwrap() error {
 	return e.err
 }
 
-func TransactionTransportFailed(err error) bool {
-	var transportErr *transactionSendError
-	return errors.As(err, &transportErr) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+func (e *transactionSendError) TransportFailed() bool {
+	return true
+}
+
+type transportFailureError struct {
+	err error
+}
+
+func (e *transportFailureError) Error() string {
+	return e.err.Error()
+}
+
+func (e *transportFailureError) Unwrap() error {
+	return e.err
+}
+
+func (e *transportFailureError) TransportFailed() bool {
+	return true
+}
+
+type transportFailure interface {
+	TransportFailed() bool
+}
+
+func markTransportFailed(err error) error {
+	if TransportFailed(err) {
+		return err
+	}
+	return &transportFailureError{err: err}
+}
+
+// TransportFailed reports a fatal SIP transport failure. Context cancellation
+// belongs to the caller's lifecycle and does not make a transport unavailable.
+func TransportFailed(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var failure transportFailure
+	return errors.As(err, &failure) && failure.TransportFailed()
 }
 
 var defaultTransactionTimers = TransactionTimers{
@@ -195,12 +231,35 @@ func (tx *clientTransaction) start(ctx context.Context) error {
 	if err := tx.session.registerTransaction(tx); err != nil {
 		return err
 	}
-	if err := tx.send(ctx, tx.request); err != nil {
+	timer, timeout := tx.initialTimer()
+	timeoutErr := &TransactionTimeoutError{Method: tx.method, Timer: timer}
+	deadline := time.Now().Add(timeout)
+	sendCtx, cancel := context.WithDeadlineCause(ctx, deadline, timeoutErr)
+	err := tx.send(sendCtx, tx.request)
+	cause := context.Cause(sendCtx)
+	cancel()
+	if errors.Is(cause, timeoutErr) {
 		tx.abort(nil)
-		return &transactionSendError{err: err}
+		tx.session.reportTransportFailure(tx.transport, timeoutErr)
+		return timeoutErr
 	}
-	go tx.run()
+	if err != nil {
+		tx.abort(nil)
+		transportErr := &transactionSendError{err: err}
+		if TransportFailed(transportErr) {
+			tx.session.reportTransportFailure(tx.transport, transportErr)
+		}
+		return transportErr
+	}
+	go tx.run(deadline)
 	return nil
+}
+
+func (tx *clientTransaction) initialTimer() (string, time.Duration) {
+	if tx.method == "INVITE" {
+		return "B", tx.timers.TB
+	}
+	return "F", tx.timers.TF
 }
 
 func (tx *clientTransaction) await(ctx context.Context) (sip.Message, error) {
@@ -255,16 +314,16 @@ func (tx *clientTransaction) deliverError(err error) {
 	}
 }
 
-func (tx *clientTransaction) run() {
+func (tx *clientTransaction) run(deadline time.Time) {
 	if tx.method == "INVITE" {
-		tx.runInvite()
+		tx.runInvite(deadline)
 		return
 	}
-	tx.runNonInvite()
+	tx.runNonInvite(deadline)
 }
 
-func (tx *clientTransaction) runNonInvite() {
-	timerF := time.NewTimer(tx.timers.TF)
+func (tx *clientTransaction) runNonInvite(deadline time.Time) {
+	timerF := time.NewTimer(max(time.Until(deadline), 0))
 	defer timerF.Stop()
 
 	retransmitDelay := tx.timers.T1
@@ -282,10 +341,14 @@ func (tx *clientTransaction) runNonInvite() {
 		case <-tx.cancelCh:
 			return
 		case <-timerF.C:
-			tx.abort(&TransactionTimeoutError{Method: tx.method, Timer: "F"})
+			err := &TransactionTimeoutError{Method: tx.method, Timer: "F"}
+			tx.abort(err)
+			if state == clientTransactionTrying {
+				tx.session.reportTransportFailure(tx.transport, err)
+			}
 			return
 		case <-timerEC:
-			if !tx.resend() {
+			if !tx.resend(state == clientTransactionTrying) {
 				return
 			}
 			if state == clientTransactionProceeding {
@@ -320,8 +383,8 @@ func (tx *clientTransaction) runNonInvite() {
 	}
 }
 
-func (tx *clientTransaction) runInvite() {
-	timerB := time.NewTimer(tx.timers.TB)
+func (tx *clientTransaction) runInvite(deadline time.Time) {
+	timerB := time.NewTimer(max(time.Until(deadline), 0))
 	defer timerB.Stop()
 
 	retransmitDelay := tx.timers.T1
@@ -343,10 +406,12 @@ func (tx *clientTransaction) runInvite() {
 			if state != clientTransactionCalling {
 				continue
 			}
-			tx.abort(&TransactionTimeoutError{Method: tx.method, Timer: "B"})
+			err := &TransactionTimeoutError{Method: tx.method, Timer: "B"}
+			tx.abort(err)
+			tx.session.reportTransportFailure(tx.transport, err)
 			return
 		case <-timerAC:
-			if !tx.resend() {
+			if !tx.resend(true) {
 				return
 			}
 			retransmitDelay *= 2
@@ -433,14 +498,51 @@ func (tx *clientTransaction) notifyProvisional(resp sip.Message) error {
 	return nil
 }
 
-func (tx *clientTransaction) resend() bool {
+func (tx *clientTransaction) resend(reportFailure bool) bool {
 	ctx, cancel := tx.session.timeoutContext(max(tx.timers.T1, 250*time.Millisecond))
 	defer cancel()
 	if err := tx.send(ctx, tx.request); err != nil {
-		tx.abort(&transactionSendError{err: fmt.Errorf("sending %s retransmission: %w", tx.method, err)})
+		transportErr := &transactionSendError{err: fmt.Errorf("sending %s retransmission: %w", tx.method, err)}
+		tx.abort(transportErr)
+		if reportFailure && TransportFailed(transportErr) {
+			tx.session.reportTransportFailure(tx.transport, transportErr)
+		}
 		return false
 	}
 	return true
+}
+
+func (s *Session) reportTransportFailure(transport Transport, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running {
+		return
+	}
+	for _, pending := range s.transportQueue {
+		if pending.transport == transport {
+			return
+		}
+	}
+	s.transportQueue = append(s.transportQueue, inboundMessage{
+		transport: transport,
+		err:       markTransportFailed(err),
+	})
+	select {
+	case s.transportErrs <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Session) nextTransportFailure() (inboundMessage, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.transportQueue) == 0 {
+		return inboundMessage{}, false
+	}
+	failure := s.transportQueue[0]
+	s.transportQueue[0] = inboundMessage{}
+	s.transportQueue = s.transportQueue[1:]
+	return failure, true
 }
 
 func (tx *clientTransaction) send(ctx context.Context, req sip.Message) error {

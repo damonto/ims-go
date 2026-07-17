@@ -84,12 +84,13 @@ func TestInnerPacketRoundTrip(t *testing.T) {
 					Ack:     20,
 					Flags:   TCPFlagACK | TCPFlagPSH,
 					Window:  65535,
+					Options: []byte{1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2},
 					Payload: []byte("REGISTER sip"),
 				},
 			},
 			check: func(t *testing.T, got InnerPacket) {
 				t.Helper()
-				if got.TCP == nil || got.TCP.Seq != 10 || got.TCP.Ack != 20 || string(got.TCP.Payload) != "REGISTER sip" {
+				if got.TCP == nil || got.TCP.Seq != 10 || got.TCP.Ack != 20 || !slices.Equal(got.TCP.Options, []byte{1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2}) || string(got.TCP.Payload) != "REGISTER sip" {
 					t.Fatalf("TCP = %+v", got.TCP)
 				}
 			},

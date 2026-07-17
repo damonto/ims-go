@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"time"
+	"sync"
 
 	imssession "github.com/damonto/ims-go/ims/session"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
@@ -14,33 +14,12 @@ import (
 )
 
 type voWiFiAccess struct {
+	mu        sync.Mutex
 	session   *swutunnel.Session
+	netstack  *ipsectransport.Netstack
 	tunnelCfg swutunnel.Config
 	info      swutunnel.Info
-}
-
-type tunnelDatagramTransport struct {
-	session *swutunnel.Session
-}
-
-func (t tunnelDatagramTransport) LocalAddr() net.Addr {
-	return t.session.LocalAddr()
-}
-
-func (t tunnelDatagramTransport) RemoteAddr() net.Addr {
-	return t.session.RemoteAddr()
-}
-
-func (t tunnelDatagramTransport) WritePacket(ctx context.Context, data []byte) error {
-	return t.session.WritePacket(ctx, data)
-}
-
-func (t tunnelDatagramTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	return t.session.ReadPacket(ctx)
-}
-
-func (t tunnelDatagramTransport) Close() error {
-	return nil
+	current   net.IP
 }
 
 func (c *Client) openVoWiFiAccess(ctx context.Context, setup *connectSetup) (*voWiFiAccess, error) {
@@ -48,20 +27,32 @@ func (c *Client) openVoWiFiAccess(ctx context.Context, setup *connectSetup) (*vo
 	if err != nil {
 		return nil, err
 	}
+	netstack, err := ipsectransport.NewNetstack(setup.tunnel)
+	if err != nil {
+		_ = setup.tunnel.Close()
+		return nil, fmt.Errorf("opening VoWiFi userspace network stack: %w", err)
+	}
 	return &voWiFiAccess{
 		session:   setup.tunnel,
+		netstack:  netstack,
 		tunnelCfg: setup.tunnelCfg,
 		info:      tunnelInfo,
 	}, nil
 }
 
 func (a *voWiFiAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAccess, error) {
-	pcscfIPs := pcscfCandidateIPs(a.info)
+	a.mu.Lock()
+	info := a.info
+	a.mu.Unlock()
+	pcscfIPs := pcscfCandidateIPs(info)
 	associations := ipsectransport.NewSecurityAssociations()
 	transport, selectedPCSCF, err := a.openSIPTransport(ctx, cfg, pcscfIPs)
 	if err != nil {
 		return imsAccess{}, err
 	}
+	a.mu.Lock()
+	a.current = append(net.IP(nil), selectedPCSCF...)
+	a.mu.Unlock()
 	return imsAccess{
 		SIP:       transport,
 		Security:  a.openSecurity(selectedPCSCF, cfg, associations),
@@ -69,11 +60,42 @@ func (a *voWiFiAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcc
 	}, nil
 }
 
-func (a *voWiFiAccess) openSIPTransport(ctx context.Context, cfg accessIMSConfig, pcscfIPs []net.IP) (imssession.Transport, net.IP, error) {
-	if cfg.Transport != "tcp" {
-		return tunnelDatagramTransport{session: a.session}, firstPCSCFIP(pcscfIPs), nil
+func (a *voWiFiAccess) PCSCFCandidateCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(pcscfCandidateIPs(a.info))
+}
+
+func (a *voWiFiAccess) SelectNextPCSCF() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	next, ok := nextPCSCFInfo(a.info, a.current)
+	if !ok {
+		return errors.New("selecting next P-CSCF: no alternate P-CSCF")
 	}
-	tcpTransport, selectedIP, err := a.dialPCSCFTCP(ctx, pcscfIPs, cfg.TCPDataACKTimeouts)
+	a.info = next
+	a.current = nil
+	return nil
+}
+
+func (a *voWiFiAccess) pcscfInfo() swutunnel.Info {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.info
+}
+
+func (a *voWiFiAccess) openSIPTransport(ctx context.Context, cfg accessIMSConfig, pcscfIPs []net.IP) (imssession.Transport, net.IP, error) {
+	if cfg.Transport == "udp" {
+		udpTransport, selectedIP, err := a.dialPCSCFUDP(ctx, pcscfIPs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dialing IMS UDP transport: %w", err)
+		}
+		return udpTransport, selectedIP, nil
+	}
+	if cfg.Transport != "tcp" {
+		return nil, nil, fmt.Errorf("opening IMS transport: unsupported transport %q", cfg.Transport)
+	}
+	tcpTransport, selectedIP, err := a.dialPCSCFTCP(ctx, pcscfIPs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dialing ims tcp transport: %w", err)
 	}
@@ -83,7 +105,7 @@ func (a *voWiFiAccess) openSIPTransport(ctx context.Context, cfg accessIMSConfig
 func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, associations *ipsectransport.SecurityAssociations) imsSecurity {
 	security := imsSecurity{
 		DialSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-			return ipsectransport.DialSecureUDP(ctx, a.session, ipsectransport.SecureUDPConfig{
+			return a.netstack.DialSecureUDP(ctx, ipsectransport.SecureUDPConfig{
 				UDPConfig: ipsectransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
@@ -101,8 +123,7 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 			})
 		},
 		ListenSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
-			_ = ctx
-			return ipsectransport.ListenSecureUDP(a.session, ipsectransport.SecureUDPConfig{
+			return a.netstack.ListenSecureUDP(ctx, ipsectransport.SecureUDPConfig{
 				UDPConfig: ipsectransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
@@ -122,12 +143,11 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 	}
 	if cfg.Transport == "tcp" {
 		security.DialSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
-			return ipsectransport.DialSecureTCP(ctx, a.session, ipsectransport.SecureTCPConfig{
+			return a.netstack.DialSecureTCP(ctx, ipsectransport.SecureTCPConfig{
 				TCPConfig: ipsectransport.TCPConfig{
-					LocalPort:       secureCfg.LocalPort,
-					RemotePort:      secureCfg.RemotePort,
-					RemoteIP:        selectedPCSCF,
-					DataACKTimeouts: configuredTCPDataACKTimeouts(secureCfg.DataACKTimeouts, cfg.TCPDataACKTimeouts),
+					LocalPort:  secureCfg.LocalPort,
+					RemotePort: secureCfg.RemotePort,
+					RemoteIP:   selectedPCSCF,
 				},
 				OutboundSPI:   secureCfg.OutboundSPI,
 				InboundSPI:    secureCfg.InboundSPI,
@@ -141,13 +161,11 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 			})
 		}
 		security.ListenSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
-			_ = ctx
-			return ipsectransport.ListenSecureTCP(a.session, ipsectransport.SecureTCPConfig{
+			return a.netstack.ListenSecureTCP(ctx, ipsectransport.SecureTCPConfig{
 				TCPConfig: ipsectransport.TCPConfig{
-					LocalPort:       secureCfg.LocalPort,
-					RemotePort:      secureCfg.RemotePort,
-					RemoteIP:        selectedPCSCF,
-					DataACKTimeouts: configuredTCPDataACKTimeouts(secureCfg.DataACKTimeouts, cfg.TCPDataACKTimeouts),
+					LocalPort:  secureCfg.LocalPort,
+					RemotePort: secureCfg.RemotePort,
+					RemoteIP:   selectedPCSCF,
 				},
 				OutboundSPI:   secureCfg.OutboundSPI,
 				InboundSPI:    secureCfg.InboundSPI,
@@ -165,27 +183,30 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 }
 
 func (a *voWiFiAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
-	return newTunnelMediaTransport(ctx, a.session, cfg)
+	return newNetstackMediaTransport(ctx, a.session, a.netstack, cfg)
 }
 
 func (a *voWiFiAccess) Close() error {
-	if a.session == nil {
-		return nil
+	var err error
+	if a.netstack != nil {
+		err = errors.Join(err, a.netstack.Close())
 	}
-	return a.session.Close()
+	if a.session != nil {
+		err = errors.Join(err, a.session.Close())
+	}
+	return err
 }
 
-func (a *voWiFiAccess) dialPCSCFTCP(ctx context.Context, pcscfIPs []net.IP, dataACKTimeouts []time.Duration) (*ipsectransport.TCPConn, net.IP, error) {
+func (a *voWiFiAccess) dialPCSCFTCP(ctx context.Context, pcscfIPs []net.IP) (*ipsectransport.NetstackTCPConn, net.IP, error) {
 	candidates := pcscfIPs
 	if len(candidates) == 0 {
 		candidates = []net.IP{nil}
 	}
 	var errs error
 	for _, ip := range candidates {
-		tcpTransport, err := ipsectransport.DialTCP(ctx, a.session, ipsectransport.TCPConfig{
-			RemotePort:      a.tunnelCfg.SIPPort,
-			RemoteIP:        ip,
-			DataACKTimeouts: dataACKTimeouts,
+		tcpTransport, err := a.netstack.DialTCP(ctx, ipsectransport.TCPConfig{
+			RemotePort: a.tunnelCfg.SIPPort,
+			RemoteIP:   ip,
 		})
 		if err == nil {
 			return tcpTransport, tcpRemoteIP(tcpTransport), nil
@@ -195,7 +216,31 @@ func (a *voWiFiAccess) dialPCSCFTCP(ctx context.Context, pcscfIPs []net.IP, data
 	return nil, nil, errs
 }
 
-func tcpRemoteIP(conn *ipsectransport.TCPConn) net.IP {
+func (a *voWiFiAccess) dialPCSCFUDP(ctx context.Context, pcscfIPs []net.IP) (*ipsectransport.NetstackUDPConn, net.IP, error) {
+	candidates := pcscfIPs
+	if len(candidates) == 0 {
+		candidates = []net.IP{nil}
+	}
+	var errs error
+	for _, ip := range candidates {
+		udpTransport, err := a.netstack.DialUDP(ctx, ipsectransport.UDPConfig{
+			RemotePort: a.tunnelCfg.SIPPort,
+			RemoteIP:   ip,
+		})
+		if err == nil {
+			return udpTransport, udpRemoteIP(udpTransport), nil
+		}
+		errs = errors.Join(errs, fmt.Errorf("dialing P-CSCF %s: %w", ipLabel(ip), err))
+	}
+	return nil, nil, errs
+}
+
+func tcpRemoteIP(conn *ipsectransport.NetstackTCPConn) net.IP {
 	remote := conn.RemoteAddr().(*net.TCPAddr)
+	return append(net.IP(nil), remote.IP...)
+}
+
+func udpRemoteIP(conn *ipsectransport.NetstackUDPConn) net.IP {
+	remote := conn.RemoteAddr().(*net.UDPAddr)
 	return append(net.IP(nil), remote.IP...)
 }

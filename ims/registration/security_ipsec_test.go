@@ -336,17 +336,18 @@ func TestSecurityServerSPIsMustDifferFromClientOffer(t *testing.T) {
 }
 
 func TestValidateReauthenticationSecurityServer(t *testing.T) {
-	current := Flow{SecurityVerify: &security.Param{PortC: 4062, PortS: 4060, SPIC: 1111, SPIS: 2222}}
+	current := Flow{SecurityVerify: &security.Param{Mod: "UDP-enc-tun", PortC: 4062, PortS: 4060, SPIC: 1111, SPIS: 2222}}
 	tests := []struct {
 		name     string
 		selected security.Param
 		wantErr  bool
 	}{
-		{name: "valid", selected: security.Param{PortC: 4600, PortS: 4060, SPIC: 3333, SPIS: 4444}},
-		{name: "server port changed", selected: security.Param{PortC: 4600, PortS: 4700, SPIC: 3333, SPIS: 4444}, wantErr: true},
-		{name: "client port unchanged", selected: security.Param{PortC: 4062, PortS: 4060, SPIC: 3333, SPIS: 4444}, wantErr: true},
-		{name: "client SPI reused", selected: security.Param{PortC: 4600, PortS: 4060, SPIC: 1111, SPIS: 4444}, wantErr: true},
-		{name: "server SPI reused", selected: security.Param{PortC: 4600, PortS: 4060, SPIC: 3333, SPIS: 2222}, wantErr: true},
+		{name: "valid", selected: security.Param{Mod: "UDP-enc-tun", PortC: 4600, PortS: 4060, SPIC: 3333, SPIS: 4444}},
+		{name: "server port changed", selected: security.Param{Mod: "UDP-enc-tun", PortC: 4600, PortS: 4700, SPIC: 3333, SPIS: 4444}, wantErr: true},
+		{name: "client port unchanged", selected: security.Param{Mod: "UDP-enc-tun", PortC: 4062, PortS: 4060, SPIC: 3333, SPIS: 4444}, wantErr: true},
+		{name: "mode downgraded", selected: security.Param{Mod: "trans", PortC: 4600, PortS: 4060, SPIC: 3333, SPIS: 4444}, wantErr: true},
+		{name: "client SPI reused", selected: security.Param{Mod: "UDP-enc-tun", PortC: 4600, PortS: 4060, SPIC: 1111, SPIS: 4444}, wantErr: true},
+		{name: "server SPI reused", selected: security.Param{Mod: "UDP-enc-tun", PortC: 4600, PortS: 4060, SPIC: 3333, SPIS: 2222}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -357,6 +358,32 @@ func TestValidateReauthenticationSecurityServer(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("validateReauthenticationSecurityServer() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestReauthenticationSecurityClientCapabilitiesPreserveUDPEncapsulation(t *testing.T) {
+	base := security.Param{Mod: "trans", PortC: 10000, PortS: 10001, SPIC: 1000, SPIS: 1001}
+	tests := []struct {
+		name    string
+		current security.Param
+		wantLen int
+		wantMod string
+	}{
+		{name: "transport mode keeps full offer", current: security.Param{Mod: "trans"}, wantLen: 4},
+		{name: "UDP encapsulation stays UDP encapsulated", current: security.Param{Mod: "UDP-enc-tun"}, wantLen: 2, wantMod: "UDP-enc-tun"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reauthSecurityClientCapabilities(base, tt.current)
+			if len(got) != tt.wantLen {
+				t.Fatalf("capability count = %d, want %d", len(got), tt.wantLen)
+			}
+			for _, param := range got {
+				if tt.wantMod != "" && param.Mod != tt.wantMod {
+					t.Fatalf("capability mode = %q, want %q", param.Mod, tt.wantMod)
+				}
 			}
 		})
 	}

@@ -55,6 +55,8 @@ type Session struct {
 	mu             sync.Mutex
 	sendMu         sync.Mutex
 	readWG         sync.WaitGroup
+	transportErrs  chan struct{}
+	transportQueue []inboundMessage
 	primary        Transport
 	aux            []Transport
 	active         map[Transport]struct{}
@@ -67,6 +69,7 @@ type Session struct {
 	stunMapped     map[Transport]string
 	crlfPending    map[Transport]chan error
 	txChanged      chan struct{}
+	inboundWatches map[*InboundWatch]struct{}
 	handlers       []*handlerEntry
 	startedCh      chan struct{}
 	closedCh       chan struct{}
@@ -90,6 +93,7 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 	return &Session{
 		cfg:            cfg,
 		logger:         cfg.Logger.With("component", "ims-session"),
+		transportErrs:  make(chan struct{}, 1),
 		primary:        primary,
 		active:         map[Transport]struct{}{primary: {}},
 		responseRoutes: make(map[Transport]Transport),
@@ -100,6 +104,7 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		stunMapped:     make(map[Transport]string),
 		crlfPending:    make(map[Transport]chan error),
 		txChanged:      make(chan struct{}),
+		inboundWatches: make(map[*InboundWatch]struct{}),
 		startedCh:      make(chan struct{}),
 		closedCh:       make(chan struct{}),
 	}, nil
@@ -159,32 +164,49 @@ func (s *Session) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.transportErrs:
+			for {
+				failure, ok := s.nextTransportFailure()
+				if !ok {
+					break
+				}
+				if err := s.handleTransportError(ctx, failure, inboundCh); err != nil {
+					return err
+				}
+			}
 		case inbound := <-inboundCh:
 			if inbound.err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
+				if err := s.handleTransportError(ctx, inbound, inboundCh); err != nil {
+					return err
 				}
-				if !s.isTransportActive(inbound.transport) {
-					continue
-				}
-				if transportRemainsUsable(inbound.err) {
-					s.logger.Warn("SIP transport connection lost; transport remains active", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
-					s.abortTransportTransactions(inbound.transport, inbound.err)
-					s.startReadLoop(ctx, inbound.transport, inboundCh)
-					continue
-				}
-				if s.removeFailedAuxTransport(inbound.transport) {
-					s.logger.Warn("removed failed auxiliary SIP transport", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
-					s.abortTransportTransactions(inbound.transport, inbound.err)
-					continue
-				}
-				return inbound.err
+				continue
 			}
 			if err := s.dispatchInbound(ctx, inbound); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func (s *Session) handleTransportError(ctx context.Context, inbound inboundMessage, inboundCh chan<- inboundMessage) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !s.isTransportActive(inbound.transport) {
+		return nil
+	}
+	if transportRemainsUsable(inbound.err) {
+		s.logger.Warn("SIP transport connection lost; transport remains active", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
+		s.abortTransportTransactions(inbound.transport, inbound.err)
+		s.startReadLoop(ctx, inbound.transport, inboundCh)
+		return nil
+	}
+	if s.removeFailedAuxTransport(inbound.transport) {
+		s.logger.Warn("removed failed auxiliary SIP transport", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
+		s.abortTransportTransactions(inbound.transport, inbound.err)
+		return nil
+	}
+	return markTransportFailed(inbound.err)
 }
 
 func transportRemainsUsable(err error) bool {
@@ -200,6 +222,7 @@ func (s *Session) handleInboundRequest(ctx context.Context, req Request) error {
 		}
 		return s.WriteStatus(ctx, req, sipStatusBadRequest, "Bad Request")
 	}
+	s.markTransportInbound(req.Transport, req.Message)
 	handled, err := s.processServerTransaction(ctx, req)
 	if handled || err != nil {
 		return err
@@ -281,6 +304,7 @@ func (s *Session) finishRunning() {
 	s.mu.Lock()
 	s.running = false
 	s.run = nil
+	s.transportQueue = nil
 	s.mu.Unlock()
 }
 
@@ -488,6 +512,7 @@ func (s *Session) dispatchInbound(ctx context.Context, inbound inboundMessage) e
 		s.logger.Debug("dropping malformed SIP response", "start_line", inbound.msg.StartLine, "err", err)
 		return nil
 	}
+	s.markTransportInbound(inbound.transport, inbound.msg)
 	if !s.dispatchResponse(inbound) {
 		return s.handleInboundResponse(ctx, inbound.msg)
 	}
@@ -614,6 +639,11 @@ type ExchangeOptions struct {
 
 func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, error) {
 	return s.ExchangeWithOptions(ctx, req, ExchangeOptions{})
+}
+
+// PrimaryTransport returns the transport used for new client transactions.
+func (s *Session) PrimaryTransport() Transport {
+	return s.primaryTransport()
 }
 
 func (s *Session) ExchangeWithOptions(ctx context.Context, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
@@ -753,17 +783,16 @@ type keepAliveTransport interface {
 }
 
 type SecureTCPConfig struct {
-	LocalPort       int
-	RemotePort      int
-	DataACKTimeouts []time.Duration
-	OutboundSPI     uint32
-	InboundSPI      uint32
-	Encryption      string
-	EncryptionKey   []byte
-	Integrity       string
-	IntegrityKey    []byte
-	Mode            string
-	Salt            [4]byte
+	LocalPort     int
+	RemotePort    int
+	OutboundSPI   uint32
+	InboundSPI    uint32
+	Encryption    string
+	EncryptionKey []byte
+	Integrity     string
+	IntegrityKey  []byte
+	Mode          string
+	Salt          [4]byte
 }
 
 type SecureUDPConfig struct {
@@ -833,6 +862,106 @@ func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transpor
 		case <-changed:
 		}
 	}
+}
+
+type InboundWatch struct {
+	session    *Session
+	transports map[Transport]struct{}
+	excluded   string
+	done       chan struct{}
+}
+
+// WatchTransportsInbound snapshots the supplied transports so a later Wait
+// observes messages arriving immediately after this call.
+func (s *Session) WatchTransportsInbound(transports ...Transport) (*InboundWatch, error) {
+	return s.watchTransportsInbound("", transports...)
+}
+
+// WatchTransportsInboundExcept ignores retransmissions of excluded while
+// waiting for a later SIP message.
+func (s *Session) WatchTransportsInboundExcept(excluded sip.Message, transports ...Transport) (*InboundWatch, error) {
+	return s.watchTransportsInbound(inboundMessageKey(excluded), transports...)
+}
+
+func (s *Session) watchTransportsInbound(excluded string, transports ...Transport) (*InboundWatch, error) {
+	watched, err := transportSet(transports)
+	if err != nil {
+		return nil, err
+	}
+	if len(watched) == 0 {
+		return nil, errors.New("watching inbound transport message: no transports")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("watching inbound transport message: session is closed")
+	}
+	watch := &InboundWatch{
+		session:    s,
+		transports: watched,
+		excluded:   excluded,
+		done:       make(chan struct{}),
+	}
+	s.inboundWatches[watch] = struct{}{}
+	return watch, nil
+}
+
+func (w *InboundWatch) Wait(ctx context.Context) error {
+	s := w.session
+	select {
+	case <-ctx.Done():
+		s.removeInboundWatch(w)
+		return ctx.Err()
+	case <-s.closedCh:
+		s.removeInboundWatch(w)
+		return errors.New("waiting for inbound transport message: session is closed")
+	case <-w.done:
+		return nil
+	}
+}
+
+func (w *InboundWatch) Close() {
+	w.session.removeInboundWatch(w)
+}
+
+// WaitTransportsInbound waits for the next valid SIP message received after
+// this call on one of the supplied transports.
+func (s *Session) WaitTransportsInbound(ctx context.Context, transports ...Transport) error {
+	watch, err := s.WatchTransportsInbound(transports...)
+	if err != nil {
+		return err
+	}
+	return watch.Wait(ctx)
+}
+
+func (s *Session) markTransportInbound(transport Transport, msg sip.Message) {
+	key := inboundMessageKey(msg)
+	s.mu.Lock()
+	for watch := range s.inboundWatches {
+		if _, ok := watch.transports[transport]; !ok || key == watch.excluded {
+			continue
+		}
+		delete(s.inboundWatches, watch)
+		close(watch.done)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) removeInboundWatch(watch *InboundWatch) {
+	s.mu.Lock()
+	delete(s.inboundWatches, watch)
+	s.mu.Unlock()
+}
+
+func inboundMessageKey(msg sip.Message) string {
+	if msg.StartLine == "" || msg.Header("Call-ID") == "" || msg.Header("CSeq") == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		msg.Header("Call-ID"),
+		msg.Header("CSeq"),
+		sip.HeaderParam(msg.Header("Via"), "branch"),
+	}, "\x00")
 }
 
 func (s *Session) ensureOpen() error {
@@ -996,8 +1125,22 @@ func (s *Session) writePacket(ctx context.Context, transport Transport, data []b
 }
 
 func (s *Session) writePacketTo(ctx context.Context, transport Transport, data []byte, addr net.Addr) error {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.sendMu.TryLock() {
+			defer s.sendMu.Unlock()
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 	if addr == nil {
 		return transport.WritePacket(ctx, data)
 	}

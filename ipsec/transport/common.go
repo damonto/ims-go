@@ -229,6 +229,16 @@ func udpEncapsulatedESPKeepalive(payload []byte) bool {
 	return len(payload) == 1 && payload[0] == udpEncapsulatedESPKeepalivePayload
 }
 
+func udpEncapsulatedESPKeepalivePacket(pkt packet.InnerPacket) bool {
+	udp := pkt.UDP
+	if udp == nil || udp.Src == nil || udp.Dst == nil {
+		return false
+	}
+	return udp.Src.Port == udpEncapsulatedESPPort &&
+		udp.Dst.Port == udpEncapsulatedESPPort &&
+		udpEncapsulatedESPKeepalive(udp.Payload)
+}
+
 func udpEncTunnelKeepalivePacket(localIP, remoteIP net.IP) (packet.InnerPacket, error) {
 	return secureInnerPacket(localIP, remoteIP, SecureModeUDPEncTunnel, []byte{udpEncapsulatedESPKeepalivePayload})
 }
@@ -246,35 +256,6 @@ func writeUDPEncTunnelKeepalive(ctx context.Context, session PacketSession, loca
 		return fmt.Errorf("writing UDP-enc-tun keepalive: %w", err)
 	}
 	return session.WriteInnerPacket(ctx, inner)
-}
-
-func startUDPEncTunnelKeepalive(done <-chan struct{}, write func(context.Context) error, logErr func(error)) {
-	go func() {
-		ticker := time.NewTicker(udpEncapsulatedESPKeepaliveTick)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), udpEncapsulatedESPKeepaliveTimeout)
-			err := write(ctx)
-			cancel()
-			if err == nil {
-				continue
-			}
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if logErr != nil {
-				logErr(err)
-			}
-		}
-	}()
 }
 
 func connectedUDPAddrs(s PacketSession, remoteIP net.IP) (*net.UDPAddr, *net.UDPAddr, error) {
@@ -316,26 +297,6 @@ func cloneTCPAddr(addr *net.TCPAddr) *net.TCPAddr {
 		return nil
 	}
 	return &net.TCPAddr{IP: append(net.IP(nil), addr.IP...), Port: addr.Port, Zone: addr.Zone}
-}
-
-func udpFlowMatches(segment *packet.UDPSegment, local, remote *net.UDPAddr) bool {
-	if segment == nil || segment.Src == nil || segment.Dst == nil || local == nil || remote == nil {
-		return false
-	}
-	return segment.Src.IP.Equal(remote.IP) &&
-		segment.Src.Port == remote.Port &&
-		segment.Dst.IP.Equal(local.IP) &&
-		segment.Dst.Port == local.Port
-}
-
-func tcpFlowMatches(segment *packet.TCPSegment, local, remote *net.TCPAddr) bool {
-	if segment == nil || segment.Src == nil || segment.Dst == nil || local == nil || remote == nil {
-		return false
-	}
-	return segment.Src.IP.Equal(remote.IP) &&
-		segment.Src.Port == remote.Port &&
-		segment.Dst.IP.Equal(local.IP) &&
-		segment.Dst.Port == local.Port
 }
 
 func packetSPI(packet []byte) uint32 {

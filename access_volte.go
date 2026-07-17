@@ -45,6 +45,7 @@ type voLTEAccess struct {
 	sipLocalIP net.IP
 	pdn        imsPDNSession
 	ipsec      *lteipsec.Session
+	netstack   *ipsectransport.Netstack
 	logger     *slog.Logger
 }
 
@@ -103,14 +104,21 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 		_ = transport.Close()
 		return imsAccess{}, err
 	}
+	netstack, err := ipsectransport.NewNetstack(ipsecSession)
+	if err != nil {
+		_ = ipsecSession.Close()
+		_ = transport.Close()
+		return imsAccess{}, fmt.Errorf("opening VoLTE userspace network stack: %w", err)
+	}
 	a.mu.Lock()
 	a.ipsec = ipsecSession
+	a.netstack = netstack
 	a.sipLocalIP = append(net.IP(nil), route.LocalIP...)
 	a.mu.Unlock()
 	return imsAccess{
 		AccessNetworkInfo: accessNetworkInfo,
 		SIP:               transport,
-		Security:          a.openSecurity(route.RemoteIP, cfg, ipsecSession),
+		Security:          a.openSecurity(route.RemoteIP, cfg, ipsecSession, netstack),
 		OpenMedia: func(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 			return a.openMedia(ctx, cfg)
 		},
@@ -132,7 +140,7 @@ func (a *voLTEAccess) openSIPTransportTo(ctx context.Context, cfg accessIMSConfi
 	}
 }
 
-func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session *lteipsec.Session) imsSecurity {
+func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session *lteipsec.Session, netstack *ipsectransport.Netstack) imsSecurity {
 	associations := ipsectransport.NewSecurityAssociations()
 	enable := func(ctx context.Context, mode string) error {
 		if err := session.Enable(ctx, mode); err != nil {
@@ -145,7 +153,7 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session
 			if err := enable(ctx, secure.Mode); err != nil {
 				return nil, err
 			}
-			return ipsectransport.DialSecureUDP(ctx, session, ipsectransport.SecureUDPConfig{
+			return netstack.DialSecureUDP(ctx, ipsectransport.SecureUDPConfig{
 				UDPConfig:   ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
 				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
@@ -157,7 +165,7 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session
 			if err := enable(ctx, secure.Mode); err != nil {
 				return nil, err
 			}
-			return ipsectransport.ListenSecureUDP(session, ipsectransport.SecureUDPConfig{
+			return netstack.ListenSecureUDP(ctx, ipsectransport.SecureUDPConfig{
 				UDPConfig:   ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
 				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
@@ -169,8 +177,8 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session
 			if err := enable(ctx, secure.Mode); err != nil {
 				return nil, err
 			}
-			return ipsectransport.DialSecureTCP(ctx, session, ipsectransport.SecureTCPConfig{
-				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP, DataACKTimeouts: configuredTCPDataACKTimeouts(secure.DataACKTimeouts, cfg.TCPDataACKTimeouts)},
+			return netstack.DialSecureTCP(ctx, ipsectransport.SecureTCPConfig{
+				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
 				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
@@ -181,8 +189,8 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session
 			if err := enable(ctx, secure.Mode); err != nil {
 				return nil, err
 			}
-			return ipsectransport.ListenSecureTCP(session, ipsectransport.SecureTCPConfig{
-				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP, DataACKTimeouts: configuredTCPDataACKTimeouts(secure.DataACKTimeouts, cfg.TCPDataACKTimeouts)},
+			return netstack.ListenSecureTCP(ctx, ipsectransport.SecureTCPConfig{
+				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
 				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
@@ -215,6 +223,8 @@ func (a *voLTEAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (
 
 func (a *voLTEAccess) Close() error {
 	a.mu.Lock()
+	netstack := a.netstack
+	a.netstack = nil
 	ipsecSession := a.ipsec
 	a.ipsec = nil
 	a.sipLocalIP = nil
@@ -223,6 +233,9 @@ func (a *voLTEAccess) Close() error {
 	a.mu.Unlock()
 
 	var err error
+	if netstack != nil {
+		err = errors.Join(err, netstack.Close())
+	}
 	if ipsecSession != nil {
 		err = errors.Join(err, ipsecSession.Close())
 	}
@@ -245,10 +258,17 @@ func (a *voLTEAccess) SelectNextPCSCF() error {
 		a.mu.Unlock()
 		return errors.New("selecting next P-CSCF: no alternate P-CSCF")
 	}
+	netstack := a.netstack
+	a.netstack = nil
 	ipsecSession := a.ipsec
 	a.ipsec = nil
 	a.sipLocalIP = nil
 	a.mu.Unlock()
+	if netstack != nil {
+		if err := netstack.Close(); err != nil {
+			return fmt.Errorf("selecting next P-CSCF: closing previous userspace network stack: %w", err)
+		}
+	}
 	if ipsecSession != nil {
 		if err := ipsecSession.Close(); err != nil {
 			return fmt.Errorf("selecting next P-CSCF: closing previous LTE IPsec session: %w", err)

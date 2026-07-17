@@ -71,7 +71,6 @@ type IMSConfig struct {
 	UseTelURIForPIDFXML      bool
 	SIPServerPort            int
 	SIPTimers                imssession.TransactionTimers
-	TCPDataACKTimeouts       []time.Duration
 	SMSDeliveryReportTimeout time.Duration
 	Voice                    imsvoice.Config
 }
@@ -273,11 +272,6 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
 	cfg.SIPTimers = timers
-	cfg.TCPDataACKTimeouts = append([]time.Duration(nil), cfg.TCPDataACKTimeouts...)
-	if err := validateTCPDataACKTimeouts(cfg.TCPDataACKTimeouts); err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
-	}
-
 	if cfg.Transport == "" {
 		cfg.Transport = "udp"
 	}
@@ -342,41 +336,6 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	}
 	cfg.Voice = voiceCfg
 	return cfg, nil
-}
-
-func validateTCPDataACKTimeouts(timeouts []time.Duration) error {
-	if len(timeouts) == 0 {
-		return nil
-	}
-	var budget time.Duration
-	for i, timeout := range timeouts {
-		if timeout < time.Second {
-			return fmt.Errorf("tcp data ack timeout must be >= %s", time.Second)
-		}
-		if i > 0 {
-			minTimeout := nextTCPDataACKTimeoutFloor(timeouts[i-1])
-			if timeout < minTimeout {
-				return fmt.Errorf("tcp data ack timeout %s is more aggressive than %s", timeout, minTimeout)
-			}
-		}
-		budget += timeout
-	}
-	if budget < 100*time.Second {
-		return errors.New("tcp data ack timeout budget must be >= 1m40s")
-	}
-	return nil
-}
-
-func nextTCPDataACKTimeoutFloor(previous time.Duration) time.Duration {
-	const backoffCeiling = 60 * time.Second
-	if previous >= backoffCeiling {
-		return previous
-	}
-	doubled := previous * 2
-	if doubled > backoffCeiling {
-		return backoffCeiling
-	}
-	return doubled
 }
 
 func geolocationPIDFConfigured(cfg IMSConfig) bool {

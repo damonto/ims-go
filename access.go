@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	imssession "github.com/damonto/ims-go/ims/session"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
@@ -44,9 +43,8 @@ type pcscfReselectingAccess interface {
 }
 
 type accessIMSConfig struct {
-	Transport          string
-	SIPServerPort      int
-	TCPDataACKTimeouts []time.Duration
+	Transport     string
+	SIPServerPort int
 }
 
 type imsAccess struct {

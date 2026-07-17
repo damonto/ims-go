@@ -27,6 +27,18 @@ type subscriptionDialog struct {
 	routeSet     []string
 }
 
+type pendingSubscription struct {
+	request   sip.Message
+	done      chan struct{}
+	completed bool
+	accepted  bool
+}
+
+type subscribeExchangeResult struct {
+	response sip.Message
+	err      error
+}
+
 type regInfoRegistrationEntry struct {
 	AOR      string
 	State    string
@@ -43,13 +55,20 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 	}
 	subscription := s.currentSubscription()
 	msg := s.buildSubscribeWithDialog(subscription)
-	resp, err := s.sess.ExchangeWithOptions(ctx, msg, s.protectedRegisterExchangeOptions())
+	pending := s.beginPendingSubscription(msg, subscription.active)
+	defer s.finishPendingSubscription(pending)
+	resp, acceptedByNotify, err := s.exchangeSubscribe(ctx, msg, pending)
 	if err != nil {
 		if subscription.active {
 			s.resetSubscription()
 			s.resetRegInfoState()
 		}
 		return fmt.Errorf("subscribing IMS registration: %w", err)
+	}
+	if acceptedByNotify {
+		s.setSubscribeUnsupported(false)
+		s.logger.Info("registration event subscription active", "expires", s.currentSubscribeExpires())
+		return nil
 	}
 	if subscription.active && resp.StatusCode() != sipStatusCallTransactionDoesNotExist {
 		s.applySubscribeRequestCSeq(msg)
@@ -78,6 +97,61 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 	s.applySubscribeDialog(msg, resp)
 	s.logger.Info("registration event subscription active", "expires", s.currentSubscribeExpires())
 	return nil
+}
+
+func (s *Registrar) exchangeSubscribe(ctx context.Context, msg sip.Message, pending *pendingSubscription) (sip.Message, bool, error) {
+	if pending == nil {
+		resp, err := s.sess.ExchangeWithOptions(ctx, msg, s.protectedRegisterExchangeOptions())
+		return resp, false, err
+	}
+	exchangeCtx, cancel := context.WithCancel(ctx)
+	resultCh := make(chan subscribeExchangeResult, 1)
+	go func() {
+		resp, err := s.sess.ExchangeWithOptions(exchangeCtx, msg, s.protectedRegisterExchangeOptions())
+		resultCh <- subscribeExchangeResult{response: resp, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		cancel()
+		return result.response, false, result.err
+	case <-pending.done:
+		accepted := s.pendingSubscriptionAccepted(pending)
+		cancel()
+		<-resultCh
+		if accepted {
+			return sip.Message{}, true, nil
+		}
+		return sip.Message{}, false, errors.New("subscription terminated by NOTIFY")
+	}
+}
+
+func (s *Registrar) beginPendingSubscription(req sip.Message, active bool) *pendingSubscription {
+	if active {
+		return nil
+	}
+	pending := &pendingSubscription{request: req, done: make(chan struct{})}
+	s.mu.Lock()
+	s.pendingSubscription = pending
+	s.mu.Unlock()
+	return pending
+}
+
+func (s *Registrar) finishPendingSubscription(pending *pendingSubscription) {
+	if pending == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.pendingSubscription == pending {
+		s.pendingSubscription = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Registrar) pendingSubscriptionAccepted(pending *pendingSubscription) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return pending.completed && pending.accepted
 }
 
 func (s *Registrar) currentSubscribeExpires() time.Duration {
@@ -241,15 +315,84 @@ func (s *Registrar) applySubscribeExpires(msg sip.Message) {
 }
 
 func (s *Registrar) notifyMatchesSubscription(msg sip.Message) bool {
-	subscription := s.currentSubscription()
-	if !subscription.active {
+	s.mu.Lock()
+	subscription := s.subscription
+	pending := s.pendingSubscription
+	s.mu.Unlock()
+	if subscription.active {
+		return sip.DialogID{
+			CallID:    subscription.callID,
+			LocalTag:  subscription.localTag,
+			RemoteTag: subscription.remoteTag,
+		}.Matches(msg)
+	}
+	if pending == nil {
 		return true
 	}
-	return sip.DialogID{
-		CallID:    subscription.callID,
-		LocalTag:  subscription.localTag,
-		RemoteTag: subscription.remoteTag,
-	}.Matches(msg)
+	return pendingSubscriptionMatches(pending.request, msg)
+}
+
+func pendingSubscriptionMatches(req, notify sip.Message) bool {
+	return req.Header("Call-ID") != "" &&
+		req.Header("Call-ID") == notify.Header("Call-ID") &&
+		sip.HeaderTag(req.Header("From")) == sip.HeaderTag(notify.Header("To"))
+}
+
+func (s *Registrar) preparePendingSubscriptionNotify(msg sip.Message) (*pendingSubscription, bool) {
+	var state subscriptionStateHeader
+	if err := state.UnmarshalText([]byte(msg.Header("Subscription-State"))); err != nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending := s.pendingSubscription
+	if pending == nil || pending.completed || !pendingSubscriptionMatches(pending.request, msg) {
+		return nil, false
+	}
+	accepted := !strings.EqualFold(state.state, subscriptionStateTerminated)
+	if !accepted {
+		return pending, false
+	}
+	localHeader := msg.Header("To")
+	remoteHeader := msg.Header("From")
+	remoteTag := sip.HeaderTag(remoteHeader)
+	if remoteTag == "" {
+		return nil, false
+	}
+	targetURI := firstAddressURI(msg.HeadersByName("Contact"))
+	if targetURI == "" {
+		targetURI = sip.AddressURI(remoteHeader)
+	}
+	if targetURI == "" {
+		targetURI = sip.RequestURI(pending.request)
+	}
+	s.subscription = subscriptionDialog{
+		active:       true,
+		callID:       pending.request.Header("Call-ID"),
+		sessionID:    pending.request.Header("Session-ID"),
+		cseq:         sip.CSeqNumber(pending.request.Header("CSeq")),
+		localHeader:  localHeader,
+		remoteHeader: remoteHeader,
+		localTag:     sip.HeaderTag(localHeader),
+		remoteTag:    remoteTag,
+		targetURI:    targetURI,
+		routeSet:     append([]string(nil), msg.HeaderList("Record-Route")...),
+	}
+	return pending, true
+}
+
+func (s *Registrar) completePendingSubscription(pending *pendingSubscription, accepted bool) {
+	if pending == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingSubscription != pending || pending.completed {
+		return
+	}
+	pending.completed = true
+	pending.accepted = accepted
+	close(pending.done)
 }
 
 func (s *Registrar) recordNotifyCSeq(msg sip.Message) (int, string) {

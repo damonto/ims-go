@@ -1006,6 +1006,9 @@ func TestRunReturnsPrimaryTransportReadError(t *testing.T) {
 			if !errors.Is(err, cause) {
 				t.Fatalf("Run() error = %v, want %v", err, cause)
 			}
+			if !TransportFailed(err) {
+				t.Fatalf("TransportFailed() = false for %v", err)
+			}
 		})
 	}
 }
@@ -1975,6 +1978,46 @@ func TestWaitTransportsIdleWaitsForClientTransactions(t *testing.T) {
 			runCancel()
 			if err := <-errCh; !errors.Is(err, context.Canceled) {
 				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestInboundMessageKeyUsesStableTransactionFields(t *testing.T) {
+	req := newRequest("REGISTER", "reauth-register", "2 REGISTER")
+	tests := []struct {
+		name     string
+		message  sip.Message
+		wantSame bool
+	}{
+		{
+			name: "response Via received and rport parameters",
+			message: func() sip.Message {
+				resp := newResponse(req, 200, "OK")
+				resp.Headers.Set("Via", resp.Header("Via")+";received=2001:db8::1;rport=4600")
+				return resp
+			}(),
+			wantSame: true,
+		},
+		{
+			name: "different branch",
+			message: func() sip.Message {
+				resp := newResponse(req, 200, "OK")
+				resp.Headers.Set("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-other")
+				return resp
+			}(),
+		},
+		{
+			name:    "different CSeq",
+			message: newRequest("REGISTER", "reauth-register", "3 REGISTER"),
+		},
+	}
+
+	want := inboundMessageKey(req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if gotSame := inboundMessageKey(tt.message) == want; gotSame != tt.wantSame {
+				t.Fatalf("matching transaction = %t, want %t", gotSame, tt.wantSame)
 			}
 		})
 	}
@@ -2969,9 +3012,197 @@ func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
 		t.Fatalf("TransactionTimerExpired(F) = false for %v", err)
 	}
 
-	runCancel()
-	if err := <-errCh; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	if runErr := <-errCh; !TransactionTimerExpired(runErr, "F") {
+		t.Fatalf("Run() error = %v, want Timer F expiration", runErr)
+	}
+}
+
+func TestTimerFInProceedingDoesNotFailSession(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "non-INVITE received provisional response"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			transport.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062}
+			transport.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{TF: 50 * time.Millisecond}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			runErrCh := make(chan error, 1)
+			go func() {
+				runErrCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			req := newRequest("MESSAGE", "timer-f-proceeding", "1 MESSAGE")
+			transport.onWrite = func([]byte) {
+				transport.queueRead(newResponse(req, 100, "Trying"))
+			}
+			provisional := make(chan struct{}, 1)
+			exchangeErrCh := make(chan error, 1)
+			go func() {
+				_, err := sess.ExchangeWithOptions(context.Background(), req, ExchangeOptions{
+					OnProvisional: func(sip.Message) {
+						provisional <- struct{}{}
+					},
+				})
+				exchangeErrCh <- err
+			}()
+
+			select {
+			case <-provisional:
+			case <-time.After(time.Second):
+				t.Fatal("waiting for provisional response")
+			}
+			if err := <-exchangeErrCh; !TransactionTimerExpired(err, "F") {
+				t.Fatalf("Exchange() error = %v, want Timer F expiration", err)
+			}
+			select {
+			case err := <-runErrCh:
+				t.Fatalf("Run() returned for Timer F in Proceeding: %v", err)
+			default:
+			}
+
+			runCancel()
+			if err := <-runErrCh; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestReportedTransportFailuresAreNotDropped(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "primary failure queued behind auxiliary failure"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			aux := newStubTransport(15062, 15060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if _, err := sess.AddTransport(aux); err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+
+			sess.mu.Lock()
+			sess.running = true
+			sess.mu.Unlock()
+			sess.reportTransportFailure(aux, errors.New("auxiliary transaction failed"))
+			cause := errors.New("primary transaction failed")
+			sess.reportTransportFailure(primary, cause)
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, cause) {
+					t.Fatalf("Run() error = %v, want %v", err, cause)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for queued primary transport failure")
+			}
+		})
+	}
+}
+
+func TestExchangeTimerStartsBeforeTransportSend(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		wantTimer string
+		occupy    bool
+	}{
+		{name: "non-INVITE blocked in TCP write", method: "MESSAGE", wantTimer: "F"},
+		{name: "INVITE blocked in TCP write", method: "INVITE", wantTimer: "B"},
+		{name: "non-INVITE waiting for send slot", method: "MESSAGE", wantTimer: "F", occupy: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newBlockingWriteTransport()
+			sess, err := Open(Config{TransactionTimers: TransactionTimers{
+				TB: 40 * time.Millisecond,
+				TF: 40 * time.Millisecond,
+			}}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			defer runCancel()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- sess.Run(runCtx)
+			}()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+
+			firstSendErr := make(chan error, 1)
+			if tt.occupy {
+				go func() {
+					firstSendErr <- sess.Send(context.Background(), newRequest("MESSAGE", "blocking-send", "1 MESSAGE"))
+				}()
+				select {
+				case <-transport.entered:
+				case <-time.After(time.Second):
+					t.Fatal("waiting for blocking write")
+				}
+			}
+
+			exchangeErr := make(chan error, 1)
+			go func() {
+				_, err := sess.Exchange(context.Background(), newRequest(tt.method, "timer-start", "1 "+tt.method))
+				exchangeErr <- err
+			}()
+
+			var got error
+			select {
+			case got = <-exchangeErr:
+			case <-time.After(time.Second):
+				t.Fatal("waiting for transaction timeout")
+			}
+			if !TransactionTimerExpired(got, tt.wantTimer) {
+				t.Fatalf("Exchange() error = %v, want Timer %s expiration", got, tt.wantTimer)
+			}
+
+			select {
+			case runErr := <-errCh:
+				if !TransactionTimerExpired(runErr, tt.wantTimer) {
+					t.Fatalf("Run() error = %v, want Timer %s expiration", runErr, tt.wantTimer)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting for session failure")
+			}
+
+			if tt.occupy {
+				close(transport.release)
+				if err := <-firstSendErr; err != nil {
+					t.Fatalf("first Send() error = %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -2987,8 +3218,8 @@ func TestExchangeReturnsReliableTransportSendError(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("Exchange() error = %v, want %v", err, cause)
 	}
-	if !TransactionTransportFailed(err) {
-		t.Fatalf("TransactionTransportFailed() = false for %v", err)
+	if !TransportFailed(err) {
+		t.Fatalf("TransportFailed() = false for %v", err)
 	}
 	if resp.StartLine != "" {
 		t.Fatalf("Exchange() response = %v, want zero response", resp)
@@ -3007,8 +3238,8 @@ func TestExchangeReturnsUnreliableTransportSendError(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("Exchange() error = %v, want %v", err, cause)
 	}
-	if !TransactionTransportFailed(err) {
-		t.Fatalf("TransactionTransportFailed() = false for %v", err)
+	if !TransportFailed(err) {
+		t.Fatalf("TransportFailed() = false for %v", err)
 	}
 	if resp.StartLine != "" {
 		t.Fatalf("Exchange() response = %v, want zero response", resp)

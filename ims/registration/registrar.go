@@ -122,6 +122,7 @@ type Registrar struct {
 	subscribeExpires     time.Duration
 	subscribeUnsupported bool
 	subscription         subscriptionDialog
+	pendingSubscription  *pendingSubscription
 	regInfoVersion       int
 	regInfoVersionSet    bool
 	regInfoRegistrations map[string]regInfoRegistrationEntry
@@ -532,6 +533,18 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 
 	req := s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, nextFlow, authorizationHeader)
 	responseTransports := reauthResponseTransports(outbound, inboundTransports)
+	newTransports := append([]session.Transport{outbound}, inboundTransports...)
+	newTransports = append(newTransports, attachmentTransports(responseAttachments)...)
+	newTransports = uniqueSessionTransports(newTransports)
+	inboundWatch, err := s.sess.WatchTransportsInboundExcept(req, newTransports...)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: watching new security associations: %w", err)
+	}
+	defer func() {
+		if !committed {
+			inboundWatch.Close()
+		}
+	}()
 	resp, err := s.sess.ExchangeWithTransport(ctx, outbound, req, session.ExchangeOptions{
 		AcceptResponseTransport: acceptResponseFrom(responseTransports),
 		ResponseTransports:      responseTransports,
@@ -558,9 +571,13 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	}
 	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
 	oldResponseAttachments := s.replaceSecureResponseAttachments(responseAttachments)
-	s.closeAttachmentsAfter(append(append(oldServerAttachments, oldResponseAttachments...), oldAttachment), saDrainDelayBefore(oldExpiresAt, s.sess.TransactionTimers()))
 	s.commitReauthentication(challenge, authorizationHeader, nextFlow, ck, ik, password)
 	s.applyRegisterSuccess(resp)
+	s.closeOldSecurityAfterNewInbound(
+		append(append(oldServerAttachments, oldResponseAttachments...), oldAttachment),
+		oldExpiresAt,
+		inboundWatch,
+	)
 	committed = true
 	return nil
 }
@@ -575,7 +592,7 @@ func (s *Registrar) Refresh(ctx context.Context) error {
 	flow := s.CurrentFlow()
 	if flow.SecurityVerify != nil {
 		flow.SecurityClient = reauthSecurityClient(flow.SecurityClient, *flow.SecurityVerify, flow.RegisterPort)
-		flow.SecurityClients = securityClientCapabilities(flow.SecurityClient)
+		flow.SecurityClients = reauthSecurityClientCapabilities(flow.SecurityClient, *flow.SecurityVerify)
 	}
 	state := refreshRegisterState{flow: flow}
 	for range 6 {

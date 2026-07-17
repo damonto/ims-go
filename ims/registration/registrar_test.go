@@ -323,6 +323,18 @@ func newResponse(req sip.Message, code int, reason string, extra ...sip.Header) 
 	return resp
 }
 
+func newInboundOptions(callID string) sip.Message {
+	msg := sip.NewRequest("OPTIONS", "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org")
+	msg.Headers = sip.Headers{
+		{Name: "Via", Value: "SIP/2.0/TCP pcscf.example;branch=z9hG4bK-" + callID},
+		{Name: "From", Value: `<sip:pcscf@ims.example>;tag=` + callID},
+		{Name: "To", Value: `<sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>`},
+		{Name: "Call-ID", Value: callID},
+		{Name: "CSeq", Value: "1 OPTIONS"},
+	}
+	return msg
+}
+
 func countWrites(t *stubTransport) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -2744,6 +2756,7 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 	if got := countWrites(nextOutbound); got != 2 {
 		t.Fatalf("next outbound write count after promote = %d, want 2", got)
 	}
+	nextInbound.queue(newInboundOptions("new-sa-active"))
 	waitForCloseCount(t, old, 1)
 
 	runCancel()
@@ -2764,6 +2777,7 @@ func TestRefreshReauthenticationCompletesBeforeSessionRun(t *testing.T) {
 			return nextInbound, nil
 		},
 	}, old, stubCard{})
+	defer svc.Close()
 
 	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
@@ -2785,7 +2799,9 @@ func TestRefreshReauthenticationCompletesBeforeSessionRun(t *testing.T) {
 	if svc.sess.LocalAddr() != nextOutbound.LocalAddr() {
 		t.Fatalf("LocalAddr() = %v, want promoted transport %v", svc.sess.LocalAddr(), nextOutbound.LocalAddr())
 	}
-	waitForCloseCount(t, old, 1)
+	if got := closeCount(old); got != 0 {
+		t.Fatalf("old closeCount = %d, want retained until a later new-SA message or expiry", got)
+	}
 }
 
 func TestRefreshReauthenticationAcceptsTCPResponseOnOutboundSecurityAssociation(t *testing.T) {
@@ -2839,31 +2855,51 @@ func TestRefreshReauthenticationAcceptsTCPResponseOnOutboundSecurityAssociation(
 
 func TestReauthResponseTransportsFollowProtectedFlowRules(t *testing.T) {
 	tests := []struct {
-		name         string
-		newTransport func(localPort, remotePort int) *stubTransport
-		wantOutbound bool
+		name     string
+		outbound func(localPort, remotePort int) *stubTransport
+		inbound  func(localPort, remotePort int) *stubTransport
+		want     func(outbound, inbound *stubTransport) []session.Transport
 	}{
 		{
-			name:         "tcp reuses UE established connection",
-			newTransport: newTCPTransport,
-			wantOutbound: true,
+			name:     "tcp reuses UE established and protected server TCP connections",
+			outbound: newTCPTransport,
+			inbound:  newTCPTransport,
+			want: func(outbound, inbound *stubTransport) []session.Transport {
+				return []session.Transport{outbound, inbound}
+			},
 		},
 		{
-			name:         "udp receives on protected server flow",
-			newTransport: newUDPTransport,
-			wantOutbound: false,
+			name:     "udp receives on protected server UDP flow",
+			outbound: newUDPTransport,
+			inbound:  newUDPTransport,
+			want: func(_, inbound *stubTransport) []session.Transport {
+				return []session.Transport{inbound}
+			},
+		},
+		{
+			name:     "tcp ignores protected server UDP flow",
+			outbound: newTCPTransport,
+			inbound:  newUDPTransport,
+			want: func(outbound, _ *stubTransport) []session.Transport {
+				return []session.Transport{outbound}
+			},
+		},
+		{
+			name:     "udp ignores protected server TCP flow",
+			outbound: newUDPTransport,
+			inbound:  newTCPTransport,
+			want: func(_, _ *stubTransport) []session.Transport {
+				return nil
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			outbound := tt.newTransport(45000, 4060)
-			inbound := tt.newTransport(5063, 45000)
+			outbound := tt.outbound(45000, 4060)
+			inbound := tt.inbound(5063, 45000)
 			got := reauthResponseTransports(outbound, []session.Transport{inbound})
-			want := []session.Transport{inbound}
-			if tt.wantOutbound {
-				want = []session.Transport{outbound, inbound}
-			}
+			want := tt.want(outbound, inbound)
 			if !slices.Equal(got, want) {
 				t.Fatalf("reauthResponseTransports() = %v, want %v", got, want)
 			}
@@ -2925,14 +2961,30 @@ func TestRefreshReauthenticationDrainsOldInboundSecurityAssociations(t *testing.
 		req := mustParseMessage(t, data)
 		oldOutbound.queue(newUnauthorizedRegisterResponse(req, testNonce, 4600))
 	}
+	var reauthSuccess sip.Message
 	nextOutbound.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
-		nextInbound.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"}))
+		reauthSuccess = newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"})
+		reauthSuccess.Headers.Set("Via", reauthSuccess.Header("Via")+";received=2001:db8::1;rport=4600")
+		nextInbound.queue(reauthSuccess)
 	}
 
 	if err := svc.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
+	time.Sleep(20 * time.Millisecond)
+	if got := closeCount(oldOutbound); got != 0 {
+		t.Fatalf("old outbound closeCount = %d, want retained before later new-SA message", got)
+	}
+	if got := closeCount(oldInbound); got != 0 {
+		t.Fatalf("old inbound closeCount = %d, want retained before later new-SA message", got)
+	}
+	nextInbound.queue(reauthSuccess)
+	time.Sleep(20 * time.Millisecond)
+	if got := closeCount(oldOutbound); got != 0 {
+		t.Fatalf("old outbound closeCount after SM12 retransmission = %d, want 0", got)
+	}
+	nextInbound.queue(newInboundOptions("new-sa-drain"))
 	waitForCloseCount(t, oldOutbound, 1)
 	waitForCloseCount(t, oldInbound, 1)
 	if got := closeCount(nextInbound); got != 0 {
@@ -3032,6 +3084,10 @@ func TestRefreshReauthenticationKeepsOldSAsUntilPendingTransactionCompletes(t *t
 	}
 	if got := closeCount(oldInbound); got != 0 {
 		t.Fatalf("old inbound closeCount = %d, want 0 while old transaction is pending", got)
+	}
+	nextInbound.queue(newInboundOptions("new-sa-pending"))
+	if got := closeCount(oldOutbound); got != 0 {
+		t.Fatalf("old outbound closeCount = %d, want 0 until pending old transaction completes", got)
 	}
 
 	oldOutbound.queue(newResponse(pending, 200, "OK"))
@@ -3625,6 +3681,76 @@ func TestSubscribeStoresExpires(t *testing.T) {
 	}
 	if svc.isSubscribeUnsupported() {
 		t.Fatal("subscribeUnsupported = true, want false")
+	}
+}
+
+func TestSubscribeBeforeSessionRunReadsProtectedTCPResponseFlows(t *testing.T) {
+	tests := []struct {
+		name                 string
+		responseOnServer     bool
+		notifyBeforeResponse bool
+	}{
+		{name: "outbound TCP flow"},
+		{name: "protected server TCP flow", responseOnServer: true},
+		{name: "active NOTIFY confirms subscription before response", notifyBeforeResponse: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outbound := newTCPTransport(5062, 4060)
+			server := newTCPTransport(5063, 4061)
+			svc := newTestService(t, Config{}, outbound, stubCard{})
+			attachment, err := svc.sess.AddTransport(server)
+			if err != nil {
+				t.Fatalf("AddTransport(server) error = %v", err)
+			}
+			svc.replaceSecureServerAttachments([]session.Attachment{attachment})
+
+			outbound.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if tt.notifyBeforeResponse {
+					notify := sip.NewRequest("NOTIFY", sip.AddressURI(req.Header("Contact")))
+					notify.Headers = sip.Headers{
+						{Name: "Via", Value: "SIP/2.0/TCP 127.0.0.1:4061;branch=z9hG4bK-notify-before-response"},
+						{Name: "From", Value: sip.WithTag(req.Header("To"), "", "remote-subscription")},
+						{Name: "To", Value: req.Header("From")},
+						{Name: "Call-ID", Value: req.Header("Call-ID")},
+						{Name: "CSeq", Value: "1 NOTIFY"},
+						{Name: "Contact", Value: "<sip:notifier.example.com>"},
+						{Name: "Record-Route", Value: "<sip:pcscf.example.com;lr>"},
+						{Name: "Event", Value: regEventPackage},
+						{Name: "Subscription-State", Value: "active;expires=90"},
+						{Name: "Max-Forwards", Value: "70"},
+						{Name: "Content-Length", Value: "0"},
+					}
+					server.queue(notify)
+					return
+				}
+				responseTransport := outbound
+				if tt.responseOnServer {
+					responseTransport = server
+				}
+				responseTransport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := svc.Subscribe(ctx); err != nil {
+				t.Fatalf("Subscribe() error = %v", err)
+			}
+			if tt.notifyBeforeResponse {
+				subscription := svc.currentSubscription()
+				if !subscription.active || subscription.remoteTag != "remote-subscription" {
+					t.Fatalf("subscription = %+v, want active NOTIFY-established dialog", subscription)
+				}
+				if got := svc.currentSubscribeExpires(); got != 90*time.Second {
+					t.Fatalf("currentSubscribeExpires() = %v, want 90s", got)
+				}
+				if !slices.Equal(subscription.routeSet, []string{"<sip:pcscf.example.com;lr>"}) {
+					t.Fatalf("subscription routeSet = %v", subscription.routeSet)
+				}
+			}
+		})
 	}
 }
 

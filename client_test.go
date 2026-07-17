@@ -46,6 +46,10 @@ type testTunnelBackoffError struct {
 
 type testTunnelBackoffDeactivatedError struct{}
 
+type testTransportFailure struct {
+	err error
+}
+
 func (e testTunnelBackoffError) Error() string {
 	return "ePDG backoff"
 }
@@ -79,6 +83,18 @@ func (testTunnelBackoffDeactivatedError) BackoffPolicy() swutunnel.BackoffPolicy
 		Deactivated: true,
 		Scope:       swutunnel.BackoffScopeEPDG,
 	}
+}
+
+func (e testTransportFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e testTransportFailure) Unwrap() error {
+	return e.err
+}
+
+func (testTransportFailure) TransportFailed() bool {
+	return true
 }
 
 func testLogger() *slog.Logger {
@@ -230,6 +246,13 @@ func TestOpenIMSWithPCSCFFailover(t *testing.T) {
 			wantSecondErr:   true,
 		},
 		{
+			name:            "fatal transport failure selects next P-CSCF",
+			firstErr:        testTransportFailure{err: errors.New("peer reset connection")},
+			wantOpenCalls:   2,
+			wantSelectCalls: 1,
+			wantSecondErr:   true,
+		},
+		{
 			name:            "504 selects next P-CSCF",
 			firstErr:        fmt.Errorf("registering IMS: %w", &imssip.ResponseError{StatusCode: 504, ReasonPhrase: "Server Time-out"}),
 			wantOpenCalls:   2,
@@ -293,6 +316,14 @@ func TestOpenIMSWithPCSCFFailover(t *testing.T) {
 			}
 			if !errors.Is(err, tt.firstErr) {
 				t.Fatalf("openIMSWithPCSCFFailover() error = %v, want first error", err)
+			}
+			if tt.wantOpenCalls > 1 {
+				for attempt := 1; attempt <= tt.wantOpenCalls; attempt++ {
+					want := fmt.Sprintf("connecting P-CSCF attempt %d", attempt)
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("openIMSWithPCSCFFailover() error = %v, want %q", err, want)
+					}
+				}
 			}
 			if access.openCalls != tt.wantOpenCalls {
 				t.Fatalf("OpenIMS() calls = %d, want %d", access.openCalls, tt.wantOpenCalls)
@@ -2731,31 +2762,106 @@ func TestPCSCFCandidateIPs(t *testing.T) {
 	}
 }
 
-func TestNextPCSCFInfoRotatesAwayFromCurrent(t *testing.T) {
-	info := swutunnel.Info{
-		PCSCFIPs: []net.IP{
-			net.IPv4(10, 0, 0, 2),
-			net.IPv4(10, 0, 0, 3),
-			net.IPv4(10, 0, 0, 1),
+func TestNextPCSCFInfoMarksCurrentUnavailable(t *testing.T) {
+	tests := []struct {
+		name    string
+		ips     []net.IP
+		current net.IP
+		want    []net.IP
+		wantOK  bool
+	}{
+		{
+			name: "removes actual current address and selects following address",
+			ips: []net.IP{
+				net.IPv4(10, 0, 0, 1),
+				net.IPv4(10, 0, 0, 2),
+				net.IPv4(10, 0, 0, 3),
+			},
+			current: net.IPv4(10, 0, 0, 2),
+			want:    []net.IP{net.IPv4(10, 0, 0, 3), net.IPv4(10, 0, 0, 1)},
+			wantOK:  true,
+		},
+		{
+			name:    "missing current address does not remove a candidate",
+			ips:     []net.IP{net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)},
+			current: net.IPv4(10, 0, 0, 9),
+			want:    []net.IP{net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)},
+		},
+		{
+			name:    "single address requires new discovery",
+			ips:     []net.IP{net.IPv4(10, 0, 0, 1)},
+			current: net.IPv4(10, 0, 0, 1),
+			want:    []net.IP{net.IPv4(10, 0, 0, 1)},
 		},
 	}
 
-	got, ok := nextPCSCFInfo(info)
-	if !ok {
-		t.Fatal("nextPCSCFInfo() ok = false, want true")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := swutunnel.Info{PCSCFIPs: tt.ips}
+			got, ok := nextPCSCFInfo(info, tt.current)
+			if ok != tt.wantOK {
+				t.Fatalf("nextPCSCFInfo() ok = %v, want %v", ok, tt.wantOK)
+			}
+			gotIPs := got.PCSCFAddresses()
+			if len(gotIPs) != len(tt.want) {
+				t.Fatalf("PCSCFAddresses() length = %d, want %d", len(gotIPs), len(tt.want))
+			}
+			for i := range tt.want {
+				if !gotIPs[i].Equal(tt.want[i]) {
+					t.Fatalf("PCSCFAddresses()[%d] = %s, want %s", i, gotIPs[i], tt.want[i])
+				}
+			}
+		})
 	}
-	if !got.DefaultPCSCFIP().Equal(net.IPv4(10, 0, 0, 3)) {
-		t.Fatalf("DefaultPCSCFIP() = %s, want 10.0.0.3", got.DefaultPCSCFIP())
+}
+
+func TestVoWiFiAccessSelectNextPCSCF(t *testing.T) {
+	tests := []struct {
+		name      string
+		ips       []net.IP
+		current   net.IP
+		want      []net.IP
+		wantError bool
+	}{
+		{
+			name: "removes selected address",
+			ips: []net.IP{
+				net.IPv4(10, 0, 0, 1),
+				net.IPv4(10, 0, 0, 2),
+				net.IPv4(10, 0, 0, 3),
+			},
+			current: net.IPv4(10, 0, 0, 2),
+			want:    []net.IP{net.IPv4(10, 0, 0, 3), net.IPv4(10, 0, 0, 1)},
+		},
+		{
+			name:      "last address requires discovery",
+			ips:       []net.IP{net.IPv4(10, 0, 0, 1)},
+			current:   net.IPv4(10, 0, 0, 1),
+			want:      []net.IP{net.IPv4(10, 0, 0, 1)},
+			wantError: true,
+		},
 	}
-	want := []net.IP{net.IPv4(10, 0, 0, 3), net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)}
-	gotIPs := got.PCSCFAddresses()
-	if len(gotIPs) != len(want) {
-		t.Fatalf("PCSCFAddresses() length = %d, want %d", len(gotIPs), len(want))
-	}
-	for i := range want {
-		if !gotIPs[i].Equal(want[i]) {
-			t.Fatalf("PCSCFAddresses()[%d] = %s, want %s", i, gotIPs[i], want[i])
-		}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			access := &voWiFiAccess{
+				info:    swutunnel.Info{PCSCFIPs: tt.ips},
+				current: tt.current,
+			}
+			err := access.SelectNextPCSCF()
+			if (err != nil) != tt.wantError {
+				t.Fatalf("SelectNextPCSCF() error = %v, wantError %v", err, tt.wantError)
+			}
+			got := access.pcscfInfo().PCSCFAddresses()
+			if len(got) != len(tt.want) {
+				t.Fatalf("PCSCFAddresses() length = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range tt.want {
+				if !got[i].Equal(tt.want[i]) {
+					t.Fatalf("PCSCFAddresses()[%d] = %s, want %s", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }
 
