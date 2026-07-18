@@ -54,7 +54,11 @@ func (a *voWiFiAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcc
 	a.current = append(net.IP(nil), selectedPCSCF...)
 	a.mu.Unlock()
 	return imsAccess{
-		SIP:       transport,
+		SIP: transport,
+		OpenReliableSIP: func(ctx context.Context) (imssession.Transport, error) {
+			reliable, _, err := a.dialPCSCFTCP(ctx, []net.IP{selectedPCSCF})
+			return reliable, err
+		},
 		Security:  a.openSecurity(selectedPCSCF, cfg, associations),
 		OpenMedia: a.openMedia,
 	}, nil
@@ -141,25 +145,25 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 			})
 		},
 	}
+	security.DialSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
+		return a.netstack.DialSecureTCP(ctx, ipsectransport.SecureTCPConfig{
+			TCPConfig: ipsectransport.TCPConfig{
+				LocalPort:  secureCfg.LocalPort,
+				RemotePort: secureCfg.RemotePort,
+				RemoteIP:   selectedPCSCF,
+			},
+			OutboundSPI:   secureCfg.OutboundSPI,
+			InboundSPI:    secureCfg.InboundSPI,
+			Encryption:    secureCfg.Encryption,
+			EncryptionKey: secureCfg.EncryptionKey,
+			Integrity:     secureCfg.Integrity,
+			IntegrityKey:  secureCfg.IntegrityKey,
+			Mode:          secureCfg.Mode,
+			Salt:          secureCfg.Salt,
+			Associations:  associations,
+		})
+	}
 	if cfg.Transport == "tcp" {
-		security.DialSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
-			return a.netstack.DialSecureTCP(ctx, ipsectransport.SecureTCPConfig{
-				TCPConfig: ipsectransport.TCPConfig{
-					LocalPort:  secureCfg.LocalPort,
-					RemotePort: secureCfg.RemotePort,
-					RemoteIP:   selectedPCSCF,
-				},
-				OutboundSPI:   secureCfg.OutboundSPI,
-				InboundSPI:    secureCfg.InboundSPI,
-				Encryption:    secureCfg.Encryption,
-				EncryptionKey: secureCfg.EncryptionKey,
-				Integrity:     secureCfg.Integrity,
-				IntegrityKey:  secureCfg.IntegrityKey,
-				Mode:          secureCfg.Mode,
-				Salt:          secureCfg.Salt,
-				Associations:  associations,
-			})
-		}
 		security.ListenSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
 			return a.netstack.ListenSecureTCP(ctx, ipsectransport.SecureTCPConfig{
 				TCPConfig: ipsectransport.TCPConfig{

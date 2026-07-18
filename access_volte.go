@@ -118,7 +118,12 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 	return imsAccess{
 		AccessNetworkInfo: accessNetworkInfo,
 		SIP:               transport,
-		Security:          a.openSecurity(route.RemoteIP, cfg, ipsecSession, netstack),
+		OpenReliableSIP: func(ctx context.Context) (imssession.Transport, error) {
+			reliableCfg := cfg
+			reliableCfg.Transport = "tcp"
+			return a.openSIPTransportTo(ctx, reliableCfg, route)
+		},
+		Security: a.openSecurity(route.RemoteIP, cfg, ipsecSession, netstack),
 		OpenMedia: func(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 			return a.openMedia(ctx, cfg)
 		},

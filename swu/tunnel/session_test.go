@@ -5375,6 +5375,54 @@ func TestWriteInnerPacketRejectsPacketsOutsideTrafficSelectors(t *testing.T) {
 	}
 }
 
+func TestTrafficSelectorMatchesICMPTypeCode(t *testing.T) {
+	tests := []struct {
+		name           string
+		protocol       byte
+		ip             net.IP
+		typ            byte
+		code           byte
+		fragmentOffset uint16
+		start          uint16
+		end            uint16
+		want           bool
+	}{
+		{name: "IPv4 exact echo request", protocol: packet.ProtocolICMP, ip: net.IPv4(10, 0, 0, 1), typ: 8, start: 8 << 8, end: 8 << 8, want: true},
+		{name: "IPv4 code outside range", protocol: packet.ProtocolICMP, ip: net.IPv4(10, 0, 0, 1), typ: 3, code: 4, start: 3 << 8, end: 3<<8 | 3},
+		{name: "IPv6 exact echo request", protocol: packet.ProtocolICMPv6, ip: net.ParseIP("2001:db8::1"), typ: 128, start: 128 << 8, end: 128 << 8, want: true},
+		{name: "wildcard accepts non-first fragment", protocol: packet.ProtocolICMPv6, ip: net.ParseIP("2001:db8::1"), fragmentOffset: 1, end: 65535, want: true},
+		{name: "specific selector rejects non-first fragment", protocol: packet.ProtocolICMPv6, ip: net.ParseIP("2001:db8::1"), fragmentOffset: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			selectors := ike.TrafficSelectorsAny()
+			selector := selectors[0]
+			if tt.ip.To4() == nil {
+				selector = selectors[1]
+			}
+			selector.ProtocolID = tt.protocol
+			binary.BigEndian.PutUint16(selector.Data[0:2], tt.start)
+			binary.BigEndian.PutUint16(selector.Data[2:4], tt.end)
+
+			pkt := packet.InnerPacket{IP: packet.IPPacket{
+				Protocol:       tt.protocol,
+				SrcIP:          tt.ip,
+				DstIP:          tt.ip,
+				Payload:        []byte{tt.typ, tt.code},
+				FragmentOffset: tt.fragmentOffset,
+			}}
+			_, _, protocol, srcPort, dstPort, portKnown := innerPacketSelectorFields(pkt)
+			if protocol != tt.protocol || srcPort != dstPort {
+				t.Fatalf("selector fields = protocol %d ports %d/%d, want protocol %d and equal ports", protocol, srcPort, dstPort, tt.protocol)
+			}
+			got := trafficSelectorMatchesPacket(selector, tt.ip, protocol, srcPort, portKnown)
+			if got != tt.want {
+				t.Fatalf("trafficSelectorMatchesPacket() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestActiveInboundChildSAByteHardLifetimeExpiresCurrentSA(t *testing.T) {
 	tests := []struct {
 		name         string

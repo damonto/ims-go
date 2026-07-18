@@ -604,6 +604,7 @@ func (s *Registrar) openRegisterSecurity(ctx context.Context) (*registerSecurity
 	}
 	registration.inboundTransports = inboundTransports
 	registration.inboundAttachments = inboundAttachments
+	s.addReliableOutboundTransport(ctx, registration, verify, flow)
 	responseAttachments, err := s.startSecureResponseTransportsWithKeys(ctx, verify, flow, outbound, inboundTransports, s.authCK, s.authIK)
 	if err != nil {
 		registration.close()
@@ -611,6 +612,34 @@ func (s *Registrar) openRegisterSecurity(ctx context.Context) (*registerSecurity
 	}
 	registration.responseAttachments = responseAttachments
 	return registration, nil
+}
+
+func (s *Registrar) addReliableOutboundTransport(ctx context.Context, registration *registerSecurity, verify *security.Param, flow Flow) {
+	if registration == nil || registration.outbound == nil || s.cfg.DialSecureTCP == nil ||
+		!strings.EqualFold(sip.TransportToken(registration.outbound.LocalAddr()), "UDP") {
+		return
+	}
+	reliable, err := s.cfg.DialSecureTCP(ctx, secureTransportConfigWithKeys(
+		verify,
+		flow.SecurityClient.PortC,
+		verify.PortS,
+		verify.SPIS,
+		flow.SecurityClient.SPIC,
+		s.authCK,
+		s.authIK,
+	))
+	if err != nil {
+		s.logger.Warn("secure TCP fallback is unavailable", "err", err)
+		return
+	}
+	attachment, err := s.sess.AddTransport(reliable)
+	if err != nil {
+		_ = reliable.Close()
+		s.logger.Warn("adding secure TCP fallback", "err", err)
+		return
+	}
+	registration.inboundTransports = append(registration.inboundTransports, reliable)
+	registration.inboundAttachments = append(registration.inboundAttachments, attachment)
 }
 
 func (s *Registrar) exchangeProtectedRegister(ctx context.Context, registration *registerSecurity, auth *security.Authorization) (sip.Message, error) {

@@ -2388,8 +2388,8 @@ func TestHandleMalformedInboundRPDataReturnsRPError96(t *testing.T) {
 
 func newServiceTransport() *serviceStubTransport {
 	return &serviceStubTransport{
-		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
-		remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+		local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+		remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 		readCh: make(chan []byte, 16),
 	}
 }

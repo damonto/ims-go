@@ -33,9 +33,10 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	}
 
 	imsSession, err := imssession.Open(imssession.Config{
-		Transport:         setup.imsCfg.Transport,
-		Logger:            c.cfg.Logger,
-		TransactionTimers: setup.imsCfg.SIPTimers,
+		Transport:             setup.imsCfg.Transport,
+		Logger:                c.cfg.Logger,
+		TransactionTimers:     setup.imsCfg.SIPTimers,
+		OpenReliableTransport: accessIMS.OpenReliableSIP,
 	}, accessIMS.SIP)
 	if err != nil {
 		return fmt.Errorf("opening IMS session: %w", err)

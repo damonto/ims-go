@@ -427,6 +427,20 @@ func fullAddress(addr *net.UDPAddr) *tcpip.FullAddress {
 func (t *NetstackTCPConn) LocalAddr() net.Addr  { return cloneTCPAddr(t.local) }
 func (t *NetstackTCPConn) RemoteAddr() net.Addr { return cloneTCPAddr(t.remote) }
 
+// OutboundCapable reports whether this transport owns an initiated connection.
+func (t *NetstackTCPConn) OutboundCapable() bool { return !t.passive }
+
+// SecureTransport reports whether the connection is protected by an IPsec policy.
+func (t *NetstackTCPConn) SecureTransport() bool { return t.policy != nil }
+
+// SecurityAssociationID identifies the security context protecting the connection.
+func (t *NetstackTCPConn) SecurityAssociationID() string {
+	if t.policy == nil {
+		return ""
+	}
+	return t.policy.associationID
+}
+
 func (t *NetstackTCPConn) flowKey() netstackFlowKey {
 	return netstackFlowKeyForAddresses(packet.ProtocolTCP, t.local.IP, t.remote.IP, t.local.Port, t.remote.Port)
 }
@@ -641,6 +655,17 @@ func (t *NetstackTCPConn) Close() error {
 
 func (t *NetstackUDPConn) LocalAddr() net.Addr  { return cloneUDPAddr(t.local) }
 func (t *NetstackUDPConn) RemoteAddr() net.Addr { return cloneUDPAddr(t.remote) }
+
+// SecureTransport reports whether the connection is protected by an IPsec policy.
+func (t *NetstackUDPConn) SecureTransport() bool { return t.policy != nil }
+
+// SecurityAssociationID identifies the security context protecting the connection.
+func (t *NetstackUDPConn) SecurityAssociationID() string {
+	if t.policy == nil {
+		return ""
+	}
+	return t.policy.associationID
+}
 
 func (t *NetstackUDPConn) flowKey(remote *net.UDPAddr) netstackFlowKey {
 	return netstackFlowKeyForAddresses(packet.ProtocolUDP, t.local.IP, remote.IP, t.local.Port, remote.Port)

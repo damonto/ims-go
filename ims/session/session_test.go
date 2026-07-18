@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,12 @@ type stubTransport struct {
 type basicTransport struct{ stub *stubTransport }
 
 type keepAliveDisabledTransport struct{ *stubTransport }
+
+type secureStubTransport struct {
+	*stubTransport
+	associationID string
+	outbound      bool
+}
 
 type readErrorTransport struct {
 	*stubTransport
@@ -132,6 +139,10 @@ func newUnreliableWriteErrorTransport(err error) *writeErrorTransport {
 
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
+
+func (t *secureStubTransport) SecureTransport() bool         { return true }
+func (t *secureStubTransport) SecurityAssociationID() string { return t.associationID }
+func (t *secureStubTransport) OutboundCapable() bool         { return t.outbound }
 
 func (t *stubTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	select {
@@ -2799,6 +2810,149 @@ func newRequest(method, callID, cseq string) sip.Message {
 		{Name: "Content-Length", Value: "0"},
 	}
 	return msg
+}
+
+func TestPrepareRequestTransportRejectsOversizedUDPWithoutReliableFlow(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "opener is absent"},
+		{
+			name: "opener returns nil",
+			cfg: Config{OpenReliableTransport: func(context.Context) (Transport, error) {
+				return nil, nil
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newStubTransport(5062, 5060)
+			sess, err := Open(tt.cfg, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			defer sess.Close()
+
+			req := newRequest("MESSAGE", "call-large", "1 MESSAGE")
+			req.Body = make([]byte, sipDatagramRequestLimit)
+			req.Headers.Set("Content-Length", fmt.Sprint(len(req.Body)))
+			if err := sess.Send(context.Background(), req); err == nil {
+				t.Fatal("Send() error = nil, want reliable transport error")
+			}
+			if got := transport.writeCount(); got != 0 {
+				t.Fatalf("UDP write count = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestActiveReliableTransportMatchesSecurityAssociation(t *testing.T) {
+	newSecureTransport := func(network, associationID string) *secureStubTransport {
+		stub := newStubTransport(5062, 5060)
+		if network == "tcp" {
+			stub.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062}
+			stub.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+		}
+		return &secureStubTransport{stubTransport: stub, associationID: associationID, outbound: true}
+	}
+
+	tests := []struct {
+		name               string
+		preferredID        string
+		candidateIDs       []string
+		wantCandidateIndex int
+	}{
+		{name: "skip old security association", preferredID: "new", candidateIDs: []string{"old", "new"}, wantCandidateIndex: 1},
+		{name: "association identity unavailable", candidateIDs: []string{""}, wantCandidateIndex: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preferred := newSecureTransport("udp", tt.preferredID)
+			sess, err := Open(Config{}, preferred)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			defer sess.Close()
+
+			candidates := make([]*secureStubTransport, 0, len(tt.candidateIDs))
+			for _, associationID := range tt.candidateIDs {
+				candidate := newSecureTransport("tcp", associationID)
+				if _, err := sess.AddTransport(candidate); err != nil {
+					t.Fatalf("AddTransport() error = %v", err)
+				}
+				candidates = append(candidates, candidate)
+			}
+
+			got := sess.activeReliableTransport(preferred)
+			if tt.wantCandidateIndex < 0 {
+				if got != nil {
+					t.Fatalf("activeReliableTransport() = %T, want nil", got)
+				}
+				return
+			}
+			if got != candidates[tt.wantCandidateIndex] {
+				t.Fatalf("activeReliableTransport() = %p, want candidate %d (%p)", got, tt.wantCandidateIndex, candidates[tt.wantCandidateIndex])
+			}
+		})
+	}
+}
+
+func TestSetRequestViaTransportPreservesRemainingViaValues(t *testing.T) {
+	tcp := newStubTransport(6062, 5060)
+	tcp.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6062}
+	tcp.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+
+	tests := []struct {
+		name    string
+		headers sip.Headers
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:    "single Via",
+			headers: sip.Headers{{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5062;branch=first"}},
+			want:    []string{"SIP/2.0/TCP 127.0.0.1:6062;branch=first"},
+		},
+		{
+			name: "repeated Via fields",
+			headers: sip.Headers{
+				{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5062;branch=first"},
+				{Name: "Via", Value: "SIP/2.0/UDP 192.0.2.10:5060;branch=second"},
+			},
+			want: []string{
+				"SIP/2.0/TCP 127.0.0.1:6062;branch=first",
+				"SIP/2.0/UDP 192.0.2.10:5060;branch=second",
+			},
+		},
+		{
+			name:    "comma separated Via values",
+			headers: sip.Headers{{Name: "Via", Value: "SIP/2.0/UDP 127.0.0.1:5062;branch=first, SIP/2.0/UDP 192.0.2.10:5060;branch=second"}},
+			want:    []string{"SIP/2.0/TCP 127.0.0.1:6062;branch=first, SIP/2.0/UDP 192.0.2.10:5060;branch=second"},
+		},
+		{name: "missing Via", wantErr: true},
+		{name: "malformed Via", headers: sip.Headers{{Name: "Via", Value: "malformed"}}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := sip.NewRequest("MESSAGE", "sip:test@example.com")
+			req.Headers = tt.headers.Clone()
+			err := setRequestViaTransport(&req, tcp)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("setRequestViaTransport() error = nil, want non-nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("setRequestViaTransport() error = %v", err)
+			}
+			got := req.Headers.Values("Via")
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("Via headers = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func newInboundRequest(method, callID, cseq string) sip.Message {

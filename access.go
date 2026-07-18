@@ -50,6 +50,7 @@ type accessIMSConfig struct {
 type imsAccess struct {
 	AccessNetworkInfo string
 	SIP               imssession.Transport
+	OpenReliableSIP   func(context.Context) (imssession.Transport, error)
 	Security          imsSecurity
 	OpenMedia         func(context.Context, imsvoice.MediaConfig) (imsvoice.MediaTransport, error)
 }

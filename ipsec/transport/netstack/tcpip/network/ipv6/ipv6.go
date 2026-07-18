@@ -51,8 +51,6 @@ const (
 	// ProtocolNumber is the ipv6 protocol number.
 	ProtocolNumber = header.IPv6ProtocolNumber
 
-	unsupportedControlProtocolNumber tcpip.TransportProtocolNumber = 58
-
 	// maxPayloadSize is the maximum size that can be encoded in the 16-bit
 	// PayloadLength field of the ipv6 header.
 	maxPayloadSize = 0xffff
@@ -903,7 +901,9 @@ func (e *endpoint) processIPv6RawPayloadHeader(extHdr *header.IPv6RawPayloadHead
 	}
 
 	stats.PacketsDelivered.Increment()
-	if proto == unsupportedControlProtocolNumber {
+	if proto == 58 {
+		pkt.TransportProtocolNumber = proto
+		e.handleICMP(pkt)
 		return nil
 	}
 	switch res := e.dispatcher.DeliverTransportPacket(proto, pkt); res {
@@ -1592,7 +1592,7 @@ func (p *protocol) parseAndValidate(pkt *stack.PacketBuffer) (*buffer.View, bool
 }
 
 func (p *protocol) parseTransport(pkt *stack.PacketBuffer, transProtoNum tcpip.TransportProtocolNumber) {
-	if transProtoNum == unsupportedControlProtocolNumber {
+	if transProtoNum == 58 {
 		return
 	}
 

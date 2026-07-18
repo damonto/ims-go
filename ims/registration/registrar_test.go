@@ -976,13 +976,16 @@ func TestSecureTransportConfigExpandsHMACSHA1IntegrityKey(t *testing.T) {
 }
 
 func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) {
-	initial := newUDPTransport(5062, 5060)
+	initial := newTCPTransport(5062, 5060)
 	firstOutbound := newUDPTransport(45000, 4060)
+	firstReliable := newTCPTransport(45002, 4060)
 	firstInbound := newUDPTransport(5063, 45000)
 	nextOutbound := newUDPTransport(45001, 4600)
+	nextReliable := newTCPTransport(45003, 4600)
 	nextInbound := newUDPTransport(5063, 45001)
 
 	dialed := 0
+	reliableDialed := 0
 	listened := 0
 	var secondDialCfg session.SecureUDPConfig
 	var secondListenCfg session.SecureUDPConfig
@@ -1003,6 +1006,13 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 			}
 			return firstInbound, nil
 		},
+		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
+			reliableDialed++
+			if reliableDialed == 2 {
+				return nextReliable, nil
+			}
+			return firstReliable, nil
+		},
 	}, initial, stubCard{})
 
 	firstNonce := "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
@@ -1011,14 +1021,14 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 		req := mustParseMessage(t, data)
 		initial.queue(newUnauthorizedRegisterResponse(req, firstNonce, 4062))
 	}
-	firstOutbound.onWrite = func(data []byte) {
+	firstReliable.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
 		if req.Method() != "REGISTER" {
 			t.Fatalf("first secure method = %q, want REGISTER", req.Method())
 		}
-		firstInbound.queue(newUnauthorizedRegisterResponse(req, secondNonce, 4600))
+		firstReliable.queue(newUnauthorizedRegisterResponse(req, secondNonce, 4600))
 	}
-	nextOutbound.onWrite = func(data []byte) {
+	nextReliable.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
 		if got := req.Header("Authorization"); !strings.Contains(got, `nonce="`+secondNonce+`"`) {
 			t.Fatalf("Authorization = %q, want second nonce", got)
@@ -1026,7 +1036,7 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 		if got := req.Header("Security-Verify"); !strings.Contains(got, "port-c=4600") {
 			t.Fatalf("Security-Verify = %q, want refreshed Security-Server", got)
 		}
-		nextInbound.queue(newResponse(req, 200, "OK"))
+		nextReliable.queue(newResponse(req, 200, "OK"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1043,11 +1053,11 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 	if secondListenCfg.RemotePort != 4600 {
 		t.Fatalf("second listen remote port = %d, want refreshed P-CSCF protected client port 4600", secondListenCfg.RemotePort)
 	}
-	if got := countWrites(firstOutbound); got != 1 {
-		t.Fatalf("first outbound writes = %d, want 1", got)
+	if got := countWrites(firstReliable); got != 1 {
+		t.Fatalf("first reliable writes = %d, want 1", got)
 	}
-	if got := countWrites(nextOutbound); got != 1 {
-		t.Fatalf("next outbound writes = %d, want 1", got)
+	if got := countWrites(nextReliable); got != 1 {
+		t.Fatalf("next reliable writes = %d, want 1", got)
 	}
 }
 
@@ -1581,8 +1591,9 @@ func TestRegisterFailureDeletesIncompleteSecurityAssociations(t *testing.T) {
 }
 
 func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
-	initial := newUDPTransport(5062, 5060)
+	initial := newTCPTransport(5062, 5060)
 	secure := newUDPTransport(45000, 5060)
+	reliable := newTCPTransport(45001, 5060)
 	serverUDP := newUDPTransport(5063, 45000)
 
 	var dialCfg session.SecureUDPConfig
@@ -1597,18 +1608,21 @@ func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 			listenUDPCfg = cfg
 			return serverUDP, nil
 		},
+		DialSecureTCP: func(context.Context, session.SecureTCPConfig) (session.Transport, error) {
+			return reliable, nil
+		},
 	}, initial, stubCard{})
 
 	initial.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
 		initial.queue(newUnauthorizedRegisterResponse(req, "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI=", 4062))
 	}
-	secure.onWrite = func(data []byte) {
+	reliable.onWrite = func(data []byte) {
 		req := mustParseMessage(t, data)
 		if req.Method() != "REGISTER" {
 			t.Fatalf("unexpected method %q", req.Method())
 		}
-		serverUDP.queue(newResponse(req, 200, "OK"))
+		reliable.queue(newResponse(req, 200, "OK"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1897,7 +1911,6 @@ func TestRegisterTreatsTransportFailureAsInitialRegistrationRequired(t *testing.
 		transport *stubTransport
 	}{
 		{"TCP fatal transport error", newTCPTransport(5062, 5060)},
-		{"UDP fatal transport error", newUDPTransport(5062, 5060)},
 	}
 
 	for _, tt := range tests {
@@ -1993,7 +2006,7 @@ func TestBuildRegisterViaIncludesRFC6223Keep(t *testing.T) {
 	}
 }
 func TestRegisterAppliesChallengeAndSuccessState(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 
 	transport.onWrite = func(data []byte) {
@@ -2049,7 +2062,7 @@ func TestRegisterRequiresInitialRegistrationOnInitialRetryStatus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2085,7 +2098,7 @@ func TestRegisterRequiresInitialRegistrationOnProtectedRetryStatus(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2129,7 +2142,7 @@ func TestRegisterInitialRegistrationErrorCarriesRetryAfter(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2175,7 +2188,7 @@ func TestRegisterRejectsInvalidAuthenticationInfoRspauth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2214,7 +2227,7 @@ func TestRegisterRequiresPCSCFReselectionOnUseProxy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2263,7 +2276,7 @@ func TestRegisterInitialRegistrationRequiredStatusClasses(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2379,7 +2392,7 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 
 			transport.onWrite = func(data []byte) {
@@ -2404,7 +2417,7 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 }
 
 func TestRegisterRetries423MinExpires(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{RegisterExpires: time.Minute}, transport, stubCard{})
 
 	transport.onWrite = func(data []byte) {
@@ -2428,7 +2441,7 @@ func TestRegisterRetries423MinExpires(t *testing.T) {
 }
 
 func TestRegisterHandlesRechallenge401(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 
 	firstNonce := "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
@@ -2536,7 +2549,7 @@ func TestRegisterKeepsUDPResponseTransportForTCPFlow(t *testing.T) {
 	}
 }
 func TestRefreshUsesAuthenticationInfoNextNonce(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
 
@@ -2566,7 +2579,7 @@ func TestRefreshRequiresInitialRegistrationOnRestartStatus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newUDPTransport(5062, 5060)
+			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
 			registerService(t, svc, transport)
 
@@ -2593,7 +2606,7 @@ func TestRefreshRequiresInitialRegistrationOnRestartStatus(t *testing.T) {
 }
 
 func TestRefreshReauthenticationRequiresSecureDialer(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
@@ -2615,8 +2628,8 @@ func TestRefreshReauthenticationRequiresSecureDialer(t *testing.T) {
 	if err == nil {
 		t.Fatal("Refresh() error = nil, want missing secure dialer")
 	}
-	if !strings.Contains(err.Error(), "UDP dialer is not configured") {
-		t.Fatalf("Refresh() error = %v, want missing UDP dialer", err)
+	if !strings.Contains(err.Error(), "TCP dialer is not configured") {
+		t.Fatalf("Refresh() error = %v, want missing TCP dialer", err)
 	}
 }
 
@@ -3301,7 +3314,7 @@ func TestRegistrationRefreshRejectsConcurrentRefresh(t *testing.T) {
 }
 
 func TestMaintainRefreshesOnInterval(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{RegisterExpires: 2 * time.Second}, transport, stubCard{})
 	registerService(t, svc, transport)
 
@@ -3425,7 +3438,7 @@ func TestRefreshIntervalFollowsIMSRegistrationExpiryRules(t *testing.T) {
 	}
 }
 func TestDeregisterRetriesAfterChallenge(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
 	svc.mu.Lock()
@@ -3480,7 +3493,7 @@ func TestDeregisterRetriesAfterChallenge(t *testing.T) {
 }
 
 func TestDeregisterAfterRunExitFallsBackToSynchronousExchange(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
 
@@ -3518,7 +3531,7 @@ func TestDeregisterAfterRunExitFallsBackToSynchronousExchange(t *testing.T) {
 }
 
 func TestDeregisterHandlesChallenge(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
 
@@ -3552,7 +3565,7 @@ func TestDeregisterHandlesChallenge(t *testing.T) {
 }
 
 func TestDeregisterReusesDigestCredential(t *testing.T) {
-	transport := newUDPTransport(5062, 5060)
+	transport := newTCPTransport(5062, 5060)
 	card := &failAfterFirstAKACard{}
 	svc := newTestService(t, Config{}, transport, card)
 	registerService(t, svc, transport)

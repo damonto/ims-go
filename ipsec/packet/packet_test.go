@@ -572,7 +572,7 @@ func TestPacketsRejectLengthOverflow(t *testing.T) {
 	}
 }
 
-func TestIPPacketRejectsFragmentsBeforeESPProcessing(t *testing.T) {
+func TestIPPacketPreservesFragmentsForNetworkReassembly(t *testing.T) {
 	ipv4, err := (IPPacket{
 		Version:  IPVersion4,
 		Protocol: ProtocolESP,
@@ -592,25 +592,119 @@ func TestIPPacketRejectsFragmentsBeforeESPProcessing(t *testing.T) {
 		Protocol: 44,
 		SrcIP:    net.ParseIP("2001:db8::1"),
 		DstIP:    net.ParseIP("2001:db8::2"),
-		Payload:  make([]byte, 8),
+		Payload:  make([]byte, 16),
 	}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() IPv6 fixture error = %v", err)
 	}
+	ipv6[40] = ProtocolESP
+	binary.BigEndian.PutUint16(ipv6[42:44], 1)
 
 	tests := []struct {
-		name   string
-		packet []byte
+		name         string
+		packet       []byte
+		wantVersion  int
+		wantProtocol byte
+		wantMore     bool
 	}{
-		{name: "ipv4 more fragments", packet: ipv4},
-		{name: "ipv6 fragment header", packet: ipv6},
+		{name: "ipv4 more fragments", packet: ipv4, wantVersion: IPVersion4, wantProtocol: ProtocolESP, wantMore: true},
+		{name: "ipv6 fragment header", packet: ipv6, wantVersion: IPVersion6, wantProtocol: ProtocolESP, wantMore: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var packet IPPacket
-			if err := packet.UnmarshalBinary(tt.packet); err == nil {
-				t.Fatal("UnmarshalBinary() error = nil, want fragment rejection")
+			if err := packet.UnmarshalBinary(tt.packet); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if packet.Version != tt.wantVersion || packet.Protocol != tt.wantProtocol || packet.MoreFragments != tt.wantMore {
+				t.Fatalf("UnmarshalBinary() = %+v, want version=%d protocol=%d more=%t", packet, tt.wantVersion, tt.wantProtocol, tt.wantMore)
+			}
+		})
+	}
+}
+
+func TestIPPacketPreservesIPv6NonFirstFragmentPayload(t *testing.T) {
+	tests := []struct {
+		name       string
+		nextHeader byte
+		payload    []byte
+	}{
+		{name: "destination options next header", nextHeader: 60, payload: []byte{17, 0xff, 0xaa, 0xbb}},
+		{name: "authentication next header", nextHeader: 51, payload: []byte{17, 0xff, 0xcc, 0xdd}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fragment := make([]byte, 8+len(tt.payload))
+			fragment[0] = tt.nextHeader
+			binary.BigEndian.PutUint16(fragment[2:4], 1<<3)
+			copy(fragment[8:], tt.payload)
+			wire, err := (IPPacket{
+				Version:  IPVersion6,
+				Protocol: 44,
+				SrcIP:    net.ParseIP("2001:db8::1"),
+				DstIP:    net.ParseIP("2001:db8::2"),
+				Payload:  fragment,
+			}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() fixture error = %v", err)
+			}
+
+			var got IPPacket
+			if err := got.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if got.Protocol != tt.nextHeader || got.FragmentOffset != 1 || got.MoreFragments {
+				t.Fatalf("fragment metadata = protocol %d offset %d more %t, want %d/1/false", got.Protocol, got.FragmentOffset, got.MoreFragments, tt.nextHeader)
+			}
+			if !slices.Equal(got.Payload, tt.payload) {
+				t.Fatalf("Payload = %x, want %x", got.Payload, tt.payload)
+			}
+		})
+	}
+}
+
+func TestInnerPacketMarshalBinaryUsesStructuredFields(t *testing.T) {
+	tests := []struct {
+		name string
+		src  net.IP
+		dst  net.IP
+	}{
+		{name: "IPv4", src: net.IPv4(10, 0, 0, 1), dst: net.IPv4(10, 0, 0, 2)},
+		{name: "IPv6", src: net.ParseIP("2001:db8::1"), dst: net.ParseIP("2001:db8::2")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original, err := (InnerPacket{UDP: &UDPSegment{
+				Src:     &net.UDPAddr{IP: tt.src, Port: 5062},
+				Dst:     &net.UDPAddr{IP: tt.dst, Port: 5060},
+				Payload: []byte("before"),
+			}}).MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() fixture error = %v", err)
+			}
+			var packet InnerPacket
+			if err := packet.UnmarshalBinary(original); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			packet.UDP.Payload = []byte("after")
+
+			wire, err := packet.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if slices.Equal(wire, original) {
+				t.Fatal("MarshalBinary() returned original wire after structured modification")
+			}
+			var decoded InnerPacket
+			if err := decoded.UnmarshalBinary(wire); err != nil {
+				t.Fatalf("UnmarshalBinary() modified error = %v", err)
+			}
+			if got := string(decoded.UDP.Payload); got != "after" {
+				t.Fatalf("UDP payload = %q, want %q", got, "after")
+			}
+			if got := packet.OriginalWire(); !slices.Equal(got, original) {
+				t.Fatalf("OriginalWire() = %x, want %x", got, original)
 			}
 		})
 	}

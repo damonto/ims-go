@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	ProtocolTCP byte = 6
-	ProtocolUDP byte = 17
-	ProtocolESP byte = 50
+	ProtocolICMP   byte = 1
+	ProtocolTCP    byte = 6
+	ProtocolUDP    byte = 17
+	ProtocolESP    byte = 50
+	ProtocolICMPv6 byte = 58
 
 	IPVersion4 int = 4
 	IPVersion6 int = 6
@@ -48,11 +50,13 @@ var (
 )
 
 type IPPacket struct {
-	Version  int
-	Protocol byte
-	SrcIP    net.IP
-	DstIP    net.IP
-	Payload  []byte
+	Version        int
+	Protocol       byte
+	SrcIP          net.IP
+	DstIP          net.IP
+	Payload        []byte
+	FragmentOffset uint16
+	MoreFragments  bool
 }
 
 type UDPSegment struct {
@@ -76,10 +80,11 @@ type TCPSegment struct {
 }
 
 type InnerPacket struct {
-	IP  IPPacket
-	UDP *UDPSegment
-	TCP *TCPSegment
-	ESP *esp.ESPPacket
+	IP   IPPacket
+	UDP  *UDPSegment
+	TCP  *TCPSegment
+	ESP  *esp.ESPPacket
+	wire []byte
 }
 
 func NextHeaderForVersion(version int) (byte, error) {
@@ -171,17 +176,23 @@ func (p IPPacket) MarshalBinary() ([]byte, error) {
 }
 
 func (p *IPPacket) UnmarshalBinary(data []byte) error {
-	version, proto, src, dst, payload, err := decodeIPPacket(data)
+	if len(data) == 0 {
+		return errors.New("parsing ip packet: packet is empty")
+	}
+	var decoded IPPacket
+	var err error
+	switch int(data[0] >> 4) {
+	case IPVersion4:
+		err = decoded.unmarshalIPv4(data)
+	case IPVersion6:
+		err = decoded.unmarshalIPv6(data)
+	default:
+		err = fmt.Errorf("parsing ip packet: unsupported version %d", data[0]>>4)
+	}
 	if err != nil {
 		return err
 	}
-	*p = IPPacket{
-		Version:  version,
-		Protocol: proto,
-		SrcIP:    src,
-		DstIP:    dst,
-		Payload:  payload,
-	}
+	*p = decoded
 	return nil
 }
 
@@ -333,7 +344,11 @@ func (p *InnerPacket) UnmarshalBinary(data []byte) error {
 	if err := ip.UnmarshalBinary(data); err != nil {
 		return err
 	}
-	packet := InnerPacket{IP: ip}
+	packet := InnerPacket{IP: ip, wire: append([]byte(nil), data...)}
+	if ip.FragmentOffset != 0 || ip.MoreFragments {
+		*p = packet
+		return nil
+	}
 	switch ip.Protocol {
 	case ProtocolUDP:
 		segment, err := decodeUDPSegment(ip.SrcIP, ip.DstIP, ip.Payload)
@@ -356,6 +371,12 @@ func (p *InnerPacket) UnmarshalBinary(data []byte) error {
 	}
 	*p = packet
 	return nil
+}
+
+// OriginalWire returns the exact IP packet accepted by UnmarshalBinary.
+// Callers should use MarshalBinary after changing structured fields.
+func (p InnerPacket) OriginalWire() []byte {
+	return append([]byte(nil), p.wire...)
 }
 
 func (p InnerPacket) OuterNextHeader() (byte, error) {
@@ -384,53 +405,105 @@ func (p InnerPacket) normalizedIPVersion() (int, error) {
 	return version, nil
 }
 
-func decodeIPPacket(packet []byte) (int, byte, net.IP, net.IP, []byte, error) {
-	if len(packet) == 0 {
-		return 0, 0, nil, nil, nil, errors.New("parsing ip packet: packet is empty")
-	}
-	switch int(packet[0] >> 4) {
-	case IPVersion4:
-		return decodeIPv4Packet(packet)
-	case IPVersion6:
-		return decodeIPv6Packet(packet)
-	default:
-		return 0, 0, nil, nil, nil, fmt.Errorf("parsing ip packet: unsupported version %d", packet[0]>>4)
-	}
-}
-
-func decodeIPv4Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) {
+func (p *IPPacket) unmarshalIPv4(packet []byte) error {
 	if len(packet) < 20 {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: packet too short")
+		return errors.New("parsing ipv4 packet: packet too short")
 	}
 	ihl := int(packet[0]&0x0f) * 4
 	if ihl < 20 || len(packet) < ihl {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid header length")
+		return errors.New("parsing ipv4 packet: invalid header length")
 	}
 	if ipv4HeaderChecksum(packet[:ihl]) != 0 {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid header checksum")
-	}
-	if binary.BigEndian.Uint16(packet[6:8])&0x3fff != 0 {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: fragments are not accepted by ESP")
+		return errors.New("parsing ipv4 packet: invalid header checksum")
 	}
 	total := int(binary.BigEndian.Uint16(packet[2:4]))
 	if total < ihl || len(packet) < total {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv4 packet: invalid total length")
+		return errors.New("parsing ipv4 packet: invalid total length")
 	}
-	return IPVersion4, packet[9], append(net.IP(nil), packet[12:16]...), append(net.IP(nil), packet[16:20]...), append([]byte(nil), packet[ihl:total]...), nil
+	fragment := binary.BigEndian.Uint16(packet[6:8])
+	*p = IPPacket{
+		Version:        IPVersion4,
+		Protocol:       packet[9],
+		SrcIP:          append(net.IP(nil), packet[12:16]...),
+		DstIP:          append(net.IP(nil), packet[16:20]...),
+		Payload:        append([]byte(nil), packet[ihl:total]...),
+		FragmentOffset: fragment & 0x1fff,
+		MoreFragments:  fragment&0x2000 != 0,
+	}
+	return nil
 }
 
-func decodeIPv6Packet(packet []byte) (int, byte, net.IP, net.IP, []byte, error) {
+func (p *IPPacket) unmarshalIPv6(packet []byte) error {
 	if len(packet) < 40 {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv6 packet: packet too short")
+		return errors.New("parsing ipv6 packet: packet too short")
 	}
 	length := int(binary.BigEndian.Uint16(packet[4:6]))
 	if len(packet) < 40+length {
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv6 packet: invalid payload length")
+		return errors.New("parsing ipv6 packet: invalid payload length")
 	}
-	if packet[6] == 44 { // IPv6 Fragment header
-		return 0, 0, nil, nil, nil, errors.New("parsing ipv6 packet: fragments are not accepted by ESP")
+	total := 40 + length
+	protocol := packet[6]
+	offset := 40
+	var fragmentOffset uint16
+	var moreFragments bool
+	for {
+		switch protocol {
+		case 0, 43, 60: // Hop-by-Hop, Routing, Destination Options.
+			if offset+2 > total {
+				return errors.New("parsing ipv6 packet: truncated extension header")
+			}
+			next := packet[offset]
+			headerLength := (int(packet[offset+1]) + 1) * 8
+			if headerLength < 8 || offset+headerLength > total {
+				return errors.New("parsing ipv6 packet: invalid extension header length")
+			}
+			protocol = next
+			offset += headerLength
+		case 44: // Fragment.
+			if offset+8 > total {
+				return errors.New("parsing ipv6 packet: truncated fragment header")
+			}
+			fragment := binary.BigEndian.Uint16(packet[offset+2 : offset+4])
+			fragmentOffset = fragment >> 3
+			moreFragments = fragment&1 != 0
+			protocol = packet[offset]
+			offset += 8
+			if fragmentOffset != 0 {
+				*p = IPPacket{
+					Version:        IPVersion6,
+					Protocol:       protocol,
+					SrcIP:          append(net.IP(nil), packet[8:24]...),
+					DstIP:          append(net.IP(nil), packet[24:40]...),
+					Payload:        append([]byte(nil), packet[offset:total]...),
+					FragmentOffset: fragmentOffset,
+					MoreFragments:  moreFragments,
+				}
+				return nil
+			}
+		case 51: // Authentication Header.
+			if offset+2 > total {
+				return errors.New("parsing ipv6 packet: truncated authentication header")
+			}
+			next := packet[offset]
+			headerLength := (int(packet[offset+1]) + 2) * 4
+			if headerLength < 8 || offset+headerLength > total {
+				return errors.New("parsing ipv6 packet: invalid authentication header length")
+			}
+			protocol = next
+			offset += headerLength
+		default:
+			*p = IPPacket{
+				Version:        IPVersion6,
+				Protocol:       protocol,
+				SrcIP:          append(net.IP(nil), packet[8:24]...),
+				DstIP:          append(net.IP(nil), packet[24:40]...),
+				Payload:        append([]byte(nil), packet[offset:total]...),
+				FragmentOffset: fragmentOffset,
+				MoreFragments:  moreFragments,
+			}
+			return nil
+		}
 	}
-	return IPVersion6, packet[6], append(net.IP(nil), packet[8:24]...), append(net.IP(nil), packet[24:40]...), append([]byte(nil), packet[40:40+length]...), nil
 }
 
 func decodeUDPSegment(srcIP, dstIP net.IP, payload []byte) (UDPSegment, error) {

@@ -993,6 +993,77 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 	}
 }
 
+func (e *endpoint) onICMPError(err tcpip.Error, transErr stack.TransportError, pkt *stack.PacketBuffer) {
+	e.lastErrorMu.Lock()
+	e.lastError = err
+	e.lastErrorMu.Unlock()
+
+	var recvErr bool
+	switch pkt.NetworkProtocolNumber {
+	case header.IPv4ProtocolNumber:
+		recvErr = e.SocketOptions().GetIPv4RecvError()
+	case header.IPv6ProtocolNumber:
+		recvErr = e.SocketOptions().GetIPv6RecvError()
+	default:
+		panic(fmt.Sprintf("unhandled network protocol number = %d", pkt.NetworkProtocolNumber))
+	}
+	if recvErr {
+		payload := pkt.Data().AsRange().ToView()
+		if len(header.UDP(payload.AsSlice())) >= header.UDPMinimumSize {
+			payload.TrimFront(header.UDPMinimumSize)
+		}
+		id := e.net.Info().ID
+		e.mu.RLock()
+		e.SocketOptions().QueueErr(&tcpip.SockError{
+			Err:     err,
+			Cause:   transErr,
+			Payload: payload,
+			Dst: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: id.RemoteAddress,
+				Port: e.remotePort,
+			},
+			Offender: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: id.LocalAddress,
+				Port: e.localPort,
+			},
+			NetProto: pkt.NetworkProtocolNumber,
+		})
+		e.mu.RUnlock()
+	}
+	e.waiterQueue.Notify(waiter.EventErr)
+}
+
+// HandleError implements stack.TransportEndpoint.
+func (e *endpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketBuffer) {
+	if e.net.State() != transport.DatagramEndpointStateConnected {
+		return
+	}
+	switch transErr.Kind() {
+	case stack.PacketTooBigTransportError:
+		e.onICMPError(&tcpip.ErrMessageTooLong{}, transErr, pkt)
+	case stack.DestinationHostUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrHostUnreachable{}, transErr, pkt)
+	case stack.DestinationNetworkUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrNetworkUnreachable{}, transErr, pkt)
+	case stack.DestinationPortUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrConnectionRefused{}, transErr, pkt)
+	case stack.DestinationProtoUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrUnknownProtocolOption{}, transErr, pkt)
+	case stack.SourceRouteFailedTransportError:
+		e.onICMPError(&tcpip.ErrNotSupported{}, transErr, pkt)
+	case stack.SourceHostIsolatedTransportError:
+		e.onICMPError(&tcpip.ErrNoNet{}, transErr, pkt)
+	case stack.DestinationHostDownTransportError:
+		e.onICMPError(&tcpip.ErrHostDown{}, transErr, pkt)
+	case stack.TimeExceededTransportError:
+		e.onICMPError(&tcpip.ErrTimeout{}, transErr, pkt)
+	case stack.ParameterProblemTransportError:
+		e.onICMPError(&tcpip.ErrMalformedHeader{}, transErr, pkt)
+	}
+}
+
 // State implements tcpip.Endpoint.
 func (e *endpoint) State() uint32 {
 	return uint32(e.net.State())

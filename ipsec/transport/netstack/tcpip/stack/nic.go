@@ -533,6 +533,29 @@ func (n *nic) DeliverTransportPacket(protocol tcpip.TransportProtocolNumber, pkt
 	return res
 }
 
+// DeliverTransportError implements TransportDispatcher.
+func (n *nic) DeliverTransportError(local, remote tcpip.Address, netProto tcpip.NetworkProtocolNumber, transProto tcpip.TransportProtocolNumber, transErr TransportError, pkt *PacketBuffer) {
+	state, ok := n.stack.transportProtocols[transProto]
+	if !ok {
+		return
+	}
+	transHeader, ok := pkt.Data().PullUp(8)
+	if !ok {
+		return
+	}
+	srcPort, dstPort, err := state.proto.ParsePorts(transHeader)
+	if err != nil {
+		return
+	}
+	id := TransportEndpointID{
+		LocalPort:     srcPort,
+		LocalAddress:  local,
+		RemotePort:    dstPort,
+		RemoteAddress: remote,
+	}
+	n.stack.demux.deliverError(n, netProto, transProto, transErr, pkt, id)
+}
+
 // DeliverTransportPacketWithDefaultHandlerResult implements
 // TransportDispatcherWithDefaultHandlerResult.DeliverTransportPacketWithDefaultHandlerResult.
 func (n *nic) DeliverTransportPacketWithDefaultHandlerResult(protocol tcpip.TransportProtocolNumber, pkt *PacketBuffer) (TransportPacketDisposition, bool) {

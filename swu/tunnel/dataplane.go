@@ -365,21 +365,21 @@ func innerPacketMatchesChildSASelectors(pkt packet.InnerPacket, info Info) bool 
 	if len(info.InitiatorTrafficSelectors) == 0 || len(info.ResponderTrafficSelectors) == 0 {
 		return true
 	}
-	srcIP, dstIP, proto, srcPort, dstPort := innerPacketSelectorFields(pkt)
-	return ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, srcIP, proto, srcPort) &&
-		ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, dstIP, proto, dstPort)
+	srcIP, dstIP, proto, srcPort, dstPort, portsKnown := innerPacketSelectorFields(pkt)
+	return ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, srcIP, proto, srcPort, portsKnown) &&
+		ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, dstIP, proto, dstPort, portsKnown)
 }
 
 func innerPacketMatchesOutboundChildSASelectors(pkt packet.InnerPacket, info Info) bool {
 	if len(info.InitiatorTrafficSelectors) == 0 || len(info.ResponderTrafficSelectors) == 0 {
 		return true
 	}
-	srcIP, dstIP, proto, srcPort, dstPort := innerPacketSelectorFields(pkt)
-	return ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, srcIP, proto, srcPort) &&
-		ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, dstIP, proto, dstPort)
+	srcIP, dstIP, proto, srcPort, dstPort, portsKnown := innerPacketSelectorFields(pkt)
+	return ipMatchesTrafficSelectors(info.InitiatorTrafficSelectors, srcIP, proto, srcPort, portsKnown) &&
+		ipMatchesTrafficSelectors(info.ResponderTrafficSelectors, dstIP, proto, dstPort, portsKnown)
 }
 
-func innerPacketSelectorFields(pkt packet.InnerPacket) (net.IP, net.IP, byte, int, int) {
+func innerPacketSelectorFields(pkt packet.InnerPacket) (net.IP, net.IP, byte, int, int, bool) {
 	srcIP := pkt.IP.SrcIP
 	dstIP := pkt.IP.DstIP
 	proto := pkt.IP.Protocol
@@ -396,7 +396,7 @@ func innerPacketSelectorFields(pkt packet.InnerPacket) (net.IP, net.IP, byte, in
 			dstIP = pkt.UDP.Dst.IP
 			dstPort = pkt.UDP.Dst.Port
 		}
-		return srcIP, dstIP, proto, srcPort, dstPort
+		return srcIP, dstIP, proto, srcPort, dstPort, true
 	case pkt.TCP != nil:
 		proto = packet.ProtocolTCP
 		srcPort := 0
@@ -409,25 +409,36 @@ func innerPacketSelectorFields(pkt packet.InnerPacket) (net.IP, net.IP, byte, in
 			dstIP = pkt.TCP.Dst.IP
 			dstPort = pkt.TCP.Dst.Port
 		}
-		return srcIP, dstIP, proto, srcPort, dstPort
+		return srcIP, dstIP, proto, srcPort, dstPort, true
 	case pkt.ESP != nil:
 		proto = packet.ProtocolESP
-		return srcIP, dstIP, proto, 0, 0
+		return srcIP, dstIP, proto, 0, 0, true
 	default:
-		return srcIP, dstIP, proto, 0, 0
+		if pkt.IP.FragmentOffset == 0 && (proto == packet.ProtocolICMP || proto == packet.ProtocolICMPv6) && len(pkt.IP.Payload) >= 2 {
+			typeCode := int(binary.BigEndian.Uint16(pkt.IP.Payload[:2]))
+			return srcIP, dstIP, proto, typeCode, typeCode, true
+		}
+		if pkt.IP.FragmentOffset == 0 && (proto == packet.ProtocolTCP || proto == packet.ProtocolUDP) && len(pkt.IP.Payload) >= 4 {
+			return srcIP, dstIP, proto,
+				int(binary.BigEndian.Uint16(pkt.IP.Payload[:2])),
+				int(binary.BigEndian.Uint16(pkt.IP.Payload[2:4])), true
+		}
+		hasSelectorValue := proto == packet.ProtocolTCP || proto == packet.ProtocolUDP ||
+			proto == packet.ProtocolICMP || proto == packet.ProtocolICMPv6
+		return srcIP, dstIP, proto, 0, 0, !hasSelectorValue
 	}
 }
 
-func ipMatchesTrafficSelectors(selectors []ike.TrafficSelector, ip net.IP, protocol byte, port int) bool {
+func ipMatchesTrafficSelectors(selectors []ike.TrafficSelector, ip net.IP, protocol byte, port int, portKnown bool) bool {
 	for _, selector := range selectors {
-		if trafficSelectorMatchesPacket(selector, ip, protocol, port) {
+		if trafficSelectorMatchesPacket(selector, ip, protocol, port, portKnown) {
 			return true
 		}
 	}
 	return false
 }
 
-func trafficSelectorMatchesPacket(selector ike.TrafficSelector, ip net.IP, protocol byte, port int) bool {
+func trafficSelectorMatchesPacket(selector ike.TrafficSelector, ip net.IP, protocol byte, port int, portKnown bool) bool {
 	if selector.ProtocolID != 0 && selector.ProtocolID != protocol {
 		return false
 	}
@@ -436,7 +447,9 @@ func trafficSelectorMatchesPacket(selector ike.TrafficSelector, ip net.IP, proto
 	}
 	startPort := int(binary.BigEndian.Uint16(selector.Data[0:2]))
 	endPort := int(binary.BigEndian.Uint16(selector.Data[2:4]))
-	if port < startPort || port > endPort {
+	usesPorts := protocol == packet.ProtocolTCP || protocol == packet.ProtocolUDP ||
+		protocol == packet.ProtocolICMP || protocol == packet.ProtocolICMPv6
+	if usesPorts && ((!portKnown && (startPort != 0 || endPort != 65535)) || (portKnown && (port < startPort || port > endPort))) {
 		return false
 	}
 	addressLen := (len(selector.Data) - 4) / 2

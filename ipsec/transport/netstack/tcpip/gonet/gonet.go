@@ -544,6 +544,7 @@ func DialTCPWithBindAndMaxSeg(ctx context.Context, s *stack.Stack, localAddr, re
 
 	select {
 	case <-ctx.Done():
+		ep.Close()
 		return nil, ctx.Err()
 	default:
 	}
@@ -551,6 +552,7 @@ func DialTCPWithBindAndMaxSeg(ctx context.Context, s *stack.Stack, localAddr, re
 	// Bind before connect if requested.
 	if localAddr != (tcpip.FullAddress{}) {
 		if err = ep.Bind(localAddr); err != nil {
+			ep.Close()
 			return nil, fmt.Errorf("ep.Bind(%+v) = %s", localAddr, err)
 		}
 	}

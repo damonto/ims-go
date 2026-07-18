@@ -417,6 +417,58 @@ func TestNetstackSharedESPAssociationDispatchesByTransport(t *testing.T) {
 	}
 }
 
+func TestSecurityAssociationFingerprintGroupsOneNegotiation(t *testing.T) {
+	base := netstackSecurityConfig{
+		protocol:      packet.ProtocolUDP,
+		localPort:     45000,
+		remotePort:    4060,
+		outboundSPI:   0x1001,
+		inboundSPI:    0x2001,
+		encryption:    esp.EncryptionAESCBC,
+		integrity:     esp.IntegrityHMACSHA196,
+		encryptionKey: []byte("0123456789abcdef"),
+		integrityKey:  []byte("0123456789abcdefghij"),
+		mode:          SecureModeTransport,
+	}
+	want := securityAssociationFingerprint(base, esp.EncryptionAESCBC, SecureModeTransport)
+	tests := []struct {
+		name      string
+		mutate    func(*netstackSecurityConfig)
+		wantEqual bool
+	}{
+		{
+			name: "TCP fallback in same negotiation",
+			mutate: func(cfg *netstackSecurityConfig) {
+				cfg.protocol = packet.ProtocolTCP
+				cfg.localPort = 45001
+			},
+			wantEqual: true,
+		},
+		{
+			name: "new outbound SPI",
+			mutate: func(cfg *netstackSecurityConfig) {
+				cfg.outboundSPI++
+			},
+		},
+		{
+			name: "new integrity key",
+			mutate: func(cfg *netstackSecurityConfig) {
+				cfg.integrityKey = []byte("abcdefghij0123456789")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			tt.mutate(&cfg)
+			got := securityAssociationFingerprint(cfg, esp.EncryptionAESCBC, SecureModeTransport)
+			if (got == want) != tt.wantEqual {
+				t.Fatalf("fingerprint equality = %t, want %t", got == want, tt.wantEqual)
+			}
+		})
+	}
+}
+
 func TestNetstackProtectedIPv6UDPLargerThanMinimumMTU(t *testing.T) {
 	tests := []struct {
 		name string

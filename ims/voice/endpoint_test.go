@@ -65,8 +65,8 @@ type voiceRTPOnlyMediaTransport struct {
 
 func newVoiceStubTransport() *voiceStubTransport {
 	return &voiceStubTransport{
-		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
-		remote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+		local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+		remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 		readCh: make(chan []byte, 16),
 		closed: make(chan struct{}),
 	}

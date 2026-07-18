@@ -579,8 +579,8 @@ type gatedCancelTransport struct {
 
 func newGatedCancelTransport(localPort, remotePort int) *gatedCancelTransport {
 	return &gatedCancelTransport{
-		local:             &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort},
-		remote:            &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: remotePort},
+		local:             &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort},
+		remote:            &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: remotePort},
 		readCh:            make(chan []byte, 16),
 		readErrCh:         make(chan error, 1),
 		cancelReadRelease: make(chan struct{}),

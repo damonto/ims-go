@@ -60,6 +60,28 @@ type NetworkPacketInfo struct {
 	IsForwardedPacket bool
 }
 
+// TransportErrorKind enumerates error types handled by transport endpoints.
+type TransportErrorKind int
+
+const (
+	PacketTooBigTransportError TransportErrorKind = iota
+	DestinationHostUnreachableTransportError
+	DestinationPortUnreachableTransportError
+	DestinationNetworkUnreachableTransportError
+	DestinationProtoUnreachableTransportError
+	SourceRouteFailedTransportError
+	SourceHostIsolatedTransportError
+	DestinationHostDownTransportError
+	TimeExceededTransportError
+	ParameterProblemTransportError
+)
+
+// TransportError describes a network error delivered to a transport endpoint.
+type TransportError interface {
+	tcpip.SockErrorCause
+	Kind() TransportErrorKind
+}
+
 // TransportEndpoint is the interface that needs to be implemented by transport
 // protocol (e.g., tcp, udp) endpoints that can handle packets.
 type TransportEndpoint interface {
@@ -68,6 +90,9 @@ type TransportEndpoint interface {
 	//
 	// HandlePacket may modify the packet.
 	HandlePacket(TransportEndpointID, *PacketBuffer)
+
+	// HandleError delivers an ICMP-derived network error to the endpoint.
+	HandleError(TransportError, *PacketBuffer)
 
 	// Abort initiates an expedited endpoint teardown. It puts the endpoint
 	// in a closed state and frees all resources associated with it. This
@@ -184,6 +209,10 @@ type TransportDispatcher interface {
 	//
 	// DeliverTransportPacket may modify the packet.
 	DeliverTransportPacket(tcpip.TransportProtocolNumber, *PacketBuffer) TransportPacketDisposition
+
+	// DeliverTransportError delivers an ICMP-derived error to the matching
+	// transport endpoint.
+	DeliverTransportError(local, remote tcpip.Address, net tcpip.NetworkProtocolNumber, trans tcpip.TransportProtocolNumber, transErr TransportError, pkt *PacketBuffer)
 }
 
 // TransportDispatcherWithDefaultHandlerResult extends TransportDispatcher with

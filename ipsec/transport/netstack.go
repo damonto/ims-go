@@ -2,9 +2,12 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,12 +107,13 @@ type netstackUDPEncKeepalive struct {
 }
 
 type netstackSecurityPolicy struct {
-	protocol   byte
-	localIP    net.IP
-	remoteIP   net.IP
-	localPort  int
-	remotePort int
-	mode       string
+	protocol      byte
+	localIP       net.IP
+	remoteIP      net.IP
+	localPort     int
+	remotePort    int
+	mode          string
+	associationID string
 
 	outboundESP  esp.Codec
 	inboundESP   esp.Codec
@@ -396,15 +400,16 @@ func (n *Netstack) registerSecurity(cfg netstackSecurityConfig) (*netstackSecuri
 		return nil, err
 	}
 	policy := &netstackSecurityPolicy{
-		protocol:     cfg.protocol,
-		localIP:      append(net.IP(nil), cfg.localIP...),
-		remoteIP:     append(net.IP(nil), cfg.remoteIP...),
-		localPort:    cfg.localPort,
-		remotePort:   cfg.remotePort,
-		mode:         mode,
-		associations: secureAssociations(cfg.associations),
-		outboundESP:  secureESPCodec(cfg.outboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.salt),
-		inboundESP:   secureESPCodec(cfg.inboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.salt),
+		protocol:      cfg.protocol,
+		localIP:       append(net.IP(nil), cfg.localIP...),
+		remoteIP:      append(net.IP(nil), cfg.remoteIP...),
+		localPort:     cfg.localPort,
+		remotePort:    cfg.remotePort,
+		mode:          mode,
+		associationID: securityAssociationFingerprint(cfg, encryption, mode),
+		associations:  secureAssociations(cfg.associations),
+		outboundESP:   secureESPCodec(cfg.outboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.salt),
+		inboundESP:    secureESPCodec(cfg.inboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.salt),
 	}
 	n.mu.Lock()
 	if n.closed {
@@ -424,6 +429,29 @@ func (n *Netstack) registerSecurity(cfg netstackSecurityConfig) (*netstackSecuri
 		go n.runUDPEncKeepalive(policy.keepalive)
 	}
 	return policy, nil
+}
+
+func securityAssociationFingerprint(cfg netstackSecurityConfig, encryption, mode string) string {
+	data := make([]byte, 0, 128)
+	var spis [8]byte
+	binary.BigEndian.PutUint32(spis[:4], cfg.outboundSPI)
+	binary.BigEndian.PutUint32(spis[4:], cfg.inboundSPI)
+	data = append(data, spis[:]...)
+	for _, value := range [][]byte{
+		[]byte(encryption),
+		[]byte(strings.ToLower(strings.TrimSpace(cfg.integrity))),
+		[]byte(mode),
+		cfg.encryptionKey,
+		cfg.integrityKey,
+		cfg.salt[:],
+	} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+		data = append(data, size[:]...)
+		data = append(data, value...)
+	}
+	sum := sha256.Sum256(data)
+	return string(sum[:])
 }
 
 func (n *Netstack) retainUDPEncKeepaliveLocked(localIP, remoteIP net.IP) (*netstackUDPEncKeepalive, bool) {
@@ -525,6 +553,18 @@ func (p *netstackSecurityPolicy) matchesInbound(protocol byte, srcIP, dstIP net.
 		srcPort == p.remotePort && dstPort == p.localPort
 }
 
+func (p *netstackSecurityPolicy) matchesInboundPacket(pkt packet.InnerPacket) bool {
+	protocol, srcIP, dstIP, srcPort, dstPort := netstackPacketFlow(pkt)
+	if p.matchesInbound(protocol, srcIP, dstIP, srcPort, dstPort) {
+		return true
+	}
+	if protocol != packet.ProtocolICMP && protocol != packet.ProtocolICMPv6 {
+		return false
+	}
+	protocol, srcIP, dstIP, srcPort, dstPort, ok := quotedTransportFlow(pkt.IP.Payload)
+	return ok && p.matches(protocol, srcIP, dstIP, srcPort, dstPort)
+}
+
 func netstackPacketFlow(pkt packet.InnerPacket) (byte, net.IP, net.IP, int, int) {
 	switch {
 	case pkt.TCP != nil && pkt.TCP.Src != nil && pkt.TCP.Dst != nil:
@@ -547,7 +587,8 @@ func (n *Netstack) HandleInnerPacket(pkt packet.InnerPacket) bool {
 		return true
 	}
 	protocol, _, dstIP, _, dstPort := netstackPacketFlow(pkt)
-	if protocol != packet.ProtocolTCP && protocol != packet.ProtocolUDP {
+	if protocol != packet.ProtocolTCP && protocol != packet.ProtocolUDP &&
+		protocol != packet.ProtocolICMP && protocol != packet.ProtocolICMPv6 {
 		return false
 	}
 	n.mu.Lock()
@@ -561,7 +602,7 @@ func (n *Netstack) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	}
 	_, local = n.addresses[dstIP.String()]
 	n.mu.Unlock()
-	if protected {
+	if protected && protocol != packet.ProtocolICMP && protocol != packet.ProtocolICMPv6 {
 		return true
 	}
 	if !local {
@@ -611,8 +652,7 @@ func (n *Netstack) unprotect(pkt packet.InnerPacket) (packet.InnerPacket, bool, 
 		if err != nil {
 			return packet.InnerPacket{}, true, false
 		}
-		protocol, srcIP, dstIP, srcPort, dstPort := netstackPacketFlow(inner)
-		if !policy.matchesInbound(protocol, srcIP, dstIP, srcPort, dstPort) {
+		if !policy.matchesInboundPacket(inner) {
 			continue
 		}
 		if !policy.associations.acceptInboundESP(policy.inboundESP, decoded.Sequence) {
@@ -621,6 +661,80 @@ func (n *Netstack) unprotect(pkt packet.InnerPacket) (packet.InnerPacket, bool, 
 		return inner, true, true
 	}
 	return packet.InnerPacket{}, recognized, false
+}
+
+func quotedTransportFlow(icmp []byte) (byte, net.IP, net.IP, int, int, bool) {
+	if len(icmp) < 8 {
+		return 0, nil, nil, 0, 0, false
+	}
+	quoted := icmp[8:]
+	if len(quoted) == 0 {
+		return 0, nil, nil, 0, 0, false
+	}
+	switch int(quoted[0] >> 4) {
+	case packet.IPVersion4:
+		if len(quoted) < 20 {
+			return 0, nil, nil, 0, 0, false
+		}
+		offset := int(quoted[0]&0x0f) * 4
+		if offset < 20 || len(quoted) < offset+4 || binary.BigEndian.Uint16(quoted[6:8])&0x1fff != 0 {
+			return 0, nil, nil, 0, 0, false
+		}
+		return quoted[9],
+			append(net.IP(nil), quoted[12:16]...),
+			append(net.IP(nil), quoted[16:20]...),
+			int(binary.BigEndian.Uint16(quoted[offset : offset+2])),
+			int(binary.BigEndian.Uint16(quoted[offset+2 : offset+4])), true
+	case packet.IPVersion6:
+		if len(quoted) < 40 {
+			return 0, nil, nil, 0, 0, false
+		}
+		protocol := quoted[6]
+		offset := 40
+		for {
+			switch protocol {
+			case 0, 43, 60:
+				if offset+2 > len(quoted) {
+					return 0, nil, nil, 0, 0, false
+				}
+				next := quoted[offset]
+				length := (int(quoted[offset+1]) + 1) * 8
+				if length < 8 || offset+length > len(quoted) {
+					return 0, nil, nil, 0, 0, false
+				}
+				protocol = next
+				offset += length
+			case 44:
+				if offset+8 > len(quoted) || binary.BigEndian.Uint16(quoted[offset+2:offset+4])>>3 != 0 {
+					return 0, nil, nil, 0, 0, false
+				}
+				protocol = quoted[offset]
+				offset += 8
+			case 51:
+				if offset+2 > len(quoted) {
+					return 0, nil, nil, 0, 0, false
+				}
+				next := quoted[offset]
+				length := (int(quoted[offset+1]) + 2) * 4
+				if length < 8 || offset+length > len(quoted) {
+					return 0, nil, nil, 0, 0, false
+				}
+				protocol = next
+				offset += length
+			default:
+				if len(quoted) < offset+4 {
+					return 0, nil, nil, 0, 0, false
+				}
+				return protocol,
+					append(net.IP(nil), quoted[8:24]...),
+					append(net.IP(nil), quoted[24:40]...),
+					int(binary.BigEndian.Uint16(quoted[offset : offset+2])),
+					int(binary.BigEndian.Uint16(quoted[offset+2 : offset+4])), true
+			}
+		}
+	default:
+		return 0, nil, nil, 0, 0, false
+	}
 }
 
 func netstackDecodedPacket(policy *netstackSecurityPolicy, outer packet.InnerPacket, decoded esp.ESPPacket) (packet.InnerPacket, error) {
@@ -641,10 +755,14 @@ func netstackDecodedPacket(policy *netstackSecurityPolicy, outer packet.InnerPac
 }
 
 func (n *Netstack) inject(pkt packet.InnerPacket) {
-	wire, err := pkt.MarshalBinary()
-	if err != nil {
-		n.session.Logger().Debug("injecting IMS netstack packet failed", "err", err)
-		return
+	wire := pkt.OriginalWire()
+	if len(wire) == 0 {
+		var err error
+		wire, err = pkt.MarshalBinary()
+		if err != nil {
+			n.session.Logger().Debug("injecting IMS netstack packet failed", "err", err)
+			return
+		}
 	}
 	_, protocol, _, err := netstackIP(pkt.IP.DstIP)
 	if err != nil {

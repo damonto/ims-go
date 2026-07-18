@@ -179,6 +179,22 @@ func (epsByNIC *endpointsByNIC) handlePacket(id TransportEndpointID, pkt *Packet
 	return true
 }
 
+// handleError delivers an error to the transport endpoint identified by id.
+func (epsByNIC *endpointsByNIC) handleError(n *nic, id TransportEndpointID, transErr TransportError, pkt *PacketBuffer) {
+	epsByNIC.mu.RLock()
+	mpep, ok := epsByNIC.endpoints[n.ID()]
+	if !ok {
+		mpep, ok = epsByNIC.endpoints[0]
+	}
+	if !ok {
+		epsByNIC.mu.RUnlock()
+		return
+	}
+	transEP := mpep.selectEndpoint(id, epsByNIC.seed)
+	epsByNIC.mu.RUnlock()
+	transEP.HandleError(transErr, pkt)
+}
+
 // registerEndpoint returns true if it succeeds. It fails and returns
 // false if ep already has an element with the same key.
 func (epsByNIC *endpointsByNIC) registerEndpoint(d *transportDemuxer, netProto tcpip.NetworkProtocolNumber, transProto tcpip.TransportProtocolNumber, t TransportEndpoint, flags ports.Flags, bindToDevice tcpip.NICID) tcpip.Error {
@@ -543,6 +559,22 @@ func (d *transportDemuxer) deliverPacket(protocol tcpip.TransportProtocolNumber,
 		return false
 	}
 	return ep.handlePacket(id, pkt)
+}
+
+// deliverError attempts to deliver an error to the matching transport endpoint.
+func (d *transportDemuxer) deliverError(n *nic, netProto tcpip.NetworkProtocolNumber, transProto tcpip.TransportProtocolNumber, transErr TransportError, pkt *PacketBuffer, id TransportEndpointID) bool {
+	eps, ok := d.protocol[protocolIDs{netProto, transProto}]
+	if !ok {
+		return false
+	}
+	eps.mu.RLock()
+	ep := eps.findEndpointLocked(id)
+	eps.mu.RUnlock()
+	if ep == nil {
+		return false
+	}
+	ep.handleError(n, id, transErr, pkt)
+	return true
 }
 
 // findTransportEndpoint returns the endpoint that most closely matches id.

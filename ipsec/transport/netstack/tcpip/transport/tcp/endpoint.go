@@ -2810,6 +2810,99 @@ func (e *Endpoint) enqueueSegment(s *segment) bool {
 	return true
 }
 
+func (e *Endpoint) onICMPError(err tcpip.Error, transErr stack.TransportError, pkt *stack.PacketBuffer) {
+	e.lastErrorMu.Lock()
+	e.lastError = err
+	e.lastErrorMu.Unlock()
+
+	var recvErr bool
+	switch pkt.NetworkProtocolNumber {
+	case header.IPv4ProtocolNumber:
+		recvErr = e.SocketOptions().GetIPv4RecvError()
+	case header.IPv6ProtocolNumber:
+		recvErr = e.SocketOptions().GetIPv6RecvError()
+	default:
+		panic(fmt.Sprintf("unhandled network protocol number = %d", pkt.NetworkProtocolNumber))
+	}
+	if recvErr {
+		e.SocketOptions().QueueErr(&tcpip.SockError{
+			Err:     err,
+			Cause:   transErr,
+			Payload: pkt.Data().AsRange().ToView(),
+			Dst: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: e.TransportEndpointInfo.ID.RemoteAddress,
+				Port: e.TransportEndpointInfo.ID.RemotePort,
+			},
+			Offender: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: e.TransportEndpointInfo.ID.LocalAddress,
+				Port: e.TransportEndpointInfo.ID.LocalPort,
+			},
+			NetProto: pkt.NetworkProtocolNumber,
+		})
+	}
+	e.mu.Lock()
+	if !e.EndpointState().connecting() {
+		e.mu.Unlock()
+		return
+	}
+	if e.h != nil && e.h.listenEP != nil {
+		lEP := e.h.listenEP
+		lEP.acceptMu.Lock()
+		delete(lEP.acceptQueue.pendingEndpoints, e)
+		lEP.acceptMu.Unlock()
+		lEP.stats.FailedConnectionAttempts.Increment()
+	}
+	e.stack.Stats().TCP.FailedConnectionAttempts.Increment()
+	e.cleanupLocked()
+	e.hardError = err
+	e.setEndpointState(StateError)
+	e.mu.Unlock()
+	e.drainClosingSegmentQueue()
+	e.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
+}
+
+// HandleError implements stack.TransportEndpoint.
+func (e *Endpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketBuffer) {
+	switch transErr.Kind() {
+	case stack.PacketTooBigTransportError:
+		e.sndQueueInfo.sndQueueMu.Lock()
+		update := false
+		if mtu := int(transErr.Info()); mtu > 0 && mtu < e.sndQueueInfo.SndMTU {
+			e.sndQueueInfo.SndMTU = mtu
+			update = true
+		}
+		newMTU := e.sndQueueInfo.SndMTU
+		e.sndQueueInfo.sndQueueMu.Unlock()
+		if update {
+			e.mu.Lock()
+			if e.snd != nil {
+				e.snd.updateMaxPayloadSize(newMTU, 1)
+			}
+			e.mu.Unlock()
+		}
+	case stack.DestinationHostUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrHostUnreachable{}, transErr, pkt)
+	case stack.DestinationNetworkUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrNetworkUnreachable{}, transErr, pkt)
+	case stack.DestinationPortUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrConnectionRefused{}, transErr, pkt)
+	case stack.DestinationProtoUnreachableTransportError:
+		e.onICMPError(&tcpip.ErrUnknownProtocolOption{}, transErr, pkt)
+	case stack.SourceRouteFailedTransportError:
+		e.onICMPError(&tcpip.ErrNotSupported{}, transErr, pkt)
+	case stack.SourceHostIsolatedTransportError:
+		e.onICMPError(&tcpip.ErrNoNet{}, transErr, pkt)
+	case stack.DestinationHostDownTransportError:
+		e.onICMPError(&tcpip.ErrHostDown{}, transErr, pkt)
+	case stack.TimeExceededTransportError:
+		e.onICMPError(&tcpip.ErrTimeout{}, transErr, pkt)
+	case stack.ParameterProblemTransportError:
+		e.onICMPError(&tcpip.ErrMalformedHeader{}, transErr, pkt)
+	}
+}
+
 // updateSndBufferUsage is called by when room opens up in the send buffer. The
 // number of newly available bytes is v.
 //

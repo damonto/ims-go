@@ -562,7 +562,18 @@ const (
 
 	// SockExtErrorOriginLocal indicates a local error.
 	SockExtErrorOriginLocal
+
+	// SockExtErrorOriginICMP indicates an IPv4 ICMP error.
+	SockExtErrorOriginICMP
+
+	// SockExtErrorOriginICMP6 indicates an IPv6 ICMP error.
+	SockExtErrorOriginICMP6
 )
+
+// IsICMPErr indicates if the error originated from an ICMP error.
+func (origin SockErrOrigin) IsICMPErr() bool {
+	return origin == SockExtErrorOriginICMP || origin == SockExtErrorOriginICMP6
+}
 
 // SockErrorCause is the cause of a socket error.
 type SockErrorCause interface {

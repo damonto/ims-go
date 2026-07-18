@@ -27,13 +27,15 @@ const (
 	sipStatusLoopDetected                = 482
 	sipStatusCallTransactionDoesNotExist = 481
 	sipStatusRequestTerminated           = 487
+	sipDatagramRequestLimit              = 1300
 )
 
 type Config struct {
-	Transport         string
-	Logger            *slog.Logger
-	TransactionTimers TransactionTimers
-	ResponseDecorator func(*sip.Message)
+	Transport             string
+	Logger                *slog.Logger
+	TransactionTimers     TransactionTimers
+	ResponseDecorator     func(*sip.Message)
+	OpenReliableTransport func(context.Context) (Transport, error)
 }
 
 func (cfg Config) Normalized() (Config, error) {
@@ -54,6 +56,7 @@ type Session struct {
 
 	mu             sync.Mutex
 	sendMu         sync.Mutex
+	reliableMu     sync.Mutex
 	readWG         sync.WaitGroup
 	transportErrs  chan struct{}
 	transportQueue []inboundMessage
@@ -662,6 +665,19 @@ func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport
 			return sip.Message{}, fmt.Errorf("exchanging request: %w", err)
 		}
 	}
+	selected, prepared, err := s.prepareRequestTransport(ctx, transport, req)
+	if err != nil {
+		return sip.Message{}, fmt.Errorf("exchanging request: %w", err)
+	}
+	if selected != transport {
+		previousAccept := opts.AcceptResponseTransport
+		opts.AcceptResponseTransport = func(candidate Transport) bool {
+			return candidate == selected || previousAccept != nil && previousAccept(candidate)
+		}
+		opts.ResponseTransports = uniqueTransports(append(opts.ResponseTransports, selected))
+		transport = selected
+		req = prepared
+	}
 	tx := newClientTransaction(s, transport, req, opts)
 	if !s.isRunning() {
 		return s.exchangeWithBootstrapReader(ctx, tx)
@@ -721,7 +737,172 @@ func (s *Session) Send(ctx context.Context, req sip.Message) error {
 	if err := s.ensureOpen(); err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
-	return s.writeRequest(ctx, s.primaryTransport(), req)
+	transport, req, err := s.prepareRequestTransport(ctx, s.primaryTransport(), req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	return s.writeRequest(ctx, transport, req)
+}
+
+func (s *Session) prepareRequestTransport(ctx context.Context, preferred Transport, req sip.Message) (Transport, sip.Message, error) {
+	packet, err := messagePacket(req)
+	if err != nil {
+		return nil, sip.Message{}, fmt.Errorf("encoding %s request: %w", req.Method(), err)
+	}
+	if len(packet) <= sipDatagramRequestLimit || transportIsReliable(preferred) {
+		return preferred, req, nil
+	}
+	reliable, err := s.reliableTransport(ctx, preferred)
+	if err != nil {
+		return nil, sip.Message{}, err
+	}
+	if reliable == nil {
+		return nil, sip.Message{}, fmt.Errorf("%s request is %d bytes and no reliable transport is active", req.Method(), len(packet))
+	}
+	req.Headers = req.Headers.Clone()
+	if err := setRequestViaTransport(&req, reliable); err != nil {
+		return nil, sip.Message{}, err
+	}
+	return reliable, req, nil
+}
+
+type outboundTransport interface {
+	OutboundCapable() bool
+}
+
+type secureTransport interface {
+	SecureTransport() bool
+}
+
+type securityBoundTransport interface {
+	SecurityAssociationID() string
+}
+
+func (s *Session) reliableTransport(ctx context.Context, preferred Transport) (Transport, error) {
+	if transport := s.activeReliableTransport(preferred); transport != nil {
+		return transport, nil
+	}
+	if isSecureTransport(preferred) || s.cfg.OpenReliableTransport == nil {
+		return nil, nil
+	}
+	s.reliableMu.Lock()
+	defer s.reliableMu.Unlock()
+	if transport := s.activeReliableTransport(preferred); transport != nil {
+		return transport, nil
+	}
+	transport, err := s.cfg.OpenReliableTransport(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("opening reliable SIP transport: %w", err)
+	}
+	if transport == nil {
+		return nil, errors.New("opening reliable SIP transport: transport is nil")
+	}
+	attachment, err := s.AddTransport(transport)
+	if err != nil {
+		_ = transport.Close()
+		return nil, fmt.Errorf("opening reliable SIP transport: %w", err)
+	}
+	if _, err := s.PromotePrimary(transport); err != nil {
+		_ = attachment.Close()
+		_ = transport.Close()
+		return nil, fmt.Errorf("opening reliable SIP transport: %w", err)
+	}
+	return transport, nil
+}
+
+func (s *Session) activeReliableTransport(preferred Transport) Transport {
+	remote := preferred.RemoteAddr()
+	secure := isSecureTransport(preferred)
+	associationID := securityAssociationID(preferred)
+	s.mu.Lock()
+	transports := append([]Transport{s.primary}, s.aux...)
+	active := make(map[Transport]struct{}, len(s.active))
+	for transport := range s.active {
+		active[transport] = struct{}{}
+	}
+	s.mu.Unlock()
+	for _, transport := range transports {
+		if transport == nil || !transportIsReliable(transport) || isSecureTransport(transport) != secure ||
+			!sameHostPort(transport.RemoteAddr(), remote) {
+			continue
+		}
+		if secure && (associationID == "" || securityAssociationID(transport) != associationID) {
+			continue
+		}
+		if capable, ok := transport.(outboundTransport); ok && !capable.OutboundCapable() {
+			continue
+		}
+		if _, ok := active[transport]; ok {
+			return transport
+		}
+	}
+	return nil
+}
+
+func isSecureTransport(transport Transport) bool {
+	secure, ok := transport.(secureTransport)
+	return ok && secure.SecureTransport()
+}
+
+func securityAssociationID(transport Transport) string {
+	bound, ok := transport.(securityBoundTransport)
+	if !ok {
+		return ""
+	}
+	return bound.SecurityAssociationID()
+}
+
+func sameHostPort(left, right net.Addr) bool {
+	switch left := left.(type) {
+	case *net.TCPAddr:
+		switch right := right.(type) {
+		case *net.TCPAddr:
+			return left.IP.Equal(right.IP) && left.Port == right.Port
+		case *net.UDPAddr:
+			return left.IP.Equal(right.IP) && left.Port == right.Port
+		}
+	case *net.UDPAddr:
+		switch right := right.(type) {
+		case *net.TCPAddr:
+			return left.IP.Equal(right.IP) && left.Port == right.Port
+		case *net.UDPAddr:
+			return left.IP.Equal(right.IP) && left.Port == right.Port
+		}
+	}
+	return false
+}
+
+func setRequestViaTransport(req *sip.Message, transport Transport) error {
+	index := -1
+	for i := range req.Headers {
+		if strings.EqualFold(req.Headers[i].Name, "Via") {
+			index = i
+			break
+		}
+	}
+	if index < 0 || strings.TrimSpace(req.Headers[index].Value) == "" {
+		return errors.New("selecting reliable SIP transport: Via header is missing")
+	}
+	via := strings.TrimSpace(req.Headers[index].Value)
+	values := sip.SplitHeaderList(via)
+	if len(values) == 0 {
+		return errors.New("selecting reliable SIP transport: Via header is missing")
+	}
+	top := values[0]
+	separator := strings.IndexByte(top, ' ')
+	if separator <= 0 {
+		return errors.New("selecting reliable SIP transport: Via header is malformed")
+	}
+	parameters := ""
+	if parameterIndex := strings.IndexByte(top[separator+1:], ';'); parameterIndex >= 0 {
+		parameters = top[separator+1+parameterIndex:]
+	}
+	rewritten := "SIP/2.0/" + sip.TransportToken(transport.LocalAddr()) + " " + transport.LocalAddr().String() + parameters
+	if len(values) > 1 {
+		rewritten += ", " + strings.Join(values[1:], ", ")
+	}
+	req.Headers[index].Value = rewritten
+	return nil
 }
 
 func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip.Message) error {

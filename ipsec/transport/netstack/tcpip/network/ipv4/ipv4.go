@@ -52,8 +52,6 @@ const (
 	// ProtocolNumber is the ipv4 protocol number.
 	ProtocolNumber = header.IPv4ProtocolNumber
 
-	unsupportedControlProtocolNumber tcpip.TransportProtocolNumber = 1
-
 	// MaxTotalSize is maximum size that can be encoded in the 16-bit
 	// TotalLength field of the ipv4 header.
 	MaxTotalSize = 0xffff
@@ -949,7 +947,9 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	stats.ip.PacketsDelivered.Increment()
 
 	p := h.TransportProtocol()
-	if p == unsupportedControlProtocolNumber {
+	if p == 1 {
+		pkt.TransportProtocolNumber = p
+		e.handleICMP(pkt)
 		return
 	}
 	if opts := h.Options(); len(opts) != 0 {
@@ -1216,7 +1216,7 @@ func (p *protocol) parseAndValidate(pkt *stack.PacketBuffer) (*buffer.View, bool
 }
 
 func (p *protocol) parseTransport(pkt *stack.PacketBuffer, transProtoNum tcpip.TransportProtocolNumber) {
-	if transProtoNum == unsupportedControlProtocolNumber {
+	if transProtoNum == 1 {
 		return
 	}
 
