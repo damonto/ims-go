@@ -31,13 +31,20 @@ type packetConn interface {
 	Close() error
 }
 
+// PacketListener opens the outer ESP transports used by an LTE IPsec session.
+// Implementations may bind those sockets to a specific IMS network interface.
+type PacketListener interface {
+	ListenIPPacket(context.Context, string, *net.IPAddr) (net.PacketConn, error)
+	ListenUDPPacket(context.Context, *net.UDPAddr) (net.PacketConn, error)
+}
+
 type Session struct {
 	localIP  net.IP
 	remoteIP net.IP
 	logger   *slog.Logger
 
-	openESP func(net.IP) (packetConn, error)
-	openUDP func(net.IP) (packetConn, error)
+	openESP func(context.Context, net.IP) (packetConn, error)
+	openUDP func(context.Context, net.IP) (packetConn, error)
 
 	mu          sync.RWMutex
 	espConn     packetConn
@@ -51,6 +58,14 @@ type Session struct {
 	writeMu   sync.Mutex
 }
 
+// SessionConfig configures an LTE IPsec session and its outer packet sockets.
+type SessionConfig struct {
+	LocalIP        net.IP
+	RemoteIP       net.IP
+	Logger         *slog.Logger
+	PacketListener PacketListener
+}
+
 type attachment struct {
 	session *Session
 	handler ipsecbase.InnerHandler
@@ -61,10 +76,20 @@ type attachment struct {
 }
 
 func NewSession(localIP, remoteIP net.IP, logger *slog.Logger) (*Session, error) {
-	local, remote, err := normalizeIPPair(localIP, remoteIP)
+	return NewSessionWithConfig(SessionConfig{LocalIP: localIP, RemoteIP: remoteIP, Logger: logger})
+}
+
+// NewSessionWithConfig creates an LTE IPsec session with an optional packet listener.
+func NewSessionWithConfig(cfg SessionConfig) (*Session, error) {
+	local, remote, err := normalizeIPPair(cfg.LocalIP, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("creating LTE IPsec session: %w", err)
 	}
+	listener := cfg.PacketListener
+	if listener == nil {
+		listener = systemPacketListener{}
+	}
+	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -72,9 +97,13 @@ func NewSession(localIP, remoteIP net.IP, logger *slog.Logger) (*Session, error)
 		localIP:  local,
 		remoteIP: remote,
 		logger:   logger.With("component", "lte-ipsec"),
-		openESP:  listenESP,
-		openUDP:  listenUDPEncap,
-		closeCh:  make(chan struct{}),
+		openESP: func(ctx context.Context, localIP net.IP) (packetConn, error) {
+			return listenESP(ctx, listener, localIP)
+		},
+		openUDP: func(ctx context.Context, localIP net.IP) (packetConn, error) {
+			return listenUDPEncap(ctx, listener, localIP)
+		},
+		closeCh: make(chan struct{}),
 	}, nil
 }
 
@@ -94,7 +123,7 @@ func (s *Session) Enable(ctx context.Context, mode string) error {
 		if s.espConn != nil {
 			return nil
 		}
-		conn, err := s.openESP(s.localIP)
+		conn, err := s.openESP(ctx, s.localIP)
 		if err != nil {
 			return fmt.Errorf("enabling LTE IPsec transport mode: %w", err)
 		}
@@ -105,7 +134,7 @@ func (s *Session) Enable(ctx context.Context, mode string) error {
 		if s.udpConn != nil {
 			return nil
 		}
-		conn, err := s.openUDP(s.localIP)
+		conn, err := s.openUDP(ctx, s.localIP)
 		if err != nil {
 			return fmt.Errorf("enabling LTE IPsec UDP encapsulation: %w", err)
 		}
@@ -346,20 +375,36 @@ func (a *attachment) isClosed() bool {
 	return a.closed
 }
 
-func listenESP(localIP net.IP) (packetConn, error) {
+type systemPacketListener struct{}
+
+func (systemPacketListener) ListenIPPacket(ctx context.Context, network string, local *net.IPAddr) (net.PacketConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return net.ListenIP(network, local)
+}
+
+func (systemPacketListener) ListenUDPPacket(ctx context.Context, local *net.UDPAddr) (net.PacketConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return net.ListenUDP("udp", local)
+}
+
+func listenESP(ctx context.Context, listener PacketListener, localIP net.IP) (packetConn, error) {
 	network := "ip6:esp"
 	if localIP.To4() != nil {
 		network = "ip4:esp"
 	}
-	conn, err := net.ListenIP(network, &net.IPAddr{IP: append(net.IP(nil), localIP...)})
+	conn, err := listener.ListenIPPacket(ctx, network, &net.IPAddr{IP: append(net.IP(nil), localIP...)})
 	if err != nil {
 		return nil, fmt.Errorf("opening raw ESP socket: %w", err)
 	}
 	return conn, nil
 }
 
-func listenUDPEncap(localIP net.IP) (packetConn, error) {
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: udpEncapPort})
+func listenUDPEncap(ctx context.Context, listener PacketListener, localIP net.IP) (packetConn, error) {
+	conn, err := listener.ListenUDPPacket(ctx, &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: udpEncapPort})
 	if err != nil {
 		return nil, fmt.Errorf("opening UDP-encapsulated ESP socket: %w", err)
 	}

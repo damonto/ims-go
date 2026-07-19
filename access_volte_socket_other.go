@@ -1,13 +1,9 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package ims
 
-import (
-	"context"
-	"net"
-)
+import "errors"
 
-func listenVoLTEPacket(ctx context.Context, _ string, local *net.UDPAddr) (net.PacketConn, error) {
-	var listenConfig net.ListenConfig
-	return listenConfig.ListenPacket(ctx, "udp", local.String())
+func bindVoLTESocket(_ uintptr, _ string, _ int, _ bool) error {
+	return errors.New("binding VoLTE sockets to an interface is unsupported on this platform")
 }

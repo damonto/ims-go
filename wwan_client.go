@@ -21,9 +21,9 @@ type IMSPDNNetworkInfo struct {
 	PCSCFIPs    []net.IP
 }
 
-// IMSPDNNetwork applies and removes host-side interface addresses and P-CSCF routes.
+// IMSPDNNetwork applies and removes host-side interface addresses and IMS routing state.
 type IMSPDNNetwork interface {
-	Replace(context.Context, IMSPDNNetworkInfo) error
+	Replace(context.Context, IMSPDNNetworkInfo) (string, error)
 	Close() error
 }
 
@@ -75,19 +75,31 @@ func (c *MBIMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 
 type networkedIMSPDNSession struct {
 	imsPDNSession
-	network   IMSPDNNetwork
-	closeOnce sync.Once
-	closeErr  error
+	network       IMSPDNNetwork
+	interfaceName string
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func configureIMSPDNNetwork(ctx context.Context, session imsPDNSession, network IMSPDNNetwork, info IMSPDNNetworkInfo) (imsPDNSession, error) {
 	if network == nil {
 		return session, nil
 	}
-	if err := network.Replace(ctx, info); err != nil {
+	interfaceName, err := network.Replace(ctx, info)
+	if err != nil {
 		return nil, errors.Join(err, network.Close(), session.Close())
 	}
-	return &networkedIMSPDNSession{imsPDNSession: session, network: network}, nil
+	return &networkedIMSPDNSession{
+		imsPDNSession: session,
+		network:       network,
+		interfaceName: interfaceName,
+	}, nil
+}
+
+func (s *networkedIMSPDNSession) Info() imsPDNInfo {
+	info := s.imsPDNSession.Info()
+	info.InterfaceName = s.interfaceName
+	return info
 }
 
 func (s *networkedIMSPDNSession) Close() error {

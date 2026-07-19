@@ -35,6 +35,7 @@ func (c *testPacketConn) WriteTo(data []byte, addr net.Addr) (int, error) {
 
 func (c *testPacketConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *testPacketConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *testPacketConn) SetDeadline(time.Time) error      { return nil }
 func (c *testPacketConn) LocalAddr() net.Addr              { return c.local }
 
 func (c *testPacketConn) Close() error {
@@ -48,6 +49,23 @@ type testInnerHandler struct {
 	handle  bool
 	packets []packet.InnerPacket
 	errors  []error
+}
+
+type testPacketListener struct {
+	ipNetwork string
+	ipLocal   *net.IPAddr
+	udpLocal  *net.UDPAddr
+}
+
+func (l *testPacketListener) ListenIPPacket(_ context.Context, network string, local *net.IPAddr) (net.PacketConn, error) {
+	l.ipNetwork = network
+	l.ipLocal = local
+	return &testPacketConn{local: local}, nil
+}
+
+func (l *testPacketListener) ListenUDPPacket(_ context.Context, local *net.UDPAddr) (net.PacketConn, error) {
+	l.udpLocal = local
+	return &testPacketConn{local: local}, nil
 }
 
 func (h *testInnerHandler) HandleInnerPacket(pkt packet.InnerPacket) bool {
@@ -111,11 +129,11 @@ func TestSessionEnableOpensModeOnce(t *testing.T) {
 				t.Fatalf("NewSession() error = %v", err)
 			}
 			calls := 0
-			s.openESP = func(net.IP) (packetConn, error) {
+			s.openESP = func(context.Context, net.IP) (packetConn, error) {
 				calls++
 				return &testPacketConn{local: &net.IPAddr{IP: s.localIP}}, nil
 			}
-			s.openUDP = func(net.IP) (packetConn, error) {
+			s.openUDP = func(context.Context, net.IP) (packetConn, error) {
 				calls++
 				return &testPacketConn{local: &net.UDPAddr{IP: s.localIP, Port: udpEncapPort}}, nil
 			}
@@ -134,6 +152,45 @@ func TestSessionEnableOpensModeOnce(t *testing.T) {
 			}
 			if tt.want == transport.SecureModeUDPEncTunnel && s.udpConn == nil {
 				t.Fatal("UDP encapsulation socket = nil, want enabled")
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestSessionUsesConfiguredPacketListener(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        string
+		wantNetwork string
+		wantLocal   string
+	}{
+		{name: "raw ESP", mode: transport.SecureModeTransport, wantNetwork: "ip4:esp", wantLocal: "192.0.2.10"},
+		{name: "UDP encapsulation", mode: transport.SecureModeUDPEncTunnel, wantLocal: "192.0.2.10:4500"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listener := &testPacketListener{}
+			s, err := NewSessionWithConfig(SessionConfig{
+				LocalIP:        net.IPv4(192, 0, 2, 10),
+				RemoteIP:       net.IPv4(192, 0, 2, 20),
+				PacketListener: listener,
+			})
+			if err != nil {
+				t.Fatalf("NewSessionWithConfig() error = %v", err)
+			}
+			if err := s.Enable(context.Background(), tt.mode); err != nil {
+				t.Fatalf("Enable() error = %v", err)
+			}
+			if tt.wantNetwork != "" {
+				if listener.ipNetwork != tt.wantNetwork || listener.ipLocal.String() != tt.wantLocal {
+					t.Fatalf("IP listener = %q %v, want %q %s", listener.ipNetwork, listener.ipLocal, tt.wantNetwork, tt.wantLocal)
+				}
+			} else if listener.udpLocal.String() != tt.wantLocal {
+				t.Fatalf("UDP listener = %v, want %s", listener.udpLocal, tt.wantLocal)
 			}
 			if err := s.Close(); err != nil {
 				t.Fatalf("Close() error = %v", err)

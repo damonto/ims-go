@@ -44,7 +44,7 @@ type volteMediaPacket struct {
 	err  error
 }
 
-func openVoLTEMediaTransport(ctx context.Context, interfaceName string, localIP net.IP, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
+func openVoLTEMediaTransport(ctx context.Context, network voLTENetwork, localIP net.IP, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -60,11 +60,11 @@ func openVoLTEMediaTransport(ctx context.Context, interfaceName string, localIP 
 		return nil, errors.New("opening voice media transport: local rtcp port would exceed 65535")
 	}
 	local := &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: cfg.LocalPort}
-	rtp, err := listenVoLTEUDP(ctx, interfaceName, local)
+	rtp, err := network.ListenUDP(ctx, local)
 	if err != nil {
 		return nil, fmt.Errorf("opening voice media transport: %w", err)
 	}
-	rtcp, err := listenVoLTEUDP(ctx, interfaceName, imsvoice.RTCPAddr(local))
+	rtcp, err := network.ListenUDP(ctx, imsvoice.RTCPAddr(local))
 	if err != nil {
 		_ = rtp.Close()
 		return nil, fmt.Errorf("opening voice media rtcp transport: %w", err)

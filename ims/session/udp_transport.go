@@ -32,10 +32,30 @@ func OpenUDPTransport(ctx context.Context, localIP, remoteIP net.IP, remotePort 
 	if err != nil {
 		return nil, fmt.Errorf("opening udp transport: %w", err)
 	}
+	transport, err := NewUDPTransport(conn, remote)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("opening udp transport: %w", err)
+	}
+	return transport, nil
+}
+
+// NewUDPTransport takes ownership of a UDP listener and sends to remote.
+func NewUDPTransport(conn *net.UDPConn, remote *net.UDPAddr) (Transport, error) {
+	if conn == nil {
+		return nil, errors.New("UDP connection is required")
+	}
+	if remote == nil || len(remote.IP) == 0 {
+		return nil, errors.New("remote UDP address is required")
+	}
+	local, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil, errors.New("UDP connection has an invalid local address")
+	}
 	return &udpTransport{
 		conn:   conn,
-		local:  cloneUDPAddr(conn.LocalAddr().(*net.UDPAddr)),
-		remote: remote,
+		local:  cloneUDPAddr(local),
+		remote: cloneUDPAddr(remote),
 	}, nil
 }
 

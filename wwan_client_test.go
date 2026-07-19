@@ -154,8 +154,8 @@ type fakeIMSPDNNetwork struct {
 	closeCalls int
 }
 
-func (n *fakeIMSPDNNetwork) Replace(context.Context, IMSPDNNetworkInfo) error {
-	return n.replaceErr
+func (n *fakeIMSPDNNetwork) Replace(context.Context, IMSPDNNetworkInfo) (string, error) {
+	return "test0", n.replaceErr
 }
 func (n *fakeIMSPDNNetwork) Close() error {
 	n.closeCalls++
@@ -169,11 +169,12 @@ func TestConfigureIMSPDNNetworkLifecycle(t *testing.T) {
 		withNetwork      bool
 		replaceErr       error
 		wantErr          error
+		wantInterface    string
 		wantNetworkClose int
 		wantSessionClose int
 	}{
 		{name: "no network", wantSessionClose: 1},
-		{name: "configured and closed", withNetwork: true, wantNetworkClose: 1, wantSessionClose: 1},
+		{name: "configured and closed", withNetwork: true, wantInterface: "test0", wantNetworkClose: 1, wantSessionClose: 1},
 		{name: "configuration failure cleans up", withNetwork: true, replaceErr: errReplace, wantErr: errReplace, wantNetworkClose: 1, wantSessionClose: 1},
 	}
 
@@ -191,6 +192,9 @@ func TestConfigureIMSPDNNetworkLifecycle(t *testing.T) {
 				t.Fatalf("configureIMSPDNNetwork() error = %v, want %v", err, tt.wantErr)
 			}
 			if err == nil {
+				if got := configured.Info().InterfaceName; got != tt.wantInterface {
+					t.Fatalf("Info().InterfaceName = %q, want %q", got, tt.wantInterface)
+				}
 				if err := configured.Close(); err != nil {
 					t.Fatalf("Close() error = %v", err)
 				}

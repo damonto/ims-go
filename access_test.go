@@ -196,11 +196,13 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 		wantIPv6  net.IP
 		wantPCSCF []net.IP
 		wantPANI  string
+		wantIF    string
 	}{
 		{
 			name: "uses modem info",
 			cfg:  lte.Config{InterfaceName: "wwan0", AccessNetworkInfo: testVoLTEPANI},
 			pdn: imsPDNInfo{
+				InterfaceName:   "mbim7s1",
 				LocalIPv4:       net.IPv4(10, 0, 0, 2),
 				PCSCFIPs:        []net.IP{net.IPv4(198, 51, 100, 10)},
 				VoPSKnown:       true,
@@ -210,6 +212,7 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 			wantIPv4:  net.IPv4(10, 0, 0, 2),
 			wantPCSCF: []net.IP{net.IPv4(198, 51, 100, 10)},
 			wantPANI:  testVoLTEPANI,
+			wantIF:    "mbim7s1",
 		},
 		{
 			name: "configured values override modem info",
@@ -248,6 +251,9 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := lteInfoFromIMSPDN(tt.cfg, tt.pdn)
+			if got.InterfaceName != tt.wantIF {
+				t.Fatalf("InterfaceName = %q, want %q", got.InterfaceName, tt.wantIF)
+			}
 			if !got.LocalIPv4.Equal(tt.wantIPv4) {
 				t.Fatalf("LocalIPv4 = %v, want %v", got.LocalIPv4, tt.wantIPv4)
 			}
@@ -279,6 +285,12 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 }
 
 func TestOpenVoLTEAccessRequiresReadyIMSPDN(t *testing.T) {
+	previousInterfaceByName := voLTEInterfaceByName
+	voLTEInterfaceByName = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 1}, nil
+	}
+	t.Cleanup(func() { voLTEInterfaceByName = previousInterfaceByName })
+
 	tests := []struct {
 		name    string
 		ready   bool
@@ -290,6 +302,7 @@ func TestOpenVoLTEAccessRequiresReadyIMSPDN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			interfaceName := "ims-test0"
 			session := &imsPDNSessionStub{info: imsPDNInfo{
 				LocalIPv4:       net.IPv4(192, 0, 2, 10),
 				PCSCFIPs:        []net.IP{net.IPv4(198, 51, 100, 20)},
@@ -299,6 +312,7 @@ func TestOpenVoLTEAccessRequiresReadyIMSPDN(t *testing.T) {
 				cfg: Config{
 					Logger: slog.Default(),
 					Access: VoLTE(lte.Config{
+						InterfaceName:     interfaceName,
 						APN:               lte.DefaultAPN,
 						PDNType:           lte.DefaultPDNType,
 						AccessNetworkInfo: testVoLTEPANI,

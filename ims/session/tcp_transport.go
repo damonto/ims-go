@@ -37,9 +37,30 @@ func OpenTCPTransport(ctx context.Context, localIP, remoteIP net.IP, remotePort 
 		_ = conn.Close()
 		return nil, errors.New("opening tcp transport: connection is not TCP")
 	}
+	transport, err := NewTCPTransport(tcp)
+	if err != nil {
+		_ = tcp.Close()
+		return nil, fmt.Errorf("opening tcp transport: %w", err)
+	}
+	return transport, nil
+}
+
+// NewTCPTransport takes ownership of an established TCP connection.
+func NewTCPTransport(conn *net.TCPConn) (Transport, error) {
+	if conn == nil {
+		return nil, errors.New("TCP connection is required")
+	}
+	local, ok := conn.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		return nil, errors.New("TCP connection has an invalid local address")
+	}
+	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return nil, errors.New("TCP connection has an invalid remote address")
+	}
 	return &tcpTransport{
-		conn:   tcp,
-		local:  cloneTCPAddr(tcp.LocalAddr().(*net.TCPAddr)),
+		conn:   conn,
+		local:  cloneTCPAddr(local),
 		remote: cloneTCPAddr(remote),
 	}, nil
 }

@@ -26,6 +26,7 @@ type imsPDNConfig struct {
 }
 
 type imsPDNInfo struct {
+	InterfaceName   string
 	LocalIPv4       net.IP
 	LocalIPv6       net.IP
 	PCSCFIPs        []net.IP
@@ -42,6 +43,7 @@ type imsPDNSession interface {
 type voLTEAccess struct {
 	mu         sync.Mutex
 	info       lte.Info
+	network    voLTENetwork
 	sipLocalIP net.IP
 	pdn        imsPDNSession
 	ipsec      *lteipsec.Session
@@ -79,11 +81,17 @@ func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voL
 		_ = pdn.Close()
 		return nil, errors.New("opening VoLTE access: P-CSCF address is unavailable")
 	}
+	network, err := newVoLTENetwork(info.InterfaceName)
+	if err != nil {
+		_ = pdn.Close()
+		return nil, fmt.Errorf("opening VoLTE access: %w", err)
+	}
 	setup.tunnel = nil
 	return &voLTEAccess{
-		info:   info,
-		pdn:    pdn,
-		logger: c.cfg.Logger,
+		info:    info,
+		network: network,
+		pdn:     pdn,
+		logger:  c.cfg.Logger,
 	}, nil
 }
 
@@ -99,7 +107,12 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 	if err != nil {
 		return imsAccess{}, err
 	}
-	ipsecSession, err := lteipsec.NewSession(route.LocalIP, route.RemoteIP, a.logger)
+	ipsecSession, err := lteipsec.NewSessionWithConfig(lteipsec.SessionConfig{
+		LocalIP:        route.LocalIP,
+		RemoteIP:       route.RemoteIP,
+		Logger:         a.logger,
+		PacketListener: a.network,
+	})
 	if err != nil {
 		_ = transport.Close()
 		return imsAccess{}, err
@@ -123,7 +136,7 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 			reliableCfg.Transport = "tcp"
 			return a.openSIPTransportTo(ctx, reliableCfg, route)
 		},
-		Security: a.openSecurity(route.RemoteIP, cfg, ipsecSession, netstack),
+		Security: a.openSecurity(route.RemoteIP, ipsecSession, netstack),
 		OpenMedia: func(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 			return a.openMedia(ctx, cfg)
 		},
@@ -137,15 +150,37 @@ func (a *voLTEAccess) openSIPTransportTo(ctx context.Context, cfg accessIMSConfi
 	}
 	switch cfg.Transport {
 	case "tcp":
-		return imssession.OpenTCPTransport(ctx, route.LocalIP, route.RemoteIP, remotePort)
+		local := &net.TCPAddr{IP: append(net.IP(nil), route.LocalIP...)}
+		remote := &net.TCPAddr{IP: append(net.IP(nil), route.RemoteIP...), Port: remotePort}
+		conn, err := a.network.DialTCP(ctx, local, remote)
+		if err != nil {
+			return nil, fmt.Errorf("opening tcp transport: %w", err)
+		}
+		transport, err := imssession.NewTCPTransport(conn)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("opening tcp transport: %w", err)
+		}
+		return transport, nil
 	case "udp":
-		return imssession.OpenUDPTransport(ctx, route.LocalIP, route.RemoteIP, remotePort)
+		local := &net.UDPAddr{IP: append(net.IP(nil), route.LocalIP...)}
+		remote := &net.UDPAddr{IP: append(net.IP(nil), route.RemoteIP...), Port: remotePort}
+		conn, err := a.network.ListenUDP(ctx, local)
+		if err != nil {
+			return nil, fmt.Errorf("opening udp transport: %w", err)
+		}
+		transport, err := imssession.NewUDPTransport(conn, remote)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("opening udp transport: %w", err)
+		}
+		return transport, nil
 	default:
 		return nil, fmt.Errorf("opening sip transport: unsupported transport %q", cfg.Transport)
 	}
 }
 
-func (a *voLTEAccess) openSecurity(remoteIP net.IP, cfg accessIMSConfig, session *lteipsec.Session, netstack *ipsectransport.Netstack) imsSecurity {
+func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, netstack *ipsectransport.Netstack) imsSecurity {
 	associations := ipsectransport.NewSecurityAssociations()
 	enable := func(ctx context.Context, mode string) error {
 		if err := session.Enable(ctx, mode); err != nil {
@@ -223,7 +258,7 @@ func (a *voLTEAccess) openMedia(ctx context.Context, cfg imsvoice.MediaConfig) (
 	if !route.LocalIP.Equal(sipLocalIP) {
 		return nil, errors.New("opening voice media transport: media address family differs from registered SIP flow")
 	}
-	return openVoLTEMediaTransport(ctx, info.InterfaceName, route.LocalIP, cfg)
+	return openVoLTEMediaTransport(ctx, a.network, route.LocalIP, cfg)
 }
 
 func (a *voLTEAccess) Close() error {
@@ -286,8 +321,12 @@ func (a *voLTEAccess) SelectNextPCSCF() error {
 }
 
 func lteInfoFromIMSPDN(cfg lte.Config, pdn imsPDNInfo) lte.Info {
+	interfaceName := cfg.InterfaceName
+	if pdn.InterfaceName != "" {
+		interfaceName = pdn.InterfaceName
+	}
 	info := lte.Info{
-		InterfaceName:     cfg.InterfaceName,
+		InterfaceName:     interfaceName,
 		LocalIPv4:         append(net.IP(nil), pdn.LocalIPv4...),
 		LocalIPv6:         append(net.IP(nil), pdn.LocalIPv6...),
 		PCSCFIPs:          cloneNetIPs(pdn.PCSCFIPs),
