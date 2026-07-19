@@ -16,9 +16,6 @@ func (s *Registrar) buildRegister(auth *security.Authorization, verify *security
 	return s.buildRegisterForFlow(auth, verify, s.CurrentFlow())
 }
 
-func (s *Registrar) buildRegisterWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, authorizationHeader string) sip.Message {
-	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, s.CurrentFlow(), authorizationHeader)
-}
 
 func (s *Registrar) buildRegisterForFlow(auth *security.Authorization, verify *security.Param, flow Flow) sip.Message {
 	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, flow, s.currentAuthorizationHeaderName())

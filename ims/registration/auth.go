@@ -196,6 +196,9 @@ func parseRegisterChallenge(resp sip.Message, offered security.Params) (register
 	if behindNAT && !strings.EqualFold(verify.Mod, "UDP-enc-tun") {
 		return registerAuthChallenge{}, fmt.Errorf("%w: applying Security-Server: NAT requires UDP-enc-tun mode", errSecurityAgreementInvalid)
 	}
+	if !behindNAT && !strings.EqualFold(verify.Mod, "trans") {
+		return registerAuthChallenge{}, fmt.Errorf("%w: applying Security-Server: mode %q requires NAT", errSecurityAgreementInvalid, verify.Mod)
+	}
 	if behindNAT {
 		parsed.publicContactHost = publicHost
 	}

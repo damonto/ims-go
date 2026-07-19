@@ -1032,8 +1032,9 @@ func newSecurityClient(registerPort int) security.Param {
 }
 
 func securityClientCapabilities(base security.Param) security.Params {
-	// Keep the algorithm offer conservative, but advertise both IMS signalling
-	// modes required for deployments that use UDP encapsulation through NAT.
+	// The supported IMS access paths terminate NAT before SIP reaches the
+	// P-CSCF. Do not advertise UDP-enc-tun until IMS-level NAT traversal has a
+	// complete public-inner/local-outer address implementation.
 	algorithms := []struct {
 		alg  string
 		ealg string
@@ -1041,28 +1042,15 @@ func securityClientCapabilities(base security.Param) security.Params {
 		{alg: "hmac-sha-1-96", ealg: "null"},
 		{alg: "hmac-sha-1-96", ealg: "aes-cbc"},
 	}
-	modes := []string{"trans", "UDP-enc-tun"}
-	params := make(security.Params, 0, len(algorithms)*len(modes))
+	params := make(security.Params, 0, len(algorithms))
 	for _, algorithm := range algorithms {
-		for _, mode := range modes {
-			param := base
-			param.Alg = algorithm.alg
-			param.EAlg = algorithm.ealg
-			param.Mod = mode
-			params = append(params, param)
-		}
+		param := base
+		param.Alg = algorithm.alg
+		param.EAlg = algorithm.ealg
+		param.Mod = "trans"
+		params = append(params, param)
 	}
 	return params
-}
-
-func reauthSecurityClientCapabilities(base, current security.Param) security.Params {
-	params := securityClientCapabilities(base)
-	if !strings.EqualFold(current.Mod, "UDP-enc-tun") {
-		return params
-	}
-	return slices.DeleteFunc(params, func(param security.Param) bool {
-		return !strings.EqualFold(param.Mod, "UDP-enc-tun")
-	})
 }
 
 func reauthSecurityClient(current, peer security.Param, registerPort int) security.Param {

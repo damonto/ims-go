@@ -1799,14 +1799,14 @@ func TestBuildRegisterAKAv2MD5BootstrapUsesIPSecSecurityAgreement(t *testing.T) 
 	if err := clients.UnmarshalText([]byte(msg.Header("Security-Client"))); err != nil {
 		t.Fatalf("parsing Security-Client: %v", err)
 	}
-	if len(clients) != 4 {
-		t.Fatalf("Security-Client count = %d, want 4", len(clients))
+	if len(clients) != 2 {
+		t.Fatalf("Security-Client count = %d, want 2", len(clients))
 	}
-	if clients[0].EAlg != "null" || clients[1].EAlg != "null" || clients[2].EAlg != "aes-cbc" || clients[3].EAlg != "aes-cbc" {
-		t.Fatalf("Security-Client ealgs = %q/%q/%q/%q, want null/null/aes-cbc/aes-cbc", clients[0].EAlg, clients[1].EAlg, clients[2].EAlg, clients[3].EAlg)
+	if clients[0].EAlg != "null" || clients[1].EAlg != "aes-cbc" {
+		t.Fatalf("Security-Client ealgs = %q/%q, want null/aes-cbc", clients[0].EAlg, clients[1].EAlg)
 	}
-	if clients[0].Mod != "trans" || clients[1].Mod != "UDP-enc-tun" || clients[2].Mod != "trans" || clients[3].Mod != "UDP-enc-tun" {
-		t.Fatalf("Security-Client modes = %q/%q/%q/%q, want trans/UDP-enc-tun/trans/UDP-enc-tun", clients[0].Mod, clients[1].Mod, clients[2].Mod, clients[3].Mod)
+	if clients[0].Mod != "trans" || clients[1].Mod != "trans" {
+		t.Fatalf("Security-Client modes = %q/%q, want trans/trans", clients[0].Mod, clients[1].Mod)
 	}
 	if got := msg.Header("Require"); got != "sec-agree" {
 		t.Fatalf("Require = %q, want sec-agree", got)
@@ -2726,11 +2726,11 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 		if err := securityClients.UnmarshalText([]byte(req.Header("Security-Client"))); err != nil {
 			t.Fatalf("parsing Security-Client: %v", err)
 		}
-		if len(securityClients) != 4 {
-			t.Fatalf("Security-Client count = %d, want 4", len(securityClients))
+		if len(securityClients) != 2 {
+			t.Fatalf("Security-Client count = %d, want 2", len(securityClients))
 		}
-		if !strings.Contains(req.Header("Security-Client"), "mod=UDP-enc-tun") {
-			t.Fatalf("Security-Client = %q, want UDP encapsulated tunnel capability", req.Header("Security-Client"))
+		if strings.Contains(req.Header("Security-Client"), "mod=UDP-enc-tun") {
+			t.Fatalf("Security-Client = %q, want transport mode only", req.Header("Security-Client"))
 		}
 		securityClient := securityClients[0]
 		if securityClient.PortS != oldSecurityClient.PortS {
@@ -4310,12 +4310,12 @@ func TestNotifyTerminatedSubscriptionRefreshesOnlyWhileRegistered(t *testing.T) 
 			notify.Headers.Add("Event", regEventPackage)
 			notify.Headers.Add("Subscription-State", "terminated;reason=timeout")
 			notify.Headers.Add("Content-Type", regInfoContentType)
-			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+			notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="%s" event="%s"><uri>%s</uri></contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.event, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.event, svc.currentRegisterContactURI())
 
 			if handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport}); err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
@@ -4349,14 +4349,14 @@ func TestNotifyRegInfoRefreshesRegistrationExpires(t *testing.T) {
 	notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Content-Type", "application/reginfo+xml")
-	notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+	notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="active" event="refreshed" expires="120">
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 	req := session.Request{Message: notify, Transport: transport}
 
 	handled, err := svc.HandleRequest(context.Background(), req)
@@ -4408,7 +4408,7 @@ func TestNotifyRegInfoMatchesTokenizedContactBySIPInstance(t *testing.T) {
 			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 			notify.Headers.Add("Event", "reg")
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
-			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+			notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="%s" event="%s" expires="3600">
@@ -4416,7 +4416,7 @@ func TestNotifyRegInfoMatchesTokenizedContactBySIPInstance(t *testing.T) {
       <unknown-param name="+sip.instance">&quot;&lt;urn:gsma:imei:869710031623444&gt;&quot; </unknown-param>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.contactEvent))
+</reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.contactEvent)
 
 			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
@@ -4681,14 +4681,14 @@ func TestNotifyRegInfoAcceptsContentTypeParameters(t *testing.T) {
 	notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Content-Type", `Application/RegInfo+XML; charset="utf-8"`)
-	notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+	notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="active" event="refreshed">
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 
 	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
 	if err != nil {
@@ -4775,14 +4775,14 @@ func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) 
 			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 			notify.Headers.Add("Event", "reg")
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
-			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+			notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="terminated" event="%s"%s>
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, tt.event, tt.attributes, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, tt.event, tt.attributes, svc.currentRegisterContactURI())
 			req := session.Request{Message: notify, Transport: transport}
 
 			handled, err := svc.HandleRequest(context.Background(), req)
@@ -4895,10 +4895,10 @@ func TestNotifyRegInfoTerminatedRegistrationPublishesRegistrationEvent(t *testin
 			if tt.includeContact {
 				contact = fmt.Sprintf(`<contact id="contact-1" state="terminated" event="%s"><uri>%s</uri></contact>`, tt.contactEvent, svc.currentRegisterContactURI())
 			}
-			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+			notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
   <registration aor="%s" id="reg-1" state="terminated">%s</registration>
-</reginfo>`, svc.State().PublicIdentity, contact))
+</reginfo>`, svc.State().PublicIdentity, contact)
 
 			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
@@ -4923,14 +4923,14 @@ func TestNotifyRegInfoFullStateWithoutOwnContactRequiresInitialRegistration(t *t
 	notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Content-Type", "application/reginfo+xml")
-	notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+	notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="3" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-2" state="active" event="registered" expires="300">
       <uri>sip:192.0.2.10:5060</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity))
+</reginfo>`, svc.State().PublicIdentity)
 	req := session.Request{Message: notify, Transport: transport}
 
 	handled, err := svc.HandleRequest(context.Background(), req)
@@ -4972,14 +4972,14 @@ func TestNotifyRegInfoFullStateMatchesRegisterTransaction(t *testing.T) {
 			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 			notify.Headers.Add("Event", "reg")
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
-			notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+			notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="3" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="active" event="created" callid="%s" cseq="%s" expires="300">
       <uri>sip:tokenized@proxy.example.com</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, tt.callID, tt.cseq))
+</reginfo>`, svc.State().PublicIdentity, tt.callID, tt.cseq)
 			req := session.Request{Message: notify, Transport: transport}
 
 			handled, err := svc.HandleRequest(context.Background(), req)
@@ -5087,14 +5087,14 @@ func TestNotifyRegInfoIgnoresStaleVersion(t *testing.T) {
 	active := sip.NewRequest("NOTIFY", "sip:user@example.com")
 	active.Headers.Add("Event", "reg")
 	active.Headers.Add("Content-Type", "application/reginfo+xml")
-	active.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+	active.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="2" state="full">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="active" event="refreshed">
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 	if _, err := svc.HandleRequest(context.Background(), session.Request{Message: active, Transport: transport}); err != nil {
 		t.Fatalf("HandleRequest(active) error = %v", err)
 	}
@@ -5102,14 +5102,14 @@ func TestNotifyRegInfoIgnoresStaleVersion(t *testing.T) {
 	stale := sip.NewRequest("NOTIFY", "sip:user@example.com")
 	stale.Headers.Add("Event", "reg")
 	stale.Headers.Add("Content-Type", "application/reginfo+xml")
-	stale.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+	stale.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
   <registration aor="%s" id="reg-1" state="terminated">
     <contact id="contact-1" state="terminated" event="expired">
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI()))
+</reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 
 	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: stale, Transport: transport})
 	if err != nil {
@@ -5426,14 +5426,14 @@ func TestNotifyRegInfoVersionGapRequestsSubscriptionRefresh(t *testing.T) {
 		notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
 		notify.Headers.Add("Event", "reg")
 		notify.Headers.Add("Content-Type", "application/reginfo+xml")
-		notify.Body = []byte(fmt.Sprintf(`<?xml version="1.0"?>
+		notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
 <reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="%s" state="partial">
   <registration aor="%s" id="reg-1" state="active">
     <contact id="contact-1" state="active" event="refreshed">
       <uri>%s</uri>
     </contact>
   </registration>
-</reginfo>`, version, svc.State().PublicIdentity, svc.currentRegisterContactURI()))
+</reginfo>`, version, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 		if handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport}); err != nil {
 			t.Fatalf("HandleRequest(version %s) error = %v", version, err)
 		} else if !handled {

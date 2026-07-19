@@ -592,7 +592,7 @@ func (s *Registrar) Refresh(ctx context.Context) error {
 	flow := s.CurrentFlow()
 	if flow.SecurityVerify != nil {
 		flow.SecurityClient = reauthSecurityClient(flow.SecurityClient, *flow.SecurityVerify, flow.RegisterPort)
-		flow.SecurityClients = reauthSecurityClientCapabilities(flow.SecurityClient, *flow.SecurityVerify)
+		flow.SecurityClients = securityClientCapabilities(flow.SecurityClient)
 	}
 	state := refreshRegisterState{flow: flow}
 	for range 6 {

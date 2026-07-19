@@ -76,9 +76,7 @@ func TestSecurityClientCapabilities(t *testing.T) {
 	}
 	want := []security.Param{
 		{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
-		{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "UDP-enc-tun"},
 		{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "trans"},
-		{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
 	}
 
 	got := securityClientCapabilities(base)
@@ -290,8 +288,9 @@ func TestSecurityServerMustMatchSecurityClientOffer(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:   "offered UDP encapsulation",
-			server: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=UDP-enc-tun;port-c=4061;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222",
+			name:    "unoffered UDP encapsulation",
+			server:  "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=UDP-enc-tun;port-c=4061;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222",
+			wantErr: true,
 		},
 		{
 			name:    "unoffered AES GCM",
@@ -363,33 +362,7 @@ func TestValidateReauthenticationSecurityServer(t *testing.T) {
 	}
 }
 
-func TestReauthenticationSecurityClientCapabilitiesPreserveUDPEncapsulation(t *testing.T) {
-	base := security.Param{Mod: "trans", PortC: 10000, PortS: 10001, SPIC: 1000, SPIS: 1001}
-	tests := []struct {
-		name    string
-		current security.Param
-		wantLen int
-		wantMod string
-	}{
-		{name: "transport mode keeps full offer", current: security.Param{Mod: "trans"}, wantLen: 4},
-		{name: "UDP encapsulation stays UDP encapsulated", current: security.Param{Mod: "UDP-enc-tun"}, wantLen: 2, wantMod: "UDP-enc-tun"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := reauthSecurityClientCapabilities(base, tt.current)
-			if len(got) != tt.wantLen {
-				t.Fatalf("capability count = %d, want %d", len(got), tt.wantLen)
-			}
-			for _, param := range got {
-				if tt.wantMod != "" && param.Mod != tt.wantMod {
-					t.Fatalf("capability mode = %q, want %q", param.Mod, tt.wantMod)
-				}
-			}
-		})
-	}
-}
-
-func TestRegisterChallengeNATMode(t *testing.T) {
+func TestRegisterChallengeNATPolicy(t *testing.T) {
 	tests := []struct {
 		name     string
 		mode     string
@@ -409,12 +382,6 @@ func TestRegisterChallengeNATMode(t *testing.T) {
 			wantHost: "127.0.0.1",
 		},
 		{
-			name:     "NAT requires and stores UDP encapsulation",
-			mode:     "UDP-enc-tun",
-			received: "203.0.113.10",
-			wantHost: "203.0.113.10",
-		},
-		{
 			name:     "NAT rejects transport mode",
 			mode:     "trans",
 			received: "203.0.113.10",
@@ -422,7 +389,7 @@ func TestRegisterChallengeNATMode(t *testing.T) {
 		},
 		{
 			name:     "rejects malformed received address",
-			mode:     "UDP-enc-tun",
+			mode:     "trans",
 			received: "not-an-ip",
 			wantErr:  true,
 		},
@@ -467,5 +434,23 @@ func TestRegisterChallengeNATMode(t *testing.T) {
 				t.Fatalf("Contact = %q, want host %q", protected.Header("Contact"), tt.wantHost)
 			}
 		})
+	}
+}
+
+func TestRegisterChallengeRejectsUDPEncapsulationWithoutNAT(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+	req := svc.buildRegister(nil, nil)
+	client := svc.CurrentFlow().SecurityClient
+	client.Alg = "hmac-sha-1-96"
+	client.EAlg = "aes-cbc"
+	client.Mod = "UDP-enc-tun"
+	resp := newResponse(req, 401, "Unauthorized",
+		sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="ims.example",nonce="` + testNonce + `",algorithm=AKAv1-MD5`},
+		sip.Header{Name: "Security-Server", Value: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc;mod=UDP-enc-tun;port-c=4061;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222"},
+	)
+
+	_, err := parseRegisterChallenge(resp, security.Params{client})
+	if err == nil || !strings.Contains(err.Error(), "requires NAT") {
+		t.Fatalf("parseRegisterChallenge() error = %v, want mode requires NAT", err)
 	}
 }
