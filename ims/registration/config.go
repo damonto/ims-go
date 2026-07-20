@@ -91,6 +91,15 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
 	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
+	var err error
+	cfg.IPSecIntegrityAlgorithms, err = security.NormalizeIPSecIntegrityAlgorithms(cfg.IPSecIntegrityAlgorithms)
+	if err != nil {
+		return Config{}, fmt.Errorf("normalizing registration config: %w", err)
+	}
+	cfg.IPSecEncryptionAlgorithms, err = security.NormalizeIPSecEncryptionAlgorithms(cfg.IPSecEncryptionAlgorithms)
+	if err != nil {
+		return Config{}, fmt.Errorf("normalizing registration config: %w", err)
+	}
 	if cfg.AuthAlgorithm == "" {
 		cfg.AuthAlgorithm = security.AlgorithmAKAv1MD5
 	} else {

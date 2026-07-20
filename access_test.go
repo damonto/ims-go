@@ -152,7 +152,7 @@ func TestConfigNormalizedAccess(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.cfg.normalized(stubCard{})
+			got, err := withTestIPSecAlgorithms(tt.cfg).normalized(stubCard{})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("normalized() error = nil, want non-nil")

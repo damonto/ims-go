@@ -305,7 +305,7 @@ func (s *Registrar) clearRegistrationState() error {
 
 func (s *Registrar) resetRegistrationState() {
 	flow := s.CurrentFlow()
-	nextFlow := newFlow(flow.ContactHost, flow.RegisterPort)
+	nextFlow := newFlow(flow.ContactHost, flow.RegisterPort, ipsecAlgorithmsFromConfig(s.cfg))
 	callID, sessionID, tag, _ := sip.NewTransaction()
 
 	s.mu.Lock()

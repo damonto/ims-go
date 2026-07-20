@@ -87,6 +87,92 @@ func TestNetstackLoopback(t *testing.T) {
 	}
 }
 
+func TestNetstackUDPEncTunnelSeparatesInnerAndOuterAddresses(t *testing.T) {
+	tests := []struct {
+		name           string
+		outerLocalIP   net.IP
+		innerLocalIP   net.IP
+		remoteIP       net.IP
+		wantNextHeader byte
+		encryption     string
+		encryptionKey  []byte
+		integrity      string
+		integrityKey   []byte
+	}{
+		{
+			name:         "IPv4 NAT",
+			outerLocalIP: net.ParseIP("10.0.0.10"), innerLocalIP: net.ParseIP("198.51.100.10"),
+			remoteIP: net.ParseIP("192.0.2.20"), wantNextHeader: packet.OuterIPv4,
+			encryption: esp.EncryptionAESCBC, encryptionKey: []byte("0123456789abcdef"),
+			integrity: esp.IntegrityHMACMD596, integrityKey: []byte("fedcba9876543210"),
+		},
+		{
+			name:         "IPv6 address translation",
+			outerLocalIP: net.ParseIP("fd00::10"), innerLocalIP: net.ParseIP("2001:db8:1::10"),
+			remoteIP: net.ParseIP("2001:db8:2::20"), wantNextHeader: packet.OuterIPv6,
+			encryption: esp.EncryptionNull,
+			integrity:  esp.IntegrityHMACSHA196, integrityKey: []byte("0123456789abcdefghij"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientSession, _ := newLoopbackPacketSessions()
+			clientSession.localIP = tt.outerLocalIP
+			clientSession.remoteIP = tt.remoteIP
+			stopWrite := errors.New("stop after recording outer packet")
+			clientSession.setWriteHook(func(context.Context, packet.InnerPacket) error { return stopWrite })
+			n := newTestNetstack(t, clientSession)
+			policy, err := n.registerSecurity(netstackSecurityConfig{
+				protocol: packet.ProtocolUDP,
+				localIP:  tt.innerLocalIP, remoteIP: tt.remoteIP,
+				outerLocalIP: tt.outerLocalIP, outerRemoteIP: tt.remoteIP,
+				localPort: 40000, remotePort: 6000, mode: SecureModeUDPEncTunnel,
+				outboundSPI: 0x1001, inboundSPI: 0x2001,
+				encryption: tt.encryption, encryptionKey: tt.encryptionKey,
+				integrity: tt.integrity, integrityKey: tt.integrityKey,
+			})
+			if err != nil {
+				t.Fatalf("registerSecurity() error = %v", err)
+			}
+			inner := packet.InnerPacket{UDP: &packet.UDPSegment{
+				Src:     &net.UDPAddr{IP: tt.innerLocalIP, Port: 40000},
+				Dst:     &net.UDPAddr{IP: tt.remoteIP, Port: 6000},
+				Payload: []byte("REGISTER sip:ims.example SIP/2.0\r\n\r\n"),
+			}}
+			wire, err := inner.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if err := n.writePacket(context.Background(), inner, wire); !errors.Is(err, stopWrite) {
+				t.Fatalf("writePacket() error = %v, want %v", err, stopWrite)
+			}
+			writes := clientSession.snapshotWrites()
+			if len(writes) != 1 || writes[0].UDP == nil {
+				t.Fatalf("outer writes = %+v, want one UDP packet", writes)
+			}
+			outer := writes[0].UDP
+			if !outer.Src.IP.Equal(tt.outerLocalIP) || !outer.Dst.IP.Equal(tt.remoteIP) {
+				t.Fatalf("outer addresses = %s -> %s, want %s -> %s", outer.Src.IP, outer.Dst.IP, tt.outerLocalIP, tt.remoteIP)
+			}
+			decoded, err := policy.outboundESP.Decode(outer.Payload)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if decoded.NextHeader != tt.wantNextHeader {
+				t.Fatalf("ESP next header = %d, want %d", decoded.NextHeader, tt.wantNextHeader)
+			}
+			var protectedInner packet.InnerPacket
+			if err := protectedInner.UnmarshalBinary(decoded.Payload); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if !protectedInner.IP.SrcIP.Equal(tt.innerLocalIP) || !protectedInner.IP.DstIP.Equal(tt.remoteIP) {
+				t.Fatalf("inner addresses = %s -> %s, want %s -> %s", protectedInner.IP.SrcIP, protectedInner.IP.DstIP, tt.innerLocalIP, tt.remoteIP)
+			}
+		})
+	}
+}
+
 func TestNetstackRejectsPlaintextForProtectedUDPFlow(t *testing.T) {
 	tests := []struct {
 		name string

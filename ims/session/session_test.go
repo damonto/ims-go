@@ -2819,6 +2819,12 @@ func TestPrepareRequestTransportRejectsOversizedUDPWithoutReliableFlow(t *testin
 	}{
 		{name: "opener is absent"},
 		{
+			name: "opener fails",
+			cfg: Config{OpenReliableTransport: func(context.Context) (Transport, error) {
+				return nil, errors.New("tcp unavailable")
+			}},
+		},
+		{
 			name: "opener returns nil",
 			cfg: Config{OpenReliableTransport: func(context.Context) (Transport, error) {
 				return nil, nil
@@ -2842,6 +2848,60 @@ func TestPrepareRequestTransportRejectsOversizedUDPWithoutReliableFlow(t *testin
 			}
 			if got := transport.writeCount(); got != 0 {
 				t.Fatalf("UDP write count = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestPrepareRequestTransportPrefersTCPForOversizedUDP(t *testing.T) {
+	tests := []struct {
+		name     string
+		bodySize int
+	}{
+		{name: "slightly above reliable threshold", bodySize: sipDatagramRequestLimit},
+		{name: "fragmented register sized request", bodySize: 4096},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			udpTransport := newStubTransport(5062, 5060)
+			tcpTransport := newStubTransport(5062, 5060)
+			tcpTransport.local = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062}
+			tcpTransport.remote = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+			openCalls := 0
+			sess, err := Open(Config{
+				OpenReliableTransport: func(context.Context) (Transport, error) {
+					openCalls++
+					return tcpTransport, nil
+				},
+			}, udpTransport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			defer sess.Close()
+
+			req := newRequest("REGISTER", "call-large-tcp", "1 REGISTER")
+			req.Body = make([]byte, tt.bodySize)
+			req.Headers.Set("Content-Length", fmt.Sprint(len(req.Body)))
+			if err := sess.Send(context.Background(), req); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+			if openCalls != 1 {
+				t.Fatalf("reliable transport open calls = %d, want 1", openCalls)
+			}
+			if got := udpTransport.writeCount(); got != 0 {
+				t.Fatalf("UDP write count = %d, want 0", got)
+			}
+			writes := tcpTransport.snapshotWrites()
+			if len(writes) != 1 {
+				t.Fatalf("TCP write count = %d, want 1", len(writes))
+			}
+			got, err := sip.ParseMessage(writes[0])
+			if err != nil {
+				t.Fatalf("ParseMessage() error = %v", err)
+			}
+			if via := got.Header("Via"); !strings.HasPrefix(via, "SIP/2.0/TCP ") {
+				t.Fatalf("Via = %q, want TCP", via)
 			}
 		})
 	}

@@ -15,6 +15,7 @@ import (
 
 type refreshRegisterState struct {
 	adjustedExpires bool
+	natPortAdjusted bool
 	flow            Flow
 }
 
@@ -132,6 +133,14 @@ func (s *Registrar) buildRefreshRegister(ctx context.Context, flow Flow) (sip.Me
 }
 
 func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Message, state *refreshRegisterState, auth *security.Authorization) (bool, error) {
+	if incompatibleNetworkAddressResponse(resp) && state.flow.SecurityVerify != nil && strings.EqualFold(state.flow.SecurityVerify.Mod, "UDP-enc-tun") {
+		if state.natPortAdjusted {
+			return false, errors.New("refreshing IMS registration: repeated incompatible network address response")
+		}
+		rotateNATProtectedPorts(&state.flow, false)
+		state.natPortAdjusted = true
+		return false, nil
+	}
 	switch resp.StatusCode() {
 	case sipStatusOK:
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
@@ -158,6 +167,26 @@ func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Mess
 		}
 		return false, fmt.Errorf("refreshing IMS registration: unexpected response: %w", sip.NewResponseError(resp))
 	}
+}
+
+func incompatibleNetworkAddressResponse(resp sip.Message) bool {
+	if resp.StatusCode() != sipStatusBadRequest {
+		return false
+	}
+	for _, warning := range sip.ParseWarningValues(resp.HeadersByName("Warning")) {
+		if warning.Code == 301 && strings.Contains(strings.ToLower(warning.Text), "incompatible network address") {
+			return true
+		}
+	}
+	return false
+}
+
+func initialNATPortCollisionResponse(resp sip.Message) bool {
+	if !incompatibleNetworkAddressResponse(resp) {
+		return false
+	}
+	_, behindNAT, err := registerResponseNAT(resp)
+	return err == nil && behindNAT
 }
 
 func initialRegistrationRetryResponse(resp sip.Message) bool {

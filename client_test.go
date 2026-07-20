@@ -103,7 +103,9 @@ func testLogger() *slog.Logger {
 
 func testRegistrationConfig(transport imssession.Transport) registration.Config {
 	return registration.Config{
-		Logger: testLogger(),
+		Logger:                    testLogger(),
+		IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+		IPSecEncryptionAlgorithms: []string{"null", "aes-cbc"},
 		DialSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			return transport, nil
 		},
@@ -671,6 +673,7 @@ func newStandaloneClient(t *testing.T) *Client {
 
 func newReadyClient(t *testing.T, cfg Config) *Client {
 	t.Helper()
+	cfg = withTestIPSecAlgorithms(cfg)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}

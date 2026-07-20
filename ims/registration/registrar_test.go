@@ -179,6 +179,7 @@ func (c identityStubCard) PublicIdentity() string { return c.publicIdentity }
 
 func newTestService(t *testing.T, cfg Config, transport session.Transport, card Card) *Registrar {
 	t.Helper()
+	cfg = withTestIPSecAlgorithms(cfg)
 	cfg.Logger = testLogger()
 	if cfg.DialSecureTCP == nil {
 		cfg.DialSecureTCP = func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
@@ -201,6 +202,16 @@ func newTestService(t *testing.T, cfg Config, transport session.Transport, card 
 	return svc
 }
 
+func withTestIPSecAlgorithms(cfg Config) Config {
+	if len(cfg.IPSecIntegrityAlgorithms) == 0 {
+		cfg.IPSecIntegrityAlgorithms = []string{"hmac-sha-1-96"}
+	}
+	if len(cfg.IPSecEncryptionAlgorithms) == 0 {
+		cfg.IPSecEncryptionAlgorithms = []string{"null", "aes-cbc"}
+	}
+	return cfg
+}
+
 func registerService(t *testing.T, svc *Registrar, transport *stubTransport) {
 	t.Helper()
 	transport.onWrite = func(data []byte) {
@@ -216,6 +227,103 @@ func registerService(t *testing.T, svc *Registrar, transport *stubTransport) {
 	}
 	if err := svc.Register(context.Background()); err != nil {
 		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+func TestAwaitRegisterChallengeRetriesNATPortCollision(t *testing.T) {
+	tests := []struct {
+		name        string
+		warningText string
+	}{
+		{name: "network address format", warningText: "incompatible network address format"},
+		{name: "network address type", warningText: "Incompatible network address type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			t.Cleanup(func() { _ = svc.Close() })
+			old := svc.CurrentFlow().SecurityClient
+			var retried security.Params
+			transport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				switch countWrites(transport) {
+				case 1:
+					resp := newResponse(req, sipStatusBadRequest, "Bad Request",
+						sip.Header{Name: "Warning", Value: `301 pcscf.example "` + tt.warningText + `"`},
+					)
+					resp.Headers.Set("Via", req.Header("Via")+";received=198.51.100.10")
+					transport.queue(resp)
+				case 2:
+					if err := retried.UnmarshalText([]byte(req.Header("Security-Client"))); err != nil {
+						t.Fatalf("parsing retried Security-Client: %v", err)
+					}
+					transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
+				default:
+					t.Fatalf("unexpected write count %d", countWrites(transport))
+				}
+			}
+
+			resp, err := svc.awaitRegisterChallenge(context.Background())
+			if err != nil {
+				t.Fatalf("awaitRegisterChallenge() error = %v", err)
+			}
+			if resp.StatusCode() != sipStatusUnauthorized {
+				t.Fatalf("response status = %d, want %d", resp.StatusCode(), sipStatusUnauthorized)
+			}
+			if len(retried) == 0 {
+				t.Fatal("retried Security-Client is empty")
+			}
+			if retried[0].PortC == old.PortC || retried[0].PortS == old.PortS {
+				t.Fatalf("retried ports = %d/%d, want both changed from %d/%d", retried[0].PortC, retried[0].PortS, old.PortC, old.PortS)
+			}
+		})
+	}
+}
+
+func TestRefreshRegistrationRetriesNATClientPortCollision(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		wantRetry bool
+	}{
+		{name: "UDP encapsulated tunnel", mode: "UDP-enc-tun", wantRetry: true},
+		{name: "transport mode", mode: "trans"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newUDPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			t.Cleanup(func() { _ = svc.Close() })
+			flow := newFlow("198.51.100.10", 5060, ipsecAlgorithmsFromConfig(svc.cfg))
+			flow.SecurityVerify = &security.Param{Mod: tt.mode}
+			flow.SecurityClient.Mod = tt.mode
+			flow.SecurityClients = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(svc.cfg))
+			state := refreshRegisterState{flow: flow}
+			resp := sip.NewResponse(sipStatusBadRequest, "Bad Request")
+			resp.Headers.Add("Warning", `301 pcscf.example "incompatible network address format"`)
+			oldClientPort := state.flow.SecurityClient.PortC
+			oldServerPort := state.flow.SecurityClient.PortS
+
+			done, err := svc.handleRefreshRegistration(context.Background(), resp, &state, nil)
+			if tt.wantRetry {
+				if err != nil || done {
+					t.Fatalf("handleRefreshRegistration() = done %v, error %v; want retry", done, err)
+				}
+				if state.flow.SecurityClient.PortC == oldClientPort {
+					t.Fatalf("protected client port = %d, want changed from %d", state.flow.SecurityClient.PortC, oldClientPort)
+				}
+				if state.flow.SecurityClient.PortS != oldServerPort {
+					t.Fatalf("protected server port = %d, want unchanged %d", state.flow.SecurityClient.PortS, oldServerPort)
+				}
+				return
+			}
+			if err == nil || done {
+				t.Fatalf("handleRefreshRegistration() = done %v, error %v; want normal 400 rejection", done, err)
+			}
+		})
 	}
 }
 
@@ -938,7 +1046,7 @@ func TestSecureResponseTransportSkipsDuplicateSessionEndpoint(t *testing.T) {
 	}
 }
 
-func TestSecureTransportConfigExpandsHMACSHA1IntegrityKey(t *testing.T) {
+func TestSecureTransportConfigBuildsIntegrityKey(t *testing.T) {
 	ik := []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
 	ck := []byte{0x20, 0x21, 0x22, 0x23}
 	tests := []struct {
@@ -956,11 +1064,21 @@ func TestSecureTransportConfigExpandsHMACSHA1IntegrityKey(t *testing.T) {
 			alg:  "hmac-sha1-96",
 			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0, 0, 0, 0},
 		},
+		{
+			name: "legacy hmac md5 keeps 128 bit IK",
+			alg:  "hmac-md5-96",
+			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := secureTransportConfigWithKeys(&security.Param{Alg: tt.alg, EAlg: "null"}, 40000, 5060, 1111, 2222, ck, ik)
+			cfg := secureTransportConfigWithKeys(secureConfigParams{
+				verify:    &security.Param{Alg: tt.alg, EAlg: "null"},
+				localPort: 40000, remotePort: 5060,
+				outboundSPI: 1111, inboundSPI: 2222,
+				ck: ck, ik: ik,
+			})
 			if !bytes.Equal(cfg.IntegrityKey, tt.want) {
 				t.Fatalf("IntegrityKey = %X, want %X", cfg.IntegrityKey, tt.want)
 			}
@@ -1192,7 +1310,7 @@ func TestSecureAssociationLifetimeExpiryClosesSecureResources(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AddTransport(active) error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1242,7 +1360,7 @@ func TestSecureAssociationLifetimeExtensionCancelsStaleExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AddTransport(active) error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1320,7 +1438,7 @@ func TestCloseClosesSecureResources(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AddTransport(draining) error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1374,7 +1492,7 @@ func TestCloseAttachmentsAfterClosedServiceClosesImmediately(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AddTransport() error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1477,7 +1595,7 @@ func TestClearRegistrationStateRestoresUnprotectedTransport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AddTransport() error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -1799,14 +1917,21 @@ func TestBuildRegisterAKAv2MD5BootstrapUsesIPSecSecurityAgreement(t *testing.T) 
 	if err := clients.UnmarshalText([]byte(msg.Header("Security-Client"))); err != nil {
 		t.Fatalf("parsing Security-Client: %v", err)
 	}
-	if len(clients) != 2 {
-		t.Fatalf("Security-Client count = %d, want 2", len(clients))
+	wantClients := []struct {
+		alg, ealg, mode string
+	}{
+		{alg: "hmac-sha-1-96", ealg: "null", mode: "trans"},
+		{alg: "hmac-sha-1-96", ealg: "null", mode: "UDP-enc-tun"},
+		{alg: "hmac-sha-1-96", ealg: "aes-cbc", mode: "trans"},
+		{alg: "hmac-sha-1-96", ealg: "aes-cbc", mode: "UDP-enc-tun"},
 	}
-	if clients[0].EAlg != "null" || clients[1].EAlg != "aes-cbc" {
-		t.Fatalf("Security-Client ealgs = %q/%q, want null/aes-cbc", clients[0].EAlg, clients[1].EAlg)
+	if len(clients) != len(wantClients) {
+		t.Fatalf("Security-Client count = %d, want %d", len(clients), len(wantClients))
 	}
-	if clients[0].Mod != "trans" || clients[1].Mod != "trans" {
-		t.Fatalf("Security-Client modes = %q/%q, want trans/trans", clients[0].Mod, clients[1].Mod)
+	for i, want := range wantClients {
+		if clients[i].Alg != want.alg || clients[i].EAlg != want.ealg || clients[i].Mod != want.mode {
+			t.Fatalf("Security-Client[%d] = %s/%s/%s, want %s/%s/%s", i, clients[i].Alg, clients[i].EAlg, clients[i].Mod, want.alg, want.ealg, want.mode)
+		}
 	}
 	if got := msg.Header("Require"); got != "sec-agree" {
 		t.Fatalf("Require = %q, want sec-agree", got)
@@ -1817,12 +1942,40 @@ func TestBuildRegisterAKAv2MD5BootstrapUsesIPSecSecurityAgreement(t *testing.T) 
 }
 
 func TestNormalizeConfigRejectsAKAv2SHA256WithoutTLSTransport(t *testing.T) {
-	_, err := normalizeConfig(Config{AuthAlgorithm: security.AlgorithmAKAv2SHA256})
+	_, err := normalizeConfig(withTestIPSecAlgorithms(Config{AuthAlgorithm: security.AlgorithmAKAv2SHA256}))
 	if err == nil {
 		t.Fatal("normalizeConfig() error = nil, want AKAv2-SHA-256 TLS transport error")
 	}
 	if !strings.Contains(err.Error(), "AKAv2-SHA-256 requires TLS SIP transport") {
 		t.Fatalf("normalizeConfig() error = %v, want TLS transport error", err)
+	}
+}
+
+func TestNormalizeConfigRequiresIPSecAlgorithms(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name:    "integrity algorithms",
+			cfg:     Config{IPSecEncryptionAlgorithms: []string{"null"}},
+			wantErr: "IPsec integrity algorithms are required",
+		},
+		{
+			name:    "encryption algorithms",
+			cfg:     Config{IPSecIntegrityAlgorithms: []string{"hmac-sha-1-96"}},
+			wantErr: "IPsec encryption algorithms are required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := normalizeConfig(tt.cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("normalizeConfig() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -2611,7 +2764,7 @@ func TestRefreshReauthenticationRequiresSecureDialer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	svc, err := New(Config{Logger: testLogger()}, sess, stubCard{})
+	svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2939,7 +3092,7 @@ func TestRefreshReauthenticationDrainsOldInboundSecurityAssociations(t *testing.
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	svc, err := New(Config{
+	svc, err := New(withTestIPSecAlgorithms(Config{
 		Logger: testLogger(),
 		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
 			return nextOutbound, nil
@@ -2947,7 +3100,7 @@ func TestRefreshReauthenticationDrainsOldInboundSecurityAssociations(t *testing.
 		ListenSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
 			return nextInbound, nil
 		},
-	}, sess, stubCard{})
+	}), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -3029,7 +3182,7 @@ func TestRefreshReauthenticationKeepsOldSAsUntilPendingTransactionCompletes(t *t
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	svc, err := New(Config{
+	svc, err := New(withTestIPSecAlgorithms(Config{
 		Logger: testLogger(),
 		DialSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
 			return nextOutbound, nil
@@ -3037,7 +3190,7 @@ func TestRefreshReauthenticationKeepsOldSAsUntilPendingTransactionCompletes(t *t
 		ListenSecureTCP: func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
 			return nextInbound, nil
 		},
-	}, sess, stubCard{})
+	}), sess, stubCard{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

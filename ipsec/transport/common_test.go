@@ -210,10 +210,16 @@ func TestValidateSecureESPConfigValidatesTS33203KeysAndAlgorithms(t *testing.T) 
 			integrityKey: []byte("0123456789abcdef"),
 		},
 		{
-			name:         "unsupported hmac md5",
+			name:         "legacy hmac md5 key is 128 bits",
 			encryption:   esp.EncryptionNull,
 			integrity:    esp.IntegrityHMACMD596,
 			integrityKey: []byte("0123456789abcdef"),
+		},
+		{
+			name:         "short hmac md5 key",
+			encryption:   esp.EncryptionNull,
+			integrity:    esp.IntegrityHMACMD596,
+			integrityKey: []byte("0123456789abcde"),
 			wantErr:      true,
 		},
 	}

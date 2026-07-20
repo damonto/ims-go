@@ -110,6 +110,7 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 	security := imsSecurity{
 		DialSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			return a.netstack.DialSecureUDP(ctx, ipsectransport.SecureUDPConfig{
+				InnerLocalIP: cfg.InnerLocalIP,
 				UDPConfig: ipsectransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
@@ -128,6 +129,7 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 		},
 		ListenSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			return a.netstack.ListenSecureUDP(ctx, ipsectransport.SecureUDPConfig{
+				InnerLocalIP: cfg.InnerLocalIP,
 				UDPConfig: ipsectransport.UDPConfig{
 					LocalPort:  cfg.LocalPort,
 					RemotePort: cfg.RemotePort,
@@ -147,6 +149,7 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 	}
 	security.DialSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
 		return a.netstack.DialSecureTCP(ctx, ipsectransport.SecureTCPConfig{
+			InnerLocalIP: secureCfg.InnerLocalIP,
 			TCPConfig: ipsectransport.TCPConfig{
 				LocalPort:  secureCfg.LocalPort,
 				RemotePort: secureCfg.RemotePort,
@@ -166,6 +169,7 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 	if cfg.Transport == "tcp" {
 		security.ListenSecureTCP = func(ctx context.Context, secureCfg imssession.SecureTCPConfig) (imssession.Transport, error) {
 			return a.netstack.ListenSecureTCP(ctx, ipsectransport.SecureTCPConfig{
+				InnerLocalIP: secureCfg.InnerLocalIP,
 				TCPConfig: ipsectransport.TCPConfig{
 					LocalPort:  secureCfg.LocalPort,
 					RemotePort: secureCfg.RemotePort,

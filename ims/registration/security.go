@@ -82,6 +82,7 @@ func (s *Registrar) applySelectedSecurityServer(verify *security.Param, raw []st
 		s.flow.MessagePort = s.flow.RegisterPort
 		return
 	}
+	s.flow.SecurityClient.Mod = verify.Mod
 	s.flow.MessagePort = s.flow.SecurityClient.PortS
 }
 
@@ -619,15 +620,12 @@ func (s *Registrar) addReliableOutboundTransport(ctx context.Context, registrati
 		!strings.EqualFold(sip.TransportToken(registration.outbound.LocalAddr()), "UDP") {
 		return
 	}
-	reliable, err := s.cfg.DialSecureTCP(ctx, secureTransportConfigWithKeys(
-		verify,
-		flow.SecurityClient.PortC,
-		verify.PortS,
-		verify.SPIS,
-		flow.SecurityClient.SPIC,
-		s.authCK,
-		s.authIK,
-	))
+	reliable, err := s.cfg.DialSecureTCP(ctx, secureTransportConfigWithKeys(secureConfigParams{
+		verify: verify, contactHost: flow.ContactHost,
+		localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
+		outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
+		ck: s.authCK, ik: s.authIK,
+	}))
 	if err != nil {
 		s.logger.Warn("secure TCP fallback is unavailable", "err", err)
 		return
@@ -647,7 +645,26 @@ func (s *Registrar) exchangeProtectedRegister(ctx context.Context, registration 
 	if registration == nil || registration.outbound == nil {
 		return s.sess.ExchangeWithOptions(ctx, req, s.protectedRegisterExchangeOptions())
 	}
+	if err := setRegisterViaTransport(&req, sip.TransportToken(registration.outbound.LocalAddr())); err != nil {
+		return sip.Message{}, err
+	}
 	return s.sess.ExchangeWithTransport(ctx, registration.outbound, req, registration.exchangeOptions())
+}
+
+func setRegisterViaTransport(req *sip.Message, transport string) error {
+	via := strings.TrimSpace(req.Header("Via"))
+	values := sip.SplitHeaderList(via)
+	if len(values) == 0 {
+		return errors.New("selecting protected REGISTER transport: Via header is missing")
+	}
+	top := strings.TrimSpace(values[0])
+	separator := strings.IndexByte(top, ' ')
+	if separator <= len("SIP/2.0/") || !strings.EqualFold(top[:len("SIP/2.0/")], "SIP/2.0/") {
+		return errors.New("selecting protected REGISTER transport: Via header is malformed")
+	}
+	values[0] = "SIP/2.0/" + transport + top[separator:]
+	req.Headers.Set("Via", strings.Join(values, ", "))
+	return nil
 }
 
 func (s *Registrar) commitRegisterSecurity(registration *registerSecurity) error {
@@ -721,34 +738,54 @@ func sameAddr(left, right net.Addr) bool {
 	return left.Network() == right.Network() && left.String() == right.String()
 }
 
-func secureTransportConfigWithKeys(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32, ck, ik []byte) session.SecureTCPConfig {
+type secureConfigParams struct {
+	verify      *security.Param
+	contactHost string
+	localPort   int
+	remotePort  int
+	outboundSPI uint32
+	inboundSPI  uint32
+	ck          []byte
+	ik          []byte
+}
+
+func secureTransportConfigWithKeys(params secureConfigParams) session.SecureTCPConfig {
 	return session.SecureTCPConfig{
-		LocalPort:     localPort,
-		RemotePort:    remotePort,
-		OutboundSPI:   outboundSPI,
-		InboundSPI:    inboundSPI,
-		Encryption:    verify.EAlg,
-		EncryptionKey: append([]byte(nil), ck...),
-		Integrity:     verify.Alg,
-		IntegrityKey:  espIntegrityKey(verify.Alg, ik),
-		Mode:          verify.Mod,
-		Salt:          espSalt(verify, ck, ik),
+		InnerLocalIP:  secureInnerLocalIP(params.verify, params.contactHost),
+		LocalPort:     params.localPort,
+		RemotePort:    params.remotePort,
+		OutboundSPI:   params.outboundSPI,
+		InboundSPI:    params.inboundSPI,
+		Encryption:    params.verify.EAlg,
+		EncryptionKey: append([]byte(nil), params.ck...),
+		Integrity:     params.verify.Alg,
+		IntegrityKey:  espIntegrityKey(params.verify.Alg, params.ik),
+		Mode:          params.verify.Mod,
+		Salt:          espSalt(params.verify, params.ck, params.ik),
 	}
 }
 
-func secureDatagramConfigWithKeys(verify *security.Param, localPort, remotePort int, outboundSPI, inboundSPI uint32, ck, ik []byte) session.SecureUDPConfig {
+func secureDatagramConfigWithKeys(params secureConfigParams) session.SecureUDPConfig {
 	return session.SecureUDPConfig{
-		LocalPort:     localPort,
-		RemotePort:    remotePort,
-		OutboundSPI:   outboundSPI,
-		InboundSPI:    inboundSPI,
-		Encryption:    verify.EAlg,
-		EncryptionKey: append([]byte(nil), ck...),
-		Integrity:     verify.Alg,
-		IntegrityKey:  espIntegrityKey(verify.Alg, ik),
-		Mode:          verify.Mod,
-		Salt:          espSalt(verify, ck, ik),
+		InnerLocalIP:  secureInnerLocalIP(params.verify, params.contactHost),
+		LocalPort:     params.localPort,
+		RemotePort:    params.remotePort,
+		OutboundSPI:   params.outboundSPI,
+		InboundSPI:    params.inboundSPI,
+		Encryption:    params.verify.EAlg,
+		EncryptionKey: append([]byte(nil), params.ck...),
+		Integrity:     params.verify.Alg,
+		IntegrityKey:  espIntegrityKey(params.verify.Alg, params.ik),
+		Mode:          params.verify.Mod,
+		Salt:          espSalt(params.verify, params.ck, params.ik),
 	}
+}
+
+func secureInnerLocalIP(verify *security.Param, contactHost string) net.IP {
+	if verify == nil || !strings.EqualFold(verify.Mod, "UDP-enc-tun") {
+		return nil
+	}
+	return net.ParseIP(strings.TrimSpace(contactHost))
 }
 
 func espIntegrityKey(alg string, ik []byte) []byte {
@@ -806,7 +843,12 @@ func (s *Registrar) dialSecureTransport(ctx context.Context, verify *security.Pa
 		if s.cfg.DialSecureTCP == nil {
 			return nil, errors.New("dialing secure IMS transport: TCP dialer is not configured")
 		}
-		secureTransport, err := s.cfg.DialSecureTCP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
+		secureTransport, err := s.cfg.DialSecureTCP(ctx, secureTransportConfigWithKeys(secureConfigParams{
+			verify: verify, contactHost: flow.ContactHost,
+			localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
+			outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
+			ck: ck, ik: ik,
+		}))
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure IMS transport: %w", err)
 		}
@@ -815,7 +857,12 @@ func (s *Registrar) dialSecureTransport(ctx context.Context, verify *security.Pa
 		if s.cfg.DialSecureUDP == nil {
 			return nil, errors.New("dialing secure IMS datagram transport: UDP dialer is not configured")
 		}
-		secureTransport, err := s.cfg.DialSecureUDP(ctx, secureDatagramConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
+		secureTransport, err := s.cfg.DialSecureUDP(ctx, secureDatagramConfigWithKeys(secureConfigParams{
+			verify: verify, contactHost: flow.ContactHost,
+			localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
+			outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
+			ck: ck, ik: ik,
+		}))
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure IMS datagram transport: %w", err)
 		}
@@ -832,7 +879,12 @@ func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, ver
 	transports := make([]session.Transport, 0, 2)
 	attachments := make([]session.Attachment, 0, 2)
 	if s.cfg.ListenSecureTCP != nil {
-		serverTransport, err := s.cfg.ListenSecureTCP(ctx, secureTransportConfigWithKeys(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS, ck, ik))
+		serverTransport, err := s.cfg.ListenSecureTCP(ctx, secureTransportConfigWithKeys(secureConfigParams{
+			verify: verify, contactHost: flow.ContactHost,
+			localPort: flow.SecurityClient.PortS, remotePort: verify.PortC,
+			outboundSPI: verify.SPIC, inboundSPI: flow.SecurityClient.SPIS,
+			ck: ck, ik: ik,
+		}))
 		if err != nil {
 			closeAttachments(attachments)
 			return nil, nil, fmt.Errorf("listening secure IMS transport: %w", err)
@@ -847,7 +899,12 @@ func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, ver
 		attachments = append(attachments, attachment)
 	}
 	if s.cfg.ListenSecureUDP != nil {
-		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, secureDatagramConfigWithKeys(verify, flow.SecurityClient.PortS, verify.PortC, verify.SPIC, flow.SecurityClient.SPIS, ck, ik))
+		serverDatagramTransport, err := s.cfg.ListenSecureUDP(ctx, secureDatagramConfigWithKeys(secureConfigParams{
+			verify: verify, contactHost: flow.ContactHost,
+			localPort: flow.SecurityClient.PortS, remotePort: verify.PortC,
+			outboundSPI: verify.SPIC, inboundSPI: flow.SecurityClient.SPIS,
+			ck: ck, ik: ik,
+		}))
 		if err != nil {
 			closeAttachments(attachments)
 			return nil, nil, fmt.Errorf("listening secure IMS datagram transport: %w", err)
@@ -878,7 +935,12 @@ func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, v
 	if sameSessionDatagramEndpoint(s.sess.LocalAddr(), s.sess.RemoteAddr(), flow.SecurityClient.PortC, verify.PortS) {
 		return nil, nil
 	}
-	responseTransport, err := s.cfg.DialSecureUDP(ctx, secureDatagramConfigWithKeys(verify, flow.SecurityClient.PortC, verify.PortS, verify.SPIS, flow.SecurityClient.SPIC, ck, ik))
+	responseTransport, err := s.cfg.DialSecureUDP(ctx, secureDatagramConfigWithKeys(secureConfigParams{
+		verify: verify, contactHost: flow.ContactHost,
+		localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
+		outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
+		ck: ck, ik: ik,
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("dialing secure IMS datagram response transport: %w", err)
 	}
@@ -895,49 +957,96 @@ func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, v
 	return []session.Attachment{attachment, route}, nil
 }
 
-func selectSecurityServer(values []string, offered security.Params) (*security.Param, []string, error) {
+func selectSecurityServer(values []string, offered security.Params, requiredMode string) (*security.Param, []string, error) {
 	raw := make([]string, 0, len(values))
-	qValues := make(map[int]struct{})
-	bestQ := -1
-	var best *security.Param
+	params := make(security.Params, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
 		}
 		raw = append(raw, value)
-		var params security.Params
-		if err := params.UnmarshalText([]byte(value)); err != nil {
+		var parsed security.Params
+		if err := parsed.UnmarshalText([]byte(value)); err != nil {
 			return nil, nil, err
 		}
-		for _, param := range params {
-			q, err := securityQValue(param.Q)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parsing Security-Server q-value %q: %w", param.Q, err)
-			}
-			if _, duplicate := qValues[q]; duplicate {
-				return nil, nil, fmt.Errorf("parsing Security-Server: duplicate q-value %q", param.Q)
-			}
-			qValues[q] = struct{}{}
-			normalized, ok := security.NormalizeParam(param)
-			if !ok || !securityMechanismOffered(normalized, offered) {
-				continue
-			}
-			if best != nil && q <= bestQ {
-				continue
-			}
-			verify := normalized
-			best = &verify
-			bestQ = q
-		}
+		params = append(params, parsed...)
 	}
 	if len(raw) == 0 {
 		return nil, nil, errors.New("applying Security-Server: header is empty")
+	}
+
+	sharedSA, hasSharedSA := sharedSecurityServerAssociation(params)
+	qValues := make(map[int]struct{})
+	bestQ := -1
+	var best *security.Param
+	for _, param := range params {
+		q, err := securityQValue(param.Q)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parsing Security-Server q-value %q: %w", param.Q, err)
+		}
+		if _, duplicate := qValues[q]; duplicate {
+			return nil, nil, fmt.Errorf("parsing Security-Server: duplicate q-value %q", param.Q)
+		}
+		qValues[q] = struct{}{}
+		if hasSharedSA && securityAssociationEmpty(param) {
+			param.PortC = sharedSA.portC
+			param.PortS = sharedSA.portS
+			param.SPIC = sharedSA.spiC
+			param.SPIS = sharedSA.spiS
+		}
+		normalized, ok := security.NormalizeParam(param)
+		if !ok || !strings.EqualFold(normalized.Mod, requiredMode) || !securityMechanismOffered(normalized, offered) {
+			continue
+		}
+		if best != nil && q <= bestQ {
+			continue
+		}
+		verify := normalized
+		best = &verify
+		bestQ = q
 	}
 	if best == nil {
 		return nil, nil, errors.New("applying Security-Server: no compatible ipsec-3gpp security mechanism")
 	}
 	return best, raw, nil
+}
+
+type securityServerAssociation struct {
+	portC int
+	portS int
+	spiC  uint32
+	spiS  uint32
+}
+
+func sharedSecurityServerAssociation(params security.Params) (securityServerAssociation, bool) {
+	var shared securityServerAssociation
+	found := false
+	for _, param := range params {
+		if !securityAssociationComplete(param) {
+			continue
+		}
+		candidate := securityServerAssociation{
+			portC: param.PortC,
+			portS: param.PortS,
+			spiC:  param.SPIC,
+			spiS:  param.SPIS,
+		}
+		if found && candidate != shared {
+			return securityServerAssociation{}, false
+		}
+		shared = candidate
+		found = true
+	}
+	return shared, found
+}
+
+func securityAssociationComplete(param security.Param) bool {
+	return param.PortC != 0 && param.PortS != 0 && param.SPIC != 0 && param.SPIS != 0
+}
+
+func securityAssociationEmpty(param security.Param) bool {
+	return param.PortC == 0 && param.PortS == 0 && param.SPIC == 0 && param.SPIS == 0
 }
 
 func securityMechanismOffered(selected security.Param, offered security.Params) bool {
@@ -996,18 +1105,30 @@ func securityQValue(value string) (int, error) {
 	return q, nil
 }
 
-func newFlow(host string, port int) Flow {
-	client := newSecurityClient(port)
+type ipsecAlgorithms struct {
+	integrity  []string
+	encryption []string
+}
+
+func ipsecAlgorithmsFromConfig(cfg Config) ipsecAlgorithms {
+	return ipsecAlgorithms{
+		integrity:  cfg.IPSecIntegrityAlgorithms,
+		encryption: cfg.IPSecEncryptionAlgorithms,
+	}
+}
+
+func newFlow(host string, port int, algorithms ipsecAlgorithms) Flow {
+	client := newSecurityClient(port, algorithms)
 	return Flow{
 		ContactHost:     host,
 		RegisterPort:    port,
 		MessagePort:     port,
 		SecurityClient:  client,
-		SecurityClients: securityClientCapabilities(client),
+		SecurityClients: securityClientCapabilities(client, algorithms),
 	}
 }
 
-func newSecurityClient(registerPort int) security.Param {
+func newSecurityClient(registerPort int, algorithms ipsecAlgorithms) security.Param {
 	clientPort := randomIMSPort()
 	for clientPort == registerPort {
 		clientPort = randomIMSPort()
@@ -1020,8 +1141,8 @@ func newSecurityClient(registerPort int) security.Param {
 	serverSPI := randomNonZeroUint32Except(clientSPI)
 	return security.Param{
 		Mechanism: "ipsec-3gpp",
-		Alg:       "hmac-sha-1-96",
-		EAlg:      "aes-cbc",
+		Alg:       algorithms.integrity[0],
+		EAlg:      algorithms.encryption[0],
 		Mod:       "trans",
 		PortC:     clientPort,
 		PortS:     serverPort,
@@ -1031,26 +1152,42 @@ func newSecurityClient(registerPort int) security.Param {
 	}
 }
 
-func securityClientCapabilities(base security.Param) security.Params {
-	// The supported IMS access paths terminate NAT before SIP reaches the
-	// P-CSCF. Do not advertise UDP-enc-tun until IMS-level NAT traversal has a
-	// complete public-inner/local-outer address implementation.
-	algorithms := []struct {
-		alg  string
-		ealg string
-	}{
-		{alg: "hmac-sha-1-96", ealg: "null"},
-		{alg: "hmac-sha-1-96", ealg: "aes-cbc"},
+func securityClientCapabilities(base security.Param, algorithms ipsecAlgorithms) security.Params {
+	return securityClientCapabilitiesForModes(base, algorithms, []string{"trans", "UDP-enc-tun"})
+}
+
+func reauthenticationSecurityClientCapabilities(base security.Param, algorithms ipsecAlgorithms) security.Params {
+	mode := base.Mod
+	if mode == "" {
+		mode = "trans"
 	}
-	params := make(security.Params, 0, len(algorithms))
-	for _, algorithm := range algorithms {
-		param := base
-		param.Alg = algorithm.alg
-		param.EAlg = algorithm.ealg
-		param.Mod = "trans"
-		params = append(params, param)
+	return securityClientCapabilitiesForModes(base, algorithms, []string{mode})
+}
+
+func securityClientCapabilitiesForModes(base security.Param, algorithms ipsecAlgorithms, modes []string) security.Params {
+	params := make(security.Params, 0, len(algorithms.integrity)*len(algorithms.encryption)*len(modes))
+	for _, integrity := range algorithms.integrity {
+		for _, encryption := range algorithms.encryption {
+			for _, mode := range modes {
+				if !advertiseIPSecCombination(integrity, mode) {
+					continue
+				}
+				param := base
+				param.Alg = integrity
+				param.EAlg = encryption
+				param.Mod = mode
+				params = append(params, param)
+			}
+		}
 	}
 	return params
+}
+
+func advertiseIPSecCombination(integrity, mode string) bool {
+	if strings.EqualFold(integrity, "hmac-md5-96") {
+		return strings.EqualFold(mode, "trans")
+	}
+	return true
 }
 
 func reauthSecurityClient(current, peer security.Param, registerPort int) security.Param {
@@ -1062,6 +1199,25 @@ func reauthSecurityClient(current, peer security.Param, registerPort int) securi
 	next.SPIC = randomNonZeroUint32Except(current.SPIC, current.SPIS, peer.SPIC, peer.SPIS)
 	next.SPIS = randomNonZeroUint32Except(current.SPIC, current.SPIS, peer.SPIC, peer.SPIS, next.SPIC)
 	return next
+}
+
+func (s *Registrar) rotateInitialNATProtectedPorts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rotateNATProtectedPorts(&s.flow, true)
+}
+
+func rotateNATProtectedPorts(flow *Flow, rotateServer bool) {
+	oldClientPort := flow.SecurityClient.PortC
+	oldServerPort := flow.SecurityClient.PortS
+	flow.SecurityClient.PortC = randomIMSPortExcept(flow.RegisterPort, oldClientPort, oldServerPort)
+	if rotateServer {
+		flow.SecurityClient.PortS = randomIMSPortExcept(flow.RegisterPort, oldClientPort, oldServerPort, flow.SecurityClient.PortC)
+	}
+	for i := range flow.SecurityClients {
+		flow.SecurityClients[i].PortC = flow.SecurityClient.PortC
+		flow.SecurityClients[i].PortS = flow.SecurityClient.PortS
+	}
 }
 
 func validateReauthenticationSecurityServer(current Flow, selected *security.Param) error {
@@ -1096,4 +1252,12 @@ func randomIMSPort() int {
 	const base = 10000
 	const span = 55535
 	return base + int(sip.RandomUint32()%span)
+}
+
+func randomIMSPortExcept(except ...int) int {
+	port := randomIMSPort()
+	for slices.Contains(except, port) {
+		port = randomIMSPort()
+	}
+	return port
 }

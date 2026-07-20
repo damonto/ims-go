@@ -82,6 +82,16 @@ func secureRegistrationConfig(transport *voiceStubTransport, cfg registration.Co
 	return cfg
 }
 
+func newTestRegistrar(cfg registration.Config, sess *session.Session, card registration.Card) (*registration.Registrar, error) {
+	if len(cfg.IPSecIntegrityAlgorithms) == 0 {
+		cfg.IPSecIntegrityAlgorithms = []string{"hmac-sha-1-96"}
+	}
+	if len(cfg.IPSecEncryptionAlgorithms) == 0 {
+		cfg.IPSecEncryptionAlgorithms = []string{"null", "aes-cbc"}
+	}
+	return registration.New(cfg, sess, card)
+}
+
 func (voiceStubCard) IMSI() string { return "001010123456789" }
 
 func (voiceStubCard) MCC() string { return "001" }
@@ -566,7 +576,7 @@ func TestTargetURI(t *testing.T) {
 	defer func() {
 		_ = sess.Close()
 	}()
-	reg, err := registration.New(registration.Config{Logger: testLogger(),
+	reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -700,7 +710,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(secureRegistrationConfig(transport, registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(secureRegistrationConfig(transport, registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -842,7 +852,7 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -978,7 +988,7 @@ func TestEmergencyCurrentLocationDiscoveryOneShotPublishesPIDF(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -1066,7 +1076,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -1356,7 +1366,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:    "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:        "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1431,7 +1441,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1542,7 +1552,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1669,7 +1679,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1762,7 +1772,7 @@ func TestDialRejectsInvalidMinSEOnSessionIntervalRetry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1835,7 +1845,7 @@ func TestDialRejectsTimerRequiredResponseWithoutSessionExpires(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1898,7 +1908,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1972,7 +1982,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2041,7 +2051,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2140,7 +2150,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2243,7 +2253,7 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2356,7 +2366,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2430,7 +2440,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2502,7 +2512,7 @@ func TestOutgoingRemoteBYEBeforeFinalResponseGets481(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2587,7 +2597,7 @@ func TestHangupAcceptsBYETerminationResponses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2661,7 +2671,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2763,7 +2773,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 			defer func() {
 				_ = sess.Close()
 			}()
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:    "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:        "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2848,7 +2858,7 @@ func TestIncomingInviteRejectsTooSmallSessionInterval(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2906,7 +2916,7 @@ func TestIncomingInviteRejectsRefresherWithoutTimerSupport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -2949,7 +2959,7 @@ func TestIncomingInviteRejectsRequiredTimerWhenUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(),
+	reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3021,7 +3031,7 @@ func TestIncomingInviteRequiredReliableProvisional(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3084,7 +3094,7 @@ func TestIncomingInvitePreconditionResponseRequiresPrecondition(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3177,7 +3187,7 @@ func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3240,7 +3250,7 @@ func TestIncomingUPDATESessionRefresh(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3332,7 +3342,7 @@ func TestIncomingUPDATESessionRefreshWithOfferAnswersSDP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3432,7 +3442,7 @@ func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3535,7 +3545,7 @@ func TestIncomingReINVITESessionRefresh(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3631,7 +3641,7 @@ func TestIncomingReINVITEGlareWhileLocalINVITEPending(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3722,7 +3732,7 @@ func TestIncomingRemoteHoldReINVITEUpdatesHoldState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3808,7 +3818,7 @@ func TestSecondIncomingReINVITEGetsRetryAfterWhileFirstPending(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3924,7 +3934,7 @@ func TestUnknownReINVITEDialogGets481(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -3978,7 +3988,7 @@ func TestIncomingCancelEndsRingingCall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 			}, sess, voiceStubCard{})
@@ -4031,7 +4041,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4093,7 +4103,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4253,7 +4263,7 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4346,7 +4356,7 @@ func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4465,7 +4475,7 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4585,7 +4595,7 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4682,7 +4692,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4789,7 +4799,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -4974,7 +4984,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5075,7 +5085,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@one.att.net",
 				PublicIdentity:    "sip:001010123456789@one.att.net",
 				HomeDomain:        "one.att.net",
@@ -5183,7 +5193,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5287,7 +5297,7 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5398,7 +5408,7 @@ func TestCallHoldResponseWithoutSessionExpiresStopsTimer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5487,7 +5497,7 @@ func TestCallHoldRetriesIncreasingMinSE(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5664,7 +5674,7 @@ func TestCallHoldAllowsEmergencyOverride(t *testing.T) {
 			defer func() {
 				_ = sess.Close()
 			}()
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5762,7 +5772,7 @@ func TestCallHoldNon2xxRestoresState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5837,7 +5847,7 @@ func TestCallHoldContextCancelRestoresPendingState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -5963,7 +5973,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6148,7 +6158,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6259,7 +6269,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6355,7 +6365,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6500,7 +6510,7 @@ func TestHeldCallInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6594,7 +6604,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6679,7 +6689,7 @@ func TestDialEndsAfterRTCPInactivityWhenPolicyIncludesRTCP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6780,7 +6790,7 @@ func TestDialUsesEmergencyAudioInactivityPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -6869,7 +6879,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(secureRegistrationConfig(transport, registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(secureRegistrationConfig(transport, registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7005,7 +7015,7 @@ func TestUnknownPRACKDialogGets481(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7058,7 +7068,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7156,7 +7166,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7248,7 +7258,7 @@ func TestDialSendsACKBeforeOpeningFinalMedia(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7326,7 +7336,7 @@ func TestDialRoutesInDialogRequestImmediatelyAfterACK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7401,7 +7411,7 @@ func TestDialKeepsEarlyMediaCallAfterRTCPBye(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -7524,7 +7534,7 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -8094,7 +8104,7 @@ func TestDialSessionTimerRefreshesWithUPDATE(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -8181,7 +8191,7 @@ func TestDialSessionTimerRefreshRetriesIncreasingMinSE(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -8290,7 +8300,7 @@ func TestSessionTimerRefreshNon2xxTerminatesDialog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(),
+	reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -8370,7 +8380,7 @@ func TestDialSessionTimerRefreshFallsBackToReINVITEWithoutRemoteUPDATE(t *testin
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",

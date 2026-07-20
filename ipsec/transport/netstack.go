@@ -110,6 +110,8 @@ type netstackSecurityPolicy struct {
 	protocol      byte
 	localIP       net.IP
 	remoteIP      net.IP
+	outerLocalIP  net.IP
+	outerRemoteIP net.IP
 	localPort     int
 	remotePort    int
 	mode          string
@@ -122,12 +124,14 @@ type netstackSecurityPolicy struct {
 }
 
 type netstackSecurityConfig struct {
-	protocol   byte
-	localIP    net.IP
-	remoteIP   net.IP
-	localPort  int
-	remotePort int
-	mode       string
+	protocol      byte
+	localIP       net.IP
+	remoteIP      net.IP
+	outerLocalIP  net.IP
+	outerRemoteIP net.IP
+	localPort     int
+	remotePort    int
+	mode          string
 
 	outboundSPI  uint32
 	inboundSPI   uint32
@@ -270,7 +274,7 @@ func (n *Netstack) writePacket(ctx context.Context, inner packet.InnerPacket, wi
 	if err != nil {
 		return err
 	}
-	protected, err := secureInnerPacket(policy.localIP, policy.remoteIP, policy.mode, sealed)
+	protected, err := secureInnerPacket(policy.outerLocalIP, policy.outerRemoteIP, policy.mode, sealed)
 	if err != nil {
 		return err
 	}
@@ -399,10 +403,18 @@ func (n *Netstack) registerSecurity(cfg netstackSecurityConfig) (*netstackSecuri
 	if err := validateSecureESPConfig(encryption, cfg.integrity, cfg.encryptionKey, cfg.integrityKey); err != nil {
 		return nil, err
 	}
+	if len(cfg.outerLocalIP) == 0 {
+		cfg.outerLocalIP = cfg.localIP
+	}
+	if len(cfg.outerRemoteIP) == 0 {
+		cfg.outerRemoteIP = cfg.remoteIP
+	}
 	policy := &netstackSecurityPolicy{
 		protocol:      cfg.protocol,
 		localIP:       append(net.IP(nil), cfg.localIP...),
 		remoteIP:      append(net.IP(nil), cfg.remoteIP...),
+		outerLocalIP:  append(net.IP(nil), cfg.outerLocalIP...),
+		outerRemoteIP: append(net.IP(nil), cfg.outerRemoteIP...),
 		localPort:     cfg.localPort,
 		remotePort:    cfg.remotePort,
 		mode:          mode,
@@ -418,7 +430,7 @@ func (n *Netstack) registerSecurity(cfg netstackSecurityConfig) (*netstackSecuri
 	}
 	startKeepalive := false
 	if mode == SecureModeUDPEncTunnel {
-		policy.keepalive, startKeepalive = n.retainUDPEncKeepaliveLocked(policy.localIP, policy.remoteIP)
+		policy.keepalive, startKeepalive = n.retainUDPEncKeepaliveLocked(policy.outerLocalIP, policy.outerRemoteIP)
 	}
 	n.policies = append(n.policies, policy)
 	if startKeepalive {
@@ -619,7 +631,7 @@ func (n *Netstack) isLocalUDPEncKeepalive(pkt packet.InnerPacket) bool {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	_, ok := n.addresses[udp.Dst.IP.String()]
+	_, ok := n.udpKeepalives[netstackPeerKey{localIP: udp.Dst.IP.String(), remoteIP: udp.Src.IP.String()}]
 	return ok
 }
 
@@ -631,7 +643,7 @@ func (n *Netstack) unprotect(pkt packet.InnerPacket) (packet.InnerPacket, bool, 
 	for i := len(policies) - 1; i >= 0; i-- {
 		policy := policies[i]
 		espPayload, ok := secureESPPayload(pkt, policy.mode)
-		if !ok || !secureOuterDestinationMatches(pkt, policy.localIP, policy.mode) || packetSPI(espPayload) != policy.inboundESP.SPI {
+		if !ok || !secureOuterDestinationMatches(pkt, policy.outerLocalIP, policy.mode) || packetSPI(espPayload) != policy.inboundESP.SPI {
 			continue
 		}
 		recognized = true

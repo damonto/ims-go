@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -650,6 +651,10 @@ func lowerHexDigits(value string, width int) bool {
 
 func normalizeIntegrityAlg(alg string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
+	case "hmac-md5-96":
+		// TS 33.203 removed HMAC-MD5 from Annex H; selected carrier profiles
+		// retain it solely for interoperability with legacy P-CSCF deployments.
+		return "hmac-md5-96", true
 	case "hmac-sha-1-96", "hmac-sha1-96":
 		return "hmac-sha-1-96", true
 	case "aes-gmac":
@@ -659,6 +664,40 @@ func normalizeIntegrityAlg(alg string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func NormalizeIPSecIntegrityAlgorithms(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, errors.New("IPsec integrity algorithms are required")
+	}
+	return normalizeIPSecAlgorithms(values, "integrity", func(value string) (string, bool) {
+		algorithm, ok := normalizeIntegrityAlg(value)
+		return algorithm, ok && (algorithm == "hmac-md5-96" || algorithm == "hmac-sha-1-96")
+	})
+}
+
+func NormalizeIPSecEncryptionAlgorithms(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, errors.New("IPsec encryption algorithms are required")
+	}
+	return normalizeIPSecAlgorithms(values, "encryption", func(value string) (string, bool) {
+		algorithm, ok := normalizeEncryptionAlg(value)
+		return algorithm, ok && (algorithm == "null" || algorithm == "aes-cbc")
+	})
+}
+
+func normalizeIPSecAlgorithms(values []string, kind string, normalize func(string) (string, bool)) ([]string, error) {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		algorithm, ok := normalize(value)
+		if !ok {
+			return nil, fmt.Errorf("unsupported IPsec %s algorithm %q", kind, value)
+		}
+		if !slices.Contains(result, algorithm) {
+			result = append(result, algorithm)
+		}
+	}
+	return result, nil
 }
 
 func normalizeEncryptionAlg(alg string) (string, bool) {
@@ -694,7 +733,7 @@ func compatibleIPSecAlgorithms(alg, ealg string) bool {
 	case alg == "aes-gmac":
 		return ealg == "null"
 	default:
-		return alg == "hmac-sha-1-96" && (ealg == "null" || ealg == "aes-cbc")
+		return (alg == "hmac-md5-96" || alg == "hmac-sha-1-96") && (ealg == "null" || ealg == "aes-cbc")
 	}
 }
 

@@ -41,6 +41,7 @@ type TCPConfig struct {
 
 type SecureTCPConfig struct {
 	TCPConfig
+	InnerLocalIP net.IP
 	OutboundSPI  uint32
 	InboundSPI   uint32
 	Encryption   string
@@ -61,6 +62,7 @@ type UDPConfig struct {
 
 type SecureUDPConfig struct {
 	UDPConfig
+	InnerLocalIP net.IP
 	OutboundSPI  uint32
 	InboundSPI   uint32
 	Encryption   string
@@ -71,6 +73,14 @@ type SecureUDPConfig struct {
 	EncryptionKey []byte
 	IntegrityKey  []byte
 	Salt          [4]byte
+}
+
+type tcpEndpointSet struct {
+	local         *net.TCPAddr
+	remote        *net.TCPAddr
+	outerLocalIP  net.IP
+	outerRemoteIP net.IP
+	network       tcpip.NetworkProtocolNumber
 }
 
 type NetstackTCPConn struct {
@@ -131,25 +141,25 @@ func (n *Netstack) ListenSecureTCP(ctx context.Context, cfg SecureTCPConfig) (*N
 		return nil, ctx.Err()
 	default:
 	}
-	local, remote, network, err := n.tcpEndpoints(cfg.TCPConfig)
+	endpoints, err := n.tcpEndpoints(cfg.TCPConfig, cfg.InnerLocalIP, cfg.Mode)
 	if err != nil {
 		return nil, fmt.Errorf("listening IMS netstack TCP: %w", err)
 	}
-	policy, err := n.registerTCPPolicy(local, remote, cfg)
+	policy, err := n.registerTCPPolicy(endpoints.local, endpoints.remote, endpoints.outerLocalIP, endpoints.outerRemoteIP, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("listening IMS netstack TCP: %w", err)
 	}
 	conn := &NetstackTCPConn{
 		netstack: n,
-		local:    local,
-		remote:   remote,
+		local:    endpoints.local,
+		remote:   endpoints.remote,
 		passive:  true,
 		policy:   policy,
 		done:     make(chan struct{}),
 		accept:   make(chan net.Conn, 1),
 		errCh:    make(chan error, 1),
 	}
-	if err := n.registerTCPListener(conn, network); err != nil {
+	if err := n.registerTCPListener(conn, endpoints.network); err != nil {
 		n.removeSecurity(policy)
 		return nil, fmt.Errorf("listening IMS netstack TCP: %w", err)
 	}
@@ -280,21 +290,27 @@ func (l *netstackTCPListener) stop() {
 }
 
 func (n *Netstack) dialTCP(ctx context.Context, cfg TCPConfig, secure *SecureTCPConfig) (*NetstackTCPConn, error) {
-	local, remote, network, err := n.tcpEndpoints(cfg)
+	var innerLocalIP net.IP
+	var mode string
+	if secure != nil {
+		innerLocalIP = secure.InnerLocalIP
+		mode = secure.Mode
+	}
+	endpoints, err := n.tcpEndpoints(cfg, innerLocalIP, mode)
 	if err != nil {
 		return nil, fmt.Errorf("dialing IMS netstack TCP: %w", err)
 	}
 	var policy *netstackSecurityPolicy
 	if secure != nil {
-		policy, err = n.registerTCPPolicy(local, remote, *secure)
+		policy, err = n.registerTCPPolicy(endpoints.local, endpoints.remote, endpoints.outerLocalIP, endpoints.outerRemoteIP, *secure)
 		if err != nil {
 			return nil, fmt.Errorf("dialing IMS netstack TCP: %w", err)
 		}
 	}
-	key := netstackFlowKeyForAddresses(packet.ProtocolTCP, local.IP, remote.IP, local.Port, remote.Port)
+	key := netstackFlowKeyForAddresses(packet.ProtocolTCP, endpoints.local.IP, endpoints.remote.IP, endpoints.local.Port, endpoints.remote.Port)
 	var conn net.Conn
 	err = n.withWriteContext(key, ctx, func() error {
-		opened, dialErr := gonet.DialTCPWithBindAndMaxSeg(ctx, n.stack, netstackFullAddress(local.IP, local.Port), netstackFullAddress(remote.IP, remote.Port), network, netstackTCPMSS)
+		opened, dialErr := gonet.DialTCPWithBindAndMaxSeg(ctx, n.stack, netstackFullAddress(endpoints.local.IP, endpoints.local.Port), netstackFullAddress(endpoints.remote.IP, endpoints.remote.Port), endpoints.network, netstackTCPMSS)
 		conn = opened
 		return dialErr
 	})
@@ -302,11 +318,11 @@ func (n *Netstack) dialTCP(ctx context.Context, cfg TCPConfig, secure *SecureTCP
 		n.removeSecurity(policy)
 		return nil, fmt.Errorf("dialing IMS netstack TCP: %w", n.transportError(key, err))
 	}
-	local = cloneTCPAddr(conn.LocalAddr().(*net.TCPAddr))
+	local := cloneTCPAddr(conn.LocalAddr().(*net.TCPAddr))
 	return &NetstackTCPConn{
 		netstack: n,
 		local:    local,
-		remote:   remote,
+		remote:   endpoints.remote,
 		policy:   policy,
 		conn:     conn,
 		done:     make(chan struct{}),
@@ -315,10 +331,14 @@ func (n *Netstack) dialTCP(ctx context.Context, cfg TCPConfig, secure *SecureTCP
 	}, nil
 }
 
-func (n *Netstack) tcpEndpoints(cfg TCPConfig) (*net.TCPAddr, *net.TCPAddr, tcpip.NetworkProtocolNumber, error) {
-	innerLocal, innerRemote, err := connectedUDPAddrs(n.session, cfg.RemoteIP)
+func (n *Netstack) tcpEndpoints(cfg TCPConfig, configuredInnerLocalIP net.IP, mode string) (tcpEndpointSet, error) {
+	outerLocal, outerRemote, err := connectedUDPAddrs(n.session, cfg.RemoteIP)
 	if err != nil {
-		return nil, nil, 0, err
+		return tcpEndpointSet{}, err
+	}
+	innerLocalIP, err := secureInnerLocalIP(configuredInnerLocalIP, outerLocal.IP, mode)
+	if err != nil {
+		return tcpEndpointSet{}, err
 	}
 	remotePort := cfg.RemotePort
 	if remotePort == 0 {
@@ -328,26 +348,32 @@ func (n *Netstack) tcpEndpoints(cfg TCPConfig) (*net.TCPAddr, *net.TCPAddr, tcpi
 	if localPort == 0 {
 		random, err := randomUint32()
 		if err != nil {
-			return nil, nil, 0, err
+			return tcpEndpointSet{}, err
 		}
 		localPort = netstackEphemeralBase + int(random%netstackEphemeralRange)
 	}
-	network, err := n.ensureAddress(innerLocal.IP)
+	network, err := n.ensureAddress(innerLocalIP)
 	if err != nil {
-		return nil, nil, 0, err
+		return tcpEndpointSet{}, err
 	}
-	if _, remoteNetwork, _, err := netstackIP(innerRemote.IP); err != nil {
-		return nil, nil, 0, err
+	if _, remoteNetwork, _, err := netstackIP(outerRemote.IP); err != nil {
+		return tcpEndpointSet{}, err
 	} else if remoteNetwork != network {
-		return nil, nil, 0, errors.New("local and remote TCP address families differ")
+		return tcpEndpointSet{}, errors.New("local and remote TCP address families differ")
 	}
-	return &net.TCPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: localPort},
-		tcpRemoteAddr(innerRemote, remotePort, cfg.RemoteIP), network, nil
+	return tcpEndpointSet{
+		local:         &net.TCPAddr{IP: append(net.IP(nil), innerLocalIP...), Port: localPort},
+		remote:        tcpRemoteAddr(outerRemote, remotePort, cfg.RemoteIP),
+		outerLocalIP:  append(net.IP(nil), outerLocal.IP...),
+		outerRemoteIP: append(net.IP(nil), outerRemote.IP...),
+		network:       network,
+	}, nil
 }
 
-func (n *Netstack) registerTCPPolicy(local, remote *net.TCPAddr, cfg SecureTCPConfig) (*netstackSecurityPolicy, error) {
+func (n *Netstack) registerTCPPolicy(local, remote *net.TCPAddr, outerLocalIP, outerRemoteIP net.IP, cfg SecureTCPConfig) (*netstackSecurityPolicy, error) {
 	return n.registerSecurity(netstackSecurityConfig{
 		protocol: packet.ProtocolTCP, localIP: local.IP, remoteIP: remote.IP,
+		outerLocalIP: outerLocalIP, outerRemoteIP: outerRemoteIP,
 		localPort: local.Port, remotePort: remote.Port, mode: cfg.Mode,
 		outboundSPI: cfg.OutboundSPI, inboundSPI: cfg.InboundSPI,
 		encryption: cfg.Encryption, integrity: cfg.Integrity, associations: cfg.Associations,
@@ -377,20 +403,28 @@ func (n *Netstack) openUDP(ctx context.Context, cfg UDPConfig, secure *SecureUDP
 		return nil, ctx.Err()
 	default:
 	}
-	innerLocal, innerRemote, err := connectedUDPAddrs(n.session, cfg.RemoteIP)
+	outerLocal, outerRemote, err := connectedUDPAddrs(n.session, cfg.RemoteIP)
 	if err != nil {
 		return nil, fmt.Errorf("opening IMS netstack UDP: %w", err)
 	}
-	network, err := n.ensureAddress(innerLocal.IP)
+	innerLocalIP := outerLocal.IP
+	if secure != nil {
+		innerLocalIP, err = secureInnerLocalIP(secure.InnerLocalIP, outerLocal.IP, secure.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("opening IMS netstack UDP: %w", err)
+		}
+	}
+	network, err := n.ensureAddress(innerLocalIP)
 	if err != nil {
 		return nil, fmt.Errorf("opening IMS netstack UDP: %w", err)
 	}
-	local := &net.UDPAddr{IP: append(net.IP(nil), innerLocal.IP...), Port: cfg.LocalPort}
-	remote := udpRemoteAddr(innerRemote, cfg.RemotePort, cfg.RemoteIP)
+	local := &net.UDPAddr{IP: append(net.IP(nil), innerLocalIP...), Port: cfg.LocalPort}
+	remote := udpRemoteAddr(outerRemote, cfg.RemotePort, cfg.RemoteIP)
 	var policy *netstackSecurityPolicy
 	if secure != nil {
 		policy, err = n.registerSecurity(netstackSecurityConfig{
 			protocol: packet.ProtocolUDP, localIP: local.IP, remoteIP: remote.IP,
+			outerLocalIP: outerLocal.IP, outerRemoteIP: outerRemote.IP,
 			localPort: local.Port, remotePort: remote.Port, mode: secure.Mode,
 			outboundSPI: secure.OutboundSPI, inboundSPI: secure.InboundSPI,
 			encryption: secure.Encryption, integrity: secure.Integrity, associations: secure.Associations,

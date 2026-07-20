@@ -306,7 +306,7 @@ func TestReliableProvisionalRetransmitsUntilPRACK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	reg, err := registration.New(registration.Config{Logger: testLogger(),
+	reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 		HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -390,7 +390,7 @@ func TestReliableProvisionalDuplicateInviteDoesNotAdvanceRSeq(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
@@ -496,7 +496,7 @@ func TestReliableProvisionalTimeoutRejectsInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			reg, err := registration.New(registration.Config{Logger: testLogger(),
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",

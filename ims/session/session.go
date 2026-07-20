@@ -797,6 +797,10 @@ func (s *Session) reliableTransport(ctx context.Context, preferred Transport) (T
 	if transport == nil {
 		return nil, errors.New("opening reliable SIP transport: transport is nil")
 	}
+	if !transportIsReliable(transport) {
+		_ = transport.Close()
+		return nil, errors.New("opening reliable SIP transport: transport is not reliable")
+	}
 	attachment, err := s.AddTransport(transport)
 	if err != nil {
 		_ = transport.Close()
@@ -964,6 +968,7 @@ type keepAliveTransport interface {
 }
 
 type SecureTCPConfig struct {
+	InnerLocalIP  net.IP
 	LocalPort     int
 	RemotePort    int
 	OutboundSPI   uint32
@@ -977,6 +982,7 @@ type SecureTCPConfig struct {
 }
 
 type SecureUDPConfig struct {
+	InnerLocalIP  net.IP
 	LocalPort     int
 	RemotePort    int
 	OutboundSPI   uint32

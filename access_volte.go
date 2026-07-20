@@ -194,8 +194,9 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				return nil, err
 			}
 			return netstack.DialSecureUDP(ctx, ipsectransport.SecureUDPConfig{
-				UDPConfig:   ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
-				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				InnerLocalIP: secure.InnerLocalIP,
+				UDPConfig:    ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
+				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
 				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
@@ -206,8 +207,9 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				return nil, err
 			}
 			return netstack.ListenSecureUDP(ctx, ipsectransport.SecureUDPConfig{
-				UDPConfig:   ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
-				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				InnerLocalIP: secure.InnerLocalIP,
+				UDPConfig:    ipsectransport.UDPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
+				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
 				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
@@ -218,8 +220,9 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				return nil, err
 			}
 			return netstack.DialSecureTCP(ctx, ipsectransport.SecureTCPConfig{
-				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
-				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				InnerLocalIP: secure.InnerLocalIP,
+				TCPConfig:    ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
+				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
 				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
@@ -230,8 +233,9 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				return nil, err
 			}
 			return netstack.ListenSecureTCP(ctx, ipsectransport.SecureTCPConfig{
-				TCPConfig:   ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
-				OutboundSPI: secure.OutboundSPI, InboundSPI: secure.InboundSPI,
+				InnerLocalIP: secure.InnerLocalIP,
+				TCPConfig:    ipsectransport.TCPConfig{LocalPort: secure.LocalPort, RemotePort: secure.RemotePort, RemoteIP: remoteIP},
+				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
 				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,

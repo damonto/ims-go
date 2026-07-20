@@ -50,29 +50,31 @@ func (terminal TerminalInfo) trimmed() TerminalInfo {
 }
 
 type IMSConfig struct {
-	Transport                string
-	PrivateIdentity          string
-	PublicIdentity           string
-	HomeDomain               string
-	PhoneContextDomain       string
-	USSDLanguage             string
-	USSDDomain               string
-	UserAgent                string
-	AccessNetworkInfo        string
-	WLANNodeID               string
-	RegisterExpires          time.Duration
-	AuthAlgorithm            string
-	RegistrationRetryBase    time.Duration
-	RegistrationRetryMax     time.Duration
-	ServiceCenter            string
-	IMEI                     string
-	GeolocationPIDFRegister  []int
-	GeolocationCountry       string
-	UseTelURIForPIDFXML      bool
-	SIPServerPort            int
-	SIPTimers                imssession.TransactionTimers
-	SMSDeliveryReportTimeout time.Duration
-	Voice                    imsvoice.Config
+	Transport                 string
+	PrivateIdentity           string
+	PublicIdentity            string
+	HomeDomain                string
+	PhoneContextDomain        string
+	USSDLanguage              string
+	USSDDomain                string
+	UserAgent                 string
+	AccessNetworkInfo         string
+	WLANNodeID                string
+	RegisterExpires           time.Duration
+	AuthAlgorithm             string
+	RegistrationRetryBase     time.Duration
+	RegistrationRetryMax      time.Duration
+	IPSecIntegrityAlgorithms  []string
+	IPSecEncryptionAlgorithms []string
+	ServiceCenter             string
+	IMEI                      string
+	GeolocationPIDFRegister   []int
+	GeolocationCountry        string
+	UseTelURIForPIDFXML       bool
+	SIPServerPort             int
+	SIPTimers                 imssession.TransactionTimers
+	SMSDeliveryReportTimeout  time.Duration
+	Voice                     imsvoice.Config
 }
 
 func cloneConfig(cfg *Config) Config {
@@ -248,6 +250,15 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
 	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
+	var err error
+	cfg.IPSecIntegrityAlgorithms, err = security.NormalizeIPSecIntegrityAlgorithms(cfg.IPSecIntegrityAlgorithms)
+	if err != nil {
+		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+	}
+	cfg.IPSecEncryptionAlgorithms, err = security.NormalizeIPSecEncryptionAlgorithms(cfg.IPSecEncryptionAlgorithms)
+	if err != nil {
+		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+	}
 	cfg.GeolocationPIDFRegister = pidf.NormalizeTypes(cfg.GeolocationPIDFRegister)
 	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
 	cfg.Voice.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.Voice.GeolocationCountry))

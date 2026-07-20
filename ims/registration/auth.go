@@ -162,7 +162,12 @@ func (s *Registrar) storeDigestCredential(algorithm, nonce, password string, ck,
 }
 
 func (s *Registrar) applyRegisterChallenge(resp sip.Message) (security.Challenge, error) {
-	parsed, err := parseRegisterChallenge(resp, s.CurrentFlow().SecurityClients)
+	flow := s.CurrentFlow()
+	requiredMode := ""
+	if flow.SecurityVerify != nil {
+		requiredMode = flow.SecurityVerify.Mod
+	}
+	parsed, err := parseRegisterChallenge(resp, flow.SecurityClients, requiredMode)
 	if err != nil {
 		return security.Challenge{}, err
 	}
@@ -171,7 +176,7 @@ func (s *Registrar) applyRegisterChallenge(resp sip.Message) (security.Challenge
 	return parsed.challenge, nil
 }
 
-func parseRegisterChallenge(resp sip.Message, offered security.Params) (registerAuthChallenge, error) {
+func parseRegisterChallenge(resp sip.Message, offered security.Params, requiredMode string) (registerAuthChallenge, error) {
 	parsed, err := selectRegisterChallengeForResponse(resp)
 	if err != nil {
 		return registerAuthChallenge{}, err
@@ -183,25 +188,23 @@ func parseRegisterChallenge(resp sip.Message, offered security.Params) (register
 		}
 		return registerAuthChallenge{}, errors.New("applying Security-Server: AKAv2-SHA-256 over TLS is not supported by this SIP transport")
 	}
-	verify, raw, err := selectSecurityServer(resp.HeadersByName("Security-Server"), offered)
+	if requiredMode == "" {
+		publicHost, behindNAT, err := registerResponseNAT(resp)
+		if err != nil {
+			return registerAuthChallenge{}, fmt.Errorf("applying registration NAT information: %w", err)
+		}
+		requiredMode = "trans"
+		if behindNAT {
+			requiredMode = "UDP-enc-tun"
+			parsed.publicContactHost = publicHost
+		}
+	}
+	verify, raw, err := selectSecurityServer(resp.HeadersByName("Security-Server"), offered, requiredMode)
 	if err != nil {
 		return registerAuthChallenge{}, fmt.Errorf("%w: %w", errSecurityAgreementInvalid, err)
 	}
 	parsed.verify = verify
 	parsed.rawSecurityServer = raw
-	publicHost, behindNAT, err := registerResponseNAT(resp)
-	if err != nil {
-		return registerAuthChallenge{}, fmt.Errorf("applying registration NAT information: %w", err)
-	}
-	if behindNAT && !strings.EqualFold(verify.Mod, "UDP-enc-tun") {
-		return registerAuthChallenge{}, fmt.Errorf("%w: applying Security-Server: NAT requires UDP-enc-tun mode", errSecurityAgreementInvalid)
-	}
-	if !behindNAT && !strings.EqualFold(verify.Mod, "trans") {
-		return registerAuthChallenge{}, fmt.Errorf("%w: applying Security-Server: mode %q requires NAT", errSecurityAgreementInvalid, verify.Mod)
-	}
-	if behindNAT {
-		parsed.publicContactHost = publicHost
-	}
 	return parsed, nil
 }
 
@@ -211,25 +214,28 @@ func registerResponseNAT(resp sip.Message) (publicHost string, behind bool, err 
 	if received == "" {
 		return "", false, nil
 	}
-	received = sanitizeHost(received)
+	received = strings.TrimSpace(strings.Trim(received, "[]"))
 	receivedIP := net.ParseIP(received)
 	if receivedIP == nil {
 		return "", false, fmt.Errorf("parsing Via received address %q", received)
 	}
-
 	sentBy := sip.TopViaSentBy(via)
 	if sentBy == "" {
-		return "", false, errors.New("parsing Via sent-by: value is empty")
+		return "", false, errors.New("parsing Via sent-by address: value is empty")
 	}
-	sentHost := sentBy
+	sentByHost := sentBy
 	if host, _, splitErr := net.SplitHostPort(sentBy); splitErr == nil {
-		sentHost = host
+		sentByHost = host
 	}
-	sentHost = sanitizeHost(sentHost)
-	if sentIP := net.ParseIP(sentHost); sentIP != nil {
-		return received, !receivedIP.Equal(sentIP), nil
+	sentByHost = strings.TrimSpace(strings.Trim(sentByHost, "[]"))
+	sentByIP := net.ParseIP(sentByHost)
+	if sentByIP == nil {
+		return "", false, fmt.Errorf("parsing Via sent-by address %q", sentByHost)
 	}
-	return received, !strings.EqualFold(received, sentHost), nil
+
+	// Some P-CSCFs always add received, even when the packet source matches
+	// sent-by. Compare the addresses so those responses do not force a tunnel.
+	return receivedIP.String(), !receivedIP.Equal(sentByIP), nil
 }
 
 func selectRegisterChallengeForResponse(resp sip.Message) (registerAuthChallenge, error) {

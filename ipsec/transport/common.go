@@ -66,6 +66,31 @@ func secureMode(value string) (string, error) {
 	return "", fmt.Errorf("unsupported ipsec mode %q", value)
 }
 
+func secureInnerLocalIP(configured, outerLocal net.IP, mode string) (net.IP, error) {
+	normalizedMode, err := secureMode(mode)
+	if err != nil {
+		return nil, err
+	}
+	if normalizedMode == SecureModeTransport {
+		return append(net.IP(nil), outerLocal...), nil
+	}
+	if len(configured) == 0 {
+		return append(net.IP(nil), outerLocal...), nil
+	}
+	innerLocal, _, _, err := netstackIP(configured)
+	if err != nil {
+		return nil, fmt.Errorf("resolving UDP-enc-tun inner local IP: %w", err)
+	}
+	outer, _, _, err := netstackIP(outerLocal)
+	if err != nil {
+		return nil, fmt.Errorf("resolving UDP-enc-tun outer local IP: %w", err)
+	}
+	if (innerLocal.To4() == nil) != (outer.To4() == nil) {
+		return nil, errors.New("UDP-enc-tun inner and outer local address families differ")
+	}
+	return innerLocal, nil
+}
+
 func espReplayProtected(codec esp.Codec) bool {
 	return strings.EqualFold(codec.Encryption, esp.EncryptionAESGCM) || !espIntegrityDisabled(codec.Integrity)
 }
@@ -78,6 +103,10 @@ func espIntegrityDisabled(value string) bool {
 func validateSecureESPConfig(encryption, integrity string, encryptionKey, integrityKey []byte) error {
 	integrity = strings.ToLower(strings.TrimSpace(integrity))
 	switch integrity {
+	case esp.IntegrityHMACMD596:
+		if len(integrityKey) != 16 {
+			return fmt.Errorf("HMAC-MD5 integrity key must be 16 bytes, got %d", len(integrityKey))
+		}
 	case esp.IntegrityHMACSHA196, esp.IntegrityHMACSHA196RFC:
 		if len(integrityKey) != 20 {
 			return fmt.Errorf("HMAC-SHA1 integrity key must be 20 bytes, got %d", len(integrityKey))

@@ -137,6 +137,44 @@ func TestCodecEncodeNullAddsAlignmentPadding(t *testing.T) {
 	}
 }
 
+func TestCodecHMACIntegrityRoundTrip(t *testing.T) {
+	tests := []struct {
+		name      string
+		integrity string
+		key       []byte
+	}{
+		{name: "HMAC MD5 96", integrity: IntegrityHMACMD596, key: []byte("0123456789abcdef")},
+		{name: "HMAC SHA1 96", integrity: IntegrityHMACSHA196, key: []byte("0123456789abcdef0123")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			codec := Codec{
+				SPI:          0x11223344,
+				Encryption:   EncryptionNull,
+				Integrity:    tt.integrity,
+				IntegrityKey: tt.key,
+			}
+			pkt := ESPPacket{SPI: codec.SPI, Sequence: 7, NextHeader: 17, Payload: []byte("REGISTER")}
+			wire, err := codec.Encode(pkt)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			decoded, err := codec.Decode(wire)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if string(decoded.Payload) != string(pkt.Payload) {
+				t.Fatalf("Decode() payload = %q, want %q", decoded.Payload, pkt.Payload)
+			}
+			wire[len(wire)-1] ^= 0xff
+			if _, err := codec.Decode(wire); err == nil {
+				t.Fatal("Decode() error = nil after ICV corruption")
+			}
+		})
+	}
+}
+
 func TestCodecRejectsNullEncryptionWithoutIntegrity(t *testing.T) {
 	codec := Codec{SPI: 0x11223344, Encryption: EncryptionNull, Integrity: IntegrityNone}
 	if _, err := codec.Encode(ESPPacket{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: []byte{0xAA}}); err == nil {

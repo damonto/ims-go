@@ -247,7 +247,7 @@ func TestNormalizeParam(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects removed md5 integrity algorithm",
+			name: "accepts legacy md5 integrity algorithm",
 			in: Param{
 				Mechanism: "ipsec-3gpp",
 				Alg:       "hmac-md5-96",
@@ -259,7 +259,18 @@ func TestNormalizeParam(t *testing.T) {
 				SPIC:      310,
 				SPIS:      320,
 			},
-			ok: false,
+			ok: true,
+			want: Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-md5-96",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5063,
+				Prot:      "esp",
+				SPIC:      310,
+				SPIS:      320,
+			},
 		},
 		{
 			name: "rejects security header sha256 integrity algorithm",

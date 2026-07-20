@@ -14,61 +14,64 @@ import (
 var embeddedIMSConfig []byte
 
 type imsProfile struct {
-	MCC                        string                    `json:"mcc"`
-	MNC                        string                    `json:"mnc"`
-	IMSIPrefix                 string                    `json:"imsiPrefix"`
-	GID1                       string                    `json:"gid1"`
-	EPDG                       string                    `json:"epdg"`
-	EPDGAddresses              []string                  `json:"epdgAddresses"`
-	InitialPort                int                       `json:"initialPort"`
-	NATTPort                   int                       `json:"nattPort"`
-	LocalSIPPort               int                       `json:"localSIPPort"`
-	SIPPort                    int                       `json:"sipPort"`
-	DHGroups                   []uint16                  `json:"dhGroups"`
-	IKEEncryptionKeyLens       []uint16                  `json:"ikeEncryptionKeyLens"`
-	IKEIntegrity               []uint16                  `json:"ikeIntegrity"`
-	IKEPRF                     []uint16                  `json:"ikePRF"`
-	ChildEncryptionKeyLens     []uint16                  `json:"childEncryptionKeyLens"`
-	ChildIntegrity             []uint16                  `json:"childIntegrity"`
-	PCSCFIPv4ConfigAttribute   uint16                    `json:"pcscfIPv4ConfigAttribute"`
-	PCSCFIPv6ConfigAttribute   uint16                    `json:"pcscfIPv6ConfigAttribute"`
-	NATKeepaliveInterval       imsProfileDuration        `json:"natKeepaliveInterval"`
-	LivenessTimeout            imsProfileDuration        `json:"livenessTimeout"`
-	IKESALifetime              imsProfileDuration        `json:"ikeSALifetime"`
-	IKERetransmitDelays        []imsProfileDuration      `json:"ikeRetransmitDelays"`
-	IKESARekeySoftTime         imsProfileDuration        `json:"ikeSARekeySoftTime"`
-	IKESARekeyHardTime         imsProfileDuration        `json:"ikeSARekeyHardTime"`
-	IKESARekeyTime             imsProfileDuration        `json:"ikeSARekeyTime"`
-	ChildSALifetime            imsProfileDuration        `json:"childSALifetime"`
-	ChildSARekeySoftTime       imsProfileDuration        `json:"childSARekeySoftTime"`
-	ChildSARekeyHardTime       imsProfileDuration        `json:"childSARekeyHardTime"`
-	ChildSARekeyTime           imsProfileDuration        `json:"childSARekeyTime"`
-	AddKEToChildSARekey        bool                      `json:"addKEToChildSARekey"`
-	IMSTransport               string                    `json:"imsTransport"`
-	IMSHomeDomain              string                    `json:"imsHomeDomain"`
-	IMSPublicIdentity          string                    `json:"imsPublicIdentity"`
-	IMSPhoneContextDomain      string                    `json:"imsPhoneContextDomain"`
-	IMSAccessNetworkInfo       string                    `json:"imsAccessNetworkInfo"`
-	IMSUserAgent               string                    `json:"imsUserAgent"`
-	IMSRegisterExpires         imsProfileDuration        `json:"imsRegisterExpires"`
-	IMSRegistrationRetryBase   imsProfileDuration        `json:"imsRegistrationRetryBase"`
-	IMSRegistrationRetryMax    imsProfileDuration        `json:"imsRegistrationRetryMax"`
-	IMSGeolocationPIDFInvite   []int                     `json:"imsGeolocationPIDFInSIPInviteSupport"`
-	IMSGeolocationPIDFRegister []int                     `json:"imsGeolocationPIDFInSIPRegisterSupport"`
-	IMSUseTelURIForPIDFXML     bool                      `json:"imsUseTelURIForPIDFXML"`
-	IMSRequestURIFormat        imsvoice.RequestURIFormat `json:"imsRequestURIFormat"`
-	IMSSIPServerPort           int                       `json:"imsSIPServerPort"`
-	IMSSIPTimerT1              imsProfileDuration        `json:"imsSIPTimerT1"`
-	IMSSIPTimerT2              imsProfileDuration        `json:"imsSIPTimerT2"`
-	IMSSIPTimerT4              imsProfileDuration        `json:"imsSIPTimerT4"`
-	IMSSIPTimerB               imsProfileDuration        `json:"imsSIPTimerB"`
-	IMSSIPTimerD               imsProfileDuration        `json:"imsSIPTimerD"`
-	IMSSIPTimerF               imsProfileDuration        `json:"imsSIPTimerF"`
-	IMSSIPTimerH               imsProfileDuration        `json:"imsSIPTimerH"`
-	IMSSIPTimerJ               imsProfileDuration        `json:"imsSIPTimerJ"`
-	EnableSMSDeliveryReports   bool                      `json:"enableSMSDeliveryReports"`
-	IMSVoice                   imsVoiceProfile           `json:"imsVoice"`
-	WFCSPN                     string                    `json:"wfcSPN"`
+	MCC                      string               `json:"mcc"`
+	MNC                      string               `json:"mnc"`
+	IMSIPrefix               string               `json:"imsiPrefix"`
+	GID1                     string               `json:"gid1"`
+	EPDG                     string               `json:"epdg"`
+	EPDGAddresses            []string             `json:"epdgAddresses"`
+	InitialPort              int                  `json:"initialPort"`
+	NATTPort                 int                  `json:"nattPort"`
+	LocalSIPPort             int                  `json:"localSIPPort"`
+	SIPPort                  int                  `json:"sipPort"`
+	DHGroups                 []uint16             `json:"dhGroups"`
+	IKEEncryptionKeyLens     []uint16             `json:"ikeEncryptionKeyLens"`
+	IKEIntegrity             []uint16             `json:"ikeIntegrity"`
+	IKEPRF                   []uint16             `json:"ikePRF"`
+	ChildEncryptionKeyLens   []uint16             `json:"childEncryptionKeyLens"`
+	ChildIntegrity           []uint16             `json:"childIntegrity"`
+	PCSCFIPv4ConfigAttribute uint16               `json:"pcscfIPv4ConfigAttribute"`
+	PCSCFIPv6ConfigAttribute uint16               `json:"pcscfIPv6ConfigAttribute"`
+	NATKeepaliveInterval     imsProfileDuration   `json:"natKeepaliveInterval"`
+	LivenessTimeout          imsProfileDuration   `json:"livenessTimeout"`
+	IKESALifetime            imsProfileDuration   `json:"ikeSALifetime"`
+	IKERetransmitDelays      []imsProfileDuration `json:"ikeRetransmitDelays"`
+	IKESARekeySoftTime       imsProfileDuration   `json:"ikeSARekeySoftTime"`
+	IKESARekeyHardTime       imsProfileDuration   `json:"ikeSARekeyHardTime"`
+	IKESARekeyTime           imsProfileDuration   `json:"ikeSARekeyTime"`
+	ChildSALifetime          imsProfileDuration   `json:"childSALifetime"`
+	ChildSARekeySoftTime     imsProfileDuration   `json:"childSARekeySoftTime"`
+	ChildSARekeyHardTime     imsProfileDuration   `json:"childSARekeyHardTime"`
+	ChildSARekeyTime         imsProfileDuration   `json:"childSARekeyTime"`
+	AddKEToChildSARekey      bool                 `json:"addKEToChildSARekey"`
+	IMSTransport             string               `json:"imsTransport"`
+	IMSHomeDomain            string               `json:"imsHomeDomain"`
+	IMSPublicIdentity        string               `json:"imsPublicIdentity"`
+	IMSPhoneContextDomain    string               `json:"imsPhoneContextDomain"`
+	IMSAccessNetworkInfo     string               `json:"imsAccessNetworkInfo"`
+	IMSUserAgent             string               `json:"imsUserAgent"`
+	IMSRegisterExpires       imsProfileDuration   `json:"imsRegisterExpires"`
+	IMSRegistrationRetryBase imsProfileDuration   `json:"imsRegistrationRetryBase"`
+	IMSRegistrationRetryMax  imsProfileDuration   `json:"imsRegistrationRetryMax"`
+	// Algorithms are carrier capabilities; IPsec mode remains negotiated by sec-agree.
+	IMSIPSecIntegrityAlgorithms  []string                  `json:"imsIPSecIntegrityAlgorithms"`
+	IMSIPSecEncryptionAlgorithms []string                  `json:"imsIPSecEncryptionAlgorithms"`
+	IMSGeolocationPIDFInvite     []int                     `json:"imsGeolocationPIDFInSIPInviteSupport"`
+	IMSGeolocationPIDFRegister   []int                     `json:"imsGeolocationPIDFInSIPRegisterSupport"`
+	IMSUseTelURIForPIDFXML       bool                      `json:"imsUseTelURIForPIDFXML"`
+	IMSRequestURIFormat          imsvoice.RequestURIFormat `json:"imsRequestURIFormat"`
+	IMSSIPServerPort             int                       `json:"imsSIPServerPort"`
+	IMSSIPTimerT1                imsProfileDuration        `json:"imsSIPTimerT1"`
+	IMSSIPTimerT2                imsProfileDuration        `json:"imsSIPTimerT2"`
+	IMSSIPTimerT4                imsProfileDuration        `json:"imsSIPTimerT4"`
+	IMSSIPTimerB                 imsProfileDuration        `json:"imsSIPTimerB"`
+	IMSSIPTimerD                 imsProfileDuration        `json:"imsSIPTimerD"`
+	IMSSIPTimerF                 imsProfileDuration        `json:"imsSIPTimerF"`
+	IMSSIPTimerH                 imsProfileDuration        `json:"imsSIPTimerH"`
+	IMSSIPTimerJ                 imsProfileDuration        `json:"imsSIPTimerJ"`
+	EnableSMSDeliveryReports     bool                      `json:"enableSMSDeliveryReports"`
+	IMSVoice                     imsVoiceProfile           `json:"imsVoice"`
+	WFCSPN                       string                    `json:"wfcSPN"`
 }
 
 type imsVoiceProfile struct {
@@ -141,7 +144,17 @@ func (d *imsProfileDuration) UnmarshalJSON(data []byte) error {
 }
 
 func loadIMSProfile(card Card) (imsProfile, bool, error) {
-	return parseIMSProfile(embeddedIMSConfig, card)
+	profile, ok, err := parseIMSProfile(embeddedIMSConfig, card)
+	if err != nil || !ok {
+		return profile, ok, err
+	}
+	if len(profile.IMSIPSecIntegrityAlgorithms) == 0 {
+		return imsProfile{}, false, fmt.Errorf("ims carrier profile %s-%s has no IPsec integrity algorithms", profile.MCC, profile.MNC)
+	}
+	if len(profile.IMSIPSecEncryptionAlgorithms) == 0 {
+		return imsProfile{}, false, fmt.Errorf("ims carrier profile %s-%s has no IPsec encryption algorithms", profile.MCC, profile.MNC)
+	}
+	return profile, true, nil
 }
 
 func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
@@ -370,6 +383,12 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 	}
 	if cfg.IMS.RegistrationRetryMax == 0 {
 		cfg.IMS.RegistrationRetryMax = imsProfileDurationValue(profile.IMSRegistrationRetryMax)
+	}
+	if len(cfg.IMS.IPSecIntegrityAlgorithms) == 0 {
+		cfg.IMS.IPSecIntegrityAlgorithms = cloneStrings(profile.IMSIPSecIntegrityAlgorithms)
+	}
+	if len(cfg.IMS.IPSecEncryptionAlgorithms) == 0 {
+		cfg.IMS.IPSecEncryptionAlgorithms = cloneStrings(profile.IMSIPSecEncryptionAlgorithms)
 	}
 	if len(cfg.IMS.Voice.GeolocationPIDFInvite) == 0 {
 		cfg.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)

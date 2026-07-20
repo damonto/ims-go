@@ -365,6 +365,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.cfg.withIMSProfile(profile, wfcTestCard{})
+			got = withTestIPSecAlgorithms(got)
 			imsCfg, err := got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
@@ -422,12 +423,108 @@ func TestConfigNormalizedWFCProfileMapsIMSRegistrationRetryTimers(t *testing.T) 
 			}
 
 			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, wfcTestCard{})
+			got = withTestIPSecAlgorithms(got)
 			imsCfg, err := got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
 			}
 			if imsCfg.RegistrationRetryBase != tt.wantBase || imsCfg.RegistrationRetryMax != tt.wantMax {
 				t.Fatalf("registration retry timers = %v/%v, want %v/%v", imsCfg.RegistrationRetryBase, imsCfg.RegistrationRetryMax, tt.wantBase, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestIMSProfileMapsIPSecAlgorithms(t *testing.T) {
+	tests := []struct {
+		name           string
+		card           plmnWFCCard
+		wantIntegrity  []string
+		wantEncryption []string
+	}{
+		{
+			name:           "Telefonica GB includes Samsung legacy capability",
+			card:           plmnWFCCard{mcc: "234", mnc: "10", mncLength: 2},
+			wantIntegrity:  []string{"hmac-sha-1-96", "hmac-md5-96"},
+			wantEncryption: []string{"null", "aes-cbc"},
+		},
+		{
+			name:           "Telefonica GB prepaid uses the same capability set",
+			card:           plmnWFCCard{mcc: "234", mnc: "10", mncLength: 2, gid1: "61"},
+			wantIntegrity:  []string{"hmac-sha-1-96", "hmac-md5-96"},
+			wantEncryption: []string{"null", "aes-cbc"},
+		},
+		{
+			name:           "Pixel ESN GB requires AES CBC",
+			card:           plmnWFCCard{mcc: "234", mnc: "71", mncLength: 2},
+			wantIntegrity:  []string{"hmac-sha-1-96"},
+			wantEncryption: []string{"aes-cbc"},
+		},
+		{
+			name:           "Samsung TDC Denmark uses MD5 with AES CBC",
+			card:           plmnWFCCard{mcc: "238", mnc: "01", mncLength: 2},
+			wantIntegrity:  []string{"hmac-md5-96"},
+			wantEncryption: []string{"aes-cbc"},
+		},
+		{
+			name:           "Pixel Vodafone Germany allows null and AES CBC",
+			card:           plmnWFCCard{mcc: "262", mnc: "02", mncLength: 2},
+			wantIntegrity:  []string{"hmac-sha-1-96"},
+			wantEncryption: []string{"null", "aes-cbc"},
+		},
+		{
+			name:           "baseline profile uses modern algorithms",
+			card:           plmnWFCCard{mcc: "001", mnc: "01", mncLength: 2},
+			wantIntegrity:  []string{"hmac-sha-1-96"},
+			wantEncryption: []string{"null", "aes-cbc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, tt.card)
+			if !slices.Equal(got.IMS.IPSecIntegrityAlgorithms, tt.wantIntegrity) {
+				t.Fatalf("IPsec integrity algorithms = %v, want %v", got.IMS.IPSecIntegrityAlgorithms, tt.wantIntegrity)
+			}
+			if !slices.Equal(got.IMS.IPSecEncryptionAlgorithms, tt.wantEncryption) {
+				t.Fatalf("IPsec encryption algorithms = %v, want %v", got.IMS.IPSecEncryptionAlgorithms, tt.wantEncryption)
+			}
+		})
+	}
+}
+
+func TestEmbeddedIMSProfilesHaveIPSecAlgorithms(t *testing.T) {
+	var profiles []imsProfile
+	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	for i, profile := range profiles {
+		t.Run(profile.MCC+"-"+profile.MNC+"-"+profile.GID1+"-"+profile.IMSIPrefix, func(t *testing.T) {
+			if len(profile.IMSIPSecIntegrityAlgorithms) == 0 {
+				t.Fatalf("profile[%d] IPsec integrity algorithms are empty", i)
+			}
+			if len(profile.IMSIPSecEncryptionAlgorithms) == 0 {
+				t.Fatalf("profile[%d] IPsec encryption algorithms are empty", i)
+			}
+			normalized, err := (IMSConfig{
+				IPSecIntegrityAlgorithms:  profile.IMSIPSecIntegrityAlgorithms,
+				IPSecEncryptionAlgorithms: profile.IMSIPSecEncryptionAlgorithms,
+			}).Normalized()
+			if err != nil {
+				t.Fatalf("profile[%d] IPsec algorithms: %v", i, err)
+			}
+			if !slices.Equal(normalized.IPSecIntegrityAlgorithms, profile.IMSIPSecIntegrityAlgorithms) {
+				t.Fatalf("profile[%d] IPsec integrity algorithms normalize to %v", i, normalized.IPSecIntegrityAlgorithms)
+			}
+			if !slices.Equal(normalized.IPSecEncryptionAlgorithms, profile.IMSIPSecEncryptionAlgorithms) {
+				t.Fatalf("profile[%d] IPsec encryption algorithms normalize to %v", i, normalized.IPSecEncryptionAlgorithms)
 			}
 		})
 	}
@@ -475,6 +572,7 @@ func TestConfigNormalizedWFCProfileMapsSMSDeliveryReports(t *testing.T) {
 			}
 
 			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, wfcTestCard{})
+			got = withTestIPSecAlgorithms(got)
 			_, err = got.normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)

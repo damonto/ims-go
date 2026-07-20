@@ -2358,8 +2358,10 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 
 func testRegistrationConfig(transport *stubTransport) registration.Config {
 	return registration.Config{
-		Logger:            testLogger(),
-		AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aa",
+		Logger:                    testLogger(),
+		AccessNetworkInfo:         "IEEE-802.11;i-wlan-node-id=aa",
+		IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+		IPSecEncryptionAlgorithms: []string{"null", "aes-cbc"},
 		DialSecureUDP: func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
 			return transport, nil
 		},

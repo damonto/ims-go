@@ -32,19 +32,21 @@ const (
 )
 
 type Config struct {
-	PrivateIdentity         string
-	PublicIdentity          string
-	HomeDomain              string
-	UserAgent               string
-	AccessNetworkInfo       string
-	WLANNodeID              string
-	RegisterExpires         time.Duration
-	IMEI                    string
-	AuthAlgorithm           string
-	GeolocationPIDFRegister []int
-	GeolocationCountry      string
-	UseTelURIForPIDFXML     bool
-	Logger                  *slog.Logger
+	PrivateIdentity           string
+	PublicIdentity            string
+	HomeDomain                string
+	UserAgent                 string
+	AccessNetworkInfo         string
+	WLANNodeID                string
+	RegisterExpires           time.Duration
+	IMEI                      string
+	AuthAlgorithm             string
+	IPSecIntegrityAlgorithms  []string
+	IPSecEncryptionAlgorithms []string
+	GeolocationPIDFRegister   []int
+	GeolocationCountry        string
+	UseTelURIForPIDFXML       bool
+	Logger                    *slog.Logger
 
 	DialSecureTCP   func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
 	DialSecureUDP   func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
@@ -179,7 +181,7 @@ func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
 			GeolocationCountry:  cfg.GeolocationCountry,
 			UseTelURIForPIDFXML: cfg.UseTelURIForPIDFXML,
 		},
-		flow:                     newFlow(host, port),
+		flow:                     newFlow(host, port, ipsecAlgorithmsFromConfig(cfg)),
 		callID:                   callID,
 		sessionID:                sessionID,
 		tag:                      tag,
@@ -303,6 +305,7 @@ func (s *Registrar) beginRegistration(ctx context.Context) (func(), error) {
 
 func (s *Registrar) awaitRegisterChallenge(ctx context.Context) (sip.Message, error) {
 	adjustedExpires := false
+	natPortsAdjusted := false
 	for {
 		resp, err := s.sess.Exchange(ctx, s.buildRegister(nil, nil))
 		if err != nil {
@@ -315,6 +318,14 @@ func (s *Registrar) awaitRegisterChallenge(ctx context.Context) (sip.Message, er
 			if err := s.adjustRegisterExpiresFrom423(resp, &adjustedExpires); err != nil {
 				return sip.Message{}, err
 			}
+			continue
+		}
+		if initialNATPortCollisionResponse(resp) {
+			if natPortsAdjusted {
+				return sip.Message{}, errors.New("repeated incompatible network address response")
+			}
+			s.rotateInitialNATProtectedPorts()
+			natPortsAdjusted = true
 			continue
 		}
 		if !registerAuthChallengeStatus(resp.StatusCode()) {
@@ -427,7 +438,11 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 
 func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip.Message, proposedFlow Flow) error {
 	currentFlow := s.CurrentFlow()
-	parsed, err := parseRegisterChallenge(challengeResp, proposedFlow.SecurityClients)
+	requiredMode := ""
+	if currentFlow.SecurityVerify != nil {
+		requiredMode = currentFlow.SecurityVerify.Mod
+	}
+	parsed, err := parseRegisterChallenge(challengeResp, proposedFlow.SecurityClients, requiredMode)
 	if err != nil {
 		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
@@ -454,7 +469,7 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		if resynchronized {
 			return errors.New("refreshing IMS registration: repeated AKA synchronization failure")
 		}
-		parsed, err = parseRegisterChallenge(resp, proposedFlow.SecurityClients)
+		parsed, err = parseRegisterChallenge(resp, proposedFlow.SecurityClients, requiredMode)
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
@@ -592,7 +607,7 @@ func (s *Registrar) Refresh(ctx context.Context) error {
 	flow := s.CurrentFlow()
 	if flow.SecurityVerify != nil {
 		flow.SecurityClient = reauthSecurityClient(flow.SecurityClient, *flow.SecurityVerify, flow.RegisterPort)
-		flow.SecurityClients = securityClientCapabilities(flow.SecurityClient)
+		flow.SecurityClients = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(s.cfg))
 	}
 	state := refreshRegisterState{flow: flow}
 	for range 6 {

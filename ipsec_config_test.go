@@ -1,0 +1,16 @@
+package ims
+
+func withTestIPSecAlgorithms(cfg Config) Config {
+	cfg.IMS = withTestIMSIPSecAlgorithms(cfg.IMS)
+	return cfg
+}
+
+func withTestIMSIPSecAlgorithms(cfg IMSConfig) IMSConfig {
+	if len(cfg.IPSecIntegrityAlgorithms) == 0 {
+		cfg.IPSecIntegrityAlgorithms = []string{"hmac-sha-1-96"}
+	}
+	if len(cfg.IPSecEncryptionAlgorithms) == 0 {
+		cfg.IPSecEncryptionAlgorithms = []string{"null", "aes-cbc"}
+	}
+	return cfg
+}

@@ -2,12 +2,81 @@ package ims
 
 import (
 	"log/slog"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	imssession "github.com/damonto/ims-go/ims/session"
 	imsussd "github.com/damonto/ims-go/ims/ussd"
 )
+
+func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            IMSConfig
+		wantIntegrity  []string
+		wantEncryption []string
+		wantErr        string
+	}{
+		{
+			name:    "requires integrity algorithms",
+			cfg:     IMSConfig{IPSecEncryptionAlgorithms: []string{"null"}},
+			wantErr: "IPsec integrity algorithms are required",
+		},
+		{
+			name:    "requires encryption algorithms",
+			cfg:     IMSConfig{IPSecIntegrityAlgorithms: []string{"hmac-sha-1-96"}},
+			wantErr: "IPsec encryption algorithms are required",
+		},
+		{
+			name: "normalizes and deduplicates",
+			cfg: IMSConfig{
+				IPSecIntegrityAlgorithms:  []string{" HMAC-SHA1-96 ", "hmac-sha-1-96", "hmac-md5-96"},
+				IPSecEncryptionAlgorithms: []string{" AES-CBC ", "null", "aes-cbc"},
+			},
+			wantIntegrity:  []string{"hmac-sha-1-96", "hmac-md5-96"},
+			wantEncryption: []string{"aes-cbc", "null"},
+		},
+		{
+			name: "rejects unsupported integrity",
+			cfg: IMSConfig{
+				IPSecIntegrityAlgorithms:  []string{"hmac-sha-2-512-256"},
+				IPSecEncryptionAlgorithms: []string{"null"},
+			},
+			wantErr: "unsupported IPsec integrity algorithm",
+		},
+		{
+			name: "rejects unsupported encryption",
+			cfg: IMSConfig{
+				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+				IPSecEncryptionAlgorithms: []string{"des-ede3-cbc"},
+			},
+			wantErr: "unsupported IPsec encryption algorithm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.Normalized()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Normalized() error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if !slices.Equal(got.IPSecIntegrityAlgorithms, tt.wantIntegrity) {
+				t.Fatalf("IPsec integrity algorithms = %v, want %v", got.IPSecIntegrityAlgorithms, tt.wantIntegrity)
+			}
+			if !slices.Equal(got.IPSecEncryptionAlgorithms, tt.wantEncryption) {
+				t.Fatalf("IPsec encryption algorithms = %v, want %v", got.IPSecEncryptionAlgorithms, tt.wantEncryption)
+			}
+		})
+	}
+}
 
 func TestConfigNormalized(t *testing.T) {
 	logger := slog.Default()
@@ -250,7 +319,7 @@ func TestConfigNormalized(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.cfg.normalized(stubCard{})
+			got, err := withTestIPSecAlgorithms(tt.cfg).normalized(stubCard{})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("normalized() error = nil, want non-nil")
@@ -331,7 +400,7 @@ func TestIMSConfigNormalizedUSSDDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := (IMSConfig{USSDDomain: tt.domain}).Normalized()
+			got, err := withTestIMSIPSecAlgorithms(IMSConfig{USSDDomain: tt.domain}).Normalized()
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Normalized() error = nil, want non-nil")
@@ -357,7 +426,7 @@ func TestUserAgent(t *testing.T) {
 		{
 			name: "client ims config leaves user agent empty",
 			got: func() string {
-				cfg, err := Config{Terminal: TerminalInfo{ID: "356789012345678"}}.normalizedIMS()
+				cfg, err := withTestIPSecAlgorithms(Config{Terminal: TerminalInfo{ID: "356789012345678"}}).normalizedIMS()
 				if err != nil {
 					t.Fatalf("normalizedIMS() error = %v", err)
 				}
@@ -411,7 +480,7 @@ func TestConfigNormalizedIMSUsesTerminalInfo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.cfg.normalizedIMS()
+			got, err := withTestIPSecAlgorithms(tt.cfg).normalizedIMS()
 			if err != nil {
 				t.Fatalf("normalizedIMS() error = %v", err)
 			}
