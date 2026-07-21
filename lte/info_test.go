@@ -136,6 +136,53 @@ func TestInfoLocalIPForRemote(t *testing.T) {
 	}
 }
 
+func TestInfoRouteTo(t *testing.T) {
+	info := Info{
+		LocalIPv4: net.IPv4(10, 0, 0, 2),
+		LocalIPv6: net.ParseIP("2001:db8::2"),
+		PCSCFIPs:  []net.IP{net.ParseIP("2001:db8::1")},
+	}
+	tests := []struct {
+		name       string
+		remote     net.IP
+		wantLocal  net.IP
+		wantRemote net.IP
+		wantOK     bool
+	}{
+		{
+			name:      "unknown remote follows default pcscf family",
+			wantLocal: net.ParseIP("2001:db8::2"),
+			wantOK:    true,
+		},
+		{
+			name:       "ipv4 remote selects ipv4",
+			remote:     net.IPv4(192, 0, 2, 1),
+			wantLocal:  net.IPv4(10, 0, 0, 2),
+			wantRemote: net.IPv4(192, 0, 2, 1),
+			wantOK:     true,
+		},
+		{name: "invalid remote is rejected", remote: net.IP{1, 2, 3}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := info.RouteTo(tt.remote)
+			if ok != tt.wantOK {
+				t.Fatalf("RouteTo() ok = %t, want %t", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if !got.LocalIP.Equal(tt.wantLocal) {
+				t.Fatalf("RouteTo() local = %v, want %v", got.LocalIP, tt.wantLocal)
+			}
+			if !got.RemoteIP.Equal(tt.wantRemote) {
+				t.Fatalf("RouteTo() remote = %v, want %v", got.RemoteIP, tt.wantRemote)
+			}
+		})
+	}
+}
+
 func TestInfoRouteToPCSCF(t *testing.T) {
 	tests := []struct {
 		name       string

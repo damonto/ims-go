@@ -561,6 +561,53 @@ func TestIMSProfileMapsIPSecAlgorithms(t *testing.T) {
 	}
 }
 
+func TestIMSProfileMapsChinaCarrierIPSecCapabilities(t *testing.T) {
+	tests := []struct {
+		name           string
+		card           plmnWFCCard
+		wantIntegrity  []string
+		wantEncryption []string
+		wantModes      []string
+	}{
+		{
+			name:           "China Unicom legacy SBC",
+			card:           plmnWFCCard{mcc: "460", mnc: "01", mncLength: 2},
+			wantIntegrity:  []string{"hmac-sha-1-96"},
+			wantEncryption: []string{"null", "aes-cbc"},
+			wantModes:      []string{"trans"},
+		},
+		{
+			name:           "China Telecom keeps expanded capabilities",
+			card:           plmnWFCCard{mcc: "460", mnc: "11", mncLength: 2},
+			wantIntegrity:  []string{"hmac-md5-96", "hmac-sha-1-96"},
+			wantEncryption: []string{"null", "aes-cbc"},
+			wantModes:      []string{"trans", "UDP-enc-tun"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			got := Config{Terminal: TerminalInfo{ID: testIMEI}}.withIMSProfile(profile, tt.card)
+			if !slices.Equal(got.IMS.IPSecIntegrityAlgorithms, tt.wantIntegrity) {
+				t.Fatalf("IPsec integrity algorithms = %v, want %v", got.IMS.IPSecIntegrityAlgorithms, tt.wantIntegrity)
+			}
+			if !slices.Equal(got.IMS.IPSecEncryptionAlgorithms, tt.wantEncryption) {
+				t.Fatalf("IPsec encryption algorithms = %v, want %v", got.IMS.IPSecEncryptionAlgorithms, tt.wantEncryption)
+			}
+			if !slices.Equal(got.IMS.IPSecModes, tt.wantModes) {
+				t.Fatalf("IPsec modes = %v, want %v", got.IMS.IPSecModes, tt.wantModes)
+			}
+		})
+	}
+}
+
 func TestIMSProfileMapsO2SecurityModes(t *testing.T) {
 	tests := []struct {
 		name string

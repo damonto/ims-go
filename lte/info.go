@@ -249,8 +249,10 @@ func (info Info) LocalIPForRemote(remote net.IP) net.IP {
 
 // RouteTo chooses a local IMS PDN address matching remote.
 func (info Info) RouteTo(remote net.IP) (Route, bool) {
-	if _, ok := netip.AddrFromSlice(remote); !ok {
-		return Route{}, false
+	if len(remote) != 0 {
+		if _, ok := netip.AddrFromSlice(remote); !ok {
+			return Route{}, false
+		}
 	}
 	local := info.LocalIPForRemote(remote)
 	if len(local) == 0 {

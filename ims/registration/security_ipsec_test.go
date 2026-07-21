@@ -700,6 +700,8 @@ func TestSecurityServerMustMatchSecurityClientOffer(t *testing.T) {
 func TestRegisterUsesIPSecClientAndServerPorts(t *testing.T) {
 	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
 	flow := svc.CurrentFlow()
+	tcpSvc := newTestService(t, Config{}, newTCPTransport(5062, 5060), stubCard{})
+	tcpFlow := tcpSvc.CurrentFlow()
 	auth := &security.Authorization{Algorithm: security.AlgorithmAKAv1MD5}
 
 	tests := []struct {
@@ -715,15 +717,27 @@ func TestRegisterUsesIPSecClientAndServerPorts(t *testing.T) {
 			wantContact: net.JoinHostPort(flow.ContactHost, strconv.Itoa(flow.RegisterPort)),
 		},
 		{
-			name:        "protected register receives responses on client port",
+			name:        "protected UDP register advertises server port",
 			build:       func() sip.Message { return svc.buildRegister(auth, nil) },
-			wantViaPort: flow.SecurityClient.PortC,
+			wantViaPort: flow.SecurityClient.PortS,
 			wantContact: net.JoinHostPort(flow.ContactHost, strconv.Itoa(flow.SecurityClient.PortS)),
 		},
 		{
-			name:        "protected deregister receives responses on client port",
+			name:        "protected UDP deregister advertises server port",
 			build:       func() sip.Message { return svc.buildDeregister(auth, nil) },
-			wantViaPort: flow.SecurityClient.PortC,
+			wantViaPort: flow.SecurityClient.PortS,
+			wantContact: "*",
+		},
+		{
+			name:        "protected TCP register advertises client port",
+			build:       func() sip.Message { return tcpSvc.buildRegister(auth, nil) },
+			wantViaPort: tcpFlow.SecurityClient.PortC,
+			wantContact: net.JoinHostPort(tcpFlow.ContactHost, strconv.Itoa(tcpFlow.SecurityClient.PortS)),
+		},
+		{
+			name:        "protected TCP deregister advertises client port",
+			build:       func() sip.Message { return tcpSvc.buildDeregister(auth, nil) },
+			wantViaPort: tcpFlow.SecurityClient.PortC,
 			wantContact: "*",
 		},
 	}

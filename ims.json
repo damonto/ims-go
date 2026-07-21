@@ -287807,11 +287807,9 @@
     "wfcSPN": "",
     "imsiPrefix": "",
     "imsIPSecModes": [
-      "trans",
-      "UDP-enc-tun"
+      "trans"
     ],
     "imsIPSecIntegrityAlgorithms": [
-      "hmac-md5-96",
       "hmac-sha-1-96"
     ],
     "imsIPSecEncryptionAlgorithms": [

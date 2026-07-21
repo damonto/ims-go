@@ -26,6 +26,9 @@ func (s *Registrar) buildRegisterForFlowWithAuthorizationHeader(auth *security.A
 	if registerUsesProtectedPort(auth, verify) {
 		contactPort = flow.SecurityClient.PortS
 		viaPort = flow.SecurityClient.PortC
+		if sip.TransportToken(s.sess.LocalAddr()) == "UDP" {
+			viaPort = flow.SecurityClient.PortS
+		}
 	}
 	legacyAuthorization := ""
 	if auth == nil {
@@ -38,6 +41,9 @@ func (s *Registrar) buildDeregister(auth *security.Authorization, verify *securi
 	viaPort := s.State().RegisterPort
 	if registerUsesProtectedPort(auth, verify) {
 		viaPort = s.State().SecurityClient.PortC
+		if sip.TransportToken(s.sess.LocalAddr()) == "UDP" {
+			viaPort = s.State().SecurityClient.PortS
+		}
 	}
 	return s.buildRegisterRequest(auth, "", verify, "*", 0, viaPort, s.currentAuthorizationHeaderName())
 }

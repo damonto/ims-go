@@ -1958,6 +1958,64 @@ func TestBuildRegisterAKAv2MD5BootstrapUsesIPSecSecurityAgreement(t *testing.T) 
 	}
 }
 
+func TestBuildRegisterUsesConfiguredIPSecCapabilities(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want []security.Param
+	}{
+		{
+			name: "China Unicom legacy SBC",
+			cfg: Config{
+				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+				IPSecEncryptionAlgorithms: []string{"null", "aes-cbc"},
+				IPSecModes:                []string{"trans"},
+			},
+			want: []security.Param{
+				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
+				{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "trans"},
+			},
+		},
+		{
+			name: "expanded carrier capabilities",
+			cfg: Config{
+				IPSecIntegrityAlgorithms:  []string{"hmac-md5-96", "hmac-sha-1-96"},
+				IPSecEncryptionAlgorithms: []string{"null", "aes-cbc"},
+				IPSecModes:                []string{"trans", "UDP-enc-tun"},
+			},
+			want: []security.Param{
+				{Alg: "hmac-md5-96", EAlg: "null", Mod: "trans"},
+				{Alg: "hmac-md5-96", EAlg: "null", Mod: "UDP-enc-tun"},
+				{Alg: "hmac-md5-96", EAlg: "aes-cbc", Mod: "trans"},
+				{Alg: "hmac-md5-96", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
+				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
+				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "UDP-enc-tun"},
+				{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "trans"},
+				{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, tt.cfg, newUDPTransport(5062, 5060), stubCard{})
+			msg := svc.buildRegister(nil, nil)
+			var got security.Params
+			if err := got.UnmarshalText([]byte(msg.Header("Security-Client"))); err != nil {
+				t.Fatalf("parsing Security-Client: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("Security-Client count = %d, want %d", len(got), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got[i].Alg != want.Alg || got[i].EAlg != want.EAlg || got[i].Mod != want.Mod {
+					t.Fatalf("Security-Client[%d] = %s/%s/%s, want %s/%s/%s", i, got[i].Alg, got[i].EAlg, got[i].Mod, want.Alg, want.EAlg, want.Mod)
+				}
+			}
+		})
+	}
+}
+
 func TestNormalizeConfigRejectsAKAv2SHA256WithoutTLSTransport(t *testing.T) {
 	_, err := normalizeConfig(withTestIPSecAlgorithms(Config{AuthAlgorithm: security.AlgorithmAKAv2SHA256}))
 	if err == nil {
