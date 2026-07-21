@@ -209,6 +209,9 @@ func withTestIPSecAlgorithms(cfg Config) Config {
 	if len(cfg.IPSecEncryptionAlgorithms) == 0 {
 		cfg.IPSecEncryptionAlgorithms = []string{"null", "aes-cbc"}
 	}
+	if len(cfg.IPSecModes) == 0 {
+		cfg.IPSecModes = []string{"trans", "UDP-enc-tun"}
+	}
 	return cfg
 }
 
@@ -300,7 +303,11 @@ func TestRefreshRegistrationRetriesNATClientPortCollision(t *testing.T) {
 			flow := newFlow("198.51.100.10", 5060, ipsecAlgorithmsFromConfig(svc.cfg))
 			flow.SecurityVerify = &security.Param{Mod: tt.mode}
 			flow.SecurityClient.Mod = tt.mode
-			flow.SecurityClients = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(svc.cfg))
+			var err error
+			flow.SecurityClients, err = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(svc.cfg))
+			if err != nil {
+				t.Fatalf("reauthenticationSecurityClientCapabilities() error = %v", err)
+			}
 			state := refreshRegisterState{flow: flow}
 			resp := sip.NewResponse(sipStatusBadRequest, "Bad Request")
 			resp.Headers.Add("Warning", `301 pcscf.example "incompatible network address format"`)
@@ -1055,6 +1062,11 @@ func TestSecureTransportConfigBuildsIntegrityKey(t *testing.T) {
 		want []byte
 	}{
 		{
+			name: "legacy MD5 uses IK unchanged",
+			alg:  "hmac-md5-96",
+			want: append([]byte(nil), ik...),
+		},
+		{
 			name: "spec spelling",
 			alg:  "hmac-sha-1-96",
 			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0, 0, 0, 0},
@@ -1065,16 +1077,21 @@ func TestSecureTransportConfigBuildsIntegrityKey(t *testing.T) {
 			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0, 0, 0, 0},
 		},
 		{
-			name: "legacy hmac md5 keeps 128 bit IK",
-			alg:  "hmac-md5-96",
-			want: []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
+			name: "SHA2 derives 256 bit integrity key",
+			alg:  "hmac-sha2-256-128",
+			want: []byte{0xbe, 0xb3, 0x46, 0x47, 0x3b, 0xc7, 0xf9, 0x0c, 0x99, 0x14, 0x73, 0x74, 0xe1, 0x36, 0x81, 0x43, 0x6e, 0xd3, 0xb1, 0xb8, 0x74, 0xd0, 0xa3, 0x54, 0xa2, 0xec, 0x49, 0xb6, 0xde, 0xcf, 0x11, 0x8b},
+		},
+		{
+			name: "Samsung SHA2 spelling derives the same key",
+			alg:  "hmac-sha-2-256-128",
+			want: []byte{0xbe, 0xb3, 0x46, 0x47, 0x3b, 0xc7, 0xf9, 0x0c, 0x99, 0x14, 0x73, 0x74, 0xe1, 0x36, 0x81, 0x43, 0x6e, 0xd3, 0xb1, 0xb8, 0x74, 0xd0, 0xa3, 0x54, 0xa2, 0xec, 0x49, 0xb6, 0xde, 0xcf, 0x11, 0x8b},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := secureTransportConfigWithKeys(secureConfigParams{
-				verify:    &security.Param{Alg: tt.alg, EAlg: "null"},
+				verify:    &security.Param{Alg: tt.alg, EAlg: "aes-cbc"},
 				localPort: 40000, remotePort: 5060,
 				outboundSPI: 1111, inboundSPI: 2222,
 				ck: ck, ik: ik,
@@ -1966,6 +1983,15 @@ func TestNormalizeConfigRequiresIPSecAlgorithms(t *testing.T) {
 			name:    "encryption algorithms",
 			cfg:     Config{IPSecIntegrityAlgorithms: []string{"hmac-sha-1-96"}},
 			wantErr: "IPsec encryption algorithms are required",
+		},
+		{
+			name: "compatible algorithm pair",
+			cfg: Config{
+				IPSecIntegrityAlgorithms:  []string{"aes-gmac-us"},
+				IPSecEncryptionAlgorithms: []string{"aes-gcm-us"},
+				IPSecModes:                []string{"trans", "UDP-enc-tun"},
+			},
+			wantErr: "no compatible pair",
 		},
 	}
 

@@ -42,14 +42,13 @@ func randomUint32() (uint32, error) {
 }
 
 func secureEncryption(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" || strings.EqualFold(value, esp.EncryptionNull) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", esp.EncryptionNull:
 		return esp.EncryptionNull, nil
-	}
-	if strings.EqualFold(value, esp.EncryptionAESCBC) {
+	case esp.EncryptionAESCBC:
 		return esp.EncryptionAESCBC, nil
-	}
-	if strings.EqualFold(value, esp.EncryptionAESGCM) {
+	case esp.EncryptionAESGCM, esp.EncryptionAESGCMUS:
 		return esp.EncryptionAESGCM, nil
 	}
 	return "", fmt.Errorf("unsupported encryption %q", value)
@@ -111,7 +110,11 @@ func validateSecureESPConfig(encryption, integrity string, encryptionKey, integr
 		if len(integrityKey) != 20 {
 			return fmt.Errorf("HMAC-SHA1 integrity key must be 20 bytes, got %d", len(integrityKey))
 		}
-	case esp.IntegrityAESGMAC:
+	case esp.IntegrityHMACSHA256128, esp.IntegrityHMACSHA256RFC:
+		if len(integrityKey) != 32 {
+			return fmt.Errorf("HMAC-SHA256 integrity key must be 32 bytes, got %d", len(integrityKey))
+		}
+	case esp.IntegrityAESGMAC, esp.IntegrityAESGMACUS:
 		if len(integrityKey) != 16 {
 			return fmt.Errorf("AES-GMAC integrity key must be 16 bytes, got %d", len(integrityKey))
 		}
@@ -129,7 +132,7 @@ func validateSecureESPConfig(encryption, integrity string, encryptionKey, integr
 		}
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityAESGMAC) && encryption != esp.EncryptionNull {
+	if (strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityAESGMAC) || strings.EqualFold(strings.TrimSpace(integrity), esp.IntegrityAESGMACUS)) && encryption != esp.EncryptionNull {
 		return errors.New("AES-GMAC requires null encryption")
 	}
 	if integrityDisabled {

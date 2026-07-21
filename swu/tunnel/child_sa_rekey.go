@@ -435,9 +435,9 @@ func (state childSARekeyState) childSARekeyResult(payloads []ike.Payload, newInb
 	}
 	var keys ESPKeys
 	if pfs != nil {
-		keys, err = state.ike.DeriveESPKeysWithDH(info.EncryptionKeyLen, info.Integrity, nonceI, nonceR, pfs, peerPublic)
+		keys, err = state.ike.DeriveESPKeysWithDH(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI, nonceR, pfs, peerPublic)
 	} else {
-		keys, err = state.ike.DeriveESPKeysWithNonces(info.EncryptionKeyLen, info.Integrity, nonceI, nonceR)
+		keys, err = state.ike.DeriveESPKeysWithNonces(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI, nonceR)
 	}
 	if err != nil {
 		return childSARekeyResult{}, fmt.Errorf("deriving esp keys: %w", err)

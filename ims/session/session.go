@@ -978,7 +978,8 @@ type SecureTCPConfig struct {
 	Integrity     string
 	IntegrityKey  []byte
 	Mode          string
-	Salt          [4]byte
+	OutboundSalt  [4]byte
+	InboundSalt   [4]byte
 }
 
 type SecureUDPConfig struct {
@@ -992,7 +993,8 @@ type SecureUDPConfig struct {
 	Integrity     string
 	IntegrityKey  []byte
 	Mode          string
-	Salt          [4]byte
+	OutboundSalt  [4]byte
+	InboundSalt   [4]byte
 }
 
 type targetedPacketWriter interface {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,12 +20,19 @@ func TestESPSaltDerivation(t *testing.T) {
 	tests := []struct {
 		name   string
 		verify security.Param
+		bits   byte
 		want   [4]byte
 	}{
 		{
 			name:   "aes gmac salt",
 			verify: security.Param{Alg: "aes-gmac", EAlg: "null"},
 			want:   [4]byte{0x2F, 0x5A, 0x80, 0x8D},
+		},
+		{
+			name:   "aes gmac unique server to UE server salt",
+			verify: security.Param{Alg: "aes-gmac-us", EAlg: "null"},
+			bits:   1,
+			want:   [4]byte{0x2F, 0x5A, 0x80, 0x8C},
 		},
 		{
 			name:   "aes gcm salt",
@@ -39,7 +47,7 @@ func TestESPSaltDerivation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := espSalt(&tt.verify, ck, ik); got != tt.want {
+			if got := espSalt(&tt.verify, ck, ik, tt.bits); got != tt.want {
 				t.Fatalf("espSalt() = % X, want % X", got, tt.want)
 			}
 		})
@@ -49,22 +57,22 @@ func TestESPSaltDerivation(t *testing.T) {
 func TestSecureTransportConfigCarriesModeAndSalt(t *testing.T) {
 	ck := []byte{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F}
 	ik := []byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F}
-	verify := security.Param{Alg: "null", EAlg: "aes-gcm", Mod: "UDP-enc-tun"}
+	verify := security.Param{Alg: "null", EAlg: "aes-gcm-us", Mod: "UDP-enc-tun"}
 
 	cfg := secureTransportConfigWithKeys(secureConfigParams{
 		verify: &verify, contactHost: "198.51.100.10",
 		localPort: 40000, remotePort: 5060,
 		outboundSPI: 1111, inboundSPI: 2222,
-		ck: ck, ik: ik,
+		ck: ck, ik: ik, outboundSaltBits: saltUEClientToPCSCFServer, inboundSaltBits: saltPCSCFServerToUEClient,
 	})
 	if cfg.Mode != "UDP-enc-tun" {
 		t.Fatalf("Mode = %q, want UDP-enc-tun", cfg.Mode)
 	}
-	if cfg.Salt != ([4]byte{0x1F, 0xBF, 0x69, 0xCD}) {
-		t.Fatalf("Salt = % X, want 1F BF 69 CD", cfg.Salt)
+	if cfg.OutboundSalt != ([4]byte{0x1F, 0xBF, 0x69, 0xCD}) || cfg.InboundSalt != ([4]byte{0x1F, 0xBF, 0x69, 0xCE}) {
+		t.Fatalf("salts = % X/% X, want 1F BF 69 CD/1F BF 69 CE", cfg.OutboundSalt, cfg.InboundSalt)
 	}
-	if cfg.Encryption != "aes-gcm" || cfg.Integrity != "null" {
-		t.Fatalf("algorithms = %s/%s, want aes-gcm/null", cfg.Encryption, cfg.Integrity)
+	if cfg.Encryption != "aes-gcm-us" || cfg.Integrity != "null" {
+		t.Fatalf("algorithms = %s/%s, want aes-gcm-us/null", cfg.Encryption, cfg.Integrity)
 	}
 	if got := cfg.InnerLocalIP.String(); got != "198.51.100.10" {
 		t.Fatalf("InnerLocalIP = %s, want 198.51.100.10", got)
@@ -119,7 +127,7 @@ func TestSecurityClientCapabilities(t *testing.T) {
 	}{
 		{
 			name:       "default algorithms announce both modes",
-			algorithms: ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null", "aes-cbc"}},
+			algorithms: ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null", "aes-cbc"}, modes: []string{"trans", "UDP-enc-tun"}},
 			mode:       "trans",
 			want: []security.Param{
 				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
@@ -129,16 +137,38 @@ func TestSecurityClientCapabilities(t *testing.T) {
 			},
 		},
 		{
-			name:       "legacy MD5 stays on transport mode",
-			algorithms: ipsecAlgorithms{integrity: []string{"hmac-sha-1-96", "hmac-md5-96"}, encryption: []string{"null", "aes-cbc"}},
+			name:       "MD5 mode is independent from algorithm",
+			algorithms: ipsecAlgorithms{integrity: []string{"hmac-md5-96"}, encryption: []string{"null", "aes-cbc"}, modes: []string{"trans", "UDP-enc-tun"}},
 			mode:       "trans",
 			want: []security.Param{
-				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
-				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "UDP-enc-tun"},
-				{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "trans"},
-				{Alg: "hmac-sha-1-96", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
 				{Alg: "hmac-md5-96", EAlg: "null", Mod: "trans"},
+				{Alg: "hmac-md5-96", EAlg: "null", Mod: "UDP-enc-tun"},
 				{Alg: "hmac-md5-96", EAlg: "aes-cbc", Mod: "trans"},
+				{Alg: "hmac-md5-96", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
+			},
+		},
+		{
+			name:       "configured transport mode applies to every algorithm",
+			algorithms: ipsecAlgorithms{integrity: []string{"hmac-md5-96", "hmac-sha-1-96"}, encryption: []string{"null"}, modes: []string{"trans"}},
+			mode:       "trans",
+			want: []security.Param{
+				{Alg: "hmac-md5-96", EAlg: "null", Mod: "trans"},
+				{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "trans"},
+			},
+		},
+		{
+			name:       "modern algorithms advertise only valid pairs",
+			algorithms: ipsecAlgorithms{integrity: []string{"aes-gmac-us", "hmac-sha2-256-128", "null"}, encryption: []string{"aes-gcm-us", "null", "aes-cbc"}, modes: []string{"trans", "UDP-enc-tun"}},
+			mode:       "trans",
+			want: []security.Param{
+				{Alg: "aes-gmac-us", EAlg: "null", Mod: "trans"},
+				{Alg: "aes-gmac-us", EAlg: "null", Mod: "UDP-enc-tun"},
+				{Alg: "hmac-sha2-256-128", EAlg: "null", Mod: "trans"},
+				{Alg: "hmac-sha2-256-128", EAlg: "null", Mod: "UDP-enc-tun"},
+				{Alg: "hmac-sha2-256-128", EAlg: "aes-cbc", Mod: "trans"},
+				{Alg: "hmac-sha2-256-128", EAlg: "aes-cbc", Mod: "UDP-enc-tun"},
+				{Alg: "null", EAlg: "aes-gcm-us", Mod: "trans"},
+				{Alg: "null", EAlg: "aes-gcm-us", Mod: "UDP-enc-tun"},
 			},
 		},
 	}
@@ -179,7 +209,7 @@ func TestSecurityClientCapabilitiesIgnoreContactAddress(t *testing.T) {
 		{name: "loopback", host: "127.0.0.1"},
 		{name: "hostname", host: "ue.example"},
 	}
-	algorithms := ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null"}}
+	algorithms := ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null"}, modes: []string{"trans", "UDP-enc-tun"}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -282,7 +312,7 @@ func TestSelectSecurityServerCompletesSharedSA(t *testing.T) {
 	offered := security.Params{
 		{
 			Mechanism: "ipsec-3gpp",
-			Alg:       "hmac-md5-96",
+			Alg:       "hmac-sha2-256-128",
 			EAlg:      "null",
 			Mod:       "trans",
 			PortC:     16890,
@@ -323,23 +353,20 @@ func TestSelectSecurityServerCompletesSharedSA(t *testing.T) {
 	}{
 		{
 			name:  "inherits list association for leading transport candidate",
-			value: "ipsec-3gpp;q=0.88;alg=hmac-md5-96;mod=trans,ipsec-3gpp;q=0.80;alg=hmac-sha-1-96;mod=trans;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060",
+			value: "ipsec-3gpp;q=0.88;alg=hmac-sha2-256-128;mod=trans,ipsec-3gpp;q=0.80;alg=hmac-sha-1-96;mod=trans;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060",
 			want: security.Param{
-				Mechanism: "ipsec-3gpp", Alg: "hmac-md5-96", EAlg: "null", Mod: "trans",
+				Mechanism: "ipsec-3gpp", Alg: "hmac-sha2-256-128", EAlg: "null", Mod: "trans",
 				PortC: 6050, PortS: 6060, Prot: "esp", SPIC: 209072149, SPIS: 210404739, Q: "0.88",
 			},
 		},
 		{
-			name:  "inherits list association for trailing transport candidate",
-			value: "ipsec-3gpp;q=0.94;alg=hmac-sha-1-96;mod=UDP-enc-tun;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060,ipsec-3gpp;q=0.88;alg=hmac-md5-96;mod=trans",
-			want: security.Param{
-				Mechanism: "ipsec-3gpp", Alg: "hmac-md5-96", EAlg: "null", Mod: "trans",
-				PortC: 6050, PortS: 6060, Prot: "esp", SPIC: 209072149, SPIS: 210404739, Q: "0.88",
-			},
+			name:    "does not borrow tunnel association for transport candidate",
+			value:   "ipsec-3gpp;q=0.94;alg=hmac-sha-1-96;mod=UDP-enc-tun;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060,ipsec-3gpp;q=0.88;alg=hmac-sha2-256-128;mod=trans",
+			wantErr: true,
 		},
 		{
 			name:    "rejects partially missing transport SA",
-			value:   "ipsec-3gpp;q=0.88;alg=hmac-md5-96;mod=trans;port-c=6050,ipsec-3gpp;q=0.94;alg=hmac-sha-1-96;mod=UDP-enc-tun;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060",
+			value:   "ipsec-3gpp;q=0.88;alg=hmac-sha2-256-128;mod=trans;port-c=6050,ipsec-3gpp;q=0.94;alg=hmac-sha-1-96;mod=UDP-enc-tun;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060",
 			wantErr: true,
 		},
 		{
@@ -353,7 +380,7 @@ func TestSelectSecurityServerCompletesSharedSA(t *testing.T) {
 		},
 		{
 			name: "rejects ambiguous shared associations",
-			value: "ipsec-3gpp;q=0.88;alg=hmac-md5-96;mod=trans," +
+			value: "ipsec-3gpp;q=0.88;alg=hmac-sha2-256-128;mod=trans," +
 				"ipsec-3gpp;q=0.80;alg=hmac-sha-1-96;mod=UDP-enc-tun;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060," +
 				"ipsec-3gpp;q=0.70;alg=hmac-sha-1-96;mod=UDP-enc-tun;spi-c=209072150;spi-s=210404740;port-c=6051;port-s=6061",
 			wantErr: true,
@@ -392,11 +419,11 @@ func TestSelectSecurityServerRejectsUnofferedHigherQValue(t *testing.T) {
 		{
 			name: "rejects unadvertised higher priority candidate",
 			values: []string{
-				"ipsec-3gpp;q=0.88;alg=hmac-md5-96;ealg=null;mod=trans;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060," +
+				"ipsec-3gpp;q=0.88;alg=hmac-sha2-256-128;ealg=null;mod=trans;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060," +
 					"ipsec-3gpp;q=0.94;alg=hmac-sha-1-96;ealg=null;mod=UDP-enc-tun;spi-c=209072150;spi-s=210404740;port-c=6051;port-s=6061",
 			},
 			want: security.Param{
-				Mechanism: "ipsec-3gpp", Alg: "hmac-md5-96", EAlg: "null", Mod: "trans",
+				Mechanism: "ipsec-3gpp", Alg: "hmac-sha2-256-128", EAlg: "null", Mod: "trans",
 				PortC: 6050, PortS: 6060, Prot: "esp", SPIC: 209072149, SPIS: 210404739, Q: "0.88",
 			},
 		},
@@ -405,7 +432,7 @@ func TestSelectSecurityServerRejectsUnofferedHigherQValue(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			base := security.Param{Mechanism: "ipsec-3gpp", PortC: 16890, PortS: 58662, Prot: "esp", SPIC: 2013280143, SPIS: 172568574}
-			offered := securityClientCapabilities(base, ipsecAlgorithms{integrity: []string{"hmac-md5-96"}, encryption: []string{"null"}})
+			offered := securityClientCapabilities(base, ipsecAlgorithms{integrity: []string{"hmac-sha2-256-128"}, encryption: []string{"null"}, modes: []string{"trans", "UDP-enc-tun"}})
 			got, _, err := selectSecurityServer(tt.values, offered, "trans")
 			if err != nil {
 				t.Fatalf("selectSecurityServer() error = %v", err)
@@ -417,6 +444,30 @@ func TestSelectSecurityServerRejectsUnofferedHigherQValue(t *testing.T) {
 	}
 }
 
+func TestSelectSecurityServerRejectsUnadvertisedMD5TunnelMode(t *testing.T) {
+	base := security.Param{
+		Mechanism: "ipsec-3gpp",
+		PortC:     16890,
+		PortS:     58662,
+		Prot:      "esp",
+		SPIC:      2013280143,
+		SPIS:      172568574,
+	}
+	offered := securityClientCapabilities(base, ipsecAlgorithms{
+		integrity:  []string{"hmac-md5-96"},
+		encryption: []string{"null"},
+		modes:      []string{"trans", "UDP-enc-tun"},
+	})
+	values := []string{
+		"ipsec-3gpp;q=0.88;alg=hmac-md5-96;ealg=null;mod=UDP-enc-tun;spi-c=209072149;spi-s=210404739;port-c=6050;port-s=6060," +
+			"ipsec-3gpp;q=0.94;alg=hmac-sha-1-96;ealg=null;mod=trans",
+	}
+
+	if _, _, err := selectSecurityServer(values, offered, "trans"); err == nil {
+		t.Fatal("selectSecurityServer() error = nil, want no compatible mechanism")
+	}
+}
+
 func TestSecurityClientParametersAreUnique(t *testing.T) {
 	tests := []struct {
 		name string
@@ -425,7 +476,7 @@ func TestSecurityClientParametersAreUnique(t *testing.T) {
 		{
 			name: "initial",
 			next: func() security.Param {
-				return newSecurityClient(5060, ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null"}})
+				return newSecurityClient(5060, ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null"}, modes: []string{"trans", "UDP-enc-tun"}})
 			},
 		},
 		{
@@ -454,6 +505,55 @@ func TestSecurityClientParametersAreUnique(t *testing.T) {
 	}
 }
 
+func TestReauthenticationSecurityClientCapabilities(t *testing.T) {
+	algorithms := ipsecAlgorithms{
+		integrity:  []string{"hmac-sha-1-96"},
+		encryption: []string{"null"},
+		modes:      []string{"trans", "UDP-enc-tun"},
+	}
+	tests := []struct {
+		name    string
+		mode    string
+		want    string
+		wantErr string
+	}{
+		{name: "transport", mode: "trans", want: "trans"},
+		{name: "UDP encapsulated tunnel", mode: "udp-ENC-tun", want: "UDP-enc-tun"},
+		{name: "missing", wantErr: "unsupported IPsec mode"},
+		{name: "unsupported", mode: "tun", wantErr: "unsupported IPsec mode"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := security.Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha-1-96",
+				EAlg:      "null",
+				Mod:       tt.mode,
+				PortC:     5062,
+				PortS:     5063,
+				Prot:      "esp",
+				SPIC:      1001,
+				SPIS:      1002,
+			}
+
+			got, err := reauthenticationSecurityClientCapabilities(base, algorithms)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("reauthenticationSecurityClientCapabilities() error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("reauthenticationSecurityClientCapabilities() error = %v", err)
+			}
+			if len(got) != 1 || got[0].Mod != tt.want {
+				t.Fatalf("reauthentication Security-Client = %+v, want mode %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNATProtectedPortRotation(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -465,7 +565,7 @@ func TestNATProtectedPortRotation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			algorithms := ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null", "aes-cbc"}}
+			algorithms := ipsecAlgorithms{integrity: []string{"hmac-sha-1-96"}, encryption: []string{"null", "aes-cbc"}, modes: []string{"trans", "UDP-enc-tun"}}
 			flow := newFlow("198.51.100.10", 5060, algorithms)
 			oldClientPort := flow.SecurityClient.PortC
 			oldServerPort := flow.SecurityClient.PortS
@@ -592,6 +692,65 @@ func TestSecurityServerMustMatchSecurityClientOffer(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("applyRegisterChallenge() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestRegisterUsesIPSecClientAndServerPorts(t *testing.T) {
+	svc := newTestService(t, Config{}, newUDPTransport(5062, 5060), stubCard{})
+	flow := svc.CurrentFlow()
+	auth := &security.Authorization{Algorithm: security.AlgorithmAKAv1MD5}
+
+	tests := []struct {
+		name        string
+		build       func() sip.Message
+		wantViaPort int
+		wantContact string
+	}{
+		{
+			name:        "unprotected register uses registration port",
+			build:       func() sip.Message { return svc.buildRegister(nil, nil) },
+			wantViaPort: flow.RegisterPort,
+			wantContact: net.JoinHostPort(flow.ContactHost, strconv.Itoa(flow.RegisterPort)),
+		},
+		{
+			name:        "protected register receives responses on client port",
+			build:       func() sip.Message { return svc.buildRegister(auth, nil) },
+			wantViaPort: flow.SecurityClient.PortC,
+			wantContact: net.JoinHostPort(flow.ContactHost, strconv.Itoa(flow.SecurityClient.PortS)),
+		},
+		{
+			name:        "protected deregister receives responses on client port",
+			build:       func() sip.Message { return svc.buildDeregister(auth, nil) },
+			wantViaPort: flow.SecurityClient.PortC,
+			wantContact: "*",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := tt.build()
+			_, portText, err := net.SplitHostPort(sip.TopViaSentBy(msg.Header("Via")))
+			if err != nil {
+				t.Fatalf("parsing Via sent-by: %v", err)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				t.Fatalf("parsing Via port: %v", err)
+			}
+			if port != tt.wantViaPort {
+				t.Fatalf("Via port = %d, want %d", port, tt.wantViaPort)
+			}
+			contact := msg.Header("Contact")
+			if tt.wantContact == "*" {
+				if contact != "*" {
+					t.Fatalf("Contact = %q, want *", contact)
+				}
+				return
+			}
+			if !strings.Contains(contact, "sip:"+tt.wantContact) {
+				t.Fatalf("Contact = %q, want endpoint %q", contact, tt.wantContact)
 			}
 		})
 	}

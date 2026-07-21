@@ -337,9 +337,9 @@ func buildChildSAResponsePayloads(state createChildSARequestState, payloads []ik
 	info.ResponderTrafficSelectors = cloneTrafficSelectors(responseTSr)
 	var keys ESPKeys
 	if pfs != nil {
-		keys, err = state.ike.DeriveESPKeysWithDH(info.EncryptionKeyLen, info.Integrity, nonceI.Data, nonceR, pfs, keI.Data)
+		keys, err = state.ike.DeriveESPKeysWithDH(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI.Data, nonceR, pfs, keI.Data)
 	} else {
-		keys, err = state.ike.DeriveESPKeysWithNonces(info.EncryptionKeyLen, info.Integrity, nonceI.Data, nonceR)
+		keys, err = state.ike.DeriveESPKeysWithNonces(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI.Data, nonceR)
 	}
 	if err != nil {
 		return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa child response: deriving esp keys: %w", err)
@@ -358,22 +358,10 @@ func buildChildSAResponsePayloads(state createChildSARequestState, payloads []ik
 	action := createChildSAAction{
 		installChild: true,
 		child: childSARekeyResult{
-			info: info,
-			keys: keys,
-			outbound: esp.Codec{
-				SPI:           peerInboundSPI,
-				Encryption:    esp.EncryptionAESCBC,
-				Integrity:     integrityName(info.Integrity),
-				EncryptionKey: append([]byte(nil), keys.EncryptionResponder...),
-				IntegrityKey:  append([]byte(nil), keys.IntegrityResponder...),
-			},
-			inbound: esp.Codec{
-				SPI:           localInboundSPI,
-				Encryption:    esp.EncryptionAESCBC,
-				Integrity:     integrityName(info.Integrity),
-				EncryptionKey: append([]byte(nil), keys.EncryptionInitiator...),
-				IntegrityKey:  append([]byte(nil), keys.IntegrityInitiator...),
-			},
+			info:       info,
+			keys:       keys,
+			outbound:   newESPCodec(peerInboundSPI, info, keys.EncryptionResponder, keys.IntegrityResponder),
+			inbound:    newESPCodec(localInboundSPI, info, keys.EncryptionInitiator, keys.IntegrityInitiator),
 			oldInbound: state.inboundSPI,
 			nonceI:     append([]byte(nil), nonceI.Data...),
 			nonceR:     append([]byte(nil), nonceR...),
@@ -405,7 +393,7 @@ func buildIKESARekeyResponsePayloads(state createChildSARequestState, payloads [
 	if err := validateNonceData(nonceI.Data); err != nil {
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
-	proposal, peerSPI, err := acceptedIKESARekeyProposal(sa.Proposals, state.ike)
+	proposal, peerSPI, err := acceptedIKESARekeyProposal(sa.Proposals, state.cfg, keI.DHGroup, state.ike)
 	if err != nil {
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
@@ -464,28 +452,96 @@ type acceptedIKESAProposal struct {
 	ProposalNumber byte
 }
 
-func acceptedIKESARekeyProposal(proposals []ike.Proposal, current *ikeCrypto) (acceptedIKESAProposal, uint64, error) {
+func acceptedIKESARekeyProposal(proposals []ike.Proposal, cfg Config, keGroup uint16, current *ikeCrypto) (acceptedIKESAProposal, uint64, error) {
 	for _, proposal := range proposals {
 		if proposal.ProtocolID != proposalProtocolIKE || len(proposal.SPI) != 8 {
 			continue
 		}
-		negotiated, err := negotiatedIKESAFromProposal(proposal, current.dhGroup)
+		accepted, err := acceptedIKESARequestProposal(proposal, cfg, keGroup)
 		if err != nil {
-			continue
-		}
-		if negotiated.Encryption != current.encr ||
-			negotiated.EncryptionKeyLen != current.encrKeyBits ||
-			negotiated.Integrity != current.integ ||
-			negotiated.PRF != current.prf {
 			continue
 		}
 		spi := binary.BigEndian.Uint64(proposal.SPI)
 		if ikeSPIInUse(spi, current.initiatorSPI, current.responderSPI) {
 			continue
 		}
-		return acceptedIKESAProposal{negotiatedIKESA: negotiated, DHGroup: current.dhGroup, ProposalNumber: proposal.Number}, spi, nil
+		accepted.ProposalNumber = proposal.Number
+		return accepted, spi, nil
 	}
 	return acceptedIKESAProposal{}, 0, errors.New("no acceptable ike sa rekey proposal")
+}
+
+func acceptedIKESARequestProposal(proposal ike.Proposal, cfg Config, keGroup uint16) (acceptedIKESAProposal, error) {
+	if proposal.ProtocolID != proposalProtocolIKE {
+		return acceptedIKESAProposal{}, fmt.Errorf("building create_child_sa ike response: invalid proposal protocol id %d", proposal.ProtocolID)
+	}
+	for _, transform := range proposal.Transforms {
+		switch transform.TransformType {
+		case transformTypeENCR, transformTypeINTEG, transformTypePRF, transformTypeDH:
+		default:
+			return acceptedIKESAProposal{}, fmt.Errorf("building create_child_sa ike response: unsupported proposal transform type %d", transform.TransformType)
+		}
+	}
+
+	accepted := acceptedIKESAProposal{}
+	for _, encryption := range uint16ValuesOrDefault(cfg.IKEEncryption, defaultEncryption) {
+		keyLens := uint16ValuesOrDefault(cfg.IKEEncryptionKeyLens, defaultEncryptionKeyLens)
+		if encryption == transformENCRAESCTR {
+			keyLens = uint16ValuesOrDefault(cfg.IKEEncryptionAESCTRKeyLens, defaultEncryptionKeyLens)
+		}
+		for _, keyLen := range keyLens {
+			if proposalHasEncryption(proposal, encryption, keyLen) {
+				accepted.Encryption = encryption
+				accepted.EncryptionKeyLen = keyLen
+				break
+			}
+		}
+		if accepted.Encryption != 0 {
+			break
+		}
+	}
+	accepted.Integrity = preferredProposalTransform(proposal, transformTypeINTEG, uint16ValuesOrDefault(cfg.IKEIntegrity, defaultIKEIntegrity))
+	accepted.PRF = preferredProposalTransform(proposal, transformTypePRF, uint16ValuesOrDefault(cfg.IKEPRF, defaultIKEPRF))
+	dhGroups := uint16ValuesOrDefault(cfg.DHGroups, defaultDHGroups)
+	if slices.Contains(dhGroups, keGroup) && proposalHasTransform(proposal, transformTypeDH, keGroup) {
+		accepted.DHGroup = keGroup
+	} else {
+		accepted.DHGroup = preferredProposalTransform(proposal, transformTypeDH, dhGroups)
+	}
+	if accepted.Encryption == 0 || accepted.EncryptionKeyLen == 0 || accepted.Integrity == 0 || accepted.PRF == 0 || accepted.DHGroup == 0 {
+		return acceptedIKESAProposal{}, errors.New("building create_child_sa ike response: proposal transform is incomplete")
+	}
+	return accepted, nil
+}
+
+func proposalHasEncryption(proposal ike.Proposal, encryption, keyLen uint16) bool {
+	for _, transform := range proposal.Transforms {
+		if transform.TransformType != transformTypeENCR || transform.ID != encryption {
+			continue
+		}
+		if got, ok := transformKeyLength(transform); ok && got == keyLen {
+			return true
+		}
+	}
+	return false
+}
+
+func preferredProposalTransform(proposal ike.Proposal, transformType byte, preferred []uint16) uint16 {
+	for _, id := range preferred {
+		if proposalHasTransform(proposal, transformType, id) {
+			return id
+		}
+	}
+	return 0
+}
+
+func proposalHasTransform(proposal ike.Proposal, transformType byte, id uint16) bool {
+	for _, transform := range proposal.Transforms {
+		if transform.TransformType == transformType && transform.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRequestProposalNumbers(proposals []ike.Proposal) error {
@@ -580,7 +636,7 @@ func acceptedChildSARequestProposal(proposal ike.Proposal, current Info, dhGroup
 			if accepted.Encryption != 0 {
 				continue
 			}
-			if transform.ID != transformENCRAESCBC {
+			if !supportedEncryptionTransform(transform.ID) {
 				continue
 			}
 			keyLen, ok := transformKeyLength(transform)
@@ -634,7 +690,7 @@ func transformKeyLength(transform ike.Transform) (uint16, bool) {
 
 func childSAResponseProposal(info acceptedChildSA, localInboundSPI uint32) ike.Proposal {
 	transforms := []ike.Transform{
-		aesCBCTransform(info.EncryptionKeyLen),
+		encryptionTransform(info.Encryption, info.EncryptionKeyLen),
 		{TransformType: transformTypeINTEG, ID: info.Integrity},
 	}
 	if info.DHGroup != 0 {
@@ -655,7 +711,7 @@ func ikeSARekeyResponseProposal(proposal acceptedIKESAProposal, responderSPI uin
 		ProtocolID: proposalProtocolIKE,
 		SPI:        uint64Bytes(responderSPI),
 		Transforms: []ike.Transform{
-			aesCBCTransform(proposal.EncryptionKeyLen),
+			encryptionTransform(proposal.Encryption, proposal.EncryptionKeyLen),
 			{TransformType: transformTypeINTEG, ID: proposal.Integrity},
 			{TransformType: transformTypePRF, ID: proposal.PRF},
 			{TransformType: transformTypeDH, ID: proposal.DHGroup},

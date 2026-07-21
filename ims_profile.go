@@ -14,48 +14,55 @@ import (
 var embeddedIMSConfig []byte
 
 type imsProfile struct {
-	MCC                      string               `json:"mcc"`
-	MNC                      string               `json:"mnc"`
-	IMSIPrefix               string               `json:"imsiPrefix"`
-	GID1                     string               `json:"gid1"`
-	EPDG                     string               `json:"epdg"`
-	EPDGAddresses            []string             `json:"epdgAddresses"`
-	InitialPort              int                  `json:"initialPort"`
-	NATTPort                 int                  `json:"nattPort"`
-	LocalSIPPort             int                  `json:"localSIPPort"`
-	SIPPort                  int                  `json:"sipPort"`
-	DHGroups                 []uint16             `json:"dhGroups"`
-	IKEEncryptionKeyLens     []uint16             `json:"ikeEncryptionKeyLens"`
-	IKEIntegrity             []uint16             `json:"ikeIntegrity"`
-	IKEPRF                   []uint16             `json:"ikePRF"`
-	ChildEncryptionKeyLens   []uint16             `json:"childEncryptionKeyLens"`
-	ChildIntegrity           []uint16             `json:"childIntegrity"`
-	PCSCFIPv4ConfigAttribute uint16               `json:"pcscfIPv4ConfigAttribute"`
-	PCSCFIPv6ConfigAttribute uint16               `json:"pcscfIPv6ConfigAttribute"`
-	NATKeepaliveInterval     imsProfileDuration   `json:"natKeepaliveInterval"`
-	LivenessTimeout          imsProfileDuration   `json:"livenessTimeout"`
-	IKESALifetime            imsProfileDuration   `json:"ikeSALifetime"`
-	IKERetransmitDelays      []imsProfileDuration `json:"ikeRetransmitDelays"`
-	IKESARekeySoftTime       imsProfileDuration   `json:"ikeSARekeySoftTime"`
-	IKESARekeyHardTime       imsProfileDuration   `json:"ikeSARekeyHardTime"`
-	IKESARekeyTime           imsProfileDuration   `json:"ikeSARekeyTime"`
-	ChildSALifetime          imsProfileDuration   `json:"childSALifetime"`
-	ChildSARekeySoftTime     imsProfileDuration   `json:"childSARekeySoftTime"`
-	ChildSARekeyHardTime     imsProfileDuration   `json:"childSARekeyHardTime"`
-	ChildSARekeyTime         imsProfileDuration   `json:"childSARekeyTime"`
-	AddKEToChildSARekey      bool                 `json:"addKEToChildSARekey"`
-	IMSTransport             string               `json:"imsTransport"`
-	IMSHomeDomain            string               `json:"imsHomeDomain"`
-	IMSPublicIdentity        string               `json:"imsPublicIdentity"`
-	IMSPhoneContextDomain    string               `json:"imsPhoneContextDomain"`
-	IMSAccessNetworkInfo     string               `json:"imsAccessNetworkInfo"`
-	IMSUserAgent             string               `json:"imsUserAgent"`
-	IMSRegisterExpires       imsProfileDuration   `json:"imsRegisterExpires"`
-	IMSRegistrationRetryBase imsProfileDuration   `json:"imsRegistrationRetryBase"`
-	IMSRegistrationRetryMax  imsProfileDuration   `json:"imsRegistrationRetryMax"`
-	// Algorithms are carrier capabilities; IPsec mode remains negotiated by sec-agree.
+	MCC                          string                    `json:"mcc"`
+	MNC                          string                    `json:"mnc"`
+	IMSIPrefix                   string                    `json:"imsiPrefix"`
+	ICCIDPrefix                  string                    `json:"iccidPrefix"`
+	SPN                          string                    `json:"spn"`
+	GID1                         string                    `json:"gid1"`
+	GID2                         string                    `json:"gid2"`
+	EPDG                         string                    `json:"epdg"`
+	EPDGAddresses                []string                  `json:"epdgAddresses"`
+	InitialPort                  int                       `json:"initialPort"`
+	NATTPort                     int                       `json:"nattPort"`
+	LocalSIPPort                 int                       `json:"localSIPPort"`
+	SIPPort                      int                       `json:"sipPort"`
+	DHGroups                     []uint16                  `json:"dhGroups"`
+	IKEEncryption                []uint16                  `json:"ikeEncryption"`
+	IKEEncryptionKeyLens         []uint16                  `json:"ikeEncryptionKeyLens"`
+	IKEEncryptionAESCTRKeyLens   []uint16                  `json:"ikeEncryptionAESCTRKeyLens"`
+	IKEIntegrity                 []uint16                  `json:"ikeIntegrity"`
+	IKEPRF                       []uint16                  `json:"ikePRF"`
+	ChildEncryption              []uint16                  `json:"childEncryption"`
+	ChildEncryptionKeyLens       []uint16                  `json:"childEncryptionKeyLens"`
+	ChildEncryptionAESCTRKeyLens []uint16                  `json:"childEncryptionAESCTRKeyLens"`
+	ChildIntegrity               []uint16                  `json:"childIntegrity"`
+	PCSCFIPv4ConfigAttribute     uint16                    `json:"pcscfIPv4ConfigAttribute"`
+	PCSCFIPv6ConfigAttribute     uint16                    `json:"pcscfIPv6ConfigAttribute"`
+	NATKeepaliveInterval         imsProfileDuration        `json:"natKeepaliveInterval"`
+	LivenessTimeout              imsProfileDuration        `json:"livenessTimeout"`
+	IKESALifetime                imsProfileDuration        `json:"ikeSALifetime"`
+	IKERetransmitDelays          []imsProfileDuration      `json:"ikeRetransmitDelays"`
+	IKESARekeySoftTime           imsProfileDuration        `json:"ikeSARekeySoftTime"`
+	IKESARekeyHardTime           imsProfileDuration        `json:"ikeSARekeyHardTime"`
+	IKESARekeyTime               imsProfileDuration        `json:"ikeSARekeyTime"`
+	ChildSALifetime              imsProfileDuration        `json:"childSALifetime"`
+	ChildSARekeySoftTime         imsProfileDuration        `json:"childSARekeySoftTime"`
+	ChildSARekeyHardTime         imsProfileDuration        `json:"childSARekeyHardTime"`
+	ChildSARekeyTime             imsProfileDuration        `json:"childSARekeyTime"`
+	AddKEToChildSARekey          bool                      `json:"addKEToChildSARekey"`
+	IMSTransport                 string                    `json:"imsTransport"`
+	IMSHomeDomain                string                    `json:"imsHomeDomain"`
+	IMSPublicIdentity            string                    `json:"imsPublicIdentity"`
+	IMSPhoneContextDomain        string                    `json:"imsPhoneContextDomain"`
+	IMSAccessNetworkInfo         string                    `json:"imsAccessNetworkInfo"`
+	IMSUserAgent                 string                    `json:"imsUserAgent"`
+	IMSRegisterExpires           imsProfileDuration        `json:"imsRegisterExpires"`
+	IMSRegistrationRetryBase     imsProfileDuration        `json:"imsRegistrationRetryBase"`
+	IMSRegistrationRetryMax      imsProfileDuration        `json:"imsRegistrationRetryMax"`
 	IMSIPSecIntegrityAlgorithms  []string                  `json:"imsIPSecIntegrityAlgorithms"`
 	IMSIPSecEncryptionAlgorithms []string                  `json:"imsIPSecEncryptionAlgorithms"`
+	IMSIPSecModes                []string                  `json:"imsIPSecModes"`
 	IMSGeolocationPIDFInvite     []int                     `json:"imsGeolocationPIDFInSIPInviteSupport"`
 	IMSGeolocationPIDFRegister   []int                     `json:"imsGeolocationPIDFInSIPRegisterSupport"`
 	IMSUseTelURIForPIDFXML       bool                      `json:"imsUseTelURIForPIDFXML"`
@@ -154,6 +161,9 @@ func loadIMSProfile(card Card) (imsProfile, bool, error) {
 	if len(profile.IMSIPSecEncryptionAlgorithms) == 0 {
 		return imsProfile{}, false, fmt.Errorf("ims carrier profile %s-%s has no IPsec encryption algorithms", profile.MCC, profile.MNC)
 	}
+	if len(profile.IMSIPSecModes) == 0 {
+		return imsProfile{}, false, fmt.Errorf("ims carrier profile %s-%s has no IPsec modes", profile.MCC, profile.MNC)
+	}
 	return profile, true, nil
 }
 
@@ -168,12 +178,13 @@ func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
 	mcc := strings.TrimSpace(card.MCC())
 	mnc := strings.TrimSpace(card.MNC())
 	mncLength := cardMNCLength(card)
-	imsi := strings.TrimSpace(card.IMSI())
+	imsi := normalizeDigits(card.IMSI())
+	iccid := normalizeDigits(card.ICCID())
+	spn := cardSPN(card)
 	gid1 := cardGID1(card)
+	gid2 := cardGID2(card)
 	bestIndex := -1
-	bestConditions := -1
-	bestIMSIPrefixLength := -1
-	bestIMSISpecificity := -1
+	bestScore := imsProfileMatchScore{}
 	for index, profile := range profiles {
 		if !samePLMNDigits(profile.MCC, profile.MNC, mcc, mnc, mncLength) {
 			continue
@@ -182,31 +193,72 @@ func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
 		if imsiPrefix != "" && !matchesIMSIPrefix(imsi, imsiPrefix) {
 			continue
 		}
-		if profile.GID1 != "" && !sameGID1(profile.GID1, gid1) {
+		iccidPrefix := normalizeDigits(profile.ICCIDPrefix)
+		if iccidPrefix != "" && !strings.HasPrefix(iccid, iccidPrefix) {
 			continue
 		}
-		conditions := 0
-		imsiSpecificity := 0
-		if imsiPrefix != "" {
-			conditions++
-			imsiSpecificity = len(imsiPrefix) - strings.Count(strings.ToLower(imsiPrefix), "x")
+		profileSPN := strings.TrimSpace(profile.SPN)
+		if profileSPN != "" && !strings.EqualFold(spn, profileSPN) {
+			continue
 		}
-		if profile.GID1 != "" {
-			conditions++
+		if profile.GID1 != "" && !sameGID(profile.GID1, gid1) {
+			continue
 		}
-		if conditions > bestConditions ||
-			conditions == bestConditions && len(imsiPrefix) > bestIMSIPrefixLength ||
-			conditions == bestConditions && len(imsiPrefix) == bestIMSIPrefixLength && imsiSpecificity > bestIMSISpecificity {
+		if profile.GID2 != "" && !sameGID(profile.GID2, gid2) {
+			continue
+		}
+
+		score := newIMSProfileMatchScore(profile)
+		if bestIndex < 0 || score.betterThan(bestScore) {
 			bestIndex = index
-			bestConditions = conditions
-			bestIMSIPrefixLength = len(imsiPrefix)
-			bestIMSISpecificity = imsiSpecificity
+			bestScore = score
 		}
 	}
 	if bestIndex >= 0 {
 		return profiles[bestIndex], true, nil
 	}
 	return imsProfile{}, false, nil
+}
+
+type imsProfileMatchScore struct {
+	conditions  int
+	specificity int
+	length      int
+}
+
+func newIMSProfileMatchScore(profile imsProfile) imsProfileMatchScore {
+	imsiPrefix := strings.TrimSpace(profile.IMSIPrefix)
+	selectors := []string{
+		normalizeDigits(profile.ICCIDPrefix),
+		strings.TrimSpace(profile.SPN),
+		normalizeGID(profile.GID1),
+		normalizeGID(profile.GID2),
+	}
+	score := imsProfileMatchScore{}
+	if imsiPrefix != "" {
+		score.conditions++
+		score.length += len(imsiPrefix)
+		score.specificity += len(imsiPrefix) - strings.Count(strings.ToLower(imsiPrefix), "x")
+	}
+	for _, selector := range selectors {
+		if selector == "" {
+			continue
+		}
+		score.conditions++
+		score.length += len(selector)
+		score.specificity += len(selector)
+	}
+	return score
+}
+
+func (score imsProfileMatchScore) betterThan(other imsProfileMatchScore) bool {
+	if score.conditions != other.conditions {
+		return score.conditions > other.conditions
+	}
+	if score.specificity != other.specificity {
+		return score.specificity > other.specificity
+	}
+	return score.length > other.length
 }
 
 func matchesIMSIPrefix(imsi, pattern string) bool {
@@ -232,11 +284,11 @@ type mncLengthCard interface {
 }
 
 func cardMNCLength(card Card) int {
-	lengthCard, ok := card.(mncLengthCard)
+	provider, ok := card.(mncLengthCard)
 	if !ok {
 		return 0
 	}
-	return lengthCard.MNCLength()
+	return provider.MNCLength()
 }
 
 type gid1Card interface {
@@ -244,11 +296,35 @@ type gid1Card interface {
 }
 
 func cardGID1(card Card) string {
-	gid1Card, ok := card.(gid1Card)
+	provider, ok := card.(gid1Card)
 	if !ok {
 		return ""
 	}
-	return normalizeGID1(gid1Card.GID1())
+	return normalizeGID(provider.GID1())
+}
+
+type gid2Card interface {
+	GID2() string
+}
+
+func cardGID2(card Card) string {
+	provider, ok := card.(gid2Card)
+	if !ok {
+		return ""
+	}
+	return normalizeGID(provider.GID2())
+}
+
+type spnCard interface {
+	SPN() string
+}
+
+func cardSPN(card Card) string {
+	provider, ok := card.(spnCard)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(provider.SPN())
 }
 
 func samePLMNDigits(profileMCC, profileMNC, cardMCC, cardMNC string, cardMNCLength int) bool {
@@ -269,19 +345,29 @@ func samePLMNDigits(profileMCC, profileMNC, cardMCC, cardMNC string, cardMNCLeng
 	return cardMNC[0] == '0' && profileMNC == cardMNC[1:]
 }
 
-func sameGID1(profileGID1, cardGID1 string) bool {
-	profileGID1 = normalizeGID1(profileGID1)
-	if profileGID1 == "" || cardGID1 == "" {
+func sameGID(profileGID, cardGID string) bool {
+	profileGID = normalizeGID(profileGID)
+	cardGID = normalizeGID(cardGID)
+	if profileGID == "" || cardGID == "" {
 		return false
 	}
-	return strings.HasPrefix(cardGID1, profileGID1)
+	return strings.HasPrefix(cardGID, profileGID)
 }
 
-func normalizeGID1(gid1 string) string {
-	gid1 = strings.TrimSpace(gid1)
-	gid1 = strings.TrimPrefix(gid1, "0x")
-	gid1 = strings.TrimPrefix(gid1, "0X")
-	return strings.ToUpper(gid1)
+func normalizeGID(gid string) string {
+	gid = strings.TrimSpace(gid)
+	gid = strings.TrimPrefix(gid, "0x")
+	gid = strings.TrimPrefix(gid, "0X")
+	return strings.ToUpper(gid)
+}
+
+func normalizeDigits(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, value)
 }
 
 func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
@@ -306,8 +392,14 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 		if len(wifi.Tunnel.DHGroups) == 0 {
 			wifi.Tunnel.DHGroups = cloneUint16s(profile.DHGroups)
 		}
+		if len(wifi.Tunnel.IKEEncryption) == 0 {
+			wifi.Tunnel.IKEEncryption = cloneUint16s(profile.IKEEncryption)
+		}
 		if len(wifi.Tunnel.IKEEncryptionKeyLens) == 0 {
 			wifi.Tunnel.IKEEncryptionKeyLens = cloneUint16s(profile.IKEEncryptionKeyLens)
+		}
+		if len(wifi.Tunnel.IKEEncryptionAESCTRKeyLens) == 0 {
+			wifi.Tunnel.IKEEncryptionAESCTRKeyLens = cloneUint16s(profile.IKEEncryptionAESCTRKeyLens)
 		}
 		if len(wifi.Tunnel.IKEIntegrity) == 0 {
 			wifi.Tunnel.IKEIntegrity = cloneUint16s(profile.IKEIntegrity)
@@ -315,8 +407,14 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 		if len(wifi.Tunnel.IKEPRF) == 0 {
 			wifi.Tunnel.IKEPRF = cloneUint16s(profile.IKEPRF)
 		}
+		if len(wifi.Tunnel.ChildEncryption) == 0 {
+			wifi.Tunnel.ChildEncryption = cloneUint16s(profile.ChildEncryption)
+		}
 		if len(wifi.Tunnel.ChildEncryptionKeyLens) == 0 {
 			wifi.Tunnel.ChildEncryptionKeyLens = cloneUint16s(profile.ChildEncryptionKeyLens)
+		}
+		if len(wifi.Tunnel.ChildEncryptionAESCTRKeyLens) == 0 {
+			wifi.Tunnel.ChildEncryptionAESCTRKeyLens = cloneUint16s(profile.ChildEncryptionAESCTRKeyLens)
 		}
 		if len(wifi.Tunnel.ChildIntegrity) == 0 {
 			wifi.Tunnel.ChildIntegrity = cloneUint16s(profile.ChildIntegrity)
@@ -357,7 +455,7 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 		}
 	}
 
-	if cfg.usesVoWiFi() && strings.TrimSpace(cfg.IMS.Transport) == "" {
+	if strings.TrimSpace(cfg.IMS.Transport) == "" {
 		cfg.IMS.Transport = profile.IMSTransport
 	}
 	if strings.TrimSpace(cfg.IMS.HomeDomain) == "" {
@@ -390,6 +488,7 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 	if len(cfg.IMS.IPSecEncryptionAlgorithms) == 0 {
 		cfg.IMS.IPSecEncryptionAlgorithms = cloneStrings(profile.IMSIPSecEncryptionAlgorithms)
 	}
+	cfg.IMS.IPSecModes = cloneStrings(profile.IMSIPSecModes)
 	if len(cfg.IMS.Voice.GeolocationPIDFInvite) == 0 {
 		cfg.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)
 	}
@@ -623,23 +722,21 @@ func imsProfileIKEReTransmitDelays(profile imsProfile) []time.Duration {
 }
 
 func saLifetimeFromIMSProfile(lifetime, soft, hard, legacySoft imsProfileDuration) (time.Duration, time.Duration) {
-	hardTime := imsProfileDurationValue(lifetime)
-	if hardTime > 0 {
-		softTime := imsProfileRekeySoftTime(hardTime, legacySoft)
+	hardTime := imsProfileDurationValue(hard)
+	softTime := imsProfileDurationValue(soft)
+	if hardTime > 0 || softTime > 0 {
+		softTime = imsProfileRekeySoftTime(hardTime, soft)
+		if hardTime <= 0 {
+			hardTime = softTime + swuSARekeyMargin(softTime)
+		}
 		if softTime <= 0 {
 			return hardTime, swuSARekeyMargin(hardTime)
 		}
 		return hardTime, hardTime - softTime
 	}
 
-	legacyTime := imsProfileDurationValue(legacySoft)
-	if legacyTime > 0 {
-		hardTime = legacyTime + swuSARekeyMargin(legacyTime)
-		return hardTime, hardTime - legacyTime
-	}
-
-	hardTime = imsProfileDurationValue(hard)
-	softTime := imsProfileRekeySoftTime(hardTime, soft)
+	hardTime = imsProfileDurationValue(lifetime)
+	softTime = imsProfileRekeySoftTime(hardTime, legacySoft)
 	if hardTime <= 0 {
 		if softTime <= 0 {
 			return 0, 0

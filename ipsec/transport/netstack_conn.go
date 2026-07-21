@@ -51,7 +51,8 @@ type SecureTCPConfig struct {
 
 	EncryptionKey []byte
 	IntegrityKey  []byte
-	Salt          [4]byte
+	OutboundSalt  [4]byte
+	InboundSalt   [4]byte
 }
 
 type UDPConfig struct {
@@ -72,7 +73,8 @@ type SecureUDPConfig struct {
 
 	EncryptionKey []byte
 	IntegrityKey  []byte
-	Salt          [4]byte
+	OutboundSalt  [4]byte
+	InboundSalt   [4]byte
 }
 
 type tcpEndpointSet struct {
@@ -377,7 +379,8 @@ func (n *Netstack) registerTCPPolicy(local, remote *net.TCPAddr, outerLocalIP, o
 		localPort: local.Port, remotePort: remote.Port, mode: cfg.Mode,
 		outboundSPI: cfg.OutboundSPI, inboundSPI: cfg.InboundSPI,
 		encryption: cfg.Encryption, integrity: cfg.Integrity, associations: cfg.Associations,
-		encryptionKey: cfg.EncryptionKey, integrityKey: cfg.IntegrityKey, salt: cfg.Salt,
+		encryptionKey: cfg.EncryptionKey, integrityKey: cfg.IntegrityKey,
+		outboundSalt: cfg.OutboundSalt, inboundSalt: cfg.InboundSalt,
 	})
 }
 
@@ -428,7 +431,8 @@ func (n *Netstack) openUDP(ctx context.Context, cfg UDPConfig, secure *SecureUDP
 			localPort: local.Port, remotePort: remote.Port, mode: secure.Mode,
 			outboundSPI: secure.OutboundSPI, inboundSPI: secure.InboundSPI,
 			encryption: secure.Encryption, integrity: secure.Integrity, associations: secure.Associations,
-			encryptionKey: secure.EncryptionKey, integrityKey: secure.IntegrityKey, salt: secure.Salt,
+			encryptionKey: secure.EncryptionKey, integrityKey: secure.IntegrityKey,
+			outboundSalt: secure.OutboundSalt, inboundSalt: secure.InboundSalt,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("opening IMS netstack UDP: %w", err)

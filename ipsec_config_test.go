@@ -12,5 +12,8 @@ func withTestIMSIPSecAlgorithms(cfg IMSConfig) IMSConfig {
 	if len(cfg.IPSecEncryptionAlgorithms) == 0 {
 		cfg.IPSecEncryptionAlgorithms = []string{"null", "aes-cbc"}
 	}
+	if len(cfg.IPSecModes) == 0 {
+		cfg.IPSecModes = []string{"trans", "UDP-enc-tun"}
+	}
 	return cfg
 }

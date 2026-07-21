@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"hash"
+	"slices"
 	"strings"
 	"testing"
 
@@ -247,7 +248,7 @@ func TestNormalizeParam(t *testing.T) {
 			},
 		},
 		{
-			name: "accepts legacy md5 integrity algorithm",
+			name: "accepts legacy MD5 integrity algorithm",
 			in: Param{
 				Mechanism: "ipsec-3gpp",
 				Alg:       "hmac-md5-96",
@@ -273,10 +274,10 @@ func TestNormalizeParam(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects security header sha256 integrity algorithm",
+			name: "accepts SHA2 integrity algorithm",
 			in: Param{
 				Mechanism: "ipsec-3gpp",
-				Alg:       "hmac-sha-256-128",
+				Alg:       "hmac-sha2-256-128",
 				EAlg:      "null",
 				Mod:       "trans",
 				PortC:     5062,
@@ -285,7 +286,18 @@ func TestNormalizeParam(t *testing.T) {
 				SPIC:      310,
 				SPIS:      320,
 			},
-			ok: false,
+			ok: true,
+			want: Param{
+				Mechanism: "ipsec-3gpp",
+				Alg:       "hmac-sha2-256-128",
+				EAlg:      "null",
+				Mod:       "trans",
+				PortC:     5062,
+				PortS:     5063,
+				Prot:      "esp",
+				SPIC:      310,
+				SPIS:      320,
+			},
 		},
 		{
 			name: "accepts aes gcm with null integrity",
@@ -528,6 +540,86 @@ func TestNormalizeParam(t *testing.T) {
 			}
 			if ok && got != tt.want {
 				t.Fatalf("NormalizeParam() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeIPSecIntegrityAlgorithms(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  []string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:   "3GPP spelling",
+			values: []string{"hmac-sha2-256-128"},
+			want:   []string{"hmac-sha2-256-128"},
+		},
+		{
+			name:   "Samsung spelling",
+			values: []string{"hmac-sha-2-256-128"},
+			want:   []string{"hmac-sha2-256-128"},
+		},
+		{
+			name:   "codec spelling and duplicate",
+			values: []string{"hmac-sha256-128", "hmac-sha2-256-128"},
+			want:   []string{"hmac-sha2-256-128"},
+		},
+		{
+			name:    "unsupported SHA2-512 IMS name",
+			values:  []string{"hmac-sha-2-512-256"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeIPSecIntegrityAlgorithms(tt.values)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("NormalizeIPSecIntegrityAlgorithms() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeIPSecIntegrityAlgorithms() error = %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("NormalizeIPSecIntegrityAlgorithms() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeIPSecModes(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  []string
+		want    []string
+		wantErr bool
+	}{
+		{name: "requires modes", wantErr: true},
+		{name: "normalizes and deduplicates", values: []string{" TRANS ", "udp-ENC-tun", "trans"}, want: []string{"trans", "UDP-enc-tun"}},
+		{name: "transport only", values: []string{"trans"}, want: []string{"trans"}},
+		{name: "rejects unsupported", values: []string{"tun"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeIPSecModes(tt.values)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("NormalizeIPSecModes() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeIPSecModes() error = %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("NormalizeIPSecModes() = %v, want %v", got, tt.want)
 			}
 		})
 	}

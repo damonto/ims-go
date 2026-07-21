@@ -141,7 +141,8 @@ type netstackSecurityConfig struct {
 
 	encryptionKey []byte
 	integrityKey  []byte
-	salt          [4]byte
+	outboundSalt  [4]byte
+	inboundSalt   [4]byte
 }
 
 func NewNetstack(session PacketSession) (*Netstack, error) {
@@ -420,8 +421,8 @@ func (n *Netstack) registerSecurity(cfg netstackSecurityConfig) (*netstackSecuri
 		mode:          mode,
 		associationID: securityAssociationFingerprint(cfg, encryption, mode),
 		associations:  secureAssociations(cfg.associations),
-		outboundESP:   secureESPCodec(cfg.outboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.salt),
-		inboundESP:    secureESPCodec(cfg.inboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.salt),
+		outboundESP:   secureESPCodec(cfg.outboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.outboundSalt),
+		inboundESP:    secureESPCodec(cfg.inboundSPI, encryption, cfg.encryptionKey, cfg.integrity, cfg.integrityKey, cfg.inboundSalt),
 	}
 	n.mu.Lock()
 	if n.closed {
@@ -455,7 +456,8 @@ func securityAssociationFingerprint(cfg netstackSecurityConfig, encryption, mode
 		[]byte(mode),
 		cfg.encryptionKey,
 		cfg.integrityKey,
-		cfg.salt[:],
+		cfg.outboundSalt[:],
+		cfg.inboundSalt[:],
 	} {
 		var size [4]byte
 		binary.BigEndian.PutUint32(size[:], uint32(len(value)))

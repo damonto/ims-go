@@ -652,13 +652,15 @@ func lowerHexDigits(value string, width int) bool {
 func normalizeIntegrityAlg(alg string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
 	case "hmac-md5-96":
-		// TS 33.203 removed HMAC-MD5 from Annex H; selected carrier profiles
-		// retain it solely for interoperability with legacy P-CSCF deployments.
 		return "hmac-md5-96", true
 	case "hmac-sha-1-96", "hmac-sha1-96":
 		return "hmac-sha-1-96", true
+	case "hmac-sha-2-256-128", "hmac-sha2-256-128", "hmac-sha256-128":
+		return "hmac-sha2-256-128", true
 	case "aes-gmac":
 		return "aes-gmac", true
+	case "aes-gmac-us":
+		return "aes-gmac-us", true
 	case "null":
 		return "null", true
 	default:
@@ -671,8 +673,7 @@ func NormalizeIPSecIntegrityAlgorithms(values []string) ([]string, error) {
 		return nil, errors.New("IPsec integrity algorithms are required")
 	}
 	return normalizeIPSecAlgorithms(values, "integrity", func(value string) (string, bool) {
-		algorithm, ok := normalizeIntegrityAlg(value)
-		return algorithm, ok && (algorithm == "hmac-md5-96" || algorithm == "hmac-sha-1-96")
+		return normalizeIntegrityAlg(value)
 	})
 }
 
@@ -681,9 +682,25 @@ func NormalizeIPSecEncryptionAlgorithms(values []string) ([]string, error) {
 		return nil, errors.New("IPsec encryption algorithms are required")
 	}
 	return normalizeIPSecAlgorithms(values, "encryption", func(value string) (string, bool) {
-		algorithm, ok := normalizeEncryptionAlg(value)
-		return algorithm, ok && (algorithm == "null" || algorithm == "aes-cbc")
+		return normalizeEncryptionAlg(value)
 	})
+}
+
+func NormalizeIPSecModes(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, errors.New("IPsec modes are required")
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		mode, ok := normalizeIPSecMode(value)
+		if !ok {
+			return nil, fmt.Errorf("unsupported IPsec mode %q", value)
+		}
+		if !slices.Contains(result, mode) {
+			result = append(result, mode)
+		}
+	}
+	return result, nil
 }
 
 func normalizeIPSecAlgorithms(values []string, kind string, normalize func(string) (string, bool)) ([]string, error) {
@@ -706,6 +723,8 @@ func normalizeEncryptionAlg(alg string) (string, bool) {
 		return "aes-cbc", true
 	case "aes-gcm":
 		return "aes-gcm", true
+	case "aes-gcm-us":
+		return "aes-gcm-us", true
 	case "null":
 		return "null", true
 	default:
@@ -727,13 +746,13 @@ func normalizeIPSecMode(mode string) (string, bool) {
 func compatibleIPSecAlgorithms(alg, ealg string) bool {
 	switch {
 	case alg == "null":
-		return ealg == "aes-gcm"
-	case ealg == "aes-gcm":
+		return ealg == "aes-gcm" || ealg == "aes-gcm-us"
+	case ealg == "aes-gcm" || ealg == "aes-gcm-us":
 		return alg == "null"
-	case alg == "aes-gmac":
+	case alg == "aes-gmac" || alg == "aes-gmac-us":
 		return ealg == "null"
 	default:
-		return (alg == "hmac-md5-96" || alg == "hmac-sha-1-96") && (ealg == "null" || ealg == "aes-cbc")
+		return (alg == "hmac-md5-96" || alg == "hmac-sha-1-96" || alg == "hmac-sha2-256-128") && (ealg == "null" || ealg == "aes-cbc")
 	}
 }
 

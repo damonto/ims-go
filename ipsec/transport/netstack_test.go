@@ -745,7 +745,7 @@ func TestNetstackSecureTCPCloseProtectsFIN(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	codec := secureESPCodec(clientConfig.OutboundSPI, clientConfig.Encryption, clientConfig.EncryptionKey, clientConfig.Integrity, clientConfig.IntegrityKey, clientConfig.Salt)
+	codec := secureESPCodec(clientConfig.OutboundSPI, clientConfig.Encryption, clientConfig.EncryptionKey, clientConfig.Integrity, clientConfig.IntegrityKey, clientConfig.OutboundSalt)
 	for _, pkt := range clientSession.snapshotWrites() {
 		if pkt.TCP != nil {
 			t.Fatalf("Close() emitted plaintext TCP flags %#x", pkt.TCP.Flags)

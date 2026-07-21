@@ -2889,6 +2889,9 @@ func TestPrepareRequestTransportPrefersTCPForOversizedUDP(t *testing.T) {
 			if openCalls != 1 {
 				t.Fatalf("reliable transport open calls = %d, want 1", openCalls)
 			}
+			if got := sess.PrimaryTransport(); got != tcpTransport {
+				t.Fatalf("PrimaryTransport() = %v, want promoted TCP transport", got)
+			}
 			if got := udpTransport.writeCount(); got != 0 {
 				t.Fatalf("UDP write count = %d, want 0", got)
 			}
@@ -2902,6 +2905,17 @@ func TestPrepareRequestTransportPrefersTCPForOversizedUDP(t *testing.T) {
 			}
 			if via := got.Header("Via"); !strings.HasPrefix(via, "SIP/2.0/TCP ") {
 				t.Fatalf("Via = %q, want TCP", via)
+			}
+
+			small := newRequest("OPTIONS", "call-small-udp", "1 OPTIONS")
+			if err := sess.Send(context.Background(), small); err != nil {
+				t.Fatalf("Send() small request error = %v", err)
+			}
+			if got := udpTransport.writeCount(); got != 0 {
+				t.Fatalf("UDP write count after small request = %d, want 0", got)
+			}
+			if got := tcpTransport.writeCount(); got != 2 {
+				t.Fatalf("TCP write count after small request = %d, want 2", got)
 			}
 		})
 	}

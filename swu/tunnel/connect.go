@@ -271,22 +271,36 @@ func outerIKEPeer(useNATT bool, outerRemote, outerNAT *net.UDPAddr) *net.UDPAddr
 }
 
 func outboundESPCodec(info Info, keys ESPKeys) esp.Codec {
-	return esp.Codec{
-		SPI:           info.ESPResponderSPI,
-		Encryption:    esp.EncryptionAESCBC,
-		Integrity:     integrityName(info.Integrity),
-		EncryptionKey: append([]byte(nil), keys.EncryptionInitiator...),
-		IntegrityKey:  append([]byte(nil), keys.IntegrityInitiator...),
-	}
+	return newESPCodec(info.ESPResponderSPI, info, keys.EncryptionInitiator, keys.IntegrityInitiator)
 }
 
 func inboundESPCodec(info Info, keys ESPKeys) esp.Codec {
-	return esp.Codec{
-		SPI:           info.ESPInitiatorSPI,
-		Encryption:    esp.EncryptionAESCBC,
+	return newESPCodec(info.ESPInitiatorSPI, info, keys.EncryptionResponder, keys.IntegrityResponder)
+}
+
+func newESPCodec(spi uint32, info Info, encryptionKeyMaterial, integrityKey []byte) esp.Codec {
+	keyLen := int(info.EncryptionKeyLen / 8)
+	codec := esp.Codec{
+		SPI:           spi,
+		Encryption:    encryptionName(info.Encryption),
 		Integrity:     integrityName(info.Integrity),
-		EncryptionKey: append([]byte(nil), keys.EncryptionResponder...),
-		IntegrityKey:  append([]byte(nil), keys.IntegrityResponder...),
+		EncryptionKey: append([]byte(nil), encryptionKeyMaterial[:keyLen]...),
+		IntegrityKey:  append([]byte(nil), integrityKey...),
+	}
+	if info.Encryption == transformENCRAESCTR {
+		copy(codec.Salt[:], encryptionKeyMaterial[keyLen:])
+	}
+	return codec
+}
+
+func encryptionName(transform uint16) string {
+	switch transform {
+	case transformENCRAESCBC:
+		return esp.EncryptionAESCBC
+	case transformENCRAESCTR:
+		return esp.EncryptionAESCTR
+	default:
+		return ""
 	}
 }
 
@@ -344,8 +358,14 @@ func integrityName(transform uint16) string {
 		return esp.IntegrityHMACMD596
 	case transformINTEGHMACSHA196:
 		return esp.IntegrityHMACSHA196
+	case transformINTEGAESXCBC96:
+		return esp.IntegrityAESXCBC96
 	case transformINTEGHMACSHA256:
 		return esp.IntegrityHMACSHA256128
+	case transformINTEGHMACSHA384:
+		return esp.IntegrityHMACSHA384192
+	case transformINTEGHMACSHA512:
+		return esp.IntegrityHMACSHA512256
 	default:
 		return esp.IntegrityNone
 	}

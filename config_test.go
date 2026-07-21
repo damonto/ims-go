@@ -17,6 +17,7 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		cfg            IMSConfig
 		wantIntegrity  []string
 		wantEncryption []string
+		wantModes      []string
 		wantErr        string
 	}{
 		{
@@ -32,11 +33,32 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		{
 			name: "normalizes and deduplicates",
 			cfg: IMSConfig{
-				IPSecIntegrityAlgorithms:  []string{" HMAC-SHA1-96 ", "hmac-sha-1-96", "hmac-md5-96"},
-				IPSecEncryptionAlgorithms: []string{" AES-CBC ", "null", "aes-cbc"},
+				IPSecIntegrityAlgorithms:  []string{" HMAC-SHA1-96 ", "hmac-sha-1-96", "HMAC-SHA2-256-128", "AES-GMAC-US", "null"},
+				IPSecEncryptionAlgorithms: []string{" AES-CBC ", "null", "aes-cbc", "AES-GCM-US"},
+				IPSecModes:                []string{"trans", "UDP-enc-tun"},
 			},
-			wantIntegrity:  []string{"hmac-sha-1-96", "hmac-md5-96"},
-			wantEncryption: []string{"aes-cbc", "null"},
+			wantIntegrity:  []string{"hmac-sha-1-96", "hmac-sha2-256-128", "aes-gmac-us", "null"},
+			wantEncryption: []string{"aes-cbc", "null", "aes-gcm-us"},
+			wantModes:      []string{"trans", "UDP-enc-tun"},
+		},
+		{
+			name: "requires modes",
+			cfg: IMSConfig{
+				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+				IPSecEncryptionAlgorithms: []string{"null"},
+			},
+			wantErr: "IPsec modes are required",
+		},
+		{
+			name: "normalizes configured modes",
+			cfg: IMSConfig{
+				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+				IPSecEncryptionAlgorithms: []string{"null"},
+				IPSecModes:                []string{" UDP-ENC-TUN ", "udp-enc-tun"},
+			},
+			wantIntegrity:  []string{"hmac-sha-1-96"},
+			wantEncryption: []string{"null"},
+			wantModes:      []string{"UDP-enc-tun"},
 		},
 		{
 			name: "rejects unsupported integrity",
@@ -53,6 +75,15 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 				IPSecEncryptionAlgorithms: []string{"des-ede3-cbc"},
 			},
 			wantErr: "unsupported IPsec encryption algorithm",
+		},
+		{
+			name: "rejects unsupported mode",
+			cfg: IMSConfig{
+				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
+				IPSecEncryptionAlgorithms: []string{"null"},
+				IPSecModes:                []string{"tun"},
+			},
+			wantErr: "unsupported IPsec mode",
 		},
 	}
 
@@ -73,6 +104,9 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 			}
 			if !slices.Equal(got.IPSecEncryptionAlgorithms, tt.wantEncryption) {
 				t.Fatalf("IPsec encryption algorithms = %v, want %v", got.IPSecEncryptionAlgorithms, tt.wantEncryption)
+			}
+			if !slices.Equal(got.IPSecModes, tt.wantModes) {
+				t.Fatalf("IPsec modes = %v, want %v", got.IPSecModes, tt.wantModes)
 			}
 		})
 	}

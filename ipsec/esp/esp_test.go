@@ -145,6 +145,10 @@ func TestCodecHMACIntegrityRoundTrip(t *testing.T) {
 	}{
 		{name: "HMAC MD5 96", integrity: IntegrityHMACMD596, key: []byte("0123456789abcdef")},
 		{name: "HMAC SHA1 96", integrity: IntegrityHMACSHA196, key: []byte("0123456789abcdef0123")},
+		{name: "AES XCBC 96", integrity: IntegrityAESXCBC96, key: []byte("0123456789abcdef")},
+		{name: "HMAC SHA256 128", integrity: IntegrityHMACSHA256128, key: bytes.Repeat([]byte{0x11}, 32)},
+		{name: "HMAC SHA384 192", integrity: IntegrityHMACSHA384192, key: bytes.Repeat([]byte{0x11}, 48)},
+		{name: "HMAC SHA512 256", integrity: IntegrityHMACSHA512256, key: bytes.Repeat([]byte{0x11}, 64)},
 	}
 
 	for _, tt := range tests {
@@ -170,6 +174,94 @@ func TestCodecHMACIntegrityRoundTrip(t *testing.T) {
 			wire[len(wire)-1] ^= 0xff
 			if _, err := codec.Decode(wire); err == nil {
 				t.Fatal("Decode() error = nil after ICV corruption")
+			}
+		})
+	}
+}
+
+func TestCodecAESCTRRoundTripAndTamper(t *testing.T) {
+	tests := []struct {
+		name string
+		key  []byte
+		salt [4]byte
+	}{
+		{
+			name: "AES-CTR 128",
+			key:  []byte("0123456789abcdef"),
+			salt: [4]byte{0x01, 0x02, 0x03, 0x04},
+		},
+		{
+			name: "AES-CTR 256",
+			key:  []byte("0123456789abcdef0123456789abcdef"),
+			salt: [4]byte{0x05, 0x06, 0x07, 0x08},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			codec := Codec{
+				SPI:           0x11223344,
+				Encryption:    EncryptionAESCTR,
+				EncryptionKey: tt.key,
+				Integrity:     IntegrityHMACSHA196,
+				IntegrityKey:  []byte("0123456789abcdef0123"),
+				Salt:          tt.salt,
+			}
+			packet := ESPPacket{
+				SPI:        codec.SPI,
+				Sequence:   7,
+				NextHeader: 17,
+				Payload:    []byte("REGISTER"),
+			}
+			wire, err := codec.Encode(packet)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if len(wire) < espHeaderLen+espExplicitIVLen+12 {
+				t.Fatalf("Encode() length = %d, want ESP header + IV + ICV", len(wire))
+			}
+			decoded, err := codec.Decode(wire)
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if decoded.NextHeader != packet.NextHeader || !bytes.Equal(decoded.Payload, packet.Payload) {
+				t.Fatalf("Decode() = %+v, want %+v", decoded, packet)
+			}
+
+			tampered := append([]byte(nil), wire...)
+			tampered[espHeaderLen+espExplicitIVLen] ^= 0x01
+			if _, err := codec.Decode(tampered); err == nil {
+				t.Fatal("Decode(tampered) error = nil, want integrity error")
+			}
+		})
+	}
+}
+
+func TestCodecRejectsAESCTRWithoutIntegrity(t *testing.T) {
+	tests := []struct {
+		name   string
+		encode bool
+	}{
+		{name: "encode", encode: true},
+		{name: "decode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			codec := Codec{
+				SPI:           0x11223344,
+				Encryption:    EncryptionAESCTR,
+				EncryptionKey: []byte("0123456789abcdef"),
+				Integrity:     IntegrityNone,
+				Salt:          [4]byte{0x01, 0x02, 0x03, 0x04},
+			}
+			if tt.encode {
+				_, err := codec.Encode(ESPPacket{SPI: codec.SPI, Sequence: 7, NextHeader: 17, Payload: []byte("REGISTER")})
+				if err == nil {
+					t.Fatal("Encode() error = nil, want AES-CTR integrity error")
+				}
+				return
+			}
+			if _, err := codec.Decode(make([]byte, espMinPacketLen)); err == nil {
+				t.Fatal("Decode() error = nil, want AES-CTR integrity error")
 			}
 		})
 	}
@@ -476,6 +568,24 @@ func TestCodecRejectsInvalidKeyLengths(t *testing.T) {
 				Encryption:   EncryptionNull,
 				Integrity:    IntegrityAESGMAC,
 				IntegrityKey: []byte("short"),
+			},
+		},
+		{
+			name: "short SHA256 integrity key",
+			codec: Codec{
+				SPI:          0x11223344,
+				Encryption:   EncryptionNull,
+				Integrity:    IntegrityHMACSHA256128,
+				IntegrityKey: []byte("short"),
+			},
+		},
+		{
+			name: "short SHA384 integrity key",
+			codec: Codec{
+				SPI:          0x11223344,
+				Encryption:   EncryptionNull,
+				Integrity:    IntegrityHMACSHA384192,
+				IntegrityKey: bytes.Repeat([]byte{0x11}, 32),
 			},
 		},
 		{

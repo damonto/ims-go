@@ -150,7 +150,7 @@ func tunnelInfoFromProposal(proposal ike.Proposal) (Info, error) {
 	for _, transform := range proposal.Transforms {
 		switch transform.TransformType {
 		case transformTypeENCR:
-			if transform.ID != transformENCRAESCBC {
+			if !supportedEncryptionTransform(transform.ID) {
 				return Info{}, fmt.Errorf("parsing ike_auth response: unsupported encryption transform %d", transform.ID)
 			}
 			tunnel.Encryption = transform.ID
@@ -396,12 +396,14 @@ func childSAProposals(cfg handshake.Config, espSPI uint32) []ike.Proposal {
 }
 
 func childSAProposalsWithDH(cfg handshake.Config, espSPI uint32, dhGroup uint16) []ike.Proposal {
-	keyLens := uint16ValuesOrDefault(cfg.ChildEncryptionKeyLens, defaultEncryptionKeyLens)
+	encryption := encryptionTransforms(
+		uint16ValuesOrDefault(cfg.ChildEncryption, defaultEncryption),
+		uint16ValuesOrDefault(cfg.ChildEncryptionKeyLens, defaultEncryptionKeyLens),
+		uint16ValuesOrDefault(cfg.ChildEncryptionAESCTRKeyLens, defaultEncryptionKeyLens),
+	)
 	integrity := uint16ValuesOrDefault(cfg.ChildIntegrity, defaultChildIntegrity)
-	transforms := make([]ike.Transform, 0, len(keyLens)+len(integrity)+2)
-	for _, keyLen := range keyLens {
-		transforms = append(transforms, aesCBCTransform(keyLen))
-	}
+	transforms := make([]ike.Transform, 0, len(encryption)+len(integrity)+2)
+	transforms = append(transforms, encryption...)
 	for _, integ := range integrity {
 		transforms = append(transforms, ike.Transform{TransformType: transformTypeINTEG, ID: integ})
 	}
@@ -420,11 +422,29 @@ func childSAProposalsWithDH(cfg handshake.Config, espSPI uint32, dhGroup uint16)
 }
 
 func aesCBCTransform(keyLen uint16) ike.Transform {
+	return encryptionTransform(transformENCRAESCBC, keyLen)
+}
+
+func encryptionTransform(transform, keyLen uint16) ike.Transform {
 	return ike.Transform{
 		TransformType: transformTypeENCR,
-		ID:            transformENCRAESCBC,
+		ID:            transform,
 		Attributes:    []ike.Attribute{ike.NewTVAttribute(transformAttrKeyLength, keyLen)},
 	}
+}
+
+func encryptionTransforms(algorithms, cbcKeyLens, ctrKeyLens []uint16) []ike.Transform {
+	transforms := make([]ike.Transform, 0, len(algorithms)*max(len(cbcKeyLens), len(ctrKeyLens)))
+	for _, algorithm := range algorithms {
+		keyLens := cbcKeyLens
+		if algorithm == transformENCRAESCTR {
+			keyLens = ctrKeyLens
+		}
+		for _, keyLen := range keyLens {
+			transforms = append(transforms, encryptionTransform(algorithm, keyLen))
+		}
+	}
+	return transforms
 }
 
 func uint16ValuesOrDefault(values, defaults []uint16) []uint16 {

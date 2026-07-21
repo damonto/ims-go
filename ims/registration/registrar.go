@@ -43,6 +43,7 @@ type Config struct {
 	AuthAlgorithm             string
 	IPSecIntegrityAlgorithms  []string
 	IPSecEncryptionAlgorithms []string
+	IPSecModes                []string
 	GeolocationPIDFRegister   []int
 	GeolocationCountry        string
 	UseTelURIForPIDFXML       bool
@@ -607,7 +608,10 @@ func (s *Registrar) Refresh(ctx context.Context) error {
 	flow := s.CurrentFlow()
 	if flow.SecurityVerify != nil {
 		flow.SecurityClient = reauthSecurityClient(flow.SecurityClient, *flow.SecurityVerify, flow.RegisterPort)
-		flow.SecurityClients = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(s.cfg))
+		flow.SecurityClients, err = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(s.cfg))
+		if err != nil {
+			return fmt.Errorf("refreshing IMS registration: %w", err)
+		}
 	}
 	state := refreshRegisterState{flow: flow}
 	for range 6 {

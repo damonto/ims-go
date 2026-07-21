@@ -100,6 +100,13 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("normalizing registration config: %w", err)
 	}
+	cfg.IPSecModes, err = security.NormalizeIPSecModes(cfg.IPSecModes)
+	if err != nil {
+		return Config{}, fmt.Errorf("normalizing registration config: %w", err)
+	}
+	if !hasCompatibleIPSecAlgorithms(cfg.IPSecIntegrityAlgorithms, cfg.IPSecEncryptionAlgorithms) {
+		return Config{}, errors.New("normalizing registration config: IPsec algorithm sets have no compatible pair")
+	}
 	if cfg.AuthAlgorithm == "" {
 		cfg.AuthAlgorithm = security.AlgorithmAKAv1MD5
 	} else {

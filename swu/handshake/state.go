@@ -25,26 +25,30 @@ type Config struct {
 	RemoteAddr string
 	APN        string
 	// RequestDefaultAPN omits IDr so the ePDG selects the default APN.
-	RequestDefaultAPN        bool
-	PDNType                  PDNType
-	InitialPort              int
-	NATTPort                 int
-	LocalSIPPort             int
-	SIPPort                  int
-	DHGroups                 []uint16
-	IKEEncryptionKeyLens     []uint16
-	IKEIntegrity             []uint16
-	IKEPRF                   []uint16
-	ChildEncryptionKeyLens   []uint16
-	ChildIntegrity           []uint16
-	PCSCFIPv4ConfigAttribute uint16
-	PCSCFIPv6ConfigAttribute uint16
-	PCSCFRestoration         bool
-	PDUSessionID             byte
-	IPMSIndication           bool
-	NATKeepaliveInterval     time.Duration
-	LivenessTimeout          time.Duration
-	IKERetransmitDelays      []time.Duration
+	RequestDefaultAPN            bool
+	PDNType                      PDNType
+	InitialPort                  int
+	NATTPort                     int
+	LocalSIPPort                 int
+	SIPPort                      int
+	DHGroups                     []uint16
+	IKEEncryption                []uint16
+	IKEEncryptionKeyLens         []uint16
+	IKEEncryptionAESCTRKeyLens   []uint16
+	IKEIntegrity                 []uint16
+	IKEPRF                       []uint16
+	ChildEncryption              []uint16
+	ChildEncryptionKeyLens       []uint16
+	ChildEncryptionAESCTRKeyLens []uint16
+	ChildIntegrity               []uint16
+	PCSCFIPv4ConfigAttribute     uint16
+	PCSCFIPv6ConfigAttribute     uint16
+	PCSCFRestoration             bool
+	PDUSessionID                 byte
+	IPMSIndication               bool
+	NATKeepaliveInterval         time.Duration
+	LivenessTimeout              time.Duration
+	IKERetransmitDelays          []time.Duration
 }
 
 type IPAddress struct {

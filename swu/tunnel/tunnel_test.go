@@ -264,25 +264,25 @@ func TestConfigNormalizedAdvancedFields(t *testing.T) {
 			name: "unsupported dh group",
 			cfg: Config{
 				RemoteAddr: "127.0.0.1",
-				DHGroups:   []uint16{15},
+				DHGroups:   []uint16{19},
 			},
-			wantErr: "dh group 15 is unsupported",
+			wantErr: "dh group 19 is unsupported",
 		},
 		{
 			name: "unsupported ike integrity",
 			cfg: Config{
 				RemoteAddr:   "127.0.0.1",
-				IKEIntegrity: []uint16{5},
+				IKEIntegrity: []uint16{99},
 			},
-			wantErr: "ike integrity transforms value 5 is unsupported",
+			wantErr: "ike integrity transforms value 99 is unsupported",
 		},
 		{
 			name: "unsupported ike prf",
 			cfg: Config{
 				RemoteAddr: "127.0.0.1",
-				IKEPRF:     []uint16{4},
+				IKEPRF:     []uint16{99},
 			},
-			wantErr: "ike prf transforms value 4 is unsupported",
+			wantErr: "ike prf transforms value 99 is unsupported",
 		},
 		{
 			name: "short ike retransmit delay",

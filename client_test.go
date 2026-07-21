@@ -37,6 +37,9 @@ type plmnTestCard struct {
 
 func (c plmnTestCard) MCC() string { return c.mcc }
 func (c plmnTestCard) MNC() string { return c.mnc }
+func (c plmnTestCard) MNCLength() int {
+	return len(c.mnc)
+}
 
 type testTunnelBackoffError struct {
 	delay       time.Duration
@@ -106,6 +109,7 @@ func testRegistrationConfig(transport imssession.Transport) registration.Config 
 		Logger:                    testLogger(),
 		IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
 		IPSecEncryptionAlgorithms: []string{"null", "aes-cbc"},
+		IPSecModes:                []string{"trans", "UDP-enc-tun"},
 		DialSecureUDP: func(ctx context.Context, cfg imssession.SecureUDPConfig) (imssession.Transport, error) {
 			return transport, nil
 		},
@@ -115,11 +119,15 @@ func testRegistrationConfig(transport imssession.Transport) registration.Config 
 	}
 }
 
-func (stubCard) ICCID() string { return "8986000000000000000" }
-func (stubCard) IMSI() string  { return "001010123456789" }
-func (stubCard) MCC() string   { return "001" }
-func (stubCard) MNC() string   { return "001" }
-func (stubCard) SMSC() string  { return "+8613800000000" }
+func (stubCard) ICCID() string  { return "8986000000000000000" }
+func (stubCard) IMSI() string   { return "001010123456789" }
+func (stubCard) MCC() string    { return "001" }
+func (stubCard) MNC() string    { return "001" }
+func (stubCard) MNCLength() int { return 3 }
+func (stubCard) GID1() string   { return "" }
+func (stubCard) GID2() string   { return "" }
+func (stubCard) SPN() string    { return "" }
+func (stubCard) SMSC() string   { return "+8613800000000" }
 func (stubCard) AKA(_ context.Context, _, _ []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{
 		RES: []byte("12345678"),

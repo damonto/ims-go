@@ -8,14 +8,18 @@ import (
 	crand "crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"math/big"
+	"sync/atomic"
 
 	"github.com/damonto/ims-go/eapaka"
+	"github.com/damonto/ims-go/ipsec/aesctr"
+	"github.com/damonto/ims-go/ipsec/aesxcbc"
 	"github.com/damonto/ims-go/swu/ike"
 )
 
@@ -68,6 +72,7 @@ type ikeCrypto struct {
 	groupPrime    *big.Int
 	groupByteSize int
 	random        io.Reader
+	ctrIV         atomic.Uint64
 	keys          ikeKeys
 	eap           eapKeys
 }
@@ -121,7 +126,14 @@ func (c *ikeCrypto) DeriveIKEKeys(peerPublic []byte) error {
 		return err
 	}
 	nonce := append(append([]byte(nil), c.nonceI...), c.nonceR...)
-	skeyseed := c.prfHMAC(nonce, shared)
+	skeyseedNonce, err := c.initialSKEYSEEDNonce()
+	if err != nil {
+		return err
+	}
+	skeyseed, err := c.prfSum(skeyseedNonce, shared)
+	if err != nil {
+		return fmt.Errorf("deriving ike keys: %w", err)
+	}
 	seed := make([]byte, 0, len(nonce)+16)
 	seed = append(seed, nonce...)
 	spi := make([]byte, 16)
@@ -147,6 +159,20 @@ func (c *ikeCrypto) DeriveIKEKeys(peerPublic []byte) error {
 	stream = stream[c.prfLength():]
 	c.keys.SKPR = append([]byte(nil), stream[:c.prfLength()]...)
 	return nil
+}
+
+func (c *ikeCrypto) initialSKEYSEEDNonce() ([]byte, error) {
+	if c.prf != transformPRFAES128XCBC {
+		return append(append([]byte(nil), c.nonceI...), c.nonceR...), nil
+	}
+	const aesXCBCNoncePartLen = 8
+	if len(c.nonceI) < aesXCBCNoncePartLen || len(c.nonceR) < aesXCBCNoncePartLen {
+		return nil, errors.New("deriving ike keys: AES-XCBC PRF requires at least 8-byte nonces")
+	}
+	nonce := make([]byte, 0, 2*aesXCBCNoncePartLen)
+	nonce = append(nonce, c.nonceI[:aesXCBCNoncePartLen]...)
+	nonce = append(nonce, c.nonceR[:aesXCBCNoncePartLen]...)
+	return nonce, nil
 }
 
 func (c *ikeCrypto) DeriveRekeyedIKEKeys(old *ikeCrypto, peerPublic []byte) error {
@@ -158,7 +184,10 @@ func (c *ikeCrypto) DeriveRekeyedIKEKeys(old *ikeCrypto, peerPublic []byte) erro
 	skeyseedInput := make([]byte, 0, len(shared)+len(nonce))
 	skeyseedInput = append(skeyseedInput, shared...)
 	skeyseedInput = append(skeyseedInput, nonce...)
-	skeyseed := old.prfHMAC(old.keys.SKD, skeyseedInput)
+	skeyseed, err := old.prfSum(old.keys.SKD, skeyseedInput)
+	if err != nil {
+		return fmt.Errorf("deriving rekeyed ike keys: %w", err)
+	}
 	seed := make([]byte, 0, len(nonce)+16)
 	seed = append(seed, nonce...)
 	spi := make([]byte, 16)
@@ -186,16 +215,16 @@ func (c *ikeCrypto) DeriveRekeyedIKEKeys(old *ikeCrypto, peerPublic []byte) erro
 	return nil
 }
 
-func (c *ikeCrypto) DeriveESPKeys(encrKeyBits, integ uint16) (ESPKeys, error) {
-	return c.DeriveESPKeysWithNonces(encrKeyBits, integ, c.nonceI, c.nonceR)
+func (c *ikeCrypto) DeriveESPKeys(encr, encrKeyBits, integ uint16) (ESPKeys, error) {
+	return c.DeriveESPKeysWithNonces(encr, encrKeyBits, integ, c.nonceI, c.nonceR)
 }
 
-func (c *ikeCrypto) DeriveESPKeysWithNonces(encrKeyBits, integ uint16, nonceI, nonceR []byte) (ESPKeys, error) {
+func (c *ikeCrypto) DeriveESPKeysWithNonces(encr, encrKeyBits, integ uint16, nonceI, nonceR []byte) (ESPKeys, error) {
 	seed := append(append([]byte(nil), nonceI...), nonceR...)
-	return c.deriveESPKeysWithSeed(encrKeyBits, integ, seed)
+	return c.deriveESPKeysWithSeed(encr, encrKeyBits, integ, seed)
 }
 
-func (c *ikeCrypto) DeriveESPKeysWithDH(encrKeyBits, integ uint16, nonceI, nonceR []byte, dh *ikeCrypto, peerPublic []byte) (ESPKeys, error) {
+func (c *ikeCrypto) DeriveESPKeysWithDH(encr, encrKeyBits, integ uint16, nonceI, nonceR []byte, dh *ikeCrypto, peerPublic []byte) (ESPKeys, error) {
 	shared, err := dh.sharedSecret(peerPublic)
 	if err != nil {
 		return ESPKeys{}, err
@@ -204,14 +233,17 @@ func (c *ikeCrypto) DeriveESPKeysWithDH(encrKeyBits, integ uint16, nonceI, nonce
 	seed = append(seed, shared...)
 	seed = append(seed, nonceI...)
 	seed = append(seed, nonceR...)
-	return c.deriveESPKeysWithSeed(encrKeyBits, integ, seed)
+	return c.deriveESPKeysWithSeed(encr, encrKeyBits, integ, seed)
 }
 
-func (c *ikeCrypto) deriveESPKeysWithSeed(encrKeyBits, integ uint16, seed []byte) (ESPKeys, error) {
+func (c *ikeCrypto) deriveESPKeysWithSeed(encr, encrKeyBits, integ uint16, seed []byte) (ESPKeys, error) {
 	if len(c.keys.SKD) == 0 {
 		return ESPKeys{}, errors.New("deriving esp keys: ike keys are empty")
 	}
-	encrKeyLen := encrKeyLengthFromBits(encrKeyBits)
+	encrKeyLen, err := encryptionKeyMaterialLength(encr, encrKeyBits)
+	if err != nil {
+		return ESPKeys{}, err
+	}
 	integKeyLen, err := integKeyLength(integ)
 	if err != nil {
 		return ESPKeys{}, err
@@ -273,26 +305,46 @@ func (c *ikeCrypto) ComputeInitiatorAuth(saInitRequest, responderNonce, idiRaw [
 	if len(c.eap.MSK) == 0 {
 		return nil, errors.New("computing initiator auth: eap msk is empty")
 	}
-	inner := c.prfHMAC(c.keys.SKPI, idiRaw)
+	inner, err := c.prfSum(c.keys.SKPI, idiRaw)
+	if err != nil {
+		return nil, fmt.Errorf("computing initiator auth: %w", err)
+	}
 	data := make([]byte, 0, len(saInitRequest)+len(responderNonce)+len(inner))
 	data = append(data, saInitRequest...)
 	data = append(data, responderNonce...)
 	data = append(data, inner...)
-	tmpKey := c.prfHMAC(c.eap.MSK, []byte("Key Pad for IKEv2"))
-	return c.prfHMAC(tmpKey, data), nil
+	tmpKey, err := c.prfSum(c.eap.MSK, []byte("Key Pad for IKEv2"))
+	if err != nil {
+		return nil, fmt.Errorf("computing initiator auth: %w", err)
+	}
+	result, err := c.prfSum(tmpKey, data)
+	if err != nil {
+		return nil, fmt.Errorf("computing initiator auth: %w", err)
+	}
+	return result, nil
 }
 
 func (c *ikeCrypto) ComputeResponderAuth(saInitResponse, initiatorNonce, idrRaw []byte) ([]byte, error) {
 	if len(c.eap.MSK) == 0 {
 		return nil, errors.New("computing responder auth: eap msk is empty")
 	}
-	inner := c.prfHMAC(c.keys.SKPR, idrRaw)
+	inner, err := c.prfSum(c.keys.SKPR, idrRaw)
+	if err != nil {
+		return nil, fmt.Errorf("computing responder auth: %w", err)
+	}
 	data := make([]byte, 0, len(saInitResponse)+len(initiatorNonce)+len(inner))
 	data = append(data, saInitResponse...)
 	data = append(data, initiatorNonce...)
 	data = append(data, inner...)
-	tmpKey := c.prfHMAC(c.eap.MSK, []byte("Key Pad for IKEv2"))
-	return c.prfHMAC(tmpKey, data), nil
+	tmpKey, err := c.prfSum(c.eap.MSK, []byte("Key Pad for IKEv2"))
+	if err != nil {
+		return nil, fmt.Errorf("computing responder auth: %w", err)
+	}
+	result, err := c.prfSum(tmpKey, data)
+	if err != nil {
+		return nil, fmt.Errorf("computing responder auth: %w", err)
+	}
+	return result, nil
 }
 
 func (c *ikeCrypto) SealIKE(header ike.IKEHeader, payloads []ike.Payload, initiator bool) ([]byte, error) {
@@ -363,7 +415,15 @@ func (c *ikeCrypto) ikeFragmentPlaintextSize(maxSize int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	overhead := ikeHeaderLen + ikePayloadHeaderLen + ikeFragmentHeaderLen + aes.BlockSize + icvLen + aes.BlockSize
+	ivLen, err := c.encryptionIVLength()
+	if err != nil {
+		return 0, err
+	}
+	blockSize, err := c.encryptionBlockSize()
+	if err != nil {
+		return 0, err
+	}
+	overhead := ikeHeaderLen + ikePayloadHeaderLen + ikeFragmentHeaderLen + ivLen + icvLen + blockSize
 	chunkSize := maxSize - overhead
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("sealing ike fragments: max size %d is too small", maxSize)
@@ -372,18 +432,22 @@ func (c *ikeCrypto) ikeFragmentPlaintextSize(maxSize int) (int, error) {
 }
 
 func (c *ikeCrypto) sealIKEPayloadBody(body []byte, initiator bool) ([]byte, error) {
-	padLen := aes.BlockSize - ((len(body) + 1) % aes.BlockSize)
-	if padLen == aes.BlockSize {
+	blockSize, err := c.encryptionBlockSize()
+	if err != nil {
+		return nil, err
+	}
+	padLen := blockSize - ((len(body) + 1) % blockSize)
+	if padLen == blockSize {
 		padLen = 0
 	}
 	plain := append([]byte(nil), body...)
 	plain = append(plain, make([]byte, padLen)...)
 	plain = append(plain, byte(padLen))
-	iv := make([]byte, aes.BlockSize)
-	if _, err := io.ReadFull(c.randomReader(), iv); err != nil {
-		return nil, fmt.Errorf("sealing ike packet: reading iv: %w", err)
+	iv, err := c.nextEncryptionIV()
+	if err != nil {
+		return nil, err
 	}
-	ciphertext, err := c.encryptCBC(c.encryptionKey(initiator), iv, plain)
+	ciphertext, err := c.encryptPayload(c.encryptionKey(initiator), iv, plain)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +472,10 @@ func (c *ikeCrypto) sealIKEContainer(header ike.IKEHeader, container ike.Payload
 	if err != nil {
 		return nil, err
 	}
-	icv := c.integHMAC(c.integrityKey(initiator), raw[:len(raw)-icvLen])
+	icv, err := c.integritySum(c.integrityKey(initiator), raw[:len(raw)-icvLen])
+	if err != nil {
+		return nil, err
+	}
 	copy(raw[len(raw)-icvLen:], icv)
 	return raw, nil
 }
@@ -470,7 +537,10 @@ func (c *ikeCrypto) OpenIKEFragment(packet ike.IKEPacket, senderInitiator bool) 
 }
 
 func (c *ikeCrypto) openIKEPayloadBody(packetRaw, body []byte, senderInitiator bool) ([]byte, error) {
-	ivLen := aes.BlockSize
+	ivLen, err := c.encryptionIVLength()
+	if err != nil {
+		return nil, err
+	}
 	icvLen, err := integLength(c.integ)
 	if err != nil {
 		return nil, err
@@ -482,13 +552,16 @@ func (c *ikeCrypto) openIKEPayloadBody(packetRaw, body []byte, senderInitiator b
 	if len(packetRaw) < icvLen {
 		return nil, errors.New("opening ike packet: packet is shorter than integrity check value")
 	}
-	gotICV := c.integHMAC(c.integrityKey(senderInitiator), packetRaw[:len(packetRaw)-icvLen])
+	gotICV, err := c.integritySum(c.integrityKey(senderInitiator), packetRaw[:len(packetRaw)-icvLen])
+	if err != nil {
+		return nil, err
+	}
 	if !hmac.Equal(gotICV, wantICV) {
 		return nil, errors.New("opening ike packet: integrity check failed")
 	}
 	iv := body[:ivLen]
 	ciphertext := body[ivLen : len(body)-icvLen]
-	plain, err := c.decryptCBC(c.encryptionKey(senderInitiator), iv, ciphertext)
+	plain, err := c.decryptPayload(c.encryptionKey(senderInitiator), iv, ciphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -525,10 +598,14 @@ func (c *ikeCrypto) ProtectedBytes(wire []byte) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(body) < aes.BlockSize+icvLen {
+	ivLen, err := c.encryptionIVLength()
+	if err != nil {
+		return 0, err
+	}
+	if len(body) < ivLen+icvLen {
 		return 0, errors.New("counting ike protected bytes: encrypted body too short")
 	}
-	return uint64(len(body) - aes.BlockSize - icvLen), nil
+	return uint64(len(body) - ivLen - icvLen), nil
 }
 
 func protectedPayloadRaw(payload ike.Payload) ([]byte, bool) {
@@ -606,24 +683,53 @@ func (c *ikeCrypto) prfPlus(key, seed []byte, size int) ([]byte, error) {
 		blockInput = append(blockInput, last...)
 		blockInput = append(blockInput, seed...)
 		blockInput = append(blockInput, byte(i))
-		last = c.prfHMAC(key, blockInput)
+		var err error
+		last, err = c.prfSum(key, blockInput)
+		if err != nil {
+			return nil, fmt.Errorf("deriving prf+: %w", err)
+		}
 		result = append(result, last...)
 	}
 	return result[:size], nil
 }
 
-func (c *ikeCrypto) prfHMAC(key, data []byte) []byte {
-	h := hmac.New(c.prfHash(), key)
+func (c *ikeCrypto) prfSum(key, data []byte) ([]byte, error) {
+	if c.prf == transformPRFAES128XCBC {
+		result, err := aesxcbc.PRF(key, data)
+		if err != nil {
+			return nil, fmt.Errorf("computing AES-XCBC PRF: %w", err)
+		}
+		return append([]byte(nil), result[:]...), nil
+	}
+	hashFunc := c.prfHash()
+	if hashFunc == nil {
+		return nil, fmt.Errorf("computing prf: unsupported transform %d", c.prf)
+	}
+	h := hmac.New(hashFunc, key)
 	_, _ = h.Write(data)
-	return h.Sum(nil)
+	return h.Sum(nil), nil
 }
 
-func (c *ikeCrypto) integHMAC(key, data []byte) []byte {
-	h := hmac.New(c.integHash(), key)
+func (c *ikeCrypto) integritySum(key, data []byte) ([]byte, error) {
+	length, err := integLength(c.integ)
+	if err != nil {
+		return nil, err
+	}
+	if c.integ == transformINTEGAESXCBC96 {
+		result, err := aesxcbc.MAC(key, data)
+		if err != nil {
+			return nil, fmt.Errorf("computing ike integrity: %w", err)
+		}
+		return append([]byte(nil), result[:length]...), nil
+	}
+	hashFunc := c.integHash()
+	if hashFunc == nil {
+		return nil, fmt.Errorf("computing ike integrity: unsupported transform %d", c.integ)
+	}
+	h := hmac.New(hashFunc, key)
 	_, _ = h.Write(data)
 	full := h.Sum(nil)
-	length, _ := integLength(c.integ)
-	return full[:length]
+	return full[:length], nil
 }
 
 func (c *ikeCrypto) prfHash() func() hash.Hash {
@@ -634,8 +740,12 @@ func (c *ikeCrypto) prfHash() func() hash.Hash {
 		return sha1.New
 	case transformPRFHMACSHA256:
 		return sha256.New
+	case transformPRFHMACSHA384:
+		return sha512.New384
+	case transformPRFHMACSHA512:
+		return sha512.New
 	default:
-		return sha1.New
+		return nil
 	}
 }
 
@@ -647,8 +757,12 @@ func (c *ikeCrypto) integHash() func() hash.Hash {
 		return sha1.New
 	case transformINTEGHMACSHA256:
 		return sha256.New
+	case transformINTEGHMACSHA384:
+		return sha512.New384
+	case transformINTEGHMACSHA512:
+		return sha512.New
 	default:
-		return sha1.New
+		return nil
 	}
 }
 
@@ -658,10 +772,16 @@ func (c *ikeCrypto) prfLength() int {
 		return md5.Size
 	case transformPRFHMACSHA1:
 		return sha1.Size
+	case transformPRFAES128XCBC:
+		return aesxcbc.Size
 	case transformPRFHMACSHA256:
 		return sha256.Size
+	case transformPRFHMACSHA384:
+		return sha512.Size384
+	case transformPRFHMACSHA512:
+		return sha512.Size
 	default:
-		return sha1.Size
+		return 0
 	}
 }
 
@@ -671,7 +791,88 @@ func (c *ikeCrypto) integKeyLength() int {
 }
 
 func (c *ikeCrypto) encrKeyLength() int {
-	return encrKeyLengthFromBits(c.encrKeyBits)
+	length, _ := encryptionKeyMaterialLength(c.encr, c.encrKeyBits)
+	return length
+}
+
+func (c *ikeCrypto) encryptionIVLength() (int, error) {
+	switch c.encr {
+	case transformENCRAESCBC:
+		return aes.BlockSize, nil
+	case transformENCRAESCTR:
+		return aesctr.IVSize, nil
+	default:
+		return 0, fmt.Errorf("encryption IV length: unsupported transform %d", c.encr)
+	}
+}
+
+func (c *ikeCrypto) encryptionBlockSize() (int, error) {
+	switch c.encr {
+	case transformENCRAESCBC:
+		return aes.BlockSize, nil
+	case transformENCRAESCTR:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("encryption block size: unsupported transform %d", c.encr)
+	}
+}
+
+func (c *ikeCrypto) nextEncryptionIV() ([]byte, error) {
+	if c.encr == transformENCRAESCTR {
+		var value uint64
+		for {
+			current := c.ctrIV.Load()
+			if current == ^uint64(0) {
+				return nil, errors.New("sealing ike packet: AES-CTR IV counter exhausted")
+			}
+			value = current + 1
+			if c.ctrIV.CompareAndSwap(current, value) {
+				break
+			}
+		}
+		iv := make([]byte, aesctr.IVSize)
+		binary.BigEndian.PutUint64(iv, value)
+		return iv, nil
+	}
+	ivLen, err := c.encryptionIVLength()
+	if err != nil {
+		return nil, err
+	}
+	iv := make([]byte, ivLen)
+	if _, err := io.ReadFull(c.randomReader(), iv); err != nil {
+		return nil, fmt.Errorf("sealing ike packet: reading iv: %w", err)
+	}
+	return iv, nil
+}
+
+func (c *ikeCrypto) encryptPayload(keyMaterial, iv, plain []byte) ([]byte, error) {
+	switch c.encr {
+	case transformENCRAESCBC:
+		return c.encryptCBC(keyMaterial, iv, plain)
+	case transformENCRAESCTR:
+		key, salt, err := splitAESCTRKeyMaterial(keyMaterial)
+		if err != nil {
+			return nil, fmt.Errorf("encrypting ike packet: %w", err)
+		}
+		return aesctr.Crypt(key, salt, iv, plain)
+	default:
+		return nil, fmt.Errorf("encrypting ike packet: unsupported encryption transform %d", c.encr)
+	}
+}
+
+func (c *ikeCrypto) decryptPayload(keyMaterial, iv, ciphertext []byte) ([]byte, error) {
+	switch c.encr {
+	case transformENCRAESCBC:
+		return c.decryptCBC(keyMaterial, iv, ciphertext)
+	case transformENCRAESCTR:
+		key, salt, err := splitAESCTRKeyMaterial(keyMaterial)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting ike packet: %w", err)
+		}
+		return aesctr.Crypt(key, salt, iv, ciphertext)
+	default:
+		return nil, fmt.Errorf("decrypting ike packet: unsupported encryption transform %d", c.encr)
+	}
 }
 
 func (c *ikeCrypto) encryptCBC(key, iv, plain []byte) ([]byte, error) {
@@ -725,8 +926,14 @@ func modpGroup(group uint16) (*big.Int, int, error) {
 	switch group {
 	case transformDH1024MODP:
 		hexPrime = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF"
+	case transformDH1536MODP:
+		hexPrime = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA237327FFFFFFFFFFFFFFFF"
 	case transformDH2048MODP:
 		hexPrime = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF"
+	case transformDH3072MODP:
+		hexPrime = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF"
+	case transformDH4096MODP:
+		hexPrime = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7DB3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2261AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200CBBE117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFCE0FD108E4B82D120A92108011A723C12A787E6D788719A10BDBA5B2699C327186AF4E23C1A946834B6150BDA2583E9CA2AD44CE8DBBBC2DB04DE8EF92E8EFC141FBECAA6287C59474E6BC05D99B2964FA090C3A2233BA186515BE7ED1F612970CEE2D7AFB81BDD762170481CD0069127D5B05AA993B4EA988D8FDDC186FFB7DC90A6C08F4DF435C934063199FFFFFFFFFFFFFFFF"
 	default:
 		return nil, 0, fmt.Errorf("loading dh group: unsupported group %d", group)
 	}
@@ -746,8 +953,32 @@ func randomDHPrivate(prime *big.Int) (*big.Int, error) {
 	return value.Add(value, big.NewInt(2)), nil
 }
 
-func encrKeyLengthFromBits(bits uint16) int {
-	return int(bits / 8)
+func encryptionKeyMaterialLength(transform, bits uint16) (int, error) {
+	switch bits {
+	case transformKeyLenAES128, transformKeyLenAES192, transformKeyLenAES256:
+	default:
+		return 0, fmt.Errorf("encryption key length: unsupported key size %d", bits)
+	}
+	length := int(bits / 8)
+	switch transform {
+	case transformENCRAESCBC:
+		return length, nil
+	case transformENCRAESCTR:
+		return length + aesctr.SaltSize, nil
+	default:
+		return 0, fmt.Errorf("encryption key length: unsupported transform %d", transform)
+	}
+}
+
+func splitAESCTRKeyMaterial(keyMaterial []byte) ([]byte, []byte, error) {
+	if len(keyMaterial) <= aesctr.SaltSize {
+		return nil, nil, fmt.Errorf("AES-CTR key material length %d is too short", len(keyMaterial))
+	}
+	keyLen := len(keyMaterial) - aesctr.SaltSize
+	if keyLen != 16 && keyLen != 24 && keyLen != 32 {
+		return nil, nil, fmt.Errorf("AES-CTR key length %d is invalid", keyLen)
+	}
+	return keyMaterial[:keyLen], keyMaterial[keyLen:], nil
 }
 
 func integKeyLength(integ uint16) (int, error) {
@@ -756,8 +987,14 @@ func integKeyLength(integ uint16) (int, error) {
 		return md5.Size, nil
 	case transformINTEGHMACSHA196:
 		return sha1.Size, nil
+	case transformINTEGAESXCBC96:
+		return aesxcbc.KeySize, nil
 	case transformINTEGHMACSHA256:
 		return sha256.Size, nil
+	case transformINTEGHMACSHA384:
+		return sha512.Size384, nil
+	case transformINTEGHMACSHA512:
+		return sha512.Size, nil
 	default:
 		return 0, fmt.Errorf("integrity key length: unsupported transform %d", integ)
 	}
@@ -765,12 +1002,14 @@ func integKeyLength(integ uint16) (int, error) {
 
 func integLength(integ uint16) (int, error) {
 	switch integ {
-	case transformINTEGHMACMD596:
-		return 12, nil
-	case transformINTEGHMACSHA196:
+	case transformINTEGHMACMD596, transformINTEGHMACSHA196, transformINTEGAESXCBC96:
 		return 12, nil
 	case transformINTEGHMACSHA256:
 		return 16, nil
+	case transformINTEGHMACSHA384:
+		return 24, nil
+	case transformINTEGHMACSHA512:
+		return 32, nil
 	default:
 		return 0, fmt.Errorf("integrity length: unsupported transform %d", integ)
 	}

@@ -36,6 +36,7 @@ func TestSecureEncryption(t *testing.T) {
 		{name: "null", value: " NULL ", want: esp.EncryptionNull},
 		{name: "aes cbc", value: "AES-CBC", want: esp.EncryptionAESCBC},
 		{name: "aes gcm", value: "aes-gcm", want: esp.EncryptionAESGCM},
+		{name: "aes gcm unique salt", value: esp.EncryptionAESGCMUS, want: esp.EncryptionAESGCM},
 		{name: "unsupported", value: "des-ede3-cbc", wantErr: true},
 	}
 	for _, tt := range tests {

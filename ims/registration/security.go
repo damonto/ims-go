@@ -46,6 +46,14 @@ type registerSecurity struct {
 	responseAttachments []session.Attachment
 }
 
+// TS 33.203 encodes the SA direction in bit 0 and the source role in bit 1.
+const (
+	saltUEClientToPCSCFServer byte = 0b00
+	saltPCSCFClientToUEServer byte = 0b01
+	saltUEServerToPCSCFClient byte = 0b10
+	saltPCSCFServerToUEClient byte = 0b11
+)
+
 func (s *Registrar) protectedRegisterExchangeOptions() session.ExchangeOptions {
 	return protectedExchangeOptions(s.sess.PrimaryTransport(), s.currentSecureServerTransports())
 }
@@ -624,7 +632,7 @@ func (s *Registrar) addReliableOutboundTransport(ctx context.Context, registrati
 		verify: verify, contactHost: flow.ContactHost,
 		localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
 		outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
-		ck: s.authCK, ik: s.authIK,
+		ck: s.authCK, ik: s.authIK, outboundSaltBits: saltUEClientToPCSCFServer, inboundSaltBits: saltPCSCFServerToUEClient,
 	}))
 	if err != nil {
 		s.logger.Warn("secure TCP fallback is unavailable", "err", err)
@@ -739,14 +747,16 @@ func sameAddr(left, right net.Addr) bool {
 }
 
 type secureConfigParams struct {
-	verify      *security.Param
-	contactHost string
-	localPort   int
-	remotePort  int
-	outboundSPI uint32
-	inboundSPI  uint32
-	ck          []byte
-	ik          []byte
+	verify           *security.Param
+	contactHost      string
+	localPort        int
+	remotePort       int
+	outboundSPI      uint32
+	inboundSPI       uint32
+	ck               []byte
+	ik               []byte
+	outboundSaltBits byte
+	inboundSaltBits  byte
 }
 
 func secureTransportConfigWithKeys(params secureConfigParams) session.SecureTCPConfig {
@@ -757,11 +767,12 @@ func secureTransportConfigWithKeys(params secureConfigParams) session.SecureTCPC
 		OutboundSPI:   params.outboundSPI,
 		InboundSPI:    params.inboundSPI,
 		Encryption:    params.verify.EAlg,
-		EncryptionKey: append([]byte(nil), params.ck...),
+		EncryptionKey: espEncryptionKey(params.verify.EAlg, params.ck),
 		Integrity:     params.verify.Alg,
-		IntegrityKey:  espIntegrityKey(params.verify.Alg, params.ik),
+		IntegrityKey:  espIntegrityKey(params.verify.Alg, params.ck, params.ik),
 		Mode:          params.verify.Mod,
-		Salt:          espSalt(params.verify, params.ck, params.ik),
+		OutboundSalt:  espSalt(params.verify, params.ck, params.ik, params.outboundSaltBits),
+		InboundSalt:   espSalt(params.verify, params.ck, params.ik, params.inboundSaltBits),
 	}
 }
 
@@ -773,11 +784,12 @@ func secureDatagramConfigWithKeys(params secureConfigParams) session.SecureUDPCo
 		OutboundSPI:   params.outboundSPI,
 		InboundSPI:    params.inboundSPI,
 		Encryption:    params.verify.EAlg,
-		EncryptionKey: append([]byte(nil), params.ck...),
+		EncryptionKey: espEncryptionKey(params.verify.EAlg, params.ck),
 		Integrity:     params.verify.Alg,
-		IntegrityKey:  espIntegrityKey(params.verify.Alg, params.ik),
+		IntegrityKey:  espIntegrityKey(params.verify.Alg, params.ck, params.ik),
 		Mode:          params.verify.Mod,
-		Salt:          espSalt(params.verify, params.ck, params.ik),
+		OutboundSalt:  espSalt(params.verify, params.ck, params.ik, params.outboundSaltBits),
+		InboundSalt:   espSalt(params.verify, params.ck, params.ik, params.inboundSaltBits),
 	}
 }
 
@@ -788,28 +800,48 @@ func secureInnerLocalIP(verify *security.Param, contactHost string) net.IP {
 	return net.ParseIP(strings.TrimSpace(contactHost))
 }
 
-func espIntegrityKey(alg string, ik []byte) []byte {
-	key := append([]byte(nil), ik...)
+func espEncryptionKey(ealg string, ck []byte) []byte {
+	if strings.EqualFold(strings.TrimSpace(ealg), "null") {
+		return nil
+	}
+	return append([]byte(nil), ck...)
+}
+
+func espIntegrityKey(alg string, ck, ik []byte) []byte {
 	switch strings.ToLower(strings.TrimSpace(alg)) {
+	case "hmac-md5-96":
+		return append([]byte(nil), ik...)
 	case "hmac-sha-1-96", "hmac-sha1-96":
+		key := append([]byte(nil), ik...)
 		if len(key) == 16 {
 			key = append(key, 0, 0, 0, 0)
 		}
+		return key
+	case "hmac-sha-2-256-128", "hmac-sha2-256-128", "hmac-sha256-128":
+		key := make([]byte, 0, len(ck)+len(ik))
+		key = append(key, ck...)
+		key = append(key, ik...)
+		return kdf33220(key, 0x5a, []byte("HMAC-SHA2-256-128"))
+	case "aes-gmac", "aes-gmac-us":
+		return append([]byte(nil), ik...)
+	case "null":
+		return nil
+	default:
+		return nil
 	}
-	return key
 }
 
-func espSalt(verify *security.Param, ck, ik []byte) [4]byte {
+func espSalt(verify *security.Param, ck, ik []byte, uniqueBits byte) [4]byte {
 	if verify == nil {
 		return [4]byte{}
 	}
 	var fc byte
 	var label string
 	switch {
-	case strings.EqualFold(verify.Alg, "aes-gmac"):
+	case strings.EqualFold(verify.Alg, "aes-gmac"), strings.EqualFold(verify.Alg, "aes-gmac-us"):
 		fc = 0x58
 		label = "AES_GMAC_SALT"
-	case strings.EqualFold(verify.EAlg, "aes-gcm"):
+	case strings.EqualFold(verify.EAlg, "aes-gcm"), strings.EqualFold(verify.EAlg, "aes-gcm-us"):
 		fc = 0x59
 		label = "AES_GCM_SALT"
 	default:
@@ -821,6 +853,10 @@ func espSalt(verify *security.Param, ck, ik []byte) [4]byte {
 	digest := kdf33220(key, fc, []byte(label))
 	var salt [4]byte
 	copy(salt[:], digest[len(digest)-4:])
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(verify.Alg)), "-us") ||
+		strings.HasSuffix(strings.ToLower(strings.TrimSpace(verify.EAlg)), "-us") {
+		salt[len(salt)-1] ^= uniqueBits & 0x03
+	}
 	return salt
 }
 
@@ -847,7 +883,7 @@ func (s *Registrar) dialSecureTransport(ctx context.Context, verify *security.Pa
 			verify: verify, contactHost: flow.ContactHost,
 			localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
 			outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
-			ck: ck, ik: ik,
+			ck: ck, ik: ik, outboundSaltBits: saltUEClientToPCSCFServer, inboundSaltBits: saltPCSCFServerToUEClient,
 		}))
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure IMS transport: %w", err)
@@ -861,7 +897,7 @@ func (s *Registrar) dialSecureTransport(ctx context.Context, verify *security.Pa
 			verify: verify, contactHost: flow.ContactHost,
 			localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
 			outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
-			ck: ck, ik: ik,
+			ck: ck, ik: ik, outboundSaltBits: saltUEClientToPCSCFServer, inboundSaltBits: saltPCSCFServerToUEClient,
 		}))
 		if err != nil {
 			return nil, fmt.Errorf("dialing secure IMS datagram transport: %w", err)
@@ -883,7 +919,7 @@ func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, ver
 			verify: verify, contactHost: flow.ContactHost,
 			localPort: flow.SecurityClient.PortS, remotePort: verify.PortC,
 			outboundSPI: verify.SPIC, inboundSPI: flow.SecurityClient.SPIS,
-			ck: ck, ik: ik,
+			ck: ck, ik: ik, outboundSaltBits: saltUEServerToPCSCFClient, inboundSaltBits: saltPCSCFClientToUEServer,
 		}))
 		if err != nil {
 			closeAttachments(attachments)
@@ -903,7 +939,7 @@ func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, ver
 			verify: verify, contactHost: flow.ContactHost,
 			localPort: flow.SecurityClient.PortS, remotePort: verify.PortC,
 			outboundSPI: verify.SPIC, inboundSPI: flow.SecurityClient.SPIS,
-			ck: ck, ik: ik,
+			ck: ck, ik: ik, outboundSaltBits: saltUEServerToPCSCFClient, inboundSaltBits: saltPCSCFClientToUEServer,
 		}))
 		if err != nil {
 			closeAttachments(attachments)
@@ -939,7 +975,7 @@ func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, v
 		verify: verify, contactHost: flow.ContactHost,
 		localPort: flow.SecurityClient.PortC, remotePort: verify.PortS,
 		outboundSPI: verify.SPIS, inboundSPI: flow.SecurityClient.SPIC,
-		ck: ck, ik: ik,
+		ck: ck, ik: ik, outboundSaltBits: saltUEClientToPCSCFServer, inboundSaltBits: saltPCSCFServerToUEClient,
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("dialing secure IMS datagram response transport: %w", err)
@@ -976,7 +1012,7 @@ func selectSecurityServer(values []string, offered security.Params, requiredMode
 		return nil, nil, errors.New("applying Security-Server: header is empty")
 	}
 
-	sharedSA, hasSharedSA := sharedSecurityServerAssociation(params)
+	sharedSA, hasSharedSA := sharedSecurityServerAssociation(params, requiredMode)
 	qValues := make(map[int]struct{})
 	bestQ := -1
 	var best *security.Param
@@ -989,14 +1025,17 @@ func selectSecurityServer(values []string, offered security.Params, requiredMode
 			return nil, nil, fmt.Errorf("parsing Security-Server: duplicate q-value %q", param.Q)
 		}
 		qValues[q] = struct{}{}
-		if hasSharedSA && securityAssociationEmpty(param) {
+		if hasSharedSA && securityAssociationEmpty(param) &&
+			(requiredMode == "" || strings.EqualFold(param.Mod, requiredMode)) {
 			param.PortC = sharedSA.portC
 			param.PortS = sharedSA.portS
 			param.SPIC = sharedSA.spiC
 			param.SPIS = sharedSA.spiS
 		}
 		normalized, ok := security.NormalizeParam(param)
-		if !ok || !strings.EqualFold(normalized.Mod, requiredMode) || !securityMechanismOffered(normalized, offered) {
+		if !ok ||
+			(requiredMode != "" && !strings.EqualFold(normalized.Mod, requiredMode)) ||
+			!securityMechanismOffered(normalized, offered) {
 			continue
 		}
 		if best != nil && q <= bestQ {
@@ -1019,10 +1058,13 @@ type securityServerAssociation struct {
 	spiS  uint32
 }
 
-func sharedSecurityServerAssociation(params security.Params) (securityServerAssociation, bool) {
+func sharedSecurityServerAssociation(params security.Params, mode string) (securityServerAssociation, bool) {
 	var shared securityServerAssociation
 	found := false
 	for _, param := range params {
+		if mode != "" && !strings.EqualFold(param.Mod, mode) {
+			continue
+		}
 		if !securityAssociationComplete(param) {
 			continue
 		}
@@ -1108,12 +1150,14 @@ func securityQValue(value string) (int, error) {
 type ipsecAlgorithms struct {
 	integrity  []string
 	encryption []string
+	modes      []string
 }
 
 func ipsecAlgorithmsFromConfig(cfg Config) ipsecAlgorithms {
 	return ipsecAlgorithms{
 		integrity:  cfg.IPSecIntegrityAlgorithms,
 		encryption: cfg.IPSecEncryptionAlgorithms,
+		modes:      cfg.IPSecModes,
 	}
 }
 
@@ -1139,11 +1183,12 @@ func newSecurityClient(registerPort int, algorithms ipsecAlgorithms) security.Pa
 	}
 	clientSPI := randomNonZeroUint32Except(0)
 	serverSPI := randomNonZeroUint32Except(clientSPI)
+	integrity, encryption := preferredIPSecAlgorithms(algorithms)
 	return security.Param{
 		Mechanism: "ipsec-3gpp",
-		Alg:       algorithms.integrity[0],
-		EAlg:      algorithms.encryption[0],
-		Mod:       "trans",
+		Alg:       integrity,
+		EAlg:      encryption,
+		Mod:       algorithms.modes[0],
 		PortC:     clientPort,
 		PortS:     serverPort,
 		Prot:      "esp",
@@ -1153,15 +1198,15 @@ func newSecurityClient(registerPort int, algorithms ipsecAlgorithms) security.Pa
 }
 
 func securityClientCapabilities(base security.Param, algorithms ipsecAlgorithms) security.Params {
-	return securityClientCapabilitiesForModes(base, algorithms, []string{"trans", "UDP-enc-tun"})
+	return securityClientCapabilitiesForModes(base, algorithms, algorithms.modes)
 }
 
-func reauthenticationSecurityClientCapabilities(base security.Param, algorithms ipsecAlgorithms) security.Params {
-	mode := base.Mod
-	if mode == "" {
-		mode = "trans"
+func reauthenticationSecurityClientCapabilities(base security.Param, algorithms ipsecAlgorithms) (security.Params, error) {
+	modes, err := security.NormalizeIPSecModes([]string{base.Mod})
+	if err != nil {
+		return nil, fmt.Errorf("building re-authentication Security-Client: %w", err)
 	}
-	return securityClientCapabilitiesForModes(base, algorithms, []string{mode})
+	return securityClientCapabilitiesForModes(base, algorithms, modes), nil
 }
 
 func securityClientCapabilitiesForModes(base security.Param, algorithms ipsecAlgorithms, modes []string) security.Params {
@@ -1169,7 +1214,7 @@ func securityClientCapabilitiesForModes(base security.Param, algorithms ipsecAlg
 	for _, integrity := range algorithms.integrity {
 		for _, encryption := range algorithms.encryption {
 			for _, mode := range modes {
-				if !advertiseIPSecCombination(integrity, mode) {
+				if !compatibleIPSecAlgorithms(integrity, encryption) {
 					continue
 				}
 				param := base
@@ -1183,11 +1228,37 @@ func securityClientCapabilitiesForModes(base security.Param, algorithms ipsecAlg
 	return params
 }
 
-func advertiseIPSecCombination(integrity, mode string) bool {
-	if strings.EqualFold(integrity, "hmac-md5-96") {
-		return strings.EqualFold(mode, "trans")
+func preferredIPSecAlgorithms(algorithms ipsecAlgorithms) (string, string) {
+	for _, integrity := range algorithms.integrity {
+		for _, encryption := range algorithms.encryption {
+			if compatibleIPSecAlgorithms(integrity, encryption) {
+				return integrity, encryption
+			}
+		}
 	}
-	return true
+	return "", ""
+}
+
+func hasCompatibleIPSecAlgorithms(integrity, encryption []string) bool {
+	alg, ealg := preferredIPSecAlgorithms(ipsecAlgorithms{integrity: integrity, encryption: encryption})
+	return alg != "" && ealg != ""
+}
+
+func compatibleIPSecAlgorithms(integrity, encryption string) bool {
+	integrity = strings.ToLower(strings.TrimSpace(integrity))
+	encryption = strings.ToLower(strings.TrimSpace(encryption))
+	switch {
+	case integrity == "null":
+		return encryption == "aes-gcm" || encryption == "aes-gcm-us"
+	case encryption == "aes-gcm" || encryption == "aes-gcm-us":
+		return false
+	case integrity == "aes-gmac" || integrity == "aes-gmac-us":
+		return encryption == "null"
+	case integrity == "hmac-md5-96" || integrity == "hmac-sha-1-96" || integrity == "hmac-sha2-256-128":
+		return encryption == "null" || encryption == "aes-cbc"
+	default:
+		return false
+	}
 }
 
 func reauthSecurityClient(current, peer security.Param, registerPort int) security.Param {

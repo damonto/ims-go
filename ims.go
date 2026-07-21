@@ -147,6 +147,7 @@ func (c *Client) buildRegistrationConfig(cfg IMSConfig, security imsSecurity) re
 		AuthAlgorithm:             cfg.AuthAlgorithm,
 		IPSecIntegrityAlgorithms:  cfg.IPSecIntegrityAlgorithms,
 		IPSecEncryptionAlgorithms: cfg.IPSecEncryptionAlgorithms,
+		IPSecModes:                cfg.IPSecModes,
 		GeolocationPIDFRegister:   cfg.GeolocationPIDFRegister,
 		GeolocationCountry:        cfg.GeolocationCountry,
 		UseTelURIForPIDFXML:       cfg.UseTelURIForPIDFXML,

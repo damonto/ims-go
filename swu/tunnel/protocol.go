@@ -30,14 +30,24 @@ const (
 
 const (
 	transformENCRAESCBC      uint16 = 12
+	transformENCRAESCTR      uint16 = 13
 	transformPRFHMACMD5      uint16 = 1
 	transformPRFHMACSHA1     uint16 = 2
+	transformPRFAES128XCBC   uint16 = 4
 	transformPRFHMACSHA256   uint16 = 5
+	transformPRFHMACSHA384   uint16 = 6
+	transformPRFHMACSHA512   uint16 = 7
 	transformINTEGHMACMD596  uint16 = 1
 	transformINTEGHMACSHA196 uint16 = 2
+	transformINTEGAESXCBC96  uint16 = 5
 	transformINTEGHMACSHA256 uint16 = 12
+	transformINTEGHMACSHA384 uint16 = 13
+	transformINTEGHMACSHA512 uint16 = 14
 	transformDH1024MODP      uint16 = 2
+	transformDH1536MODP      uint16 = 5
 	transformDH2048MODP      uint16 = 14
+	transformDH3072MODP      uint16 = 15
+	transformDH4096MODP      uint16 = 16
 	transformESNNoESN        uint16 = 0
 )
 

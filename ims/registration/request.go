@@ -16,29 +16,30 @@ func (s *Registrar) buildRegister(auth *security.Authorization, verify *security
 	return s.buildRegisterForFlow(auth, verify, s.CurrentFlow())
 }
 
-
 func (s *Registrar) buildRegisterForFlow(auth *security.Authorization, verify *security.Param, flow Flow) sip.Message {
 	return s.buildRegisterForFlowWithAuthorizationHeader(auth, verify, flow, s.currentAuthorizationHeaderName())
 }
 
 func (s *Registrar) buildRegisterForFlowWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, flow Flow, authorizationHeader string) sip.Message {
-	port := s.State().RegisterPort
+	contactPort := s.State().RegisterPort
+	viaPort := contactPort
 	if registerUsesProtectedPort(auth, verify) {
-		port = flow.SecurityClient.PortS
+		contactPort = flow.SecurityClient.PortS
+		viaPort = flow.SecurityClient.PortC
 	}
 	legacyAuthorization := ""
 	if auth == nil {
 		legacyAuthorization = s.initialAuthorizationValue()
 	}
-	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(port), s.registerExpiresSeconds(), port, authorizationHeader)
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(contactPort), s.registerExpiresSeconds(), viaPort, authorizationHeader)
 }
 
 func (s *Registrar) buildDeregister(auth *security.Authorization, verify *security.Param) sip.Message {
-	port := s.State().RegisterPort
+	viaPort := s.State().RegisterPort
 	if registerUsesProtectedPort(auth, verify) {
-		port = s.State().SecurityClient.PortS
+		viaPort = s.State().SecurityClient.PortC
 	}
-	return s.buildRegisterRequest(auth, "", verify, "*", 0, port, s.currentAuthorizationHeaderName())
+	return s.buildRegisterRequest(auth, "", verify, "*", 0, viaPort, s.currentAuthorizationHeaderName())
 }
 
 func (s *Registrar) registerRealm(auth *security.Authorization) string {
@@ -97,11 +98,11 @@ func (s *Registrar) resetRegisterTransaction() {
 	s.mu.Unlock()
 }
 
-func (s *Registrar) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
-	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, port, authorizationHeader)
+func (s *Registrar) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, viaPort int, authorizationHeader string) sip.Message {
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, viaPort, authorizationHeader)
 }
 
-func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, port int, authorizationHeader string) sip.Message {
+func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, viaPort int, authorizationHeader string) sip.Message {
 	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
 	cseq, callID, sessionID, tag := s.nextRegisterTransaction()
@@ -136,7 +137,7 @@ func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, le
 	}
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d REGISTER", cseq))
 	transport := sip.TransportToken(s.sess.LocalAddr())
-	msg.Headers.Add("Via", sip.BuildViaWithOptions(transport, state.ContactHost, port, branch, sip.ViaOptions{
+	msg.Headers.Add("Via", sip.BuildViaWithOptions(transport, state.ContactHost, viaPort, branch, sip.ViaOptions{
 		Keep: true,
 	}))
 	accessNetworkInfo := ""

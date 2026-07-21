@@ -1885,7 +1885,11 @@ func TestInitiatedChildSARekeyRetriesInvalidKEPayloadGroup(t *testing.T) {
 				return []ike.Payload{
 					&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{
 						childSAResponseProposal(acceptedChildSA{
-							Info:           Info{EncryptionKeyLen: 128, Integrity: transformINTEGHMACSHA196},
+							Info: Info{
+								Encryption:       transformENCRAESCBC,
+								EncryptionKeyLen: 128,
+								Integrity:        transformINTEGHMACSHA196,
+							},
 							DHGroup:        transformDH2048MODP,
 							ProposalNumber: 1,
 						}, peerInboundSPI),
@@ -2220,6 +2224,7 @@ func TestChildSAFromCreateChildResponseValidatesNegotiatedProposal(t *testing.T)
 	validProposal := func(dhGroup uint16) ike.Proposal {
 		return childSAResponseProposal(acceptedChildSA{
 			Info: Info{
+				Encryption:       transformENCRAESCBC,
 				EncryptionKeyLen: 128,
 				Integrity:        transformINTEGHMACSHA196,
 			},
@@ -2381,6 +2386,7 @@ func TestChildSAFromCreateChildResponseValidatesNegotiatedProposalNumberAgainstR
 	}), newInboundSPI)
 	responseProposal := childSAResponseProposal(acceptedChildSA{
 		Info: Info{
+			Encryption:       transformENCRAESCBC,
 			EncryptionKeyLen: 128,
 			Integrity:        transformINTEGHMACSHA196,
 		},
@@ -2403,6 +2409,7 @@ func TestChildSAFromCreateChildResponseValidatesNegotiatedProposalNumberAgainstR
 func TestChildSAFromCreateChildResponseRejectsNarrowTrafficSelectors(t *testing.T) {
 	proposal := childSAResponseProposal(acceptedChildSA{
 		Info: Info{
+			Encryption:       transformENCRAESCBC,
 			EncryptionKeyLen: 128,
 			Integrity:        transformINTEGHMACSHA196,
 		},
@@ -2484,6 +2491,7 @@ func TestRekeyChildSACreatesReplacementAfterChildSANotFound(t *testing.T) {
 			session.deliverInformationalWaiter(ikeMessageKeyForSPIs(0x0102030405060708, 0x1112131415161718, exchangeTypeCreateChildSA, flagResponse, 1), inboundIKE{
 				data: sealCreateChildSAResponse(t, crypto, false, 1, []ike.Payload{
 					&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{childSAResponseProposal(acceptedChildSA{Info: Info{
+						Encryption:       transformENCRAESCBC,
 						EncryptionKeyLen: 128,
 						Integrity:        transformINTEGHMACSHA196,
 					}, ProposalNumber: 1}, tt.peerInboundSPI)}},
@@ -2706,7 +2714,7 @@ func TestRekeyParsersRejectInvalidNonceLengths(t *testing.T) {
 			act: func() error {
 				_, _, _, err := negotiatedIKESAFromPayloads([]ike.Payload{
 					&ike.NoncePayload{Data: bytes.Repeat([]byte{0x01}, ikeNonceMinLen-1)},
-					&ike.SecurityAssociationPayload{Proposals: ikeSAProposals(handshakeConfig(Config{}), transformDH2048MODP)[:1]},
+					&ike.SecurityAssociationPayload{Proposals: ikeSAProposals(handshakeConfig(Config{}))[:1]},
 					&ike.KeyExchangePayload{DHGroup: transformDH2048MODP, Data: []byte{0x01}},
 				}, transformDH2048MODP, nil)
 				return err
@@ -3119,12 +3127,53 @@ func TestAcceptedIKESARekeyProposalRejectsInvalidSPI(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			proposals := currentIKESARekeyProposals(current, transformDH2048MODP, tt.spi)
 
-			_, _, err := acceptedIKESARekeyProposal(proposals, current)
+			cfg := Config{
+				DHGroups:             []uint16{current.dhGroup},
+				IKEEncryption:        []uint16{current.encr},
+				IKEEncryptionKeyLens: []uint16{current.encrKeyBits},
+				IKEIntegrity:         []uint16{current.integ},
+				IKEPRF:               []uint16{current.prf},
+			}
+			_, _, err := acceptedIKESARekeyProposal(proposals, cfg, current.dhGroup, current)
 
 			if err == nil || !strings.Contains(err.Error(), "no acceptable ike sa rekey proposal") {
 				t.Fatalf("acceptedIKESARekeyProposal() error = %v, want no proposal", err)
 			}
 		})
+	}
+}
+
+func TestAcceptedIKESARekeyProposalSelectsRequestAlternatives(t *testing.T) {
+	current := testIKESARekeyCrypto(transformDH2048MODP, transformPRFHMACSHA1)
+	current.SetSPIs(0x0102030405060708, 0x1112131415161718)
+	proposals := currentIKESARekeyProposals(current, transformDH1024MODP, 0x2122232425262728)
+	proposal := &proposals[0]
+	proposal.Transforms = append(proposal.Transforms,
+		encryptionTransform(transformENCRAESCTR, 128),
+		ike.Transform{TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA384},
+		ike.Transform{TransformType: transformTypePRF, ID: transformPRFHMACSHA384},
+		ike.Transform{TransformType: transformTypeDH, ID: transformDH2048MODP},
+	)
+	cfg := Config{
+		DHGroups:                   []uint16{transformDH1024MODP, transformDH2048MODP},
+		IKEEncryption:              []uint16{transformENCRAESCTR, transformENCRAESCBC},
+		IKEEncryptionKeyLens:       []uint16{128},
+		IKEEncryptionAESCTRKeyLens: []uint16{128},
+		IKEIntegrity:               []uint16{transformINTEGHMACSHA384, transformINTEGHMACSHA196},
+		IKEPRF:                     []uint16{transformPRFHMACSHA384, transformPRFHMACSHA1},
+	}
+
+	got, spi, err := acceptedIKESARekeyProposal(proposals, cfg, transformDH2048MODP, current)
+	if err != nil {
+		t.Fatalf("acceptedIKESARekeyProposal() error = %v", err)
+	}
+	if spi != 0x2122232425262728 {
+		t.Fatalf("peer SPI = %#x, want %#x", spi, uint64(0x2122232425262728))
+	}
+	if got.Encryption != transformENCRAESCTR || got.EncryptionKeyLen != 128 ||
+		got.Integrity != transformINTEGHMACSHA384 || got.PRF != transformPRFHMACSHA384 ||
+		got.DHGroup != transformDH2048MODP {
+		t.Fatalf("accepted proposal = %+v, want AES-CTR/SHA384/SHA384/DH14", got)
 	}
 }
 
@@ -3427,11 +3476,11 @@ func TestDeriveESPKeysWithNoncesUsesCreateChildNonces(t *testing.T) {
 				},
 			}
 			crypto.SetNonces([]byte("old-ni"), []byte("old-nr"))
-			oldKeys, err := crypto.DeriveESPKeys(128, transformINTEGHMACSHA196)
+			oldKeys, err := crypto.DeriveESPKeys(transformENCRAESCBC, 128, transformINTEGHMACSHA196)
 			if err != nil {
 				t.Fatalf("DeriveESPKeys() error = %v", err)
 			}
-			newKeys, err := crypto.DeriveESPKeysWithNonces(128, transformINTEGHMACSHA196, tt.nonceI, tt.nonceR)
+			newKeys, err := crypto.DeriveESPKeysWithNonces(transformENCRAESCBC, 128, transformINTEGHMACSHA196, tt.nonceI, tt.nonceR)
 			if err != nil {
 				t.Fatalf("DeriveESPKeysWithNonces() error = %v", err)
 			}
@@ -3473,7 +3522,7 @@ func TestDeriveESPKeysWithDHUsesSharedSecret(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newIKECrypto() responder error = %v", err)
 			}
-			keys, err := crypto.DeriveESPKeysWithDH(128, transformINTEGHMACSHA196, tt.nonceI, tt.nonceR, initiatorDH, responderDH.PublicKey())
+			keys, err := crypto.DeriveESPKeysWithDH(transformENCRAESCBC, 128, transformINTEGHMACSHA196, tt.nonceI, tt.nonceR, initiatorDH, responderDH.PublicKey())
 			if err != nil {
 				t.Fatalf("DeriveESPKeysWithDH() error = %v", err)
 			}
@@ -3492,7 +3541,7 @@ func TestDeriveESPKeysWithDHUsesSharedSecret(t *testing.T) {
 			if !bytes.Equal(keys.EncryptionInitiator, stream[:16]) {
 				t.Fatalf("initiator encryption key = %x, want %x", keys.EncryptionInitiator, stream[:16])
 			}
-			withoutDH, err := crypto.DeriveESPKeysWithNonces(128, transformINTEGHMACSHA196, tt.nonceI, tt.nonceR)
+			withoutDH, err := crypto.DeriveESPKeysWithNonces(transformENCRAESCBC, 128, transformINTEGHMACSHA196, tt.nonceI, tt.nonceR)
 			if err != nil {
 				t.Fatalf("DeriveESPKeysWithNonces() error = %v", err)
 			}
@@ -4133,7 +4182,10 @@ func protectedIKERawPlain(t *testing.T, crypto *ikeCrypto, exchangeType byte, fl
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
-	icv := crypto.integHMAC(crypto.integrityKey(senderInitiator), wire[:len(wire)-icvLen])
+	icv, err := crypto.integritySum(crypto.integrityKey(senderInitiator), wire[:len(wire)-icvLen])
+	if err != nil {
+		t.Fatalf("integritySum() error = %v", err)
+	}
 	copy(wire[len(wire)-icvLen:], icv)
 	return wire
 }

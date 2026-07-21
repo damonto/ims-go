@@ -923,7 +923,7 @@ func TestSAProposalsUseConfigWithoutFallback(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ikeProposals := ikeSAProposals(tt.cfg, transformDH2048MODP)
+			ikeProposals := ikeSAProposals(tt.cfg)
 			if len(ikeProposals) != tt.wantIKE {
 				t.Fatalf("len(ikeProposals) = %d, want %d", len(ikeProposals), tt.wantIKE)
 			}
@@ -953,10 +953,11 @@ func TestSAProposalsUseConfigWithoutFallback(t *testing.T) {
 
 func TestIKESAProposalsGroupTransformAlternatives(t *testing.T) {
 	proposals := ikeSAProposals(handshake.Config{
+		DHGroups:             []uint16{transformDH1024MODP, transformDH2048MODP, transformDH4096MODP},
 		IKEEncryptionKeyLens: []uint16{128, 256},
 		IKEIntegrity:         []uint16{transformINTEGHMACSHA256},
 		IKEPRF:               []uint16{transformPRFHMACSHA1, transformPRFHMACSHA256},
-	}, transformDH2048MODP)
+	})
 
 	if len(proposals) != 1 {
 		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
@@ -966,6 +967,9 @@ func TestIKESAProposalsGroupTransformAlternatives(t *testing.T) {
 	}
 	if got := proposalTransformIDs(proposals[0], transformTypePRF); !slices.Equal(got, []uint16{transformPRFHMACSHA1, transformPRFHMACSHA256}) {
 		t.Fatalf("ike prfs = %v, want [%d %d]", got, transformPRFHMACSHA1, transformPRFHMACSHA256)
+	}
+	if got := proposalTransformIDs(proposals[0], transformTypeDH); !slices.Equal(got, []uint16{transformDH1024MODP, transformDH2048MODP, transformDH4096MODP}) {
+		t.Fatalf("ike dh groups = %v, want [2 14 16]", got)
 	}
 }
 
@@ -1098,7 +1102,7 @@ func TestNegotiatedIKESAInitValidatesOfferedProposal(t *testing.T) {
 		IKEEncryptionKeyLens: []uint16{128},
 		IKEIntegrity:         []uint16{transformINTEGHMACSHA256},
 		IKEPRF:               []uint16{transformPRFHMACSHA1},
-	}, dhGroup)
+	})
 
 	tests := []struct {
 		name    string
@@ -1174,7 +1178,7 @@ func TestNegotiatedIKESAInitAcceptsGroupedKeyLengthAlternative(t *testing.T) {
 		IKEEncryptionKeyLens: []uint16{128, 256},
 		IKEIntegrity:         []uint16{transformINTEGHMACSHA256},
 		IKEPRF:               []uint16{transformPRFHMACSHA1},
-	}, dhGroup)
+	})
 	response := ike.Proposal{
 		Number:     1,
 		ProtocolID: proposalProtocolIKE,
@@ -1855,7 +1859,7 @@ func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectS
 	localHash := natDetectionHash(state.initiatorSPI, responderSPI, local)
 	remoteHash := natDetectionHash(state.initiatorSPI, responderSPI, remote)
 	payloads := []ike.Payload{
-		&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{ikeSAProposals(state.input.Config, state.crypto.dhGroup)[0]}},
+		&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{ikeSAProposals(state.input.Config)[0]}},
 		&ike.NoncePayload{Data: make([]byte, defaultIKENonceLength)},
 		&ike.KeyExchangePayload{DHGroup: state.crypto.dhGroup, Data: responder.PublicKey()},
 		&ike.NotifyPayload{NotifyType: notifyTypeNATDetectionSourceIP, Data: remoteHash[:]},

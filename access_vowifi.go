@@ -123,7 +123,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 				Integrity:     cfg.Integrity,
 				IntegrityKey:  cfg.IntegrityKey,
 				Mode:          cfg.Mode,
-				Salt:          cfg.Salt,
+				OutboundSalt:  cfg.OutboundSalt,
+				InboundSalt:   cfg.InboundSalt,
 				Associations:  associations,
 			})
 		},
@@ -142,7 +143,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 				Integrity:     cfg.Integrity,
 				IntegrityKey:  cfg.IntegrityKey,
 				Mode:          cfg.Mode,
-				Salt:          cfg.Salt,
+				OutboundSalt:  cfg.OutboundSalt,
+				InboundSalt:   cfg.InboundSalt,
 				Associations:  associations,
 			})
 		},
@@ -162,7 +164,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 			Integrity:     secureCfg.Integrity,
 			IntegrityKey:  secureCfg.IntegrityKey,
 			Mode:          secureCfg.Mode,
-			Salt:          secureCfg.Salt,
+			OutboundSalt:  secureCfg.OutboundSalt,
+			InboundSalt:   secureCfg.InboundSalt,
 			Associations:  associations,
 		})
 	}
@@ -182,7 +185,8 @@ func (a *voWiFiAccess) openSecurity(selectedPCSCF net.IP, cfg accessIMSConfig, a
 				Integrity:     secureCfg.Integrity,
 				IntegrityKey:  secureCfg.IntegrityKey,
 				Mode:          secureCfg.Mode,
-				Salt:          secureCfg.Salt,
+				OutboundSalt:  secureCfg.OutboundSalt,
+				InboundSalt:   secureCfg.InboundSalt,
 				Associations:  associations,
 			})
 		}

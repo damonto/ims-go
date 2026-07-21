@@ -79,7 +79,7 @@ func finalizeIKEAuthState(state *connectState, finalPayloads []ike.Payload, next
 	}
 	tunnel.ESPInitiatorSPI = state.espInitiatorSPI
 	tunnel.APN = state.responderAPN
-	espKeys, err := state.crypto.DeriveESPKeys(tunnel.EncryptionKeyLen, tunnel.Integrity)
+	espKeys, err := state.crypto.DeriveESPKeys(tunnel.Encryption, tunnel.EncryptionKeyLen, tunnel.Integrity)
 	if err != nil {
 		return fmt.Errorf("deriving esp keys: %w", err)
 	}

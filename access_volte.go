@@ -199,7 +199,7 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
-				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+				Mode: secure.Mode, OutboundSalt: secure.OutboundSalt, InboundSalt: secure.InboundSalt, Associations: associations,
 			})
 		},
 		ListenSecureUDP: func(ctx context.Context, secure imssession.SecureUDPConfig) (imssession.Transport, error) {
@@ -212,7 +212,7 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
-				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+				Mode: secure.Mode, OutboundSalt: secure.OutboundSalt, InboundSalt: secure.InboundSalt, Associations: associations,
 			})
 		},
 		DialSecureTCP: func(ctx context.Context, secure imssession.SecureTCPConfig) (imssession.Transport, error) {
@@ -225,7 +225,7 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
-				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+				Mode: secure.Mode, OutboundSalt: secure.OutboundSalt, InboundSalt: secure.InboundSalt, Associations: associations,
 			})
 		},
 		ListenSecureTCP: func(ctx context.Context, secure imssession.SecureTCPConfig) (imssession.Transport, error) {
@@ -238,7 +238,7 @@ func (a *voLTEAccess) openSecurity(remoteIP net.IP, session *lteipsec.Session, n
 				OutboundSPI:  secure.OutboundSPI, InboundSPI: secure.InboundSPI,
 				Encryption: secure.Encryption, EncryptionKey: secure.EncryptionKey,
 				Integrity: secure.Integrity, IntegrityKey: secure.IntegrityKey,
-				Mode: secure.Mode, Salt: secure.Salt, Associations: associations,
+				Mode: secure.Mode, OutboundSalt: secure.OutboundSalt, InboundSalt: secure.InboundSalt, Associations: associations,
 			})
 		},
 	}

@@ -89,6 +89,9 @@ func newTestRegistrar(cfg registration.Config, sess *session.Session, card regis
 	if len(cfg.IPSecEncryptionAlgorithms) == 0 {
 		cfg.IPSecEncryptionAlgorithms = []string{"null", "aes-cbc"}
 	}
+	if len(cfg.IPSecModes) == 0 {
+		cfg.IPSecModes = []string{"trans", "UDP-enc-tun"}
+	}
 	return registration.New(cfg, sess, card)
 }
 

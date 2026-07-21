@@ -66,6 +66,7 @@ type IMSConfig struct {
 	RegistrationRetryMax      time.Duration
 	IPSecIntegrityAlgorithms  []string
 	IPSecEncryptionAlgorithms []string
+	IPSecModes                []string
 	ServiceCenter             string
 	IMEI                      string
 	GeolocationPIDFRegister   []int
@@ -135,7 +136,17 @@ func (cfg Config) normalized(card Card) (Config, error) {
 	}
 	if ok {
 		cfg = cfg.withIMSProfile(profile, card)
-		cfg.Logger.Debug("IMS carrier profile selected", "mcc", profile.MCC, "mnc", profile.MNC, "gid1", profile.GID1)
+		cfg.Logger.Debug(
+			"IMS carrier profile selected",
+			"mcc", profile.MCC,
+			"mnc", profile.MNC,
+			"imsi_prefix", profile.IMSIPrefix,
+			"iccid_prefix", profile.ICCIDPrefix,
+			"spn", profile.SPN,
+			"gid1", profile.GID1,
+			"gid2", profile.GID2,
+			"epdg", profile.EPDG,
+		)
 	}
 
 	if cfg.usesVoWiFi() {
@@ -256,6 +267,10 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
 	cfg.IPSecEncryptionAlgorithms, err = security.NormalizeIPSecEncryptionAlgorithms(cfg.IPSecEncryptionAlgorithms)
+	if err != nil {
+		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+	}
+	cfg.IPSecModes, err = security.NormalizeIPSecModes(cfg.IPSecModes)
 	if err != nil {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}

@@ -27,10 +27,14 @@ type Config struct {
 	LocalSIPPort                     int
 	SIPPort                          int
 	DHGroups                         []uint16
+	IKEEncryption                    []uint16
 	IKEEncryptionKeyLens             []uint16
+	IKEEncryptionAESCTRKeyLens       []uint16
 	IKEIntegrity                     []uint16
 	IKEPRF                           []uint16
+	ChildEncryption                  []uint16
 	ChildEncryptionKeyLens           []uint16
+	ChildEncryptionAESCTRKeyLens     []uint16
 	ChildIntegrity                   []uint16
 	PCSCFIPv4ConfigAttribute         uint16
 	PCSCFIPv6ConfigAttribute         uint16
@@ -65,6 +69,7 @@ const (
 
 var (
 	defaultDHGroups          = []uint16{transformDH2048MODP}
+	defaultEncryption        = []uint16{transformENCRAESCBC}
 	defaultEncryptionKeyLens = []uint16{transformKeyLenAES128, transformKeyLenAES256}
 	defaultIKEIntegrity      = []uint16{transformINTEGHMACSHA256}
 	defaultIKEPRF            = []uint16{transformPRFHMACSHA1, transformPRFHMACSHA256}
@@ -135,12 +140,28 @@ func (cfg Config) Normalized() (Config, error) {
 			return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 		}
 	}
+	if len(cfg.IKEEncryption) == 0 {
+		cfg.IKEEncryption = append([]uint16(nil), defaultEncryption...)
+	} else {
+		cfg.IKEEncryption = append([]uint16(nil), cfg.IKEEncryption...)
+	}
+	if err := validateEncryptionTransforms("ike encryption transforms", cfg.IKEEncryption); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
 	if len(cfg.IKEEncryptionKeyLens) == 0 {
 		cfg.IKEEncryptionKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
 	} else {
 		cfg.IKEEncryptionKeyLens = append([]uint16(nil), cfg.IKEEncryptionKeyLens...)
 	}
 	if err := validateEncryptionKeyLens("ike encryption key lengths", cfg.IKEEncryptionKeyLens); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
+	if len(cfg.IKEEncryptionAESCTRKeyLens) == 0 {
+		cfg.IKEEncryptionAESCTRKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
+	} else {
+		cfg.IKEEncryptionAESCTRKeyLens = append([]uint16(nil), cfg.IKEEncryptionAESCTRKeyLens...)
+	}
+	if err := validateEncryptionKeyLens("ike AES-CTR key lengths", cfg.IKEEncryptionAESCTRKeyLens); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	if len(cfg.IKEIntegrity) == 0 {
@@ -159,12 +180,28 @@ func (cfg Config) Normalized() (Config, error) {
 	if err := validatePRFTransforms("ike prf transforms", cfg.IKEPRF); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
+	if len(cfg.ChildEncryption) == 0 {
+		cfg.ChildEncryption = append([]uint16(nil), defaultEncryption...)
+	} else {
+		cfg.ChildEncryption = append([]uint16(nil), cfg.ChildEncryption...)
+	}
+	if err := validateEncryptionTransforms("child encryption transforms", cfg.ChildEncryption); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
 	if len(cfg.ChildEncryptionKeyLens) == 0 {
 		cfg.ChildEncryptionKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
 	} else {
 		cfg.ChildEncryptionKeyLens = append([]uint16(nil), cfg.ChildEncryptionKeyLens...)
 	}
 	if err := validateEncryptionKeyLens("child encryption key lengths", cfg.ChildEncryptionKeyLens); err != nil {
+		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
+	}
+	if len(cfg.ChildEncryptionAESCTRKeyLens) == 0 {
+		cfg.ChildEncryptionAESCTRKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
+	} else {
+		cfg.ChildEncryptionAESCTRKeyLens = append([]uint16(nil), cfg.ChildEncryptionAESCTRKeyLens...)
+	}
+	if err := validateEncryptionKeyLens("child AES-CTR key lengths", cfg.ChildEncryptionAESCTRKeyLens); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
 	if len(cfg.ChildIntegrity) == 0 {
@@ -227,29 +264,33 @@ func (cfg Config) Normalized() (Config, error) {
 
 func handshakeConfig(cfg Config) handshake.Config {
 	return handshake.Config{
-		LocalAddr:                cfg.LocalAddr,
-		RemoteAddr:               cfg.RemoteAddr,
-		APN:                      cfg.APN,
-		RequestDefaultAPN:        cfg.RequestDefaultAPN,
-		PDNType:                  cfg.PDNType,
-		InitialPort:              cfg.InitialPort,
-		NATTPort:                 cfg.NATTPort,
-		LocalSIPPort:             cfg.LocalSIPPort,
-		SIPPort:                  cfg.SIPPort,
-		DHGroups:                 append([]uint16(nil), cfg.DHGroups...),
-		IKEEncryptionKeyLens:     append([]uint16(nil), cfg.IKEEncryptionKeyLens...),
-		IKEIntegrity:             append([]uint16(nil), cfg.IKEIntegrity...),
-		IKEPRF:                   append([]uint16(nil), cfg.IKEPRF...),
-		ChildEncryptionKeyLens:   append([]uint16(nil), cfg.ChildEncryptionKeyLens...),
-		ChildIntegrity:           append([]uint16(nil), cfg.ChildIntegrity...),
-		PCSCFIPv4ConfigAttribute: cfg.PCSCFIPv4ConfigAttribute,
-		PCSCFIPv6ConfigAttribute: cfg.PCSCFIPv6ConfigAttribute,
-		PCSCFRestoration:         !cfg.DisablePCSCFRestoration,
-		PDUSessionID:             cfg.PDUSessionID,
-		IPMSIndication:           cfg.EnableIPMSIndication,
-		NATKeepaliveInterval:     cfg.NATKeepaliveInterval,
-		LivenessTimeout:          cfg.LivenessTimeout,
-		IKERetransmitDelays:      append([]time.Duration(nil), cfg.IKERetransmitDelays...),
+		LocalAddr:                    cfg.LocalAddr,
+		RemoteAddr:                   cfg.RemoteAddr,
+		APN:                          cfg.APN,
+		RequestDefaultAPN:            cfg.RequestDefaultAPN,
+		PDNType:                      cfg.PDNType,
+		InitialPort:                  cfg.InitialPort,
+		NATTPort:                     cfg.NATTPort,
+		LocalSIPPort:                 cfg.LocalSIPPort,
+		SIPPort:                      cfg.SIPPort,
+		DHGroups:                     append([]uint16(nil), cfg.DHGroups...),
+		IKEEncryption:                append([]uint16(nil), cfg.IKEEncryption...),
+		IKEEncryptionKeyLens:         append([]uint16(nil), cfg.IKEEncryptionKeyLens...),
+		IKEEncryptionAESCTRKeyLens:   append([]uint16(nil), cfg.IKEEncryptionAESCTRKeyLens...),
+		IKEIntegrity:                 append([]uint16(nil), cfg.IKEIntegrity...),
+		IKEPRF:                       append([]uint16(nil), cfg.IKEPRF...),
+		ChildEncryption:              append([]uint16(nil), cfg.ChildEncryption...),
+		ChildEncryptionKeyLens:       append([]uint16(nil), cfg.ChildEncryptionKeyLens...),
+		ChildEncryptionAESCTRKeyLens: append([]uint16(nil), cfg.ChildEncryptionAESCTRKeyLens...),
+		ChildIntegrity:               append([]uint16(nil), cfg.ChildIntegrity...),
+		PCSCFIPv4ConfigAttribute:     cfg.PCSCFIPv4ConfigAttribute,
+		PCSCFIPv6ConfigAttribute:     cfg.PCSCFIPv6ConfigAttribute,
+		PCSCFRestoration:             !cfg.DisablePCSCFRestoration,
+		PDUSessionID:                 cfg.PDUSessionID,
+		IPMSIndication:               cfg.EnableIPMSIndication,
+		NATKeepaliveInterval:         cfg.NATKeepaliveInterval,
+		LivenessTimeout:              cfg.LivenessTimeout,
+		IKERetransmitDelays:          append([]time.Duration(nil), cfg.IKERetransmitDelays...),
 	}
 }
 
@@ -327,11 +368,27 @@ func validatePortRange(name string, port int) error {
 
 func validateDHGroup(group uint16) error {
 	switch group {
-	case transformDH1024MODP, transformDH2048MODP:
+	case transformDH1024MODP, transformDH1536MODP, transformDH2048MODP, transformDH3072MODP, transformDH4096MODP:
 		return nil
 	default:
 		return fmt.Errorf("dh group %d is unsupported", group)
 	}
+}
+
+func validateEncryptionTransforms(name string, values []uint16) error {
+	if len(values) == 0 {
+		return fmt.Errorf("%s must not be empty", name)
+	}
+	for _, value := range values {
+		if !supportedEncryptionTransform(value) {
+			return fmt.Errorf("%s value %d is unsupported", name, value)
+		}
+	}
+	return nil
+}
+
+func supportedEncryptionTransform(transform uint16) bool {
+	return transform == transformENCRAESCBC || transform == transformENCRAESCTR
 }
 
 func validateEncryptionKeyLens(name string, values []uint16) error {
@@ -354,7 +411,7 @@ func validateIntegrityTransforms(name string, values []uint16) error {
 	}
 	for _, value := range values {
 		switch value {
-		case transformINTEGHMACMD596, transformINTEGHMACSHA196, transformINTEGHMACSHA256:
+		case transformINTEGHMACMD596, transformINTEGHMACSHA196, transformINTEGAESXCBC96, transformINTEGHMACSHA256, transformINTEGHMACSHA384, transformINTEGHMACSHA512:
 		default:
 			return fmt.Errorf("%s value %d is unsupported", name, value)
 		}
@@ -368,7 +425,7 @@ func validatePRFTransforms(name string, values []uint16) error {
 	}
 	for _, value := range values {
 		switch value {
-		case transformPRFHMACMD5, transformPRFHMACSHA1, transformPRFHMACSHA256:
+		case transformPRFHMACMD5, transformPRFHMACSHA1, transformPRFAES128XCBC, transformPRFHMACSHA256, transformPRFHMACSHA384, transformPRFHMACSHA512:
 		default:
 			return fmt.Errorf("%s value %d is unsupported", name, value)
 		}

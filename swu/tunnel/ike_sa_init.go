@@ -49,7 +49,7 @@ func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, reques
 	if response.Header.ResponderSPI == 0 {
 		return errors.New("responder spi is empty")
 	}
-	requestProposals := ikeSAProposals(state.input.Config, state.crypto.dhGroup)
+	requestProposals := ikeSAProposals(state.input.Config)
 	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, state.crypto.dhGroup, requestProposals)
 	if err != nil {
 		return err
@@ -281,6 +281,9 @@ func negotiatedIKESAFromProposal(proposal ike.Proposal, dhGroup uint16) (negotia
 			if parsed.Encryption != 0 {
 				return negotiatedIKESA{}, errors.New("parsing negotiated ike proposal: duplicate encryption transform")
 			}
+			if !supportedEncryptionTransform(transform.ID) {
+				return negotiatedIKESA{}, fmt.Errorf("parsing negotiated ike proposal: unsupported encryption transform %d", transform.ID)
+			}
 			parsed.Encryption = transform.ID
 			for _, attr := range transform.Attributes {
 				if attr.Type == transformAttrKeyLength {
@@ -317,21 +320,26 @@ func negotiatedIKESAFromProposal(proposal ike.Proposal, dhGroup uint16) (negotia
 	return parsed, nil
 }
 
-func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
-	keyLens := uint16ValuesOrDefault(cfg.IKEEncryptionKeyLens, defaultEncryptionKeyLens)
+func ikeSAProposals(cfg handshake.Config) []ike.Proposal {
+	encryption := encryptionTransforms(
+		uint16ValuesOrDefault(cfg.IKEEncryption, defaultEncryption),
+		uint16ValuesOrDefault(cfg.IKEEncryptionKeyLens, defaultEncryptionKeyLens),
+		uint16ValuesOrDefault(cfg.IKEEncryptionAESCTRKeyLens, defaultEncryptionKeyLens),
+	)
 	integrity := uint16ValuesOrDefault(cfg.IKEIntegrity, defaultIKEIntegrity)
 	prfs := uint16ValuesOrDefault(cfg.IKEPRF, defaultIKEPRF)
-	transforms := make([]ike.Transform, 0, len(keyLens)+len(integrity)+len(prfs)+1)
-	for _, keyLen := range keyLens {
-		transforms = append(transforms, aesCBCTransform(keyLen))
-	}
+	dhGroups := uint16ValuesOrDefault(cfg.DHGroups, defaultDHGroups)
+	transforms := make([]ike.Transform, 0, len(encryption)+len(integrity)+len(prfs)+len(dhGroups))
+	transforms = append(transforms, encryption...)
 	for _, integ := range integrity {
 		transforms = append(transforms, ike.Transform{TransformType: transformTypeINTEG, ID: integ})
 	}
 	for _, prf := range prfs {
 		transforms = append(transforms, ike.Transform{TransformType: transformTypePRF, ID: prf})
 	}
-	transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
+	for _, dhGroup := range dhGroups {
+		transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
+	}
 	return []ike.Proposal{
 		{
 			Number:     1,
@@ -342,7 +350,7 @@ func ikeSAProposals(cfg handshake.Config, dhGroup uint16) []ike.Proposal {
 }
 
 func defaultIKESAInitPayloads(cfg handshake.Config, crypto *ikeCrypto, local, remote *net.UDPAddr) []ike.Payload {
-	proposals := ikeSAProposals(cfg, crypto.dhGroup)
+	proposals := ikeSAProposals(cfg)
 	natSourceHash := natDetectionHash(crypto.initiatorSPI, crypto.responderSPI, local)
 	natDestHash := natDetectionHash(crypto.initiatorSPI, crypto.responderSPI, remote)
 	return []ike.Payload{
