@@ -857,12 +857,12 @@ func normalizeAKAAlgorithm(algorithm string) (akaAlgorithm, bool) {
 	if !ok {
 		return akaAlgorithm{}, false
 	}
-	switch {
-	case name == AlgorithmAKAv1MD5:
+	switch name {
+	case AlgorithmAKAv1MD5:
 		return akaAlgorithm{name: AlgorithmAKAv1MD5, version: 1, hash: md5.New}, true
-	case name == AlgorithmAKAv2MD5:
+	case AlgorithmAKAv2MD5:
 		return akaAlgorithm{name: AlgorithmAKAv2MD5, version: 2, hash: md5.New}, true
-	case name == AlgorithmAKAv2SHA256:
+	case AlgorithmAKAv2SHA256:
 		return akaAlgorithm{name: AlgorithmAKAv2SHA256, version: 2, hash: sha256.New}, true
 	default:
 		return akaAlgorithm{}, false

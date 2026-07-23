@@ -147,7 +147,7 @@ func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, le
 		Keep: true,
 	}))
 	accessNetworkInfo := ""
-	if registerCanCarryAccessNetworkInfo(auth, verify, flow) {
+	if registerCanCarryAccessNetworkInfo(state.AccessNetworkInfo, auth, verify, flow) {
 		accessNetworkInfo = state.AccessNetworkInfo
 	}
 	sip.ClientRequestPolicy{
@@ -160,8 +160,14 @@ func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, le
 	return msg
 }
 
-func registerCanCarryAccessNetworkInfo(auth *security.Authorization, verify *security.Param, flow Flow) bool {
-	return auth != nil || verify != nil || flow.SecurityVerify != nil
+func registerCanCarryAccessNetworkInfo(accessNetworkInfo string, auth *security.Authorization, verify *security.Param, flow Flow) bool {
+	if auth != nil || verify != nil || flow.SecurityVerify != nil {
+		return true
+	}
+	// LTE PANI is valid on the bootstrap REGISTER and is required by some
+	// carrier SBCs. Keep the old delayed behavior for Wi-Fi PANI, whose
+	// bootstrap semantics vary between deployments.
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(accessNetworkInfo)), "3GPP-")
 }
 
 func registerUsesIPSec(auth *security.Authorization, verify *security.Param, algorithm string) bool {

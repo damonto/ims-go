@@ -737,6 +737,7 @@ func TestAccessNetworkInfo(t *testing.T) {
 func TestBuildRegisterAccessNetworkInfoFollowsSecurityState(t *testing.T) {
 	tests := []struct {
 		name    string
+		cfg     Config
 		auth    *security.Authorization
 		verify  *security.Param
 		prepare func(*Registrar)
@@ -744,9 +745,18 @@ func TestBuildRegisterAccessNetworkInfoFollowsSecurityState(t *testing.T) {
 	}{
 		{
 			name: "unprotected initial register omits access network info",
+			cfg:  Config{WLANNodeID: "AA:BB:CC"},
+		},
+		{
+			name: "LTE bootstrap includes access network info",
+			cfg: Config{
+				AccessNetworkInfo: "3GPP-E-UTRAN-TDD;utran-cell-id-3gpp=4600053AC8C595D0",
+			},
+			want: "3GPP-E-UTRAN-TDD;utran-cell-id-3gpp=4600053AC8C595D0",
 		},
 		{
 			name: "protected register includes access network info",
+			cfg:  Config{WLANNodeID: "AA:BB:CC"},
 			auth: &security.Authorization{
 				Username:           "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				Realm:              "ims.mnc001.mcc001.3gppnetwork.org",
@@ -760,6 +770,7 @@ func TestBuildRegisterAccessNetworkInfoFollowsSecurityState(t *testing.T) {
 		},
 		{
 			name: "existing security association allows access network info",
+			cfg:  Config{WLANNodeID: "AA:BB:CC"},
 			prepare: func(svc *Registrar) {
 				svc.mu.Lock()
 				verify := security.Param{Mechanism: "ipsec-3gpp"}
@@ -771,7 +782,7 @@ func TestBuildRegisterAccessNetworkInfoFollowsSecurityState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := newTestService(t, Config{WLANNodeID: "AA:BB:CC"}, newUDPTransport(5062, 5060), stubCard{})
+			svc := newTestService(t, tt.cfg, newUDPTransport(5062, 5060), stubCard{})
 			if tt.prepare != nil {
 				tt.prepare(svc)
 			}
@@ -1916,6 +1927,51 @@ func TestBuildRegisterAuthorizationIntegrityProtected(t *testing.T) {
 	}
 	if got := protected.Header("Authorization"); !strings.Contains(got, `opaque="test-opaque"`) {
 		t.Fatalf("protected Authorization = %q, want opaque", got)
+	}
+}
+
+func TestRegisterUsesChallengeRealm(t *testing.T) {
+	tests := []struct {
+		name           string
+		homeDomain     string
+		challengeRealm string
+	}{
+		{
+			name:           "challenge can differ from home domain",
+			homeDomain:     "ims.mnc002.mcc460.3gppnetwork.org",
+			challengeRealm: "ims.mnc000.mcc460.3gppnetwork.org",
+		},
+		{
+			name:           "challenge can match home domain",
+			homeDomain:     "ims.mnc001.mcc001.3gppnetwork.org",
+			challengeRealm: "ims.mnc001.mcc001.3gppnetwork.org",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, Config{HomeDomain: tt.homeDomain}, newUDPTransport(5062, 5060), stubCard{})
+			initial := svc.buildRegister(nil, nil)
+			if got := digestTestDirective(t, initial.Header("Authorization"), "realm"); got != tt.homeDomain {
+				t.Fatalf("bootstrap realm = %q, want home domain %q", got, tt.homeDomain)
+			}
+
+			resp := newResponse(initial, sipStatusUnauthorized, "Unauthorized",
+				sip.Header{Name: "WWW-Authenticate", Value: `Digest realm="` + tt.challengeRealm + `",nonce="` + testNonce + `",algorithm=AKAv1-MD5,qop="auth"`},
+				sip.Header{Name: "Security-Server", Value: `ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;mod=trans;port-c=4062;port-s=4060;prot=esp;spi-c=0000001111;spi-s=0000002222`},
+			)
+			challenge, err := svc.applyRegisterChallenge(resp)
+			if err != nil {
+				t.Fatalf("applyRegisterChallenge() error = %v", err)
+			}
+			auth, err := svc.buildRegisterAuthorization(context.Background(), challenge)
+			if err != nil {
+				t.Fatalf("buildRegisterAuthorization() error = %v", err)
+			}
+			protected := svc.buildRegister(auth, nil)
+			if got := digestTestDirective(t, protected.Header("Authorization"), "realm"); got != tt.challengeRealm {
+				t.Fatalf("protected realm = %q, want challenge realm %q", got, tt.challengeRealm)
+			}
+		})
 	}
 }
 
