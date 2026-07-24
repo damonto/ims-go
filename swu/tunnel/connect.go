@@ -304,16 +304,6 @@ func encryptionName(transform uint16) string {
 	}
 }
 
-func (state *connectState) innerLocalAddr(port int) *net.UDPAddr {
-	local, _ := innerAddrsForInfo(state.tunnel, nil, port, state.input.Config.SIPPort)
-	return local
-}
-
-func (state *connectState) innerRemoteAddr(port int) *net.UDPAddr {
-	_, remote := innerAddrsForInfo(state.tunnel, nil, state.input.Config.LocalSIPPort, port)
-	return remote
-}
-
 func (state *connectState) sessionLivenessTimeout() time.Duration {
 	timeout := livenessTimeout(state.finalPayloads)
 	if timeout > 0 {

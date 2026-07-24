@@ -37,7 +37,6 @@ func (s *Session) livenessLoop() {
 			continue
 		}
 		cause := fmt.Errorf("liveness check: %w", err)
-		s.tryDeliverError(cause)
 		s.failSecurityAssociations(cause)
 		return
 	}

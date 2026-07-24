@@ -672,7 +672,6 @@ func (s *Session) ikeSARekeyLoop() {
 		now := time.Now()
 		if rekeyHardLifetimeExpired(expiresAt, now) {
 			cause := fmt.Errorf("ike sa rekey: %w", errIKESAExpired)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}
@@ -699,7 +698,6 @@ func (s *Session) ikeSARekeyLoop() {
 		if errors.Is(err, errIKETemporaryFailure) {
 			if !temporaryFailure.record(now) {
 				cause := fmt.Errorf("ike sa rekey: %w", err)
-				s.tryDeliverError(cause)
 				s.failSecurityAssociations(cause)
 				return
 			}
@@ -708,13 +706,11 @@ func (s *Session) ikeSARekeyLoop() {
 		}
 		if errors.Is(err, errIKERequestIncomplete) {
 			cause := fmt.Errorf("ike sa rekey: %w", err)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}
 		if rekeyHardLifetimeExpired(expiresAt, time.Now()) {
 			cause := fmt.Errorf("ike sa rekey: %w", err)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}

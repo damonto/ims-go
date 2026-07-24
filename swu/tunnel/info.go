@@ -28,27 +28,6 @@ type Info struct {
 	SNSSAIPlmnID              []byte
 }
 
-func (s *Session) LocalAddr() net.Addr {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.connected && s.innerLocal != nil {
-		return cloneUDPAddr(s.innerLocal)
-	}
-	if s.conn == nil {
-		return nil
-	}
-	return s.conn.LocalAddr()
-}
-
-func (s *Session) RemoteAddr() net.Addr {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.connected && s.innerRemote != nil {
-		return cloneUDPAddr(s.innerRemote)
-	}
-	return cloneUDPAddr(s.outerRemote)
-}
-
 func (s *Session) Tunnel() Info {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -149,19 +128,6 @@ func innerIPsForInfo(info Info, remoteIP net.IP) (net.IP, net.IP) {
 		local = info.DefaultInnerIP()
 	}
 	return local, remote
-}
-
-func innerAddrsForInfo(info Info, remoteIP net.IP, localPort, remotePort int) (*net.UDPAddr, *net.UDPAddr) {
-	local, remote := innerIPsForInfo(info, remoteIP)
-	var localAddr *net.UDPAddr
-	if len(local) != 0 {
-		localAddr = &net.UDPAddr{IP: local, Port: localPort}
-	}
-	var remoteAddr *net.UDPAddr
-	if len(remote) != 0 {
-		remoteAddr = &net.UDPAddr{IP: remote, Port: remotePort}
-	}
-	return localAddr, remoteAddr
 }
 
 func handshakeInfo(info Info) handshake.Info {

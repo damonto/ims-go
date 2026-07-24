@@ -2,8 +2,6 @@ package tunnel
 
 import (
 	"errors"
-	"fmt"
-	"net"
 	"time"
 
 	"github.com/damonto/ims-go/ipsec/esp"
@@ -17,8 +15,6 @@ var (
 type tunnelConnection struct {
 	connected            bool
 	connecting           bool
-	innerLocal           *net.UDPAddr
-	innerRemote          *net.UDPAddr
 	tunnel               Info
 	tunnelErr            error
 	livenessTimeout      time.Duration
@@ -49,14 +45,10 @@ func (s *Session) discardSecurityAssociations(cause error) {
 	}
 	s.abortInformationalWaiters(cause)
 	s.mu.Lock()
-	closeDataPlaneDone(s.dataPlaneDone)
-	s.dataPlaneDone = nil
 	s.connected = false
 	s.connecting = false
 	s.useNATT = false
 	s.ikeFragmentationSupported = false
-	s.innerLocal = nil
-	s.innerRemote = nil
 	s.tunnel = Info{}
 	s.outboundESP = esp.Codec{}
 	s.inboundESP = esp.Codec{}
@@ -108,14 +100,10 @@ func (s *Session) discardChildSecurityAssociations(cause error) {
 		cause = errChildSAUnavailable
 	}
 	s.mu.Lock()
-	closeDataPlaneDone(s.dataPlaneDone)
-	s.dataPlaneDone = nil
 	s.connected = false
 	s.connecting = false
 	s.useNATT = false
 	s.ikeFragmentationSupported = false
-	s.innerLocal = nil
-	s.innerRemote = nil
 	s.tunnel = Info{}
 	s.outboundESP = esp.Codec{}
 	s.inboundESP = esp.Codec{}
@@ -137,7 +125,6 @@ func (s *Session) discardChildSecurityAssociations(cause error) {
 	s.ikeFragments = nil
 	s.mu.Unlock()
 
-	s.tryDeliverError(fmt.Errorf("reading packet: %w", cause))
 	s.notifyDetachedAttachments(s.detachAllAttachments(), cause)
 }
 
@@ -198,11 +185,4 @@ func (s *Session) childSAState() childSAState {
 		return childSAStateRekeying
 	}
 	return childSAStateActive
-}
-
-func closeDataPlaneDone(ch chan struct{}) {
-	if ch == nil {
-		return
-	}
-	close(ch)
 }

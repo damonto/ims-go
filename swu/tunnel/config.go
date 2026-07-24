@@ -24,7 +24,6 @@ type Config struct {
 	PacketConn                       net.PacketConn
 	InitialPort                      int
 	NATTPort                         int
-	LocalSIPPort                     int
 	SIPPort                          int
 	DHGroups                         []uint16
 	IKEEncryption                    []uint16
@@ -81,7 +80,6 @@ const (
 	defaultAKAPrimeNetworkName   = "WLAN"
 	defaultIKEPort               = 500
 	defaultNATTPort              = 4500
-	defaultLocalSIPPort          = 5062
 	defaultSIPPort               = 5060
 	defaultNATKeepaliveInterval  = 20 * time.Second
 	defaultLivenessTimeout       = 120 * time.Second
@@ -123,9 +121,6 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	if cfg.NATTPort == 0 {
 		cfg.NATTPort = defaultNATTPort
-	}
-	if cfg.LocalSIPPort == 0 {
-		cfg.LocalSIPPort = defaultLocalSIPPort
 	}
 	if cfg.SIPPort == 0 {
 		cfg.SIPPort = defaultSIPPort
@@ -253,9 +248,6 @@ func (cfg Config) Normalized() (Config, error) {
 	if err := validatePortRange("natt port", cfg.NATTPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := validatePortRange("local sip port", cfg.LocalSIPPort); err != nil {
-		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
-	}
 	if err := validatePortRange("sip port", cfg.SIPPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
@@ -271,8 +263,6 @@ func handshakeConfig(cfg Config) handshake.Config {
 		PDNType:                      cfg.PDNType,
 		InitialPort:                  cfg.InitialPort,
 		NATTPort:                     cfg.NATTPort,
-		LocalSIPPort:                 cfg.LocalSIPPort,
-		SIPPort:                      cfg.SIPPort,
 		DHGroups:                     append([]uint16(nil), cfg.DHGroups...),
 		IKEEncryption:                append([]uint16(nil), cfg.IKEEncryption...),
 		IKEEncryptionKeyLens:         append([]uint16(nil), cfg.IKEEncryptionKeyLens...),

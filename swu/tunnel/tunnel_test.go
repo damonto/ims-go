@@ -30,7 +30,7 @@ func TestConfigNormalized(t *testing.T) {
 			if got.AKAPrimeNetworkName != defaultAKAPrimeNetworkName {
 				t.Fatalf("AKAPrimeNetworkName = %q, want %q", got.AKAPrimeNetworkName, defaultAKAPrimeNetworkName)
 			}
-			if got.NATTPort != 4500 || got.LocalSIPPort != 5062 || got.SIPPort != 5060 {
+			if got.NATTPort != 4500 || got.SIPPort != 5060 {
 				t.Fatalf("ports = %+v", got)
 			}
 			if len(got.DHGroups) != 1 || got.DHGroups[0] != transformDH2048MODP {

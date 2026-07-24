@@ -133,10 +133,20 @@ func (c *serializedWritePacketConn) SetWriteDeadline(time.Time) error {
 }
 
 type recordingInnerHandler struct {
-	errCh chan error
+	packetCh chan packet.InnerPacket
+	errCh    chan error
 }
 
-func (h *recordingInnerHandler) HandleInnerPacket(packet.InnerPacket) bool { return false }
+func (h *recordingInnerHandler) HandleInnerPacket(pkt packet.InnerPacket) bool {
+	if h.packetCh == nil {
+		return false
+	}
+	select {
+	case h.packetCh <- pkt:
+	default:
+	}
+	return true
+}
 
 func (h *recordingInnerHandler) HandleError(err error) {
 	select {
@@ -265,8 +275,6 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	session := mustDialSession(t, conn)
 	session.mu.Lock()
 	session.connected = true
-	session.innerLocal = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062}
-	session.innerRemote = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060}
 	session.tunnel = Info{
 		InnerIPv4:       net.IPv4(10, 0, 0, 1),
 		PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
@@ -315,8 +323,6 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	initiatorSPI := session.initiatorSPI
 	responderSPI := session.responderSPI
 	nextMessageID := session.nextMessageID
-	innerLocal := session.innerLocal
-	innerRemote := session.innerRemote
 	info := session.tunnel
 	tunnelErr := session.tunnelErr
 	session.mu.RUnlock()
@@ -333,9 +339,6 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	if nextMessageID != 9 {
 		t.Fatalf("nextMessageID = %d, want 9", nextMessageID)
 	}
-	if innerLocal != nil || innerRemote != nil {
-		t.Fatalf("inner addrs = (%v, %v), want nil", innerLocal, innerRemote)
-	}
 	if info.HasInnerAddress() || len(info.PCSCFAddresses()) != 0 || info.ESPInitiatorSPI != 0 || info.ESPResponderSPI != 0 || info.Encryption != 0 || info.EncryptionKeyLen != 0 || info.Integrity != 0 {
 		t.Fatalf("Info = %+v, want zero value", info)
 	}
@@ -346,14 +349,8 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 		t.Fatal("currentInformationalState().canSendDelete() = false, want true")
 	}
 
-	if err := session.WritePacket(context.Background(), []byte("ping")); !errors.Is(err, cause) {
-		t.Fatalf("WritePacket() error = %v, want wrapped %v", err, cause)
-	}
-	for range 2 {
-		_, _, err := session.ReadPacket(context.Background())
-		if !errors.Is(err, cause) {
-			t.Fatalf("ReadPacket() error = %v, want wrapped %v", err, cause)
-		}
+	if _, err := session.ReadyInfo(); !errors.Is(err, cause) {
+		t.Fatalf("ReadyInfo() error = %v, want wrapped %v", err, cause)
 	}
 	if _, err := session.beginConnect(); err == nil || !strings.Contains(err.Error(), "close and redial") {
 		t.Fatalf("beginConnect() error = %v, want close-and-redial error", err)
@@ -442,7 +439,7 @@ func TestReadyInfoReportsTunnelState(t *testing.T) {
 	}
 }
 
-func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
+func TestApplyPCSCFReselectionUpdatesTunnelAndNotifiesAttachment(t *testing.T) {
 	conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 	session := mustDialSession(t, conn)
 	session.mu.Lock()
@@ -457,6 +454,10 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 		Integrity:        transformINTEGHMACSHA256,
 	}
 	session.mu.Unlock()
+	handler := &recordingInnerHandler{errCh: make(chan error, 1)}
+	if _, err := session.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
 
 	want := Info{
 		InnerIPv4:        net.IPv4(10, 0, 0, 1),
@@ -477,11 +478,11 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 		t.Fatalf("PCSCFIPs = %v, want %v", info.PCSCFIPs, want.PCSCFIPs)
 	}
 	select {
-	case inbound := <-session.readCh:
-		if !PCSCFReselectionRequested(inbound.err) {
-			t.Fatalf("readCh err = %v, want P-CSCF reselection", inbound.err)
+	case err := <-handler.errCh:
+		if !PCSCFReselectionRequested(err) {
+			t.Fatalf("HandleError() error = %v, want P-CSCF reselection", err)
 		}
-		got, ok := PCSCFReselectionInfo(inbound.err)
+		got, ok := PCSCFReselectionInfo(err)
 		if !ok {
 			t.Fatal("PCSCFReselectionInfo() ok = false")
 		}
@@ -489,41 +490,7 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndSignalsReader(t *testing.T) {
 			t.Fatalf("PCSCFReselectionInfo().PCSCFIPs = %v, want %v", got.PCSCFIPs, want.PCSCFIPs)
 		}
 	default:
-		t.Fatal("readCh empty, want P-CSCF reselection signal")
-	}
-}
-
-func TestDiscardChildSecurityAssociationsUnblocksConnectedRead(t *testing.T) {
-	session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
-	session.mu.Lock()
-	session.connected = true
-	session.ike = &ikeCrypto{}
-	session.tunnelErr = nil
-	session.dataPlaneDone = make(chan struct{})
-	session.mu.Unlock()
-
-	result := make(chan error, 1)
-	go func() {
-		_, _, err := session.readConnectedPacket(context.Background())
-		result <- err
-	}()
-
-	select {
-	case err := <-result:
-		t.Fatalf("readConnectedPacket() returned early with %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	cause := errors.New("peer deleted child SA")
-	session.discardChildSecurityAssociations(cause)
-
-	select {
-	case err := <-result:
-		if !errors.Is(err, cause) {
-			t.Fatalf("readConnectedPacket() error = %v, want wrapped %v", err, cause)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("readConnectedPacket() did not unblock")
+		t.Fatal("HandleError() was not called for P-CSCF reselection")
 	}
 }
 
@@ -564,8 +531,11 @@ func TestLivenessLoopFailsSecurityAssociationsAfterDPDTimeout(t *testing.T) {
 	session.responderSPI = session.ike.responderSPI
 	session.livenessTimeout = 10 * time.Millisecond
 	session.lastProtectedRx = time.Now().Add(-20 * time.Millisecond)
-	session.dataPlaneDone = make(chan struct{})
 	session.mu.Unlock()
+	handler := &recordingInnerHandler{errCh: make(chan error, 1)}
+	if _, err := session.Attach(handler); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
 
 	session.wg.Add(1)
 	go session.livenessLoop()
@@ -574,19 +544,13 @@ func TestLivenessLoopFailsSecurityAssociationsAfterDPDTimeout(t *testing.T) {
 		session.wg.Wait()
 	}()
 
-	errCh := make(chan error, 1)
-	go func() {
-		_, _, err := session.readConnectedPacket(context.Background())
-		errCh <- err
-	}()
-
 	select {
-	case err := <-errCh:
+	case err := <-handler.errCh:
 		if !errors.Is(err, errIKERequestIncomplete) || !strings.Contains(err.Error(), "liveness check") {
-			t.Fatalf("readConnectedPacket() error = %v, want liveness incomplete request", err)
+			t.Fatalf("HandleError() error = %v, want liveness incomplete request", err)
 		}
 	case <-time.After(250 * time.Millisecond):
-		t.Fatal("liveness DPD timeout did not unblock connected read")
+		t.Fatal("liveness DPD timeout did not notify attachment")
 	}
 }
 
@@ -4228,7 +4192,6 @@ func TestStageResponderChildSecurityAssociationsDefersOutboundSwitch(t *testing.
 			}
 			session.mu.Lock()
 			session.connected = true
-			session.dataPlaneDone = make(chan struct{})
 			session.tunnel = Info{
 				InnerIPv4:       net.IPv4(10, 0, 0, 1),
 				PCSCFIPs:        []net.IP{net.IPv4(10, 0, 0, 2)},
@@ -4704,7 +4667,6 @@ func TestInstallChildSecurityAssociationsSwitchesESPState(t *testing.T) {
 			session.cfg.ChildSARekeyMargin = 10 * time.Minute
 			session.mu.Lock()
 			session.connected = true
-			session.dataPlaneDone = make(chan struct{})
 			session.inboundESP = esp.Codec{SPI: 0x01020304}
 			session.espSeq = 99
 			session.inboundReplay.Accept(7)
@@ -4766,7 +4728,6 @@ func TestInboundPacketContextsPrunesExpiredRetiredChildSAs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
-			session.cfg.LocalSIPPort = 5062
 			session.mu.Lock()
 			session.connected = true
 			session.inboundESP = esp.Codec{SPI: 0x01020304}
@@ -4780,9 +4741,6 @@ func TestInboundPacketContextsPrunesExpiredRetiredChildSAs(t *testing.T) {
 
 			if got := len(contexts) != 0; got != tt.wantContext {
 				t.Fatalf("inboundPacketContexts() present = %t, want %t", got, tt.wantContext)
-			}
-			if tt.wantContext && contexts[0].localUDPPort != 5062 {
-				t.Fatalf("local UDP port = %d, want 5062", contexts[0].localUDPPort)
 			}
 			session.mu.RLock()
 			retiredCount := len(session.retiredChildSAs)
@@ -5073,7 +5031,6 @@ func TestChildSAByteHardLifetimeDiscardsBeforeOutboundOverflow(t *testing.T) {
 			session.outboundESP = esp.Codec{SPI: 0x10203040, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: bytes.Repeat([]byte{0x11}, 20)}
 			session.childSAOutboundBytes = tt.currentBytes
 			session.childSAByteExpiresAt = tt.hardBytes
-			session.dataPlaneDone = make(chan struct{})
 			session.mu.Unlock()
 
 			err := session.writeInner(context.Background(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP)
@@ -5241,11 +5198,14 @@ func TestHandleESPPacketValidatesTunnelNextHeader(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
 			session.mu.Lock()
 			session.connected = true
-			session.cfg.LocalSIPPort = 5062
 			session.inboundESP = codec
 			oldRx := time.Now().Add(-time.Hour)
 			session.lastProtectedRx = oldRx
 			session.mu.Unlock()
+			handler := &recordingInnerHandler{packetCh: make(chan packet.InnerPacket, 1)}
+			if _, err := session.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
 
 			session.handleESPPacket(wire)
 
@@ -5256,16 +5216,16 @@ func TestHandleESPPacketValidatesTunnelNextHeader(t *testing.T) {
 				t.Fatalf("lastProtectedRx = %s, want after %s for accepted protected ESP packet", lastRx, oldRx)
 			}
 			select {
-			case inbound := <-session.readCh:
+			case inbound := <-handler.packetCh:
 				if !tt.wantRead {
-					t.Fatalf("readCh delivered %+v, want packet discarded", inbound)
+					t.Fatalf("HandleInnerPacket() got %+v, want packet discarded", inbound)
 				}
-				if string(inbound.data) != "ping" {
-					t.Fatalf("readCh payload = %q, want ping", inbound.data)
+				if inbound.UDP == nil || string(inbound.UDP.Payload) != "ping" {
+					t.Fatalf("HandleInnerPacket() packet = %+v, want UDP payload ping", inbound)
 				}
 			default:
 				if tt.wantRead {
-					t.Fatal("readCh empty, want delivered inner UDP payload")
+					t.Fatal("HandleInnerPacket() was not called for inner UDP packet")
 				}
 			}
 		})
@@ -5321,7 +5281,6 @@ func TestHandleESPPacketDropsPacketsOutsideTrafficSelectors(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
 			session.mu.Lock()
 			session.connected = true
-			session.cfg.LocalSIPPort = 5062
 			session.inboundESP = codec
 			session.tunnel = Info{
 				ESPInitiatorSPI:           codec.SPI,
@@ -5329,20 +5288,24 @@ func TestHandleESPPacketDropsPacketsOutsideTrafficSelectors(t *testing.T) {
 				ResponderTrafficSelectors: []ike.TrafficSelector{ipv4Selector(net.IPv4(10, 0, 0, 2), 5060)},
 			}
 			session.mu.Unlock()
+			handler := &recordingInnerHandler{packetCh: make(chan packet.InnerPacket, 1)}
+			if _, err := session.Attach(handler); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
 
 			session.handleESPPacket(wire)
 
 			select {
-			case inbound := <-session.readCh:
+			case inbound := <-handler.packetCh:
 				if !tt.wantRead {
-					t.Fatalf("readCh delivered %+v, want packet discarded", inbound)
+					t.Fatalf("HandleInnerPacket() got %+v, want packet discarded", inbound)
 				}
-				if string(inbound.data) != "ping" {
-					t.Fatalf("readCh payload = %q, want ping", inbound.data)
+				if inbound.UDP == nil || string(inbound.UDP.Payload) != "ping" {
+					t.Fatalf("HandleInnerPacket() packet = %+v, want UDP payload ping", inbound)
 				}
 			default:
 				if tt.wantRead {
-					t.Fatal("readCh empty, want delivered inner UDP payload")
+					t.Fatal("HandleInnerPacket() was not called for matching inner UDP packet")
 				}
 			}
 		})
@@ -5518,7 +5481,13 @@ func TestExpiredChildSAIsDiscardedBeforeUse(t *testing.T) {
 		{
 			name: "outbound write",
 			act: func(session *Session) error {
-				return session.WritePacket(context.Background(), []byte("ping"))
+				return session.WriteInnerPacket(context.Background(), packet.InnerPacket{
+					UDP: &packet.UDPSegment{
+						Src:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
+						Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
+						Payload: []byte("ping"),
+					},
+				})
 			},
 		},
 		{
@@ -5538,13 +5507,10 @@ func TestExpiredChildSAIsDiscardedBeforeUse(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
 			session.mu.Lock()
 			session.connected = true
-			session.innerLocal = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062}
-			session.innerRemote = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060}
 			session.outboundESP = esp.Codec{SPI: 202}
 			session.inboundESP = esp.Codec{SPI: 101}
 			session.ike = &ikeCrypto{}
 			session.childSAExpiresAt = time.Now().Add(-time.Second)
-			session.dataPlaneDone = make(chan struct{})
 			session.mu.Unlock()
 
 			err := tt.act(session)

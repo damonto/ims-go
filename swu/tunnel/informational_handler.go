@@ -276,18 +276,17 @@ func (s *Session) applyPCSCFReselection(info Info) {
 	}
 	next := cloneInfo(s.tunnel)
 	next.PCSCFIPs = cloneIPList(info.PCSCFIPs)
-	local, remote := innerAddrsForInfo(next, nil, s.cfg.LocalSIPPort, s.cfg.SIPPort)
-	if local == nil || remote == nil {
+	local, remote := innerIPsForInfo(next, nil)
+	if len(local) == 0 || len(remote) == 0 {
 		s.mu.Unlock()
 		return
 	}
 	s.tunnel = next
-	s.innerLocal = local
-	s.innerRemote = remote
 	current := cloneInfo(s.tunnel)
 	s.mu.Unlock()
 
-	s.tryDeliverError(fmt.Errorf("reading packet: %w", pcscfReselectionRequestedError(current)))
+	cause := pcscfReselectionRequestedError(current)
+	s.notifyDetachedAttachments(s.detachAllAttachments(), cause)
 }
 
 func ikeErrorNotifyResponse(err error) ([]ike.Payload, bool) {

@@ -25,7 +25,6 @@ type imsProfile struct {
 	EPDGAddresses                []string                  `json:"epdgAddresses"`
 	InitialPort                  int                       `json:"initialPort"`
 	NATTPort                     int                       `json:"nattPort"`
-	LocalSIPPort                 int                       `json:"localSIPPort"`
 	SIPPort                      int                       `json:"sipPort"`
 	DHGroups                     []uint16                  `json:"dhGroups"`
 	IKEEncryption                []uint16                  `json:"ikeEncryption"`
@@ -382,9 +381,6 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 		}
 		if wifi.Tunnel.NATTPort == 0 {
 			wifi.Tunnel.NATTPort = profile.NATTPort
-		}
-		if wifi.Tunnel.LocalSIPPort == 0 {
-			wifi.Tunnel.LocalSIPPort = profile.LocalSIPPort
 		}
 		if wifi.Tunnel.SIPPort == 0 {
 			wifi.Tunnel.SIPPort = firstNonZero(profile.SIPPort, profile.IMSSIPServerPort)

@@ -108,10 +108,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "mcc": "530",
     "mnc": "24",
     "epdg": "epdg.ims.2degrees.net.nz",
-    "initialPort": 501,
-    "nattPort": 4501,
-    "localSIPPort": 5064,
-    "sipPort": 5070,
+	    "initialPort": 501,
+	    "nattPort": 4501,
+	    "sipPort": 5070,
     "dhGroups": [2, 14],
     "ikeEncryptionKeyLens": [256],
     "ikeIntegrity": [12],
@@ -216,8 +215,8 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				if gotEPDG := configEPDG(got); gotEPDG != "epdg.ims.2degrees.net.nz" {
 					t.Fatalf("EPDG = %q, want profile ePDG", gotEPDG)
 				}
-				if tunnel.InitialPort != 501 || tunnel.NATTPort != 4501 || tunnel.LocalSIPPort != 5064 || tunnel.SIPPort != 5070 {
-					t.Fatalf("Tunnel ports = %d/%d/%d/%d, want profile ports", tunnel.InitialPort, tunnel.NATTPort, tunnel.LocalSIPPort, tunnel.SIPPort)
+				if tunnel.InitialPort != 501 || tunnel.NATTPort != 4501 || tunnel.SIPPort != 5070 {
+					t.Fatalf("Tunnel ports = %d/%d/%d, want profile ports", tunnel.InitialPort, tunnel.NATTPort, tunnel.SIPPort)
 				}
 				if len(tunnel.DHGroups) != 2 || tunnel.DHGroups[0] != 2 || tunnel.DHGroups[1] != 14 {
 					t.Fatalf("Tunnel.DHGroups = %v, want [2 14]", tunnel.DHGroups)

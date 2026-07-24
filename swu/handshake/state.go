@@ -29,8 +29,6 @@ type Config struct {
 	PDNType                      PDNType
 	InitialPort                  int
 	NATTPort                     int
-	LocalSIPPort                 int
-	SIPPort                      int
 	DHGroups                     []uint16
 	IKEEncryption                []uint16
 	IKEEncryptionKeyLens         []uint16

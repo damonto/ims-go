@@ -23,35 +23,6 @@ type innerWriteState struct {
 	protectedBytes uint64
 }
 
-func (s *Session) WritePacket(ctx context.Context, data []byte) error {
-	if s.isClosed() {
-		return errors.New("writing packet: session is closed")
-	}
-	s.mu.RLock()
-	connected := s.connected
-	tunnelErr := s.disconnectedTunnelErr()
-	innerLocal := cloneUDPAddr(s.innerLocal)
-	innerRemote := cloneUDPAddr(s.innerRemote)
-	outerRemote := cloneUDPAddr(s.outerRemote)
-	s.mu.RUnlock()
-	if !connected {
-		if tunnelErr != nil {
-			return fmt.Errorf("writing packet: %w", tunnelErr)
-		}
-		if outerRemote == nil {
-			return errors.New("writing packet: remote address is nil")
-		}
-		return s.writeOuter(ctx, data, outerRemote)
-	}
-	return s.WriteInnerPacket(ctx, packet.InnerPacket{
-		UDP: &packet.UDPSegment{
-			Src:     innerLocal,
-			Dst:     innerRemote,
-			Payload: append([]byte(nil), data...),
-		},
-	})
-}
-
 func (s *Session) prepareInnerWrite(pkt packet.InnerPacket, payloadLen int) (innerWriteState, error) {
 	if s.isClosed() {
 		return innerWriteState{}, errors.New("writing packet: session is closed")
@@ -140,55 +111,8 @@ func (s *Session) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) 
 	return s.writeInner(ctx, pkt, wire, nextHeader)
 }
 
-func (s *Session) readConnectedPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	s.mu.RLock()
-	dataPlaneDone := s.dataPlaneDone
-	s.mu.RUnlock()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-s.closeDone():
-			return nil, nil, errors.New("reading packet: session is closed")
-		case <-dataPlaneDone:
-			if err := s.currentDisconnectedTunnelErr(); err != nil {
-				return nil, nil, fmt.Errorf("reading packet: %w", err)
-			}
-			return nil, nil, nil
-		case inbound, ok := <-s.readCh:
-			if !ok {
-				return nil, nil, errors.New("reading packet: session is closed")
-			}
-			if err := s.currentDisconnectedTunnelErr(); err != nil {
-				return nil, nil, fmt.Errorf("reading packet: %w", err)
-			}
-			if inbound.err != nil {
-				return nil, nil, inbound.err
-			}
-			return inbound.data, inbound.addr, nil
-		}
-	}
-}
-
-func (s *Session) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	if s.isClosed() {
-		return nil, nil, errors.New("reading packet: session is closed")
-	}
-	if err := s.currentDisconnectedTunnelErr(); err != nil {
-		return nil, nil, fmt.Errorf("reading packet: %w", err)
-	}
-	s.mu.RLock()
-	connected := s.connected
-	s.mu.RUnlock()
-	if !connected {
-		return s.readOuterPacket(ctx)
-	}
-	return s.readConnectedPacket(ctx)
-}
-
 func (s *Session) readLoop() {
 	defer s.wg.Done()
-	defer close(s.readCh)
 	buf := make([]byte, maxUDPPacketSize)
 	for {
 		packet, addr, ok := s.readLoopPacket(buf)
@@ -207,7 +131,7 @@ func (s *Session) readLoopPacket(buf []byte) ([]byte, net.Addr, bool) {
 		return nil, nil, false
 	}
 	if err := s.conn.SetReadDeadline(time.Now().Add(outerReadPollDelay)); err != nil {
-		s.tryDeliverError(fmt.Errorf("reading packet: setting read deadline: %w", err))
+		s.failSecurityAssociations(fmt.Errorf("reading packet: setting read deadline: %w", err))
 		return nil, nil, false
 	}
 	n, addr, err := s.conn.ReadFrom(buf)
@@ -221,7 +145,7 @@ func (s *Session) readLoopPacket(buf []byte) ([]byte, net.Addr, bool) {
 			}
 			return nil, nil, true
 		}
-		s.tryDeliverError(fmt.Errorf("reading packet: %w", err))
+		s.failSecurityAssociations(fmt.Errorf("reading packet: %w", err))
 		return nil, nil, false
 	}
 	return append([]byte(nil), buf[:n]...), addr, true
@@ -256,9 +180,8 @@ func (s *Session) handleNonESPPacket(packet []byte, addr net.Addr) {
 }
 
 type inboundESPContext struct {
-	codec        esp.Codec
-	info         Info
-	localUDPPort int
+	codec esp.Codec
+	info  Info
 }
 
 func (s *Session) inboundPacketContexts(spi uint32) []inboundESPContext {
@@ -267,11 +190,11 @@ func (s *Session) inboundPacketContexts(spi uint32) []inboundESPContext {
 	s.pruneRetiredChildSAs(time.Now())
 	contexts := make([]inboundESPContext, 0, 1+len(s.retiredChildSAs))
 	if s.inboundESP.SPI == spi {
-		contexts = append(contexts, inboundESPContext{codec: s.inboundESP, info: cloneInfo(s.tunnel), localUDPPort: s.cfg.LocalSIPPort})
+		contexts = append(contexts, inboundESPContext{codec: s.inboundESP, info: cloneInfo(s.tunnel)})
 	}
 	for _, child := range s.retiredChildSAs {
 		if child.inbound.SPI == spi {
-			contexts = append(contexts, inboundESPContext{codec: child.inbound, info: cloneInfo(child.info), localUDPPort: s.cfg.LocalSIPPort})
+			contexts = append(contexts, inboundESPContext{codec: child.inbound, info: cloneInfo(child.info)})
 		}
 	}
 	return contexts
@@ -293,7 +216,6 @@ func (s *Session) handleESPPacket(data []byte) {
 		return
 	}
 	var espPacket esp.ESPPacket
-	var localUDPPort int
 	var info Info
 	var protectedBytes uint64
 	var err error
@@ -306,7 +228,6 @@ func (s *Session) handleESPPacket(data []byte) {
 				return
 			}
 			info = context.info
-			localUDPPort = context.localUDPPort
 			break
 		}
 	}
@@ -355,7 +276,7 @@ func (s *Session) handleESPPacket(data []byte) {
 		s.logger.Debug("dropping ESP packet outside child sa traffic selectors", "src_ip", inner.IP.SrcIP, "dst_ip", inner.IP.DstIP, "protocol", inner.IP.Protocol)
 		return
 	}
-	s.handleInnerPacket(inner, localUDPPort)
+	s.handleInnerPacket(inner)
 	if accept.expireCurrent {
 		s.discardChildSecurityAssociations(errChildSAExpired)
 	}
@@ -484,13 +405,17 @@ func espPacketSPI(data []byte) (uint32, bool) {
 	return binary.BigEndian.Uint32(data[:4]), true
 }
 
-func (s *Session) handleInnerPacket(pkt packet.InnerPacket, localUDPPort int) {
+func (s *Session) handleInnerPacket(pkt packet.InnerPacket) {
 	if s.dispatchInnerPacket(pkt) {
 		return
 	}
 	switch pkt.IP.Protocol {
 	case packet.ProtocolUDP:
-		s.handleInnerUDPPacket(pkt, localUDPPort)
+		if pkt.UDP != nil {
+			s.logger.Debug("dropping inner UDP packet without attachment", "src_addr", pkt.UDP.Src, "dst_addr", pkt.UDP.Dst)
+			return
+		}
+		s.logger.Debug("dropping inner UDP packet without attachment", "src_ip", pkt.IP.SrcIP, "dst_ip", pkt.IP.DstIP)
 	case packet.ProtocolTCP:
 		if pkt.TCP != nil {
 			s.logger.Debug("dropping inner TCP packet without attachment", "src_addr", pkt.TCP.Src, "dst_addr", pkt.TCP.Dst, "tcp_flags", pkt.TCP.Flags)
@@ -500,33 +425,7 @@ func (s *Session) handleInnerPacket(pkt packet.InnerPacket, localUDPPort int) {
 	case packet.ProtocolESP:
 		s.logger.Debug("dropping inner ESP packet without attachment", "src_ip", pkt.IP.SrcIP, "dst_ip", pkt.IP.DstIP)
 	default:
-		s.logger.Debug("dropping unsupported inner protocol", "inner_proto", pkt.IP.Protocol)
-	}
-}
-
-func (s *Session) handleInnerUDPPacket(pkt packet.InnerPacket, localUDPPort int) {
-	if pkt.UDP == nil || pkt.UDP.Src == nil || pkt.UDP.Dst == nil {
-		s.logger.Debug("parsing inner UDP packet failed", "err", errors.New("udp segment is missing"))
-		return
-	}
-	if localUDPPort != 0 && pkt.UDP.Dst.Port != localUDPPort {
-		s.logger.Debug("parsing inner UDP packet failed", "err", fmt.Errorf("unexpected destination port %d", pkt.UDP.Dst.Port))
-		return
-	}
-	peer := cloneUDPAddr(pkt.UDP.Src)
-	payload := append([]byte(nil), pkt.UDP.Payload...)
-	s.logger.Debug("read inner UDP packet", "peer_addr", peer, "payload_len", len(payload))
-	select {
-	case s.readCh <- inboundPacket{data: payload, addr: peer}:
-	case <-s.closeDone():
-	}
-}
-
-func (s *Session) tryDeliverError(err error) {
-	select {
-	case s.readCh <- inboundPacket{err: err}:
-	case <-s.closeDone():
-	default:
+		s.logger.Debug("dropping inner packet without attachment", "inner_proto", pkt.IP.Protocol)
 	}
 }
 

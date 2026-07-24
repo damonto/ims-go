@@ -37,17 +37,9 @@ type Session struct {
 	attachmentsMu sync.RWMutex
 	attachments   []*sessionAttachment
 
-	closeCh       chan struct{}
-	closeOnce     sync.Once
-	wg            sync.WaitGroup
-	readCh        chan inboundPacket
-	dataPlaneDone chan struct{}
-}
-
-type inboundPacket struct {
-	data []byte
-	addr net.Addr
-	err  error
+	closeCh   chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
 }
 
 type inboundIKE struct {
@@ -135,7 +127,6 @@ func newSession(cfg Config, conn net.PacketConn, owned bool, remote *net.UDPAddr
 		cfg:         cfg,
 		logger:      cfg.Logger.With("component", "swu"),
 		closeCh:     make(chan struct{}),
-		readCh:      make(chan inboundPacket, 16),
 		ikeExchangeState: ikeExchangeState{
 			ikeRequestGate: make(chan struct{}, 1),
 			rekeyWake:      make(chan struct{}, 1),
@@ -150,8 +141,6 @@ func (s *Session) commitConnect(state *connectState) {
 	s.mu.Lock()
 	s.connected = true
 	s.connecting = false
-	s.innerLocal = state.innerLocalAddr(s.cfg.LocalSIPPort)
-	s.innerRemote = state.innerRemoteAddr(s.cfg.SIPPort)
 	s.useNATT = state.useNATT
 	s.ikeFragmentationSupported = state.ikeFragmentationSupported
 	s.tunnel = infoFromHandshake(state.established.Info)
@@ -201,7 +190,6 @@ func (s *Session) commitConnect(state *connectState) {
 	s.inboundESP = state.inboundESPCodec()
 	s.retiredChildSAs = nil
 	s.pendingChildSA = pendingChildSA{}
-	s.dataPlaneDone = make(chan struct{})
 	s.mu.Unlock()
 }
 

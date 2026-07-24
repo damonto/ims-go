@@ -785,7 +785,6 @@ func (s *Session) childSARekeyLoop() {
 		now := time.Now()
 		if rekeyHardLifetimeExpired(expiresAt, now) {
 			cause := fmt.Errorf("child sa rekey: %w", errChildSAExpired)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}
@@ -812,7 +811,6 @@ func (s *Session) childSARekeyLoop() {
 		if errors.Is(err, errIKETemporaryFailure) {
 			if !temporaryFailure.record(now) {
 				cause := fmt.Errorf("child sa rekey: %w", err)
-				s.tryDeliverError(cause)
 				s.failSecurityAssociations(cause)
 				return
 			}
@@ -821,19 +819,16 @@ func (s *Session) childSARekeyLoop() {
 		}
 		if errors.Is(err, errChildSANotFound) {
 			cause := fmt.Errorf("child sa rekey: %w", err)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}
 		if errors.Is(err, errIKERequestIncomplete) {
 			cause := fmt.Errorf("child sa rekey: %w", err)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}
 		if rekeyHardLifetimeExpired(expiresAt, time.Now()) {
 			cause := fmt.Errorf("child sa rekey: %w", err)
-			s.tryDeliverError(cause)
 			s.failSecurityAssociations(cause)
 			return
 		}
