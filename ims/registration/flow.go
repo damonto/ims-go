@@ -11,6 +11,7 @@ type Flow struct {
 	ContactHost       string
 	RegisterPort      int
 	MessagePort       int
+	Outbound          bool
 	ServiceRoutes     []string
 	SecurityClient    security.Param
 	SecurityClients   security.Params
@@ -67,6 +68,7 @@ func (f Flow) requestPolicy(routes []string, userAgent, accessNetworkInfo string
 		Routes:            append([]string(nil), routes...),
 		UserAgent:         userAgent,
 		AccessNetworkInfo: accessNetworkInfo,
+		Outbound:          f.Outbound,
 		Security: sip.SecurityAgreement{
 			Verify:   verify,
 			Required: verify != "",

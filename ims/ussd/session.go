@@ -290,7 +290,7 @@ func (s *Session) buildDialogRequest(method string, body []byte) sip.Message {
 	msg.Headers.Add("Call-ID", s.callID)
 	msg.Headers.Add("Session-ID", s.sessionID)
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d %s", s.nextCSeq(), method))
-	msg.Headers.Add("Contact", contactValue(state, s.endpoint.cfg.NetworkInitiatedSupported))
+	msg.Headers.Add("Contact", requestContactValue(state, s.endpoint.cfg.NetworkInitiatedSupported))
 	s.endpoint.reg.DialogRequestPolicy(s.routeSet).Apply(&msg)
 	msg.Body = body
 	return msg

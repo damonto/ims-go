@@ -520,6 +520,14 @@ func incomingInviteKey(msg sip.Message, method string) string {
 }
 
 func contactValue(state registration.State) string {
+	return contactValueForURI(state.ContactURI)
+}
+
+func requestContactValue(state registration.State) string {
+	return contactValueForURI(state.RequestContactURI())
+}
+
+func contactValueForURI(uri string) string {
 	params := []string{
 		`audio`,
 		fmt.Sprintf(`+g.3gpp.icsi-ref="%s"`, mmtelICSIEncoded),
@@ -527,11 +535,7 @@ func contactValue(state registration.State) string {
 		`+g.3gpp.ps2cs-srvcc-orig-pre-alerting`,
 		`+g.3gpp.srvcc-alerting`,
 	}
-	return fmt.Sprintf("<%s>;%s", sipContactURI(state.ContactHost, state.MessagePort), strings.Join(params, ";"))
-}
-
-func sipContactURI(host string, port int) string {
-	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
+	return fmt.Sprintf("<%s>;%s", uri, strings.Join(params, ";"))
 }
 
 func preferredIdentity(state registration.State) string {

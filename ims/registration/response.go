@@ -146,6 +146,11 @@ func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Mess
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
 			return false, fmt.Errorf("refreshing IMS registration: %w", err)
 		}
+		singleRegistration, err := s.validateRegisterSuccessForFlow(resp, state.flow)
+		if err != nil {
+			return false, fmt.Errorf("refreshing IMS registration: %w", err)
+		}
+		s.applyRegisterCapability(singleRegistration)
 		s.applyRegisterSuccess(resp)
 		return true, nil
 	case sipStatusUnauthorized, sipStatusProxyAuthenticationRequired:

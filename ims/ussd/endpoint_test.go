@@ -746,62 +746,91 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 	}
 }
 
-func TestContactValueFormatsIPHosts(t *testing.T) {
+func TestContactValuesUseRegisteredURI(t *testing.T) {
 	tests := []struct {
 		name                      string
 		state                     registration.State
 		networkInitiatedSupported bool
-		want                      string
+		wantRequestURI            string
 		wantNetworkInitTag        bool
 	}{
 		{
 			name: "ipv4",
 			state: registration.State{
-				ContactHost: "127.0.0.1",
-				MessagePort: 5062,
+				ContactURI: "sip:opaque@127.0.0.1:5062;transport=tcp",
 			},
-			want: "<sip:127.0.0.1:5062>;",
+			wantRequestURI: "sip:opaque@127.0.0.1:5062;transport=tcp",
 		},
 		{
-			name: "ipv6",
+			name: "outbound ipv6",
 			state: registration.State{
-				ContactHost: "2001:db8::20",
-				MessagePort: 5062,
+				ContactURI: "sip:opaque@[2001:db8::20]:5062;transport=tcp",
+				Flow:       registration.Flow{Outbound: true},
 			},
-			want: "<sip:[2001:db8::20]:5062>;",
+			wantRequestURI: "sip:opaque@[2001:db8::20]:5062;transport=tcp;ob",
 		},
 		{
 			name:                      "network initiated advertised only when configured",
 			networkInitiatedSupported: true,
 			state: registration.State{
-				ContactHost: "127.0.0.1",
-				MessagePort: 5062,
+				ContactURI: "sip:opaque@127.0.0.1:5062",
 			},
-			want:               "<sip:127.0.0.1:5062>;",
+			wantRequestURI:     "sip:opaque@127.0.0.1:5062",
 			wantNetworkInitTag: true,
 		},
 		{
 			name: "imei does not add sip instance outside REGISTER",
 			state: registration.State{
-				ContactHost: "127.0.0.1",
-				MessagePort: 5062,
-				IMEI:        "123456789012345",
+				ContactURI: "sip:opaque@127.0.0.1:5062",
+				IMEI:       "123456789012345",
 			},
-			want: "<sip:127.0.0.1:5062>;",
+			wantRequestURI: "sip:opaque@127.0.0.1:5062",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := contactValue(tt.state, tt.networkInitiatedSupported)
-			if !strings.HasPrefix(got, tt.want) {
-				t.Fatalf("contactValue() = %q, want prefix %q", got, tt.want)
+			response := contactValue(tt.state, tt.networkInitiatedSupported)
+			if got := sip.AddressURI(response); got != tt.state.ContactURI {
+				t.Fatalf("contactValue() URI = %q, want %q", got, tt.state.ContactURI)
 			}
-			if strings.Contains(got, nwInitUSSI) != tt.wantNetworkInitTag {
-				t.Fatalf("contactValue() = %q, want network init tag %t", got, tt.wantNetworkInitTag)
+			request := requestContactValue(tt.state, tt.networkInitiatedSupported)
+			if got := sip.AddressURI(request); got != tt.wantRequestURI {
+				t.Fatalf("requestContactValue() URI = %q, want %q", got, tt.wantRequestURI)
 			}
-			if strings.Contains(got, "+sip.instance") {
-				t.Fatalf("contactValue() = %q, want no +sip.instance", got)
+			if strings.Contains(response, nwInitUSSI) != tt.wantNetworkInitTag || strings.Contains(request, nwInitUSSI) != tt.wantNetworkInitTag {
+				t.Fatalf("Contact values = %q / %q, want network init tag %t", response, request, tt.wantNetworkInitTag)
+			}
+			if strings.Contains(response, "+sip.instance") || strings.Contains(request, "+sip.instance") {
+				t.Fatalf("Contact values = %q / %q, want no +sip.instance", response, request)
+			}
+		})
+	}
+}
+
+func TestUSSDCancelKeepsInviteSupportedOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		supported []string
+	}{
+		{name: "outbound", supported: []string{"199,path,sec-agree,outbound"}},
+		{name: "repeated headers", supported: []string{"199,path", "outbound"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invite := sip.NewRequest("INVITE", "sip:ussd@example.com")
+			invite.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bK-test")
+			invite.Headers.Add("From", "<sip:user@example.com>;tag=local")
+			invite.Headers.Add("To", "<sip:ussd@example.com>")
+			invite.Headers.Add("Call-ID", "call-1")
+			invite.Headers.Add("CSeq", "1 INVITE")
+			for _, value := range tt.supported {
+				invite.Headers.Add("Supported", value)
+			}
+			cancel := buildCancel(invite)
+			if got := cancel.HeadersByName("Supported"); !slices.Equal(got, tt.supported) {
+				t.Fatalf("CANCEL Supported = %q, want %q", got, tt.supported)
 			}
 		})
 	}

@@ -763,8 +763,12 @@ func TestRegisterUsesIPSecClientAndServerPorts(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(contact, "sip:"+tt.wantContact) {
-				t.Fatalf("Contact = %q, want endpoint %q", contact, tt.wantContact)
+			uri, ok := parseComparableSIPURI(sip.AddressURI(contact))
+			if !ok {
+				t.Fatalf("parsing Contact URI %q", contact)
+			}
+			if uri.hostPort != tt.wantContact {
+				t.Fatalf("Contact endpoint = %q, want %q", uri.hostPort, tt.wantContact)
 			}
 		})
 	}

@@ -106,7 +106,11 @@ func (s *Registrar) calculateRegisterAuthorization(ctx context.Context, challeng
 	if challenge.Nonce == "" {
 		return nil, nil, nil, "", nil
 	}
-	result, err := security.BuildAKAAuthorization(ctx, akaProvider{s.card}, security.Identity{
+	result, err := security.BuildAKAAuthorization(ctx, akaProvider{
+		card:       s.card,
+		group:      s.group,
+		preference: s.cfg.RegistrationPreference,
+	}, security.Identity{
 		PrivateIdentity: s.State().PrivateIdentity,
 		RegisterURI:     s.State().RegisterURI,
 		Realm:           defaultRealm(challenge.Realm, s.State().RegisterURI),
@@ -384,8 +388,17 @@ func defaultRealm(realm, registerURI string) string {
 	return strings.TrimPrefix(registerURI, "sip:")
 }
 
-type akaProvider struct{ card Card }
+type akaProvider struct {
+	card       Card
+	group      *Group
+	preference int
+}
 
 func (p akaProvider) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	release, err := p.group.BeginAKA(ctx, p.preference)
+	if err != nil {
+		return usim.AKAResult{}, fmt.Errorf("waiting for USIM AKA access: %w", err)
+	}
+	defer release()
 	return p.card.AKA(ctx, rand, autn)
 }

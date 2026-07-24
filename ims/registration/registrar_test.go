@@ -603,37 +603,35 @@ func TestNewIdentityResolution(t *testing.T) {
 
 func TestContactURIFormatting(t *testing.T) {
 	tests := []struct {
-		name               string
-		cfg                Config
-		localAddr          net.Addr
-		wantRegisterURI    string
-		wantRegisterPrefix string
-		wantSubscribe      string
+		name       string
+		cfg        Config
+		localAddr  net.Addr
+		wantSuffix string
 	}{
 		{
-			name:               "ipv4",
-			localAddr:          &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
-			wantRegisterURI:    "sip:127.0.0.1:5062",
-			wantRegisterPrefix: "<sip:127.0.0.1:5062>;",
-			wantSubscribe:      "<sip:127.0.0.1:5062>;text",
+			name:       "ipv4",
+			localAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+			wantSuffix: "@127.0.0.1:5062;transport=tcp",
 		},
 		{
-			name:               "ipv6",
-			localAddr:          &net.TCPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5062},
-			wantRegisterURI:    "sip:[2001:db8::10]:5062",
-			wantRegisterPrefix: "<sip:[2001:db8::10]:5062>;",
-			wantSubscribe:      "<sip:[2001:db8::10]:5062>;text",
+			name:       "ipv6",
+			localAddr:  &net.TCPAddr{IP: net.ParseIP("2001:db8::10"), Port: 5062},
+			wantSuffix: "@[2001:db8::10]:5062;transport=tcp",
 		},
 		{
-			name:               "subscribe omits sip instance outside REGISTER",
-			cfg:                Config{IMEI: "123456789012345"},
-			localAddr:          &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
-			wantRegisterURI:    "sip:127.0.0.1:5062",
-			wantRegisterPrefix: "<sip:127.0.0.1:5062>;",
-			wantSubscribe:      "<sip:127.0.0.1:5062>;text",
+			name:       "udp omits transport parameter",
+			localAddr:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+			wantSuffix: "@127.0.0.1:5062",
+		},
+		{
+			name:       "subscribe omits sip instance outside REGISTER",
+			cfg:        Config{IMEI: "123456789012345"},
+			localAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+			wantSuffix: "@127.0.0.1:5062;transport=tcp",
 		},
 	}
 
+	contactUsers := make(map[string]struct{}, len(tests))
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := &stubTransport{
@@ -643,12 +641,30 @@ func TestContactURIFormatting(t *testing.T) {
 			}
 			svc := newTestService(t, tt.cfg, transport, stubCard{})
 
-			if got := svc.currentRegisterContactURI(); got != tt.wantRegisterURI {
-				t.Fatalf("currentRegisterContactURI() = %q, want %q", got, tt.wantRegisterURI)
+			registerURI := svc.currentRegisterContactURI()
+			parsed, ok := parseComparableSIPURI(registerURI)
+			if !ok || parsed.userinfo == "" {
+				t.Fatalf("currentRegisterContactURI() = %q, want opaque user", registerURI)
+			}
+			publicIdentity, _ := parseComparableSIPURI(sip.AddressURI(svc.State().PublicIdentity))
+			if parsed.userinfo == publicIdentity.userinfo {
+				t.Fatalf("Contact user = %q, want value unrelated to public identity", parsed.userinfo)
+			}
+			if _, exists := contactUsers[parsed.userinfo]; exists {
+				t.Fatalf("Contact user = %q, want globally unique value", parsed.userinfo)
+			}
+			contactUsers[parsed.userinfo] = struct{}{}
+			if !strings.HasSuffix(registerURI, tt.wantSuffix) {
+				t.Fatalf("currentRegisterContactURI() = %q, want suffix %q", registerURI, tt.wantSuffix)
+			}
+			if got := svc.State().ContactURI; got != registerURI {
+				t.Fatalf("State().ContactURI = %q, want %q", got, registerURI)
 			}
 
-			if got := svc.buildRegister(nil, nil).Header("Contact"); !strings.HasPrefix(got, tt.wantRegisterPrefix) {
-				t.Fatalf("REGISTER Contact = %q, want prefix %q", got, tt.wantRegisterPrefix)
+			if got := svc.buildRegister(nil, nil).Header("Contact"); sip.AddressURI(got) != registerURI {
+				t.Fatalf("REGISTER Contact = %q, want URI %q", got, registerURI)
+			} else if !strings.Contains(got, ";audio;") {
+				t.Fatalf("REGISTER Contact = %q, want audio media feature tag", got)
 			} else if !strings.Contains(got, "+g.3gpp.smsip") || !strings.Contains(got, "+g.3gpp.smsip-msisdn-less") {
 				t.Fatalf("REGISTER Contact = %q, want SMS over IP and MSISDN-less feature tags", got)
 			}
@@ -656,8 +672,9 @@ func TestContactURIFormatting(t *testing.T) {
 				t.Fatalf("REGISTER Supported = %q, want path", got)
 			}
 
-			if got := svc.buildSubscribe().Header("Contact"); got != tt.wantSubscribe {
-				t.Fatalf("SUBSCRIBE Contact = %q, want %q", got, tt.wantSubscribe)
+			wantSubscribe := fmt.Sprintf("<%s>;text", registerURI)
+			if got := svc.buildSubscribe().Header("Contact"); got != wantSubscribe {
+				t.Fatalf("SUBSCRIBE Contact = %q, want %q", got, wantSubscribe)
 			} else if strings.Contains(got, "+sip.instance") {
 				t.Fatalf("SUBSCRIBE Contact = %q, want no +sip.instance", got)
 			}
@@ -2665,12 +2682,32 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 			},
 		},
 		{
-			name: "does not match contact with different userinfo",
+			name: "matches registrar response that omits transport",
+			headersFor: func(req sip.Message) []sip.Header {
+				contact := strings.Replace(req.Header("Contact"), ";transport=tcp", "", 1)
+				return []sip.Header{
+					{Name: "Contact", Value: contact + `;expires=1800`},
+					{Name: "Expires", Value: "600"},
+				}
+			},
+			checkState: func(t *testing.T, state State) {
+				t.Helper()
+				if state.RegisterExpires != 30*time.Minute {
+					t.Fatalf("RegisterExpires = %v, want %v", state.RegisterExpires, 30*time.Minute)
+				}
+			},
+		},
+		{
+			name: "does not match unrelated userinfo",
 			headersFor: func(req sip.Message) []sip.Header {
 				uri, params := sip.AddressURIAndParams(req.Header("Contact"))
-				hostPort := strings.TrimPrefix(uri, "sip:")
+				at := strings.IndexByte(uri, '@')
+				if at < 0 {
+					return []sip.Header{{Name: "Expires", Value: "600"}}
+				}
+				contact := "sip:another-user" + uri[at:] + params
 				return []sip.Header{
-					{Name: "Contact", Value: `<sip:001010123456789@` + hostPort + `>` + params + `;expires=1800`},
+					{Name: "Contact", Value: contact + `;expires=1800`},
 					{Name: "Expires", Value: "600"},
 				}
 			},

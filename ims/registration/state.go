@@ -1,6 +1,8 @@
 package registration
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,11 +22,17 @@ func associatedURIsFromMessage(msg sip.Message) []string {
 	return uris
 }
 
-func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration, bool) {
+type registerBinding struct {
+	uri      string
+	instance string
+	regID    uint32
+}
+
+func registerResponseExpires(msg sip.Message, binding registerBinding) (time.Duration, bool) {
 	for _, value := range msg.HeadersByName("Contact") {
 		for _, part := range sip.SplitHeaderList(value) {
-			uri, params := sip.AddressURIAndParams(part)
-			if uri == "" || !sameContactURI(uri, contactURI) {
+			_, params := sip.AddressURIAndParams(part)
+			if !contactMatchesRegisterBinding(part, binding) {
 				continue
 			}
 			if expires, ok := parsePositiveSeconds(sip.HeaderParam(params, "expires")); ok {
@@ -33,6 +41,51 @@ func registerResponseExpires(msg sip.Message, contactURI string) (time.Duration,
 		}
 	}
 	return parsePositiveSeconds(msg.Header("Expires"))
+}
+
+func contactMatchesRegisterBinding(value string, binding registerBinding) bool {
+	uri, params := sip.AddressURIAndParams(value)
+	if uri == "" {
+		return false
+	}
+	regID, hasRegID := parseRegistrationID(sip.HeaderParam(params, "reg-id"))
+	if hasRegID && binding.regID != 0 && regID != binding.regID {
+		return false
+	}
+	instance := normalizeSIPInstance(sip.HeaderParam(params, "+sip.instance"))
+	if instance != "" && binding.instance != "" && !strings.EqualFold(instance, binding.instance) {
+		return false
+	}
+	if sameRegisterContactURI(uri, binding.uri) {
+		return true
+	}
+	return binding.regID != 0 && hasRegID && regID == binding.regID &&
+		instance != "" && strings.EqualFold(instance, binding.instance)
+}
+
+func parseRegistrationID(value string) (uint32, bool) {
+	regID, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+	return uint32(regID), err == nil
+}
+
+func sameRegisterContactURI(got, want string) bool {
+	if sameContactURI(got, want) {
+		return true
+	}
+	gotURI, gotOK := parseComparableSIPURI(got)
+	wantURI, wantOK := parseComparableSIPURI(want)
+	if !gotOK || !wantOK || gotURI.scheme != wantURI.scheme ||
+		gotURI.userinfo != wantURI.userinfo ||
+		!strings.EqualFold(gotURI.hostPort, wantURI.hostPort) {
+		return false
+	}
+	gotTransport, gotHasTransport := gotURI.parameters["transport"]
+	wantTransport, wantHasTransport := wantURI.parameters["transport"]
+	if gotHasTransport && wantHasTransport && gotTransport != wantTransport {
+		return false
+	}
+	// Some IMS registrars omit the transport parameter in the response.
+	return true
 }
 
 func sameContactURI(got, want string) bool {
@@ -194,12 +247,28 @@ func uriUnreserved(value byte) bool {
 }
 
 func (s *Registrar) currentRegisterContactURI() string {
-	flow := s.CurrentFlow()
+	return s.currentRegisterBinding().uri
+}
+
+func (s *Registrar) currentRegisterBinding() registerBinding {
+	return s.registerBindingForFlow(s.CurrentFlow())
+}
+
+func (s *Registrar) registerBindingForFlow(flow Flow) registerBinding {
 	port := flow.RegisterPort
 	if flow.MessagePort != 0 {
 		port = flow.MessagePort
 	}
-	return contactURI(flow.ContactHost, port)
+	state := s.State()
+	registrationID := uint32(0)
+	if s.multipleRegistration() {
+		registrationID = state.registrationID
+	}
+	return registerBinding{
+		uri:      s.registerContactURI(flow.ContactHost, port),
+		instance: currentSIPInstance(state),
+		regID:    registrationID,
+	}
 }
 
 func (s *Registrar) applyAssociatedURI(msg sip.Message) {
@@ -278,11 +347,45 @@ func (s *Registrar) refreshInterval() time.Duration {
 }
 
 func (s *Registrar) applyRegisterExpires(msg sip.Message) {
-	expires, ok := registerResponseExpires(msg, s.currentRegisterContactURI())
+	expires, ok := registerResponseExpires(msg, s.currentRegisterBinding())
 	if !ok {
 		return
 	}
 	s.setRegisterExpires(expires)
+}
+
+func (s *Registrar) validateRegisterSuccess(msg sip.Message) (bool, error) {
+	return s.validateRegisterSuccessForFlow(msg, s.CurrentFlow())
+}
+
+func (s *Registrar) validateRegisterSuccessForFlow(msg sip.Message, flow Flow) (bool, error) {
+	if !s.multipleRegistration() {
+		return false, nil
+	}
+	binding := s.registerBindingForFlow(flow)
+	for _, value := range msg.HeadersByName("Contact") {
+		for _, contact := range sip.SplitHeaderList(value) {
+			if contactMatchesRegisterBinding(contact, binding) {
+				return !msg.HeaderHasToken("Require", "outbound"), nil
+			}
+		}
+	}
+	return false, fmt.Errorf("%w: reg-id %d", errRegisterBindingMissing, binding.regID)
+}
+
+func (s *Registrar) applyRegisterCapability(singleRegistration bool) {
+	outbound := !singleRegistration && s.multipleRegistration()
+	if !singleRegistration {
+		s.mu.Lock()
+		s.flow.Outbound = outbound
+		s.mu.Unlock()
+		return
+	}
+	s.group.setSingleRegistrationOwner(s.cfg.RegistrationID, s.cfg.RegistrationPreference, s.revokeSingleRegistration)
+	s.mu.Lock()
+	s.flow.Outbound = false
+	s.mu.Unlock()
+	s.logger.Info("IMS registrar does not support multiple registration; using one preferred flow", "registration_id", s.cfg.RegistrationID)
 }
 
 func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
@@ -348,6 +451,7 @@ func (s *Registrar) resetRegistrationState() {
 	s.regInfoVersionSet = false
 	s.regInfoRegistrations = make(map[string]regInfoRegistrationEntry)
 	s.mu.Unlock()
+	s.releaseRegistrationOwnership()
 }
 
 func (s *Registrar) rememberRegisterTransaction(msg sip.Message) {
@@ -366,6 +470,15 @@ func (s *Registrar) setRegistered(registered bool) {
 	s.mu.Lock()
 	s.state.Registered = registered
 	s.mu.Unlock()
+	if !registered {
+		s.releaseRegistrationOwnership()
+	}
+}
+
+func (s *Registrar) releaseRegistrationOwnership() {
+	// A later initial registration probes outbound support again because the
+	// selected S-CSCF can change after disconnect or P-CSCF reselection.
+	s.group.releaseSingleRegistration(s.cfg.RegistrationID)
 }
 
 func (s *Registrar) isRegistered() bool {

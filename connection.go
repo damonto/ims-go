@@ -134,12 +134,19 @@ func (c *Client) Tunnel() swutunnel.Info {
 	return active.tunnel.Info()
 }
 
-func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, error) {
+func (c *Client) connectOnce(ctx context.Context, internal bool) (_ *activeConn, resultErr error) {
 	setup, setupCtx, err := c.prepareConnect(ctx, internal)
 	if err != nil {
 		return nil, err
 	}
-	defer setup.rollback()
+	defer func() {
+		if err := setup.rollback(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rolling back connection setup: %w", err))
+		}
+		if resultErr != nil && !internal {
+			c.emitConnectFailure(ctx, resultErr)
+		}
+	}()
 
 	if !internal {
 		c.emitStatus(StatusConnecting)
@@ -148,9 +155,6 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 		if c.cfg.usesVoWiFi() {
 			c.recordSWUBackoff(err, time.Now())
 		}
-		if !internal {
-			c.emitConnectFailure(ctx, err)
-		}
 		return nil, err
 	}
 	if c.cfg.usesVoWiFi() {
@@ -158,17 +162,11 @@ func (c *Client) connectOnce(ctx context.Context, internal bool) (*activeConn, e
 	}
 
 	if err := c.openIMSWithPCSCFFailover(setupCtx, setup); err != nil {
-		if !internal {
-			c.emitConnectFailure(ctx, err)
-		}
 		return nil, err
 	}
 
 	active, err := c.commitConnect(setup)
 	if err != nil {
-		if !internal {
-			c.emitConnectFailure(ctx, err)
-		}
 		return nil, err
 	}
 
@@ -364,7 +362,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	return active, nil
 }
 
-func (s *connectSetup) rollback() {
+func (s *connectSetup) rollback() error {
 	if s.client != nil {
 		s.client.finishConnectAttempt()
 	}
@@ -372,15 +370,16 @@ func (s *connectSetup) rollback() {
 		s.setupStop()
 	}
 	if s.scope == nil {
-		return
+		return nil
 	}
 	s.scope.stop()
-	_ = s.ims.close()
+	err := s.closeIMS()
 	if s.access != nil {
-		_ = s.access.Close()
+		err = errors.Join(err, wrapCloseError(closeActionAccess, normalizeCloseError(s.access.Close())))
 	} else if s.tunnel != nil {
-		_ = s.tunnel.Close()
+		err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(s.tunnel.Close())))
 	}
+	return err
 }
 
 func (c *Client) finishConnectAttempt() {
@@ -454,6 +453,9 @@ func (c *Client) Close() error {
 			active.scope.stop()
 		}
 		if c.waitCloseTasks() {
+			if c.cfg.IMS.RegistrationGroup != nil {
+				err = errors.Join(err, c.deregisterActive(active))
+			}
 			err = errors.Join(err, c.closeActive(active))
 		} else {
 			err = errors.Join(err, context.DeadlineExceeded)
@@ -540,6 +542,25 @@ func (c *Client) closeActive(active *activeConn) error {
 	return err
 }
 
+func (c *Client) deregisterActive(active *activeConn) error {
+	if active == nil {
+		return nil
+	}
+	return deregisterRegistrar(active.ims.reg)
+}
+
+func deregisterRegistrar(reg *registration.Registrar) error {
+	if reg == nil || !reg.State().Registered {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
+	defer cancel()
+	if err := reg.Deregister(ctx); err != nil {
+		return fmt.Errorf("deregistering IMS before close: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) closeActiveConnection(active *activeConn) error {
 	if active == nil {
 		return nil
@@ -559,7 +580,18 @@ func (c *Client) closeIMS(active *activeConn) error {
 }
 
 func (s *connectSetup) closeIMS() error {
-	return s.ims.close()
+	var err error
+	if s.imsCfg.RegistrationGroup != nil {
+		err = deregisterRegistrar(s.ims.reg)
+	}
+	return errors.Join(err, s.ims.close())
+}
+
+func (s *connectSetup) closeIMSAfterFailure(cause error) error {
+	if err := s.closeIMS(); err != nil {
+		return errors.Join(cause, fmt.Errorf("closing failed IMS setup: %w", err))
+	}
+	return cause
 }
 
 func (r *imsStack) close() error {
@@ -818,12 +850,10 @@ func (c *Client) restoreIMSWithNextLTEPCSCF(active *activeConn, access pcscfRese
 	// contains only candidates that still need to be attempted.
 	remainingCandidates := max(access.PCSCFCandidateCount(), 1)
 	if err := c.openIMSWithPCSCFFailoverAttempts(setupCtx, setup, access, remainingCandidates); err != nil {
-		_ = setup.closeIMS()
-		return nil, err
+		return nil, setup.closeIMSAfterFailure(err)
 	}
 	if err := c.commitIMSRestore(active, setup); err != nil {
-		_ = setup.closeIMS()
-		return nil, err
+		return nil, setup.closeIMSAfterFailure(err)
 	}
 	c.emitStatus(StatusRegistered)
 	return active, nil
@@ -972,12 +1002,10 @@ func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunn
 		tunnel:    active.tunnel,
 	}
 	if err := c.openIMSWithPCSCFFailover(setupCtx, setup); err != nil {
-		_ = setup.closeIMS()
-		return nil, err
+		return nil, setup.closeIMSAfterFailure(err)
 	}
 	if err := c.commitIMSRestore(active, setup); err != nil {
-		_ = setup.closeIMS()
-		return nil, err
+		return nil, setup.closeIMSAfterFailure(err)
 	}
 	c.emitStatus(StatusRegistered)
 	return active, nil

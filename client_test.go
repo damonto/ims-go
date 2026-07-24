@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -156,6 +155,7 @@ type pcscfReselectingAccessStub struct {
 	openCalls   int
 	selectCalls int
 	selectErr   error
+	closeErr    error
 }
 
 func (s *pcscfReselectingAccessStub) OpenIMS(context.Context, accessIMSConfig) (imsAccess, error) {
@@ -164,7 +164,7 @@ func (s *pcscfReselectingAccessStub) OpenIMS(context.Context, accessIMSConfig) (
 	return imsAccess{}, err
 }
 
-func (s *pcscfReselectingAccessStub) Close() error { return nil }
+func (s *pcscfReselectingAccessStub) Close() error { return s.closeErr }
 
 func (s *pcscfReselectingAccessStub) PCSCFCandidateCount() int { return len(s.openErrors) }
 
@@ -378,6 +378,81 @@ func TestRestoreIMSWithNextLTEPCSCFTriesAllRemainingCandidates(t *testing.T) {
 	}
 }
 
+func TestConnectSetupRollbackReturnsCleanupErrors(t *testing.T) {
+	imsErr := errors.New("closing IMS transport")
+	accessErr := errors.New("closing access")
+	tests := []struct {
+		name      string
+		imsErr    error
+		accessErr error
+	}{
+		{name: "clean rollback"},
+		{name: "joins IMS and access errors", imsErr: imsErr, accessErr: accessErr},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newGatedCancelTransport(5062, 5060)
+			transport.closeErr = tt.imsErr
+			sess, err := imssession.Open(imssession.Config{}, transport)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			scope := newConnectionScope()
+			setup := &connectSetup{
+				scope:  scope,
+				access: &pcscfReselectingAccessStub{closeErr: tt.accessErr},
+				ims:    imsStack{sip: sess},
+			}
+
+			err = setup.rollback()
+			for _, want := range []error{tt.imsErr, tt.accessErr} {
+				if want != nil && !errors.Is(err, want) {
+					t.Fatalf("rollback() error = %v, want wrapped %v", err, want)
+				}
+			}
+			if tt.imsErr == nil && tt.accessErr == nil && err != nil {
+				t.Fatalf("rollback() error = %v, want nil", err)
+			}
+			if !scope.stopped() {
+				t.Fatal("rollback() left connection scope running")
+			}
+		})
+	}
+}
+
+func TestConnectSetupCloseIMSAfterFailurePreservesCause(t *testing.T) {
+	cause := errors.New("opening IMS endpoints")
+	cleanupErr := errors.New("closing IMS transport")
+	tests := []struct {
+		name       string
+		cleanupErr error
+	}{
+		{name: "clean close keeps original cause"},
+		{name: "failed close joins cleanup error", cleanupErr: cleanupErr},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newGatedCancelTransport(5062, 5060)
+			transport.closeErr = tt.cleanupErr
+			sess, err := imssession.Open(imssession.Config{}, transport)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			setup := &connectSetup{ims: imsStack{sip: sess}}
+
+			err = setup.closeIMSAfterFailure(cause)
+			if !errors.Is(err, cause) {
+				t.Fatalf("closeIMSAfterFailure() error = %v, want original cause", err)
+			}
+			if tt.cleanupErr != nil && !errors.Is(err, tt.cleanupErr) {
+				t.Fatalf("closeIMSAfterFailure() error = %v, want cleanup error", err)
+			}
+		})
+	}
+}
+
 func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -585,6 +660,7 @@ type gatedCancelTransport struct {
 	readErrCh         chan error
 	cancelReadRelease chan struct{}
 	closed            bool
+	closeErr          error
 }
 
 func newGatedCancelTransport(localPort, remotePort int) *gatedCancelTransport {
@@ -632,13 +708,14 @@ func (t *gatedCancelTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr
 func (t *gatedCancelTransport) Close() error {
 	t.mu.Lock()
 	t.closed = true
+	err := t.closeErr
 	t.mu.Unlock()
 	select {
 	case <-t.cancelReadRelease:
 	default:
 		close(t.cancelReadRelease)
 	}
-	return nil
+	return err
 }
 
 func (t *gatedCancelTransport) queueRead(msg imssip.Message) {
@@ -1667,6 +1744,119 @@ func TestClientCloseClosesOwnedReaderOnce(t *testing.T) {
 	}
 	if reader.closeCalls != 1 {
 		t.Fatalf("reader Close() calls = %d, want 1", reader.closeCalls)
+	}
+}
+
+func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
+	tests := []struct {
+		name          string
+		multiple      bool
+		outbound      bool
+		setupRollback bool
+		wantWrites    int
+	}{
+		{name: "single registration keeps existing close behavior", wantWrites: 2},
+		{name: "outbound registration removes its flow", multiple: true, outbound: true, wantWrites: 3},
+		{name: "single-flow fallback removes only its contact", multiple: true, wantWrites: 3},
+		{name: "failed setup removes outbound flow", multiple: true, outbound: true, setupRollback: true, wantWrites: 3},
+		{name: "failed setup removes single-flow fallback", multiple: true, setupRollback: true, wantWrites: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newGatedCancelTransport(5062, 5060)
+			nonce := testNonce()
+			var group *RegistrationGroup
+			if tt.multiple {
+				group = NewRegistrationGroup()
+			}
+			transport.onWrite = func(data []byte) {
+				req, err := imssip.ParseMessage(data)
+				if err != nil {
+					t.Errorf("ParseMessage() error = %v", err)
+					return
+				}
+				switch transport.writeCount() {
+				case 1:
+					transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
+				case 2:
+					resp := newIMSResponse(req, 200, "OK")
+					if tt.multiple {
+						if tt.outbound {
+							resp.Headers.Add("Require", "outbound")
+						}
+						resp.Headers.Add("Contact", req.Header("Contact")+";expires=60")
+					}
+					transport.queueRead(resp)
+				case 3:
+					if !tt.multiple {
+						t.Fatalf("unexpected deregistration for a single registration")
+					}
+					if got := req.Header("Contact"); got == "*" {
+						t.Fatal("deregister Contact = *, want current flow only")
+					}
+					_, params := imssip.AddressURIAndParams(req.Header("Contact"))
+					wantRegID := ""
+					if tt.outbound {
+						wantRegID = "1"
+					}
+					if got := imssip.HeaderParam(params, "reg-id"); got != wantRegID {
+						t.Fatalf("deregister reg-id = %q, want %q", got, wantRegID)
+					}
+					if got := imssip.HeaderParam(params, "expires"); got != "0" {
+						t.Fatalf("deregister expires = %q, want 0", got)
+					}
+					transport.queueRead(newIMSResponse(req, 200, "OK"))
+				default:
+					t.Fatalf("unexpected write count %d", transport.writeCount())
+				}
+			}
+
+			sess, err := imssession.Open(imssession.Config{}, transport)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			regCfg := testRegistrationConfig(transport)
+			if tt.multiple {
+				regCfg.RegistrationGroup = group
+				regCfg.RegistrationID = 1
+				regCfg.RegistrationPreference = 1000
+				regCfg.IMEI = testIMEI
+			}
+			reg, err := registration.New(regCfg, sess, stubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			if err := reg.Register(context.Background()); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+
+			if tt.setupRollback {
+				setup := &connectSetup{
+					imsCfg: IMSConfig{RegistrationGroup: group},
+					ims:    imsStack{sip: sess, reg: reg},
+				}
+				if err := setup.closeIMS(); err != nil {
+					t.Fatalf("closeIMS() error = %v", err)
+				}
+			} else {
+				client := newReadyClient(t, Config{
+					Terminal: TerminalInfo{ID: testIMEI},
+					Access:   VoWiFi(VoWiFiConfig{}),
+					IMS:      IMSConfig{RegistrationGroup: group},
+				})
+				setClientActive(t, client, &activeConn{
+					scope: newConnectionScope(),
+					ims:   imsStack{sip: sess, reg: reg},
+				})
+				if err := client.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			}
+			if got := transport.writeCount(); got != tt.wantWrites {
+				t.Fatalf("write count = %d, want %d", got, tt.wantWrites)
+			}
+		})
 	}
 }
 
@@ -2984,6 +3174,7 @@ func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *t
 func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
+	var registerContact string
 	transport.onWrite = func(data []byte) {
 		req, err := imssip.ParseMessage(data)
 		if err != nil {
@@ -2997,6 +3188,7 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 		case 1:
 			transport.queueRead(newUnauthorizedRegisterResponse(req, nonce))
 		case 2:
+			registerContact = req.Header("Contact")
 			transport.queueRead(newIMSResponse(req, 200, "OK"))
 		}
 	}
@@ -3033,7 +3225,7 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	}
 
 	state := reg.State()
-	contactURI := "sip:" + net.JoinHostPort(state.ContactHost, strconv.Itoa(state.MessagePort))
+	contactURI := imssip.AddressURI(registerContact)
 	notify := imssip.NewRequest("NOTIFY", "sip:user@example.com")
 	notify.Headers.Add("Via", "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-registration-terminated")
 	notify.Headers.Add("Max-Forwards", "70")

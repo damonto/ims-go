@@ -2,6 +2,7 @@ package registration
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -41,6 +42,9 @@ type Config struct {
 	RegisterExpires           time.Duration
 	IMEI                      string
 	AuthAlgorithm             string
+	RegistrationGroup         *Group
+	RegistrationID            uint32
+	RegistrationPreference    int
 	IPSecIntegrityAlgorithms  []string
 	IPSecEncryptionAlgorithms []string
 	IPSecModes                []string
@@ -86,19 +90,23 @@ type State struct {
 	ContactHost         string
 	RegisterPort        int
 	MessagePort         int
+	ContactURI          string
 	UserAgent           string
 	AccessNetworkInfo   string
 	IMEI                string
 	GeolocationCountry  string
 	UseTelURIForPIDFXML bool
+	registrationID      uint32
 }
 
 type Registrar struct {
-	cfg        Config
-	sess       *session.Session
-	card       Card
-	logger     *slog.Logger
-	attachment session.Attachment
+	cfg         Config
+	sess        *session.Session
+	card        Card
+	logger      *slog.Logger
+	attachment  session.Attachment
+	group       *Group
+	contactUser string
 
 	mu                  sync.Mutex
 	state               State
@@ -132,7 +140,6 @@ type Registrar struct {
 
 	registrationEvents        chan error
 	subscribeRefreshRequests  chan struct{}
-	registrationGate          chan struct{}
 	done                      chan struct{}
 	secureServerAttachments   []session.Attachment
 	secureResponseAttachments []session.Attachment
@@ -164,11 +171,17 @@ func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
 		return nil, fmt.Errorf("creating IMS registrar: %w", err)
 	}
 	callID, sessionID, tag, _ := sip.NewTransaction()
+	group := cfg.RegistrationGroup
+	if group == nil {
+		group = &Group{}
+	}
 	registrar := &Registrar{
-		cfg:    cfg,
-		sess:   sess,
-		card:   card,
-		logger: cfg.Logger.With("component", "ims-registration"),
+		cfg:         cfg,
+		sess:        sess,
+		card:        card,
+		logger:      cfg.Logger.With("component", "ims-registration"),
+		group:       group,
+		contactUser: cryptorand.Text(),
 		state: State{
 			PublicIdentity:      identity.publicIdentity,
 			DefaultPublicID:     identity.publicIdentity,
@@ -181,6 +194,7 @@ func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
 			IMEI:                cfg.IMEI,
 			GeolocationCountry:  cfg.GeolocationCountry,
 			UseTelURIForPIDFXML: cfg.UseTelURIForPIDFXML,
+			registrationID:      cfg.RegistrationID,
 		},
 		flow:                     newFlow(host, port, ipsecAlgorithmsFromConfig(cfg)),
 		callID:                   callID,
@@ -189,7 +203,6 @@ func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
 		regInfoRegistrations:     make(map[string]regInfoRegistrationEntry),
 		registrationEvents:       make(chan error, 1),
 		subscribeRefreshRequests: make(chan struct{}, 1),
-		registrationGate:         make(chan struct{}, 1),
 		done:                     make(chan struct{}),
 	}
 	attachment, err := sess.Attach(registrar)
@@ -240,7 +253,12 @@ func (s *Registrar) Register(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("registering IMS: %w", err)
 	}
-	defer release()
+	defer func() {
+		if !s.isRegistered() {
+			s.releaseRegistrationOwnership()
+		}
+		release()
+	}()
 
 	s.logger.Info("registering IMS", "public_identity", s.State().PublicIdentity)
 	challengeMsg, err := s.awaitRegisterChallenge(ctx)
@@ -296,12 +314,18 @@ func (s *Registrar) Establish(ctx context.Context) error {
 }
 
 func (s *Registrar) beginRegistration(ctx context.Context) (func(), error) {
-	select {
-	case s.registrationGate <- struct{}{}:
-		return func() { <-s.registrationGate }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if s.cfg.RegistrationGroup != nil {
+		return s.group.beginRegistrationForFlow(ctx, s.cfg.RegistrationID, s.cfg.RegistrationPreference)
 	}
+	return s.group.BeginRegistration(ctx, s.cfg.RegistrationPreference)
+}
+
+func (s *Registrar) beginDeregistration(ctx context.Context) (func(), bool, error) {
+	if s.cfg.RegistrationGroup != nil {
+		return s.group.beginDeregistrationForFlow(ctx, s.cfg.RegistrationID, s.cfg.RegistrationPreference)
+	}
+	release, err := s.group.BeginRegistration(ctx, s.cfg.RegistrationPreference)
+	return release, true, err
 }
 
 func (s *Registrar) awaitRegisterChallenge(ctx context.Context) (sip.Message, error) {
@@ -428,9 +452,14 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
 			return err
 		}
+		singleRegistration, err := s.validateRegisterSuccess(resp)
+		if err != nil {
+			return err
+		}
 		if err := s.commitRegisterSecurity(pendingSecurity); err != nil {
 			return err
 		}
+		s.applyRegisterCapability(singleRegistration)
 		s.applyRegisterSuccess(resp)
 		committedSecurity = true
 		return nil
@@ -509,7 +538,12 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 			}
 			return fmt.Errorf("refreshing IMS registration: expected 200 after AKAv2 re-authentication, got %w", sip.NewResponseError(resp))
 		}
+		singleRegistration, err := s.validateRegisterSuccessForFlow(resp, nextFlow)
+		if err != nil {
+			return fmt.Errorf("refreshing IMS registration: %w", err)
+		}
 		s.commitReauthentication(challenge, authorizationHeader, nextFlow, nil, nil, password)
+		s.applyRegisterCapability(singleRegistration)
 		s.applyRegisterSuccess(resp)
 		return nil
 	}
@@ -580,6 +614,10 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		}
 		return fmt.Errorf("refreshing IMS registration: expected 200 after re-authentication, got %w", sip.NewResponseError(resp))
 	}
+	singleRegistration, err := s.validateRegisterSuccessForFlow(resp, nextFlow)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
 	oldExpiresAt := s.currentSecureAssociationExpiresAt()
 	oldAttachment, err := s.sess.PromotePrimary(outbound)
 	if err != nil {
@@ -588,6 +626,7 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
 	oldResponseAttachments := s.replaceSecureResponseAttachments(responseAttachments)
 	s.commitReauthentication(challenge, authorizationHeader, nextFlow, ck, ik, password)
+	s.applyRegisterCapability(singleRegistration)
 	s.applyRegisterSuccess(resp)
 	s.closeOldSecurityAfterNewInbound(
 		append(append(oldServerAttachments, oldResponseAttachments...), oldAttachment),
@@ -683,13 +722,23 @@ func (s *Registrar) Deregister(ctx context.Context) error {
 }
 
 func (s *Registrar) deregister(ctx context.Context) error {
-	release, err := s.beginRegistration(ctx)
+	release, ownsRegistration, err := s.beginDeregistration(ctx)
 	if err != nil {
 		return fmt.Errorf("deregistering IMS: %w", err)
 	}
 	defer release()
+	return s.deregisterCurrent(ctx, ownsRegistration)
+}
 
+func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool) error {
 	if !s.isRegistered() {
+		return nil
+	}
+	if !ownsRegistration {
+		if err := s.clearRegistrationState(); err != nil {
+			return fmt.Errorf("deregistering IMS: deleting replaced registration state: %w", err)
+		}
+		s.logger.Info("IMS registration already replaced by preferred flow")
 		return nil
 	}
 	verify := s.currentSecurityVerify()
@@ -717,6 +766,16 @@ func (s *Registrar) deregister(ctx context.Context) error {
 		}
 	}
 	return errors.New("deregistering IMS: exhausted retries")
+}
+
+func (s *Registrar) revokeSingleRegistration(ctx context.Context) error {
+	err := s.deregisterCurrent(ctx, true)
+	if s.isRegistered() {
+		return err
+	}
+	s.releaseRegistrationOwnership()
+	s.publishRegistrationEvent(errRegistrationReplaced)
+	return err
 }
 
 func (s *Registrar) buildDeregisterMessage(ctx context.Context, verify *security.Param, challenge security.Challenge) (sip.Message, error) {

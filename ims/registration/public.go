@@ -26,7 +26,21 @@ func (s *Registrar) State() State {
 	state.ContactHost = state.Flow.ContactHost
 	state.RegisterPort = state.Flow.RegisterPort
 	state.MessagePort = state.Flow.MessagePort
+	contactPort := state.MessagePort
+	if contactPort == 0 {
+		contactPort = state.RegisterPort
+	}
+	state.ContactURI = s.registerContactURI(state.ContactHost, contactPort)
 	return state
+}
+
+// RequestContactURI returns the registered contact address with the flow
+// marker required for requests sent over an outbound registration.
+func (state State) RequestContactURI() string {
+	if !state.Flow.Outbound {
+		return state.ContactURI
+	}
+	return state.ContactURI + ";ob"
 }
 
 func (s *Registrar) CurrentFlow() Flow {

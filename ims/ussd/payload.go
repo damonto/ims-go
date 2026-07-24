@@ -275,11 +275,6 @@ func decodePayload(msg sip.Message) (Message, error) {
 	}
 }
 
-func decodeSinglePayload(context payloadContext, msg sip.Message) (Message, error) {
-	payload, _, err := decodeSinglePayloadWithPresence(context, msg)
-	return payload, err
-}
-
 func decodeSinglePayloadWithPresence(context payloadContext, msg sip.Message) (Message, payloadPresence, error) {
 	mediaType, _, err := splitContentTypeHeader(context, msg.Header("Content-Type"))
 	if err != nil {

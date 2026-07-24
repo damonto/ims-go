@@ -518,7 +518,7 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 	if s.flow.MessagePort != 0 {
 		port = s.flow.MessagePort
 	}
-	contactURI := contactURI(s.flow.ContactHost, port)
+	contactURI := s.registerContactURI(s.flow.ContactHost, port)
 	registerCallID := s.lastRegisterCallID
 	registerCSeq := s.lastRegisterCSeq
 	fullState := strings.EqualFold(strings.TrimSpace(info.State), regInfoStateFull)
@@ -678,18 +678,36 @@ func initialRegistrationRequiredFromRegInfo(reason string) error {
 }
 
 func contactMatchesCurrentBinding(contact regInfoContact, state State, contactURI string, registerCallID string, registerCSeq int64) bool {
-	if sameContactURI(contact.URI, contactURI) {
+	regID := contactRegistrationID(contact)
+	if state.registrationID != 0 && regID != 0 && regID != state.registrationID {
+		return false
+	}
+	if sameRegisterContactURI(contact.URI, contactURI) {
 		return true
 	}
 	instance := contactSIPInstance(contact)
 	if instance != "" && strings.EqualFold(instance, currentSIPInstance(state)) {
-		return true
+		if state.registrationID == 0 || regID == state.registrationID {
+			return true
+		}
 	}
 	if strings.TrimSpace(contact.CallID) != strings.TrimSpace(registerCallID) {
 		return false
 	}
 	cseq, err := strconv.ParseInt(strings.TrimSpace(contact.CSeq), 10, 64)
 	return err == nil && cseq == registerCSeq
+}
+
+func contactRegistrationID(contact regInfoContact) uint32 {
+	for _, param := range contact.Unknown {
+		if !strings.EqualFold(strings.TrimSpace(param.Name), "reg-id") {
+			continue
+		}
+		if regID, ok := parseRegistrationID(param.Value); ok {
+			return regID
+		}
+	}
+	return 0
 }
 
 func contactSIPInstance(contact regInfoContact) string {

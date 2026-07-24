@@ -50,20 +50,28 @@ func (terminal TerminalInfo) trimmed() TerminalInfo {
 }
 
 type IMSConfig struct {
-	Transport                 string
-	PrivateIdentity           string
-	PublicIdentity            string
-	HomeDomain                string
-	PhoneContextDomain        string
-	USSDLanguage              string
-	USSDDomain                string
-	UserAgent                 string
-	AccessNetworkInfo         string
-	WLANNodeID                string
-	RegisterExpires           time.Duration
-	AuthAlgorithm             string
-	RegistrationRetryBase     time.Duration
-	RegistrationRetryMax      time.Duration
+	Transport             string
+	PrivateIdentity       string
+	PublicIdentity        string
+	HomeDomain            string
+	PhoneContextDomain    string
+	USSDLanguage          string
+	USSDDomain            string
+	UserAgent             string
+	AccessNetworkInfo     string
+	WLANNodeID            string
+	RegisterExpires       time.Duration
+	AuthAlgorithm         string
+	RegistrationRetryBase time.Duration
+	RegistrationRetryMax  time.Duration
+	// RegistrationGroup enables RFC 5626 multiple registration. Share the
+	// same group between Clients that use the same USIM and IMS identity.
+	RegistrationGroup *RegistrationGroup
+	// RegistrationID is the stable reg-id for this access flow.
+	RegistrationID uint32
+	// RegistrationPreference is both the local queue priority and Contact q
+	// value in thousandths. Valid values are 1 through 1000.
+	RegistrationPreference    int
 	IPSecIntegrityAlgorithms  []string
 	IPSecEncryptionAlgorithms []string
 	IPSecModes                []string
@@ -231,6 +239,24 @@ func (cfg Config) normalizedIMS() (IMSConfig, error) {
 	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && strings.TrimSpace(imsCfg.WLANNodeID) == "" && epdg != "" {
 		imsCfg.AccessNetworkInfo = "IEEE-802.11"
 	}
+	if imsCfg.RegistrationGroup != nil {
+		switch {
+		case cfg.usesVoWiFi():
+			if imsCfg.RegistrationID == 0 {
+				imsCfg.RegistrationID = defaultVoWiFiRegistrationID
+			}
+			if imsCfg.RegistrationPreference == 0 {
+				imsCfg.RegistrationPreference = defaultVoWiFiRegistrationPreference
+			}
+		case cfg.usesVoLTE():
+			if imsCfg.RegistrationID == 0 {
+				imsCfg.RegistrationID = defaultVoLTERegistrationID
+			}
+			if imsCfg.RegistrationPreference == 0 {
+				imsCfg.RegistrationPreference = defaultVoLTERegistrationPreference
+			}
+		}
+	}
 	imsCfg, err := imsCfg.Normalized()
 	if err != nil {
 		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
@@ -346,6 +372,21 @@ func (cfg IMSConfig) Normalized() (IMSConfig, error) {
 	}
 	if cfg.RegistrationRetryBase > cfg.RegistrationRetryMax {
 		return IMSConfig{}, errors.New("normalizing ims config: registration retry max must be >= registration retry base")
+	}
+	if cfg.RegistrationGroup == nil {
+		if cfg.RegistrationID != 0 || cfg.RegistrationPreference != 0 {
+			return IMSConfig{}, errors.New("normalizing ims config: registration group is required for multiple registration settings")
+		}
+	} else {
+		if cfg.RegistrationID == 0 {
+			return IMSConfig{}, errors.New("normalizing ims config: registration id must be greater than zero")
+		}
+		if cfg.RegistrationPreference < 1 || cfg.RegistrationPreference > 1000 {
+			return IMSConfig{}, errors.New("normalizing ims config: registration preference must be between 1 and 1000")
+		}
+		if cfg.IMEI == "" {
+			return IMSConfig{}, errors.New("normalizing ims config: imei is required for multiple registration")
+		}
 	}
 	if cfg.SIPServerPort < 0 || cfg.SIPServerPort > 65535 {
 		return IMSConfig{}, errors.New("normalizing ims config: sip server port must be between 0 and 65535")

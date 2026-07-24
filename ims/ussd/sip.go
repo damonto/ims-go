@@ -69,6 +69,9 @@ func buildCancel(invite sip.Message) sip.Message {
 	for _, route := range invite.HeadersByName("Route") {
 		cancelMsg.Headers.Add("Route", route)
 	}
+	for _, supported := range invite.HeadersByName("Supported") {
+		cancelMsg.Headers.Add("Supported", supported)
+	}
 	cancelMsg.Headers.Add("From", invite.Header("From"))
 	cancelMsg.Headers.Add("To", invite.Header("To"))
 	cancelMsg.Headers.Add("Call-ID", invite.Header("Call-ID"))
@@ -120,6 +123,14 @@ func defaultValue(value, fallback string) string {
 }
 
 func contactValue(state registration.State, networkInitiatedSupported bool) string {
+	return contactValueForURI(state.ContactURI, networkInitiatedSupported)
+}
+
+func requestContactValue(state registration.State, networkInitiatedSupported bool) string {
+	return contactValueForURI(state.RequestContactURI(), networkInitiatedSupported)
+}
+
+func contactValueForURI(uri string, networkInitiatedSupported bool) string {
 	params := []string{
 		icsiRefFeatureTag,
 		midCallFeatureTag,
@@ -131,11 +142,7 @@ func contactValue(state registration.State, networkInitiatedSupported bool) stri
 		params = append(params, nwInitUSSI)
 	}
 	params = append(params, "text")
-	return fmt.Sprintf("<%s>;%s", sipContactURI(state.ContactHost, state.MessagePort), strings.Join(params, ";"))
-}
-
-func sipContactURI(host string, port int) string {
-	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
+	return fmt.Sprintf("<%s>;%s", uri, strings.Join(params, ";"))
 }
 
 func preferredIdentity(state registration.State) string {

@@ -43,6 +43,15 @@ func TestClientRequestPolicyApply(t *testing.T) {
 				"Supported":    DefaultClientSupported,
 			},
 		},
+		{
+			name: "with outbound registration",
+			in:   ClientRequestPolicy{Outbound: true},
+			want: map[string]string{
+				"Allow":        DefaultClientAllow,
+				"Max-Forwards": "70",
+				"Supported":    DefaultClientSupported + ",outbound",
+			},
+		},
 	}
 
 	for _, tt := range tests {

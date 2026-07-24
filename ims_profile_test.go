@@ -1402,6 +1402,94 @@ func TestEmbeddedPixelIMSIPrefixProfiles(t *testing.T) {
 	}
 }
 
+func TestEmbeddedIMSUserAgentSourcePriority(t *testing.T) {
+	terminal := TerminalInfo{
+		Vendor: "Google",
+		Model:  "Pixel 10 Pro",
+		Build:  "BD1A.250702.001",
+	}
+	tests := []struct {
+		name         string
+		card         plmnWFCCard
+		wantTemplate string
+		wantRendered string
+	}{
+		{
+			name:         "Pixel value wins",
+			card:         plmnWFCCard{mcc: "202", mnc: "01", mncLength: 2},
+			wantTemplate: "#MANUFACTURE# - #MODEL# - #BUILD#",
+			wantRendered: "Google - Pixel 10 Pro - BD1A.250702.001",
+		},
+		{
+			name:         "Samsung fallback uses Pixel placeholders",
+			card:         plmnWFCCard{mcc: "202", mnc: "05", mncLength: 2},
+			wantTemplate: "#MODEL#-#BUILD# Samsung IMS 6.0",
+			wantRendered: "Pixel 10 Pro-BD1A.250702.001 Samsung IMS 6.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			if profile.IMSUserAgent != tt.wantTemplate {
+				t.Fatalf("IMSUserAgent = %q, want %q", profile.IMSUserAgent, tt.wantTemplate)
+			}
+
+			got := renderIMSUserAgent(profile.IMSUserAgent, Config{Terminal: terminal}, profile)
+			if got != tt.wantRendered {
+				t.Fatalf("renderIMSUserAgent() = %q, want %q", got, tt.wantRendered)
+			}
+		})
+	}
+}
+
+func TestEmbeddedIMSUserAgentsUsePixelPlaceholderFormat(t *testing.T) {
+	var profiles []imsProfile
+	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	samsungPlaceholders := []string{
+		"#SUPPORT#",
+		"#OMCCODE#",
+		"#UICC_VERSION#",
+		"#IMS_PROFILE_VOICE#",
+		"#RCS_PROFILE#",
+		"#MNO_CUSTOM#",
+	}
+
+	tests := make([]struct {
+		name      string
+		userAgent string
+	}, 0, len(profiles))
+	for _, profile := range profiles {
+		tests = append(tests, struct {
+			name      string
+			userAgent string
+		}{
+			name:      profile.MCC + "-" + profile.MNC,
+			userAgent: profile.IMSUserAgent,
+		})
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.ContainsAny(tt.userAgent, "[]") {
+				t.Fatalf("IMS User-Agent uses Samsung placeholder format: %q", tt.userAgent)
+			}
+			for _, placeholder := range samsungPlaceholders {
+				if strings.Contains(tt.userAgent, placeholder) {
+					t.Fatalf("IMS User-Agent uses Samsung-only placeholder %q: %q", placeholder, tt.userAgent)
+				}
+			}
+		})
+	}
+}
+
 func TestEmbeddedRequestURIFormatSourcePriority(t *testing.T) {
 	tests := []struct {
 		name string

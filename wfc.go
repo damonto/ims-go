@@ -10,7 +10,7 @@ import (
 func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) error {
 	terminal := cfg.Terminal.trimmed()
 	result, err := wfcsetup.Check(ctx, wfcsetup.Request{
-		Card: card,
+		Card: cfg.IMS.coordinatedCard(card),
 		Device: wfcsetup.Device{
 			IMEI:            terminal.ID,
 			Vendor:          terminal.Vendor,

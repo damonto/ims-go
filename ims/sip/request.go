@@ -28,6 +28,7 @@ type ClientRequestPolicy struct {
 	Routes            []string
 	UserAgent         string
 	AccessNetworkInfo string
+	Outbound          bool
 	Security          SecurityAgreement
 }
 
@@ -42,7 +43,11 @@ func (p ClientRequestPolicy) Apply(msg *Message) {
 	if strings.TrimSpace(msg.Header("Max-Forwards")) == "" {
 		msg.Headers.Add("Max-Forwards", strconv.Itoa(DefaultMaxForwards))
 	}
-	msg.Headers.Add("Supported", DefaultClientSupported)
+	supported := DefaultClientSupported
+	if p.Outbound {
+		supported += ",outbound"
+	}
+	msg.Headers.Add("Supported", supported)
 	if userAgent := strings.TrimSpace(p.UserAgent); userAgent != "" {
 		msg.Headers.Add("User-Agent", userAgent)
 	}

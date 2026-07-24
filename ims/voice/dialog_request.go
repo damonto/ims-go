@@ -59,7 +59,7 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 		transport:         sip.TransportToken(c.endpoint.sess.LocalAddr()),
 		contactHost:       state.ContactHost,
 		messagePort:       state.MessagePort,
-		contact:           contactValue(state),
+		contact:           requestContactValue(state),
 	}
 }
 
@@ -144,6 +144,9 @@ func (s dialogSnapshot) buildCANCEL(reason string) sip.Message {
 	}
 	for _, route := range invite.HeadersByName("Route") {
 		msg.Headers.Add("Route", route)
+	}
+	for _, supported := range invite.HeadersByName("Supported") {
+		msg.Headers.Add("Supported", supported)
 	}
 	if userAgent := strings.TrimSpace(s.userAgent); userAgent != "" {
 		msg.Headers.Add("User-Agent", userAgent)

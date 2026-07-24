@@ -91,6 +91,21 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
 	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
+	if cfg.RegistrationGroup == nil {
+		if cfg.RegistrationID != 0 || cfg.RegistrationPreference != 0 {
+			return Config{}, errors.New("normalizing registration config: registration group is required for multiple registration settings")
+		}
+	} else {
+		if cfg.RegistrationID == 0 {
+			return Config{}, errors.New("normalizing registration config: registration id must be greater than zero")
+		}
+		if cfg.RegistrationPreference < 1 || cfg.RegistrationPreference > 1000 {
+			return Config{}, errors.New("normalizing registration config: registration preference must be between 1 and 1000")
+		}
+		if cfg.IMEI == "" {
+			return Config{}, errors.New("normalizing registration config: imei is required for multiple registration")
+		}
+	}
 	var err error
 	cfg.IPSecIntegrityAlgorithms, err = security.NormalizeIPSecIntegrityAlgorithms(cfg.IPSecIntegrityAlgorithms)
 	if err != nil {

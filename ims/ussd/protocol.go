@@ -211,13 +211,6 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 	return errors.New("parsing USSD XML: missing ussd-data root element")
 }
 
-func (p *xmlPayload) ensureAnyExt() *anyExt {
-	if p.AnyExt == nil {
-		p.AnyExt = &anyExt{}
-	}
-	return p.AnyExt
-}
-
 func validateLanguage(language string) error {
 	language = strings.TrimSpace(language)
 	if language == "" {

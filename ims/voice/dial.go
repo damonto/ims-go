@@ -377,7 +377,7 @@ func (s *Endpoint) newOutgoingInvite(req DialRequest) (outgoingInvite, error) {
 	invite.Headers.Add("P-Preferred-Service", mmtelICSI)
 	invite.Headers.Add("P-Preferred-Identity", fmt.Sprintf("<%s>", localURI))
 	invite.Headers.Add("P-Early-Media", "supported")
-	invite.Headers.Add("Contact", contactValue(state))
+	invite.Headers.Add("Contact", requestContactValue(state))
 	if includeCurrentLocation {
 		invite.Headers.Add("Recv-Info", currentLocationDiscoveryInfoPackage)
 	}

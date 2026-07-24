@@ -950,25 +950,41 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestVoiceContactValueOmitsSipInstanceOutsideRegister(t *testing.T) {
+func TestVoiceContactValuesUseRegisteredURI(t *testing.T) {
 	tests := []struct {
-		name  string
-		state registration.State
+		name        string
+		state       registration.State
+		wantRequest string
 	}{
 		{
-			name: "imei available",
+			name: "single registration",
 			state: registration.State{
-				ContactHost: "127.0.0.1",
-				MessagePort: 5062,
-				IMEI:        "123456789012345",
+				ContactURI: "sip:opaque@127.0.0.1:5062;transport=tcp",
+				IMEI:       "123456789012345",
 			},
+			wantRequest: "sip:opaque@127.0.0.1:5062;transport=tcp",
+		},
+		{
+			name: "outbound registration",
+			state: registration.State{
+				ContactURI: "sip:opaque@[2001:db8::20]:5062;transport=tcp",
+				Flow:       registration.Flow{Outbound: true},
+			},
+			wantRequest: "sip:opaque@[2001:db8::20]:5062;transport=tcp;ob",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := contactValue(tt.state)
-			if strings.Contains(got, "+sip.instance") {
-				t.Fatalf("contactValue() = %q, want no +sip.instance", got)
+			response := contactValue(tt.state)
+			if got := sip.AddressURI(response); got != tt.state.ContactURI {
+				t.Fatalf("contactValue() URI = %q, want %q", got, tt.state.ContactURI)
+			}
+			request := requestContactValue(tt.state)
+			if got := sip.AddressURI(request); got != tt.wantRequest {
+				t.Fatalf("requestContactValue() URI = %q, want %q", got, tt.wantRequest)
+			}
+			if strings.Contains(response, "+sip.instance") || strings.Contains(request, "+sip.instance") {
+				t.Fatalf("Contact values = %q / %q, want no +sip.instance", response, request)
 			}
 		})
 	}
@@ -1298,6 +1314,34 @@ func TestDialogSnapshotAddsSessionTimerSupportToNonACKRequests(t *testing.T) {
 	snap.applyACKRequestPolicy(&ack, nil)
 	if ack.Headers.Has("Require") || ack.Headers.Has("Proxy-Require") {
 		t.Fatalf("ACK contains forbidden extension requirements: %#v", ack.Headers)
+	}
+}
+
+func TestVoiceCancelKeepsInviteSupportedOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		supported []string
+	}{
+		{name: "outbound", supported: []string{"199,path,sec-agree,outbound"}},
+		{name: "repeated headers", supported: []string{"199,path", "outbound,100rel"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invite := sip.NewRequest("INVITE", "sip:remote@example.com")
+			invite.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bK-test")
+			invite.Headers.Add("From", "<sip:user@example.com>;tag=local")
+			invite.Headers.Add("To", "<sip:remote@example.com>")
+			invite.Headers.Add("Call-ID", "call-1")
+			invite.Headers.Add("CSeq", "1 INVITE")
+			for _, value := range tt.supported {
+				invite.Headers.Add("Supported", value)
+			}
+			cancel := (dialogSnapshot{inviteSeq: 1, inviteRequest: invite}).buildCANCEL("")
+			if got := cancel.HeadersByName("Supported"); !slices.Equal(got, tt.supported) {
+				t.Fatalf("CANCEL Supported = %q, want %q", got, tt.supported)
+			}
+		})
 	}
 }
 

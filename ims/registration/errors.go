@@ -6,6 +6,8 @@ import (
 )
 
 var (
+	errRegisterBindingMissing    = errors.New("register response omitted current binding")
+	errRegistrationReplaced      = errors.New("ims registration replaced by preferred flow")
 	errNetworkDeregistered       = errors.New("ims registration terminated by network")
 	errInitialRegistrationNeeded = errors.New("initial registration required")
 	errSecureSAExpired           = errors.New("ims security association lifetime expired")

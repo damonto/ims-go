@@ -21,7 +21,7 @@ func (s *Registrar) buildRegisterForFlow(auth *security.Authorization, verify *s
 }
 
 func (s *Registrar) buildRegisterForFlowWithAuthorizationHeader(auth *security.Authorization, verify *security.Param, flow Flow, authorizationHeader string) sip.Message {
-	contactPort := s.State().RegisterPort
+	contactPort := flow.RegisterPort
 	viaPort := contactPort
 	if registerUsesProtectedPort(auth, verify) {
 		contactPort = flow.SecurityClient.PortS
@@ -34,18 +34,25 @@ func (s *Registrar) buildRegisterForFlowWithAuthorizationHeader(auth *security.A
 	if auth == nil {
 		legacyAuthorization = s.initialAuthorizationValue()
 	}
-	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValue(contactPort), s.registerExpiresSeconds(), viaPort, authorizationHeader)
+	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, flow, s.registerContactValueForFlow(flow, contactPort), s.registerExpiresSeconds(), viaPort, authorizationHeader)
 }
 
 func (s *Registrar) buildDeregister(auth *security.Authorization, verify *security.Param) sip.Message {
-	viaPort := s.State().RegisterPort
+	flow := s.CurrentFlow()
+	contactPort := flow.RegisterPort
+	viaPort := flow.RegisterPort
 	if registerUsesProtectedPort(auth, verify) {
-		viaPort = s.State().SecurityClient.PortC
+		contactPort = flow.SecurityClient.PortS
+		viaPort = flow.SecurityClient.PortC
 		if sip.TransportToken(s.sess.LocalAddr()) == "UDP" {
-			viaPort = s.State().SecurityClient.PortS
+			viaPort = flow.SecurityClient.PortS
 		}
 	}
-	return s.buildRegisterRequest(auth, "", verify, "*", 0, viaPort, s.currentAuthorizationHeaderName())
+	contact := "*"
+	if s.cfg.RegistrationGroup != nil {
+		contact = s.registerContactValueForFlow(flow, contactPort) + ";expires=0"
+	}
+	return s.buildRegisterRequestForFlow(auth, "", verify, flow, contact, 0, viaPort, s.currentAuthorizationHeaderName())
 }
 
 func (s *Registrar) registerRealm(auth *security.Authorization) string {
@@ -104,10 +111,6 @@ func (s *Registrar) resetRegisterTransaction() {
 	s.mu.Unlock()
 }
 
-func (s *Registrar) buildRegisterRequest(auth *security.Authorization, legacyAuthorization string, verify *security.Param, contact string, expiresSeconds, viaPort int, authorizationHeader string) sip.Message {
-	return s.buildRegisterRequestForFlow(auth, legacyAuthorization, verify, s.CurrentFlow(), contact, expiresSeconds, viaPort, authorizationHeader)
-}
-
 func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, legacyAuthorization string, verify *security.Param, flow Flow, contact string, expiresSeconds, viaPort int, authorizationHeader string) sip.Message {
 	_, _, _, branch := sip.NewTransaction()
 	state := s.State()
@@ -135,7 +138,11 @@ func (s *Registrar) buildRegisterRequestForFlow(auth *security.Authorization, le
 	msg.Headers.Add("Call-ID", callID)
 	msg.Headers.Add("Session-ID", sessionID)
 	msg.Headers.Add("Contact", contact)
-	msg.Headers.Add("Supported", "path")
+	supported := "path"
+	if s.multipleRegistration() {
+		supported += ",outbound"
+	}
+	msg.Headers.Add("Supported", supported)
 	if auth != nil {
 		msg.Headers.Add(registerAuthorizationHeaderName(authorizationHeader), auth.String())
 	} else if legacyAuthorization != "" {
@@ -326,7 +333,7 @@ func (s *Registrar) buildSubscribeWithDialog(subscription subscriptionDialog) si
 	msg.Headers.Add("To", subscribeHeaderWithTag(subscription.remoteHeader, publicID, subscription.remoteTag))
 	msg.Headers.Add("Call-ID", callID)
 	msg.Headers.Add("Session-ID", sessionID)
-	msg.Headers.Add("Contact", s.subscribeContactValue(s.messagePort()))
+	msg.Headers.Add("Contact", s.subscribeContactValue())
 	msg.Headers.Add("CSeq", fmt.Sprintf("%d SUBSCRIBE", cseq))
 	msg.Headers.Add("Via", sip.BuildVia(sip.TransportToken(s.sess.LocalAddr()), state.ContactHost, s.messagePort(), branch))
 	if subscription.active {
@@ -362,9 +369,8 @@ func (s *Registrar) messagePort() int {
 	return flow.RegisterPort
 }
 
-func (s *Registrar) subscribeContactValue(port int) string {
-	params := []string{"text"}
-	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
+func (s *Registrar) subscribeContactValue() string {
+	return fmt.Sprintf("<%s>;text", s.State().RequestContactURI())
 }
 
 func firstAddressURI(values []string) string {
@@ -389,8 +395,9 @@ func reverseHeaderValues(values []string) []string {
 	return out
 }
 
-func (s *Registrar) registerContactValue(port int) string {
+func (s *Registrar) registerContactValueForFlow(flow Flow, port int) string {
 	params := []string{
+		`audio`,
 		`+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
 		`+g.3gpp.mid-call`,
 		`+g.3gpp.nw-init-ussi`,
@@ -402,10 +409,41 @@ func (s *Registrar) registerContactValue(port int) string {
 	if s.cfg.IMEI != "" {
 		params = append(params, fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, s.cfg.IMEI))
 	}
+	if s.multipleRegistration() {
+		params = append(params,
+			"reg-id="+strconv.FormatUint(uint64(s.cfg.RegistrationID), 10),
+			"q="+formatRegistrationPreference(s.cfg.RegistrationPreference),
+		)
+	}
 	params = append(params, "text")
-	return fmt.Sprintf("<%s>;%s", contactURI(s.State().ContactHost, port), strings.Join(params, ";"))
+	return fmt.Sprintf("<%s>;%s", s.registerContactURI(flow.ContactHost, port), strings.Join(params, ";"))
+}
+
+func (s *Registrar) multipleRegistration() bool {
+	return s.cfg.RegistrationGroup != nil && s.group.multipleRegistrationEnabled()
+}
+
+func formatRegistrationPreference(preference int) string {
+	if preference >= 1000 {
+		return "1.0"
+	}
+	fraction := strings.TrimRight(fmt.Sprintf("%03d", preference), "0")
+	return "0." + fraction
 }
 
 func contactURI(host string, port int) string {
 	return "sip:" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func (s *Registrar) localContactURI(host string, port int) string {
+	uri := contactURI(host, port)
+	if strings.EqualFold(sip.TransportToken(s.sess.LocalAddr()), "TCP") {
+		return uri + ";transport=tcp"
+	}
+	return uri
+}
+
+func (s *Registrar) registerContactURI(host string, port int) string {
+	uri := s.localContactURI(host, port)
+	return "sip:" + s.contactUser + "@" + strings.TrimPrefix(uri, "sip:")
 }
