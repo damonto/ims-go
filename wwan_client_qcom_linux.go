@@ -13,10 +13,8 @@ import (
 
 type QCOMClient struct {
 	*sim.QCOM
-	client            *qcom.Client
-	muxDataPort       *qcom.WDSMuxDataPort
-	legacyMuxDataPort qcom.WDSSIOPort
-	network           IMSPDNNetwork
+	client *qcom.Client
+	config QCOMClientConfig
 }
 
 // QCOMClientConfig configures QCOM-specific IMS PDN access.
@@ -34,17 +32,12 @@ func NewQCOMClient(client *qcom.Client, cfg QCOMClientConfig) (*QCOMClient, erro
 	if err != nil {
 		return nil, err
 	}
-	return &QCOMClient{
-		QCOM:              wwan,
-		client:            client,
-		muxDataPort:       cloneQCOMMuxDataPort(cfg.MuxDataPort),
-		legacyMuxDataPort: cfg.LegacyMuxDataPort,
-		network:           cfg.Network,
-	}, nil
+	cfg.MuxDataPort = cloneQCOMMuxDataPort(cfg.MuxDataPort)
+	return &QCOMClient{QCOM: wwan, client: client, config: cfg}, nil
 }
 
 func (c *QCOMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSession, error) {
-	pdnConfigs, err := qcomIMSPDNConfigs(cfg, c.muxDataPort, c.legacyMuxDataPort)
+	pdnConfigs, err := qcomIMSPDNConfigs(cfg, c.config)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +46,7 @@ func (c *QCOMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 		session, err = c.client.OpenIMSPDN(ctx, pdnCfg)
 		if err == nil {
 			adapted := qcomIMSPDNSession{session}
-			return configureIMSPDNNetwork(ctx, adapted, c.network, qcomIMSPDNNetworkInfo(session.Info()))
+			return configureIMSPDNNetwork(ctx, adapted, c.config.Network, qcomIMSPDNNetworkInfo(session.Info()))
 		}
 		if i == 0 && len(pdnConfigs) > 1 && errors.Is(err, qcom.QMIErrorNotSupported) {
 			continue
@@ -73,7 +66,7 @@ func qcomIMSPDNNetworkInfo(info qcom.IMSPDNInfo) IMSPDNNetworkInfo {
 	}
 }
 
-func qcomIMSPDNConfigs(cfg imsPDNConfig, muxDataPort *qcom.WDSMuxDataPort, legacyMuxDataPort qcom.WDSSIOPort) ([]qcom.IMSPDNConfig, error) {
+func qcomIMSPDNConfigs(cfg imsPDNConfig, clientCfg QCOMClientConfig) ([]qcom.IMSPDNConfig, error) {
 	ipPreference, err := qcomIPPreference(cfg.PDNType)
 	if err != nil {
 		return nil, err
@@ -82,16 +75,16 @@ func qcomIMSPDNConfigs(cfg imsPDNConfig, muxDataPort *qcom.WDSMuxDataPort, legac
 		APN:          cfg.APN,
 		IPPreference: ipPreference,
 		ProfileIndex: cfg.ProfileIndex,
-		MuxDataPort:  cloneQCOMMuxDataPort(muxDataPort),
+		MuxDataPort:  cloneQCOMMuxDataPort(clientCfg.MuxDataPort),
 	}
-	if muxDataPort == nil {
-		pdnCfg.LegacyMuxDataPort = legacyMuxDataPort
+	if clientCfg.MuxDataPort == nil {
+		pdnCfg.LegacyMuxDataPort = clientCfg.LegacyMuxDataPort
 		return []qcom.IMSPDNConfig{pdnCfg}, nil
 	}
 	configs := []qcom.IMSPDNConfig{pdnCfg}
-	if legacyMuxDataPort != 0 {
+	if clientCfg.LegacyMuxDataPort != 0 {
 		pdnCfg.MuxDataPort = nil
-		pdnCfg.LegacyMuxDataPort = legacyMuxDataPort
+		pdnCfg.LegacyMuxDataPort = clientCfg.LegacyMuxDataPort
 		configs = append(configs, pdnCfg)
 	}
 	return configs, nil
@@ -132,7 +125,7 @@ func qcomIPPreference(pdnType string) (qcom.WDSIPPreference, error) {
 	case "ipv6":
 		return qcom.WDSIPPreferenceIPv6, nil
 	case "ipv4v6":
-		return qcom.WDSIPPreferenceUnspecified, nil
+		return qcom.WDSIPPreferenceDefault, nil
 	default:
 		return 0, fmt.Errorf("opening QCOM IMS PDN: unsupported PDN type %q", pdnType)
 	}
