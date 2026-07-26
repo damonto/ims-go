@@ -30,25 +30,28 @@ const (
 )
 
 type Config struct {
-	Codecs                        []AudioCodecConfig
-	RTPProfile                    string
-	PTime                         time.Duration
-	MaxPTime                      time.Duration
-	GeolocationPIDFInvite         []int
-	GeolocationCountry            string
-	PIDFShortCodes                []string
-	UseTelURIForPIDFXML           bool
-	RequestURIFormat              RequestURIFormat
-	PhoneContextDomain            string
-	Preconditions                 bool
-	ReliableProvisional           bool
-	SessionTimer                  bool
-	SessionExpires                time.Duration
-	MinSessionExpires             time.Duration
-	SessionRefresher              string
-	MOCallRequestTimeout          time.Duration
-	RingbackTimeout               time.Duration
-	RingingTimeout                time.Duration
+	Codecs                []AudioCodecConfig
+	RTPProfile            string
+	PTime                 time.Duration
+	MaxPTime              time.Duration
+	GeolocationPIDFInvite []int
+	GeolocationCountry    string
+	PIDFShortCodes        []string
+	UseTelURIForPIDFXML   bool
+	RequestURIFormat      RequestURIFormat
+	PhoneContextDomain    string
+	Preconditions         bool
+	ReliableProvisional   bool
+	SessionTimer          bool
+	SessionExpires        time.Duration
+	MinSessionExpires     time.Duration
+	SessionRefresher      string
+	MOCallRequestTimeout  time.Duration
+	RingbackTimeout       time.Duration
+	RingingTimeout        time.Duration
+	// IncomingPreconditionTimeout bounds how long an early incoming call
+	// waits for mandatory peer preconditions. Zero uses the 30-second default.
+	IncomingPreconditionTimeout   time.Duration
 	AllowHoldDuringEmergency      bool
 	AudioASBandwidthKbps          int
 	RTPInactivityTimeout          *time.Duration
@@ -58,11 +61,15 @@ type Config struct {
 	LocalRTPPortMax               int
 	PrepareMedia                  func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
 	OpenMedia                     func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
-	OnIncomingCall                func(IncomingCall)
-	OnCallEvent                   func(CallEvent)
-	OnMedia                       func(MediaEvent)
-	OnError                       func(error)
-	Logger                        *slog.Logger
+	// WaitMediaReady confirms that the network resources for the negotiated
+	// media are available. A successful packet transport alone does not satisfy
+	// IMS QoS preconditions. When nil, local QoS preconditions remain unmet.
+	WaitMediaReady func(ctx context.Context, cfg MediaConfig) error
+	OnIncomingCall func(IncomingCall)
+	OnCallEvent    func(CallEvent)
+	OnMedia        func(MediaEvent)
+	OnError        func(error)
+	Logger         *slog.Logger
 }
 
 type AudioCodecConfig struct {
@@ -138,15 +145,16 @@ type MediaTransportConfigurer interface {
 }
 
 const (
-	defaultRTPProfile        = "RTP/AVP"
-	defaultPTime             = 20 * time.Millisecond
-	defaultMaxPTime          = 240 * time.Millisecond
-	defaultSessionExpires    = 1800 * time.Second
-	defaultMinSessionExpires = 90 * time.Second
-	defaultRTPInactivity     = 10 * time.Second
-	defaultRTCPInactivity    = 30 * time.Second
-	defaultLocalRTPPortMin   = 40000
-	defaultLocalRTPPortMax   = 40100
+	defaultRTPProfile                  = "RTP/AVP"
+	defaultPTime                       = 20 * time.Millisecond
+	defaultMaxPTime                    = 240 * time.Millisecond
+	defaultSessionExpires              = 1800 * time.Second
+	defaultMinSessionExpires           = 90 * time.Second
+	defaultRTPInactivity               = 10 * time.Second
+	defaultRTCPInactivity              = 30 * time.Second
+	defaultIncomingPreconditionTimeout = 30 * time.Second
+	defaultLocalRTPPortMin             = 40000
+	defaultLocalRTPPortMax             = 40100
 )
 
 var defaultAudioInactivityCallEndReasons = []AudioInactivityCallEndReason{
@@ -242,6 +250,12 @@ func (cfg Config) Normalized() (Config, error) {
 	}
 	if cfg.RingingTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: ringing timeout must be >= 0")
+	}
+	if cfg.IncomingPreconditionTimeout < 0 {
+		return Config{}, errors.New("normalizing voice config: incoming precondition timeout must be >= 0")
+	}
+	if cfg.IncomingPreconditionTimeout == 0 {
+		cfg.IncomingPreconditionTimeout = defaultIncomingPreconditionTimeout
 	}
 	var err error
 	if cfg.RTPInactivityTimeout, err = normalizeDurationSetting(cfg.RTPInactivityTimeout, defaultRTPInactivity, durationSettingRTPInactivityTimeout); err != nil {

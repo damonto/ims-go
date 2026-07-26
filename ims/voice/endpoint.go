@@ -25,16 +25,17 @@ func New(cfg Config, sess *session.Session, reg *registration.Registrar) (*Endpo
 		return nil, err
 	}
 	endpoint := &Endpoint{
-		cfg:          endpointCfg,
-		sess:         sess,
-		reg:          reg,
-		logger:       endpointCfg.Logger.With("component", "ims-voice"),
-		timers:       sess.TransactionTimers(),
-		rtcpInterval: rtcpInterval,
-		nextPort:     endpointCfg.LocalRTPPortMin,
-		calls:        make(map[string]*Call),
-		incomings:    make(map[string]*Call),
-		bgDone:       make(chan struct{}),
+		cfg:                    endpointCfg,
+		sess:                   sess,
+		reg:                    reg,
+		logger:                 endpointCfg.Logger.With("component", "ims-voice"),
+		timers:                 sess.TransactionTimers(),
+		rtcpInterval:           rtcpInterval,
+		preconditionRetryDelay: preconditionRetryDelay,
+		nextPort:               endpointCfg.LocalRTPPortMin,
+		calls:                  make(map[string]*Call),
+		incomings:              make(map[string]*Call),
+		bgDone:                 make(chan struct{}),
 	}
 	attachment, err := sess.Attach(endpoint)
 	if err != nil {

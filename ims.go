@@ -91,6 +91,9 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	if voiceCfg.OpenMedia == nil {
 		voiceCfg.OpenMedia = accessIMS.OpenMedia
 	}
+	if voiceCfg.WaitMediaReady == nil {
+		voiceCfg.WaitMediaReady = accessIMS.WaitMediaReady
+	}
 	voiceCfg.OnIncomingCall = c.handleIncomingVoice
 	voiceCfg.OnCallEvent = c.handleVoiceEvent
 	voiceCfg.OnError = c.emitError

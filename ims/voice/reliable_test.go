@@ -349,9 +349,9 @@ func TestReliableProvisionalRetransmitsUntilPRACK(t *testing.T) {
 	invite := reliableDelayedInvite()
 	transport.queue(invite)
 	select {
-	case <-incoming:
-	case <-time.After(time.Second):
-		t.Fatal("incoming call event timed out")
+	case event := <-incoming:
+		t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+	case <-time.After(20 * time.Millisecond):
 	}
 	if !waitForCallTest(func() bool {
 		return len(transport.messagesByStatus(183, "INVITE")) >= 2
@@ -364,6 +364,14 @@ func TestReliableProvisionalRetransmitsUntilPRACK(t *testing.T) {
 		return len(transport.messagesByStatus(200, "PRACK")) == 1
 	}) {
 		t.Fatalf("200 PRACK count = %d, want 1", len(transport.messagesByStatus(200, "PRACK")))
+	}
+	select {
+	case event := <-incoming:
+		if event.Call == nil {
+			t.Fatal("incoming call is nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incoming call was not reported after PRACK")
 	}
 	afterPRACK := len(transport.messagesByStatus(183, "INVITE"))
 	time.Sleep(60 * time.Millisecond)
@@ -433,9 +441,9 @@ func TestReliableProvisionalDuplicateInviteDoesNotAdvanceRSeq(t *testing.T) {
 			invite := reliableDelayedInvite()
 			transport.queue(invite)
 			select {
-			case <-incoming:
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+			case <-time.After(20 * time.Millisecond):
 			}
 			if !waitForCallTest(func() bool {
 				return len(transport.messagesByStatus(183, "INVITE")) == 1
@@ -473,6 +481,14 @@ func TestReliableProvisionalDuplicateInviteDoesNotAdvanceRSeq(t *testing.T) {
 				return len(transport.messagesByStatus(sipStatusOK, "PRACK")) == 1
 			}) {
 				t.Fatalf("200 PRACK count = %d, want 1", len(transport.messagesByStatus(sipStatusOK, "PRACK")))
+			}
+			select {
+			case event := <-incoming:
+				if event.Call == nil {
+					t.Fatal("incoming call is nil")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after PRACK")
 			}
 		})
 	}
@@ -536,13 +552,14 @@ func TestReliableProvisionalTimeoutRejectsInvite(t *testing.T) {
 				<-runErr
 			}()
 
-			transport.queue(reliableDelayedInvite())
+			invite := reliableDelayedInvite()
+			transport.queue(invite)
 			var call *Call
-			select {
-			case event := <-incoming:
-				call = event.Call
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+			if !waitForCallTest(func() bool {
+				call = svc.lookupCall(invite.Header("Call-ID"))
+				return call != nil
+			}) {
+				t.Fatal("incoming call was not stored while PRACK was pending")
 			}
 
 			if !waitForCallTest(func() bool {
@@ -552,6 +569,11 @@ func TestReliableProvisionalTimeoutRejectsInvite(t *testing.T) {
 			}
 			if call.State() != CallStateFailed {
 				t.Fatalf("call state = %s, want %s", call.State(), CallStateFailed)
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported even though PRACK timed out: %v", event.Call)
+			default:
 			}
 		})
 	}

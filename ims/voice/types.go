@@ -46,7 +46,9 @@ const (
 	sipStatusBadInfoPackage              = 469
 	sipStatusCallTransactionDoesNotExist = 481
 	sipStatusBusyHere                    = 486
+	sipStatusRequestTerminated           = 487
 	sipStatusNotAcceptableHere           = 488
+	sipStatusPreconditionFailure         = 580
 	sipStatusRequestPending              = 491
 	sipStatusServerInternalError         = 500
 )
@@ -108,13 +110,14 @@ type MediaEvent struct {
 }
 
 type Endpoint struct {
-	cfg          Config
-	sess         *session.Session
-	reg          *registration.Registrar
-	logger       *slog.Logger
-	attachment   session.Attachment
-	timers       session.TransactionTimers
-	rtcpInterval func(NegotiatedMedia) time.Duration
+	cfg                    Config
+	sess                   *session.Session
+	reg                    *registration.Registrar
+	logger                 *slog.Logger
+	attachment             session.Attachment
+	timers                 session.TransactionTimers
+	rtcpInterval           func(NegotiatedMedia) time.Duration
+	preconditionRetryDelay func(CallDirection) time.Duration
 
 	mu        sync.Mutex
 	cseq      int64
@@ -129,70 +132,99 @@ type Endpoint struct {
 type Call struct {
 	endpoint *Endpoint
 
-	mu                  sync.Mutex
-	mediaSendMu         sync.Mutex
-	id                  string
-	sessionID           string
-	direction           CallDirection
-	state               CallState
-	localURI            string
-	localTag            string
-	remoteURI           string
-	remoteTag           string
-	remoteTo            string
-	remoteAllow         string
-	targetURI           string
-	routeSet            []string
-	inviteSeq           int64
-	localCSeq           int64
-	inviteRequest       sip.Message
-	localSDP            []byte
-	inviteResponse      bool
-	cancelOnResponse    bool
-	cancelSent          bool
-	inviteCancel        func()
-	cancelledInviteStop chan struct{}
-	localINVITEPending  bool
-	refreshGlareRetried bool
-	remoteINVITEPending bool
-	remoteINVITECSeq    int64
-	remoteCSeq          int64
-	localPort           int
-	incomingRequest     *session.Request
-	remoteOffer         sdpOffer
-	remotePayloads      map[int]rtpPayloadMapping
-	earlyDialogs        map[string]earlyDialog
-	inviteOK            sip.Message
-	inviteOKStop        chan struct{}
-	inviteOKCSeq        int64
-	ringbackStop        chan struct{}
-	ringingStop         chan struct{}
-	inviteACK           sip.Message
-	reliableRSeq        map[string]int64
-	reliableStop        chan struct{}
-	nextRSeq            int64
-	pendingReliable     reliableProvisional
-	reliableResponse    sip.Message
-	provisionalReady    chan struct{}
-	delayedOffer        bool
-	prackAnsweredOffer  bool
-	provisionalAnswer   bool
-	mediaActivity       chan MediaPacket
-	mediaWatchStop      chan struct{}
-	sessionTimer        sessionTimerState
-	sessionTimerStop    chan struct{}
-	dialogAttachment    session.Attachment
-	media               NegotiatedMedia
-	rtpSend             rtpSendState
-	rtcpSend            rtcpSendState
-	rtcpRecv            rtcpReceiveState
-	hold                CallHoldState
-	localHoldRTCPOff    bool
-	transport           MediaTransport
-	rtcpSSRC            uint32
-	emergency           bool
-	currentLocation     bool
-	closed              bool
+	mu                    sync.Mutex
+	mediaSendMu           sync.Mutex
+	preconditionUpdateMu  sync.Mutex
+	id                    string
+	sessionID             string
+	direction             CallDirection
+	state                 CallState
+	localURI              string
+	localTag              string
+	remoteURI             string
+	remoteTag             string
+	remoteTo              string
+	remoteAllow           string
+	targetURI             string
+	routeSet              []string
+	inviteSeq             int64
+	localCSeq             int64
+	inviteRequest         sip.Message
+	localSDP              []byte
+	inviteResponse        bool
+	cancelOnResponse      bool
+	cancelSent            bool
+	inviteCancel          func()
+	cancelledInviteStop   chan struct{}
+	localINVITEPending    bool
+	refreshGlareRetried   bool
+	remoteINVITEPending   bool
+	remoteINVITECSeq      int64
+	remoteCSeq            int64
+	localPort             int
+	localQoSStatus        string
+	incomingRequest       *session.Request
+	preconditions         bool
+	incomingMediaReady    bool
+	incomingConfirmations int
+	incomingAlerting      bool
+	incomingAlerted       bool
+	incomingQoS           incomingQoSState
+	incomingUnknown       []incomingUnknownPrecondition
+	incomingOffer         MediaDescription
+	incomingReceived      time.Time
+	remoteSDP             []byte
+	remoteOffer           sdpOffer
+	remotePayloads        map[int]rtpPayloadMapping
+	earlyDialogs          map[string]earlyDialog
+	inviteOK              sip.Message
+	inviteOKStop          chan struct{}
+	inviteOKCSeq          int64
+	ringbackStop          chan struct{}
+	ringingStop           chan struct{}
+	preconditionStop      chan struct{}
+	inviteACK             sip.Message
+	reliableRSeq          map[string]int64
+	reliableStop          chan struct{}
+	nextRSeq              int64
+	pendingReliable       reliableProvisional
+	reliableResponse      sip.Message
+	provisionalReady      chan struct{}
+	delayedOffer          bool
+	prackAnsweredOffer    bool
+	provisionalAnswer     bool
+	provisionalCompleting bool
+	mediaActivity         chan MediaPacket
+	mediaWatchStop        chan struct{}
+	sessionTimer          sessionTimerState
+	sessionTimerStop      chan struct{}
+	dialogAttachment      session.Attachment
+	media                 NegotiatedMedia
+	rtpSend               rtpSendState
+	rtcpSend              rtcpSendState
+	rtcpRecv              rtcpReceiveState
+	hold                  CallHoldState
+	localHoldRTCPOff      bool
+	transport             MediaTransport
+	mediaGeneration       uint64
+	mediaResource         mediaResourceKey
+	qosMediaResource      mediaResourceKey
+	callDone              chan struct{}
+	rtcpSSRC              uint32
+	emergency             bool
+	currentLocation       bool
+	closed                bool
+}
+
+type incomingQoSState struct {
+	desired      qosDesiredStatus
+	remoteStatus string
+}
+
+type incomingUnknownPrecondition struct {
+	preconditionType string
+	direction        string
+	remoteStatus     string
 }
 
 type rtpSendState struct {

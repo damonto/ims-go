@@ -13,6 +13,17 @@ var (
 	_ encoding.BinaryUnmarshaler = (*MediaDescription)(nil)
 )
 
+type sdpPreconditionFailureError struct {
+	preconditionType string
+	statusType       string
+	direction        string
+	strength         string
+}
+
+func (e *sdpPreconditionFailureError) Error() string {
+	return fmt.Sprintf("parsing voice SDP: unsupported mandatory %s precondition", e.preconditionType)
+}
+
 // UnmarshalBinary decodes an SDP body into its audio media description.
 func (description *MediaDescription) UnmarshalBinary(data []byte) error {
 	*description = MediaDescription{}
@@ -26,11 +37,12 @@ func (description *MediaDescription) UnmarshalBinary(data []byte) error {
 
 func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
 	*offer = sdpOffer{
-		RawSDP:     append([]byte(nil), data...),
-		Codecs:     make(map[int]AudioCodecConfig),
-		FMTP:       make(map[int]string),
-		Direction:  MediaDirectionSendRecv,
-		AudioIndex: -1,
+		RawSDP:             append([]byte(nil), data...),
+		Codecs:             make(map[int]AudioCodecConfig),
+		FMTP:               make(map[int]string),
+		UnknownLocalStatus: make(map[string]string),
+		Direction:          MediaDirectionSendRecv,
+		AudioIndex:         -1,
 	}
 	var mediaPayloads map[int]struct{}
 	inAudio := false
@@ -148,14 +160,10 @@ func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
 			} else if !seenMedia {
 				sessionDirection = direction
 			}
-		case strings.HasPrefix(line, "a=curr:qos") || strings.HasPrefix(line, "a=des:qos") || strings.HasPrefix(line, "a=conf:qos"):
+		case isPreconditionAttribute(line):
 			if inAudio {
-				offer.Preconditions = true
-				if status, ok := parseCurrentQoSLocal(line); ok {
-					offer.LocalQoSStatus = status
-				}
-				if parseQoSConfirmationRemote(line) {
-					offer.RemoteQoSConfirmation = true
+				if err := offer.applyPrecondition(line); err != nil {
+					return err
 				}
 			}
 		case strings.HasPrefix(line, "b="):
@@ -205,6 +213,122 @@ func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+func isPreconditionAttribute(line string) bool {
+	fields := strings.Fields(strings.ToLower(line))
+	if len(fields) == 0 {
+		return false
+	}
+	return strings.HasPrefix(fields[0], "a=curr:") ||
+		strings.HasPrefix(fields[0], "a=des:") ||
+		strings.HasPrefix(fields[0], "a=conf:")
+}
+
+func (offer *sdpOffer) applyPrecondition(line string) error {
+	fields := strings.Fields(strings.ToLower(line))
+	if len(fields) == 0 {
+		return errors.New("parsing voice SDP: empty precondition attribute")
+	}
+	attribute := strings.TrimPrefix(fields[0], "a=")
+	parts := strings.SplitN(attribute, ":", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return errors.New("parsing voice SDP: invalid precondition attribute")
+	}
+	kind, preconditionType := parts[0], parts[1]
+	if preconditionType != "qos" {
+		return offer.applyUnknownPrecondition(kind, preconditionType, fields)
+	}
+
+	offer.Preconditions = true
+	switch kind {
+	case "curr":
+		scope, status, ok := parseCurrentQoS(line)
+		if !ok {
+			return qosPreconditionParseError(fields)
+		}
+		switch scope {
+		case "local":
+			offer.LocalQoSStatus = status
+		case "remote":
+			offer.RemoteQoSStatus = status
+		}
+	case "des":
+		strength, scope, direction, ok := parseDesiredQoS(line)
+		if !ok {
+			return qosPreconditionParseError(fields)
+		}
+		offer.DesiredQoS.set(scope, direction, strength)
+	case "conf":
+		scope, direction, ok := parseQoSConfirmation(line)
+		if !ok {
+			return qosPreconditionParseError(fields)
+		}
+		if scope == "remote" {
+			offer.RemoteQoSConfirmation = true
+			offer.QoSConfirmation = direction
+		}
+	default:
+		return errors.New("parsing voice SDP: invalid QoS precondition attribute")
+	}
+	return nil
+}
+
+func (offer *sdpOffer) applyUnknownPrecondition(kind, preconditionType string, fields []string) error {
+	switch kind {
+	case "curr":
+		if len(fields) != 3 || (fields[1] != "local" && fields[1] != "remote") || normalizedQoSStatus(fields[2]) != fields[2] {
+			return errors.New("parsing voice SDP: invalid unknown current-status precondition")
+		}
+		if fields[1] == "local" {
+			offer.UnknownLocalStatus[preconditionType] = fields[2]
+		}
+	case "des":
+		if len(fields) != 4 || !validQoSStrength(fields[1]) ||
+			(fields[3] != qosStatusSend && fields[3] != qosStatusRecv && fields[3] != qosStatusSendRecv) {
+			return errors.New("parsing voice SDP: invalid unknown desired-status precondition")
+		}
+		if fields[1] != qosStrengthMandatory {
+			return nil
+		}
+		if fields[2] != "local" {
+			return &sdpPreconditionFailureError{
+				preconditionType: preconditionType,
+				statusType:       fields[2],
+				direction:        fields[3],
+				strength:         qosStrengthUnknown,
+			}
+		}
+		offer.UnknownLocalMandatory = append(offer.UnknownLocalMandatory, sdpUnknownPrecondition{
+			preconditionType: preconditionType,
+			direction:        fields[3],
+		})
+	case "conf":
+		if len(fields) != 3 {
+			return errors.New("parsing voice SDP: invalid unknown confirm-status precondition")
+		}
+	default:
+		return errors.New("parsing voice SDP: invalid unknown precondition attribute")
+	}
+	return nil
+}
+
+func qosPreconditionParseError(fields []string) error {
+	statusType := ""
+	direction := qosStatusSendRecv
+	if len(fields) >= 3 {
+		statusType = fields[len(fields)-2]
+		direction = fields[len(fields)-1]
+	}
+	if statusType == "e2e" {
+		return &sdpPreconditionFailureError{
+			preconditionType: "qos",
+			statusType:       statusType,
+			direction:        direction,
+			strength:         qosStrengthFailure,
+		}
+	}
+	return errors.New("parsing voice SDP: invalid QoS precondition attribute")
+}
+
 func isSDPDirectionLine(line string) bool {
 	switch strings.ToLower(line) {
 	case "a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive":
@@ -214,17 +338,61 @@ func isSDPDirectionLine(line string) bool {
 	}
 }
 
-func parseCurrentQoSLocal(line string) (string, bool) {
-	fields := strings.Fields(strings.TrimPrefix(line, "a=curr:qos"))
-	if len(fields) != 2 || !strings.EqualFold(fields[0], "local") {
-		return "", false
+func parseCurrentQoS(line string) (string, string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 3 || !strings.EqualFold(fields[0], "a=curr:qos") {
+		return "", "", false
 	}
-	return strings.ToLower(fields[1]), true
+	scope := strings.ToLower(fields[1])
+	if scope != "local" && scope != "remote" {
+		return "", "", false
+	}
+	status := strings.ToLower(fields[2])
+	if normalizedQoSStatus(status) != status {
+		return "", "", false
+	}
+	return scope, status, true
+}
+
+func parseDesiredQoS(line string) (string, string, string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 4 || !strings.EqualFold(fields[0], "a=des:qos") {
+		return "", "", "", false
+	}
+	strength := strings.ToLower(fields[1])
+	if !validQoSStrength(strength) {
+		return "", "", "", false
+	}
+	scope := strings.ToLower(fields[2])
+	if scope != "local" && scope != "remote" {
+		return "", "", "", false
+	}
+	direction := strings.ToLower(fields[3])
+	if direction != qosStatusSend && direction != qosStatusRecv && direction != qosStatusSendRecv {
+		return "", "", "", false
+	}
+	return strength, scope, direction, true
+}
+
+func parseQoSConfirmation(line string) (string, string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 3 || !strings.EqualFold(fields[0], "a=conf:qos") {
+		return "", "", false
+	}
+	scope := strings.ToLower(fields[1])
+	if scope != "local" && scope != "remote" {
+		return "", "", false
+	}
+	direction := strings.ToLower(fields[2])
+	if direction != qosStatusSend && direction != qosStatusRecv && direction != qosStatusSendRecv {
+		return "", "", false
+	}
+	return scope, direction, true
 }
 
 func parseQoSConfirmationRemote(line string) bool {
-	fields := strings.Fields(strings.TrimPrefix(line, "a=conf:qos"))
-	return len(fields) == 2 && strings.EqualFold(fields[0], "remote") && strings.EqualFold(fields[1], qosStatusSendRecv)
+	scope, _, ok := parseQoSConfirmation(line)
+	return ok && scope == "remote"
 }
 
 func applyStaticRTPPayloads(offer *sdpOffer) {

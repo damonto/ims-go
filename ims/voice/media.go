@@ -9,6 +9,48 @@ import (
 	"time"
 )
 
+type mediaResourceKey struct {
+	localPort      int
+	remoteIP       string
+	remotePort     int
+	remoteRTCPIP   string
+	remoteRTCPPort int
+	rtcpMux        bool
+	profile        string
+}
+
+func newMediaResourceKey(localPort int, media NegotiatedMedia) mediaResourceKey {
+	return mediaResourceKey{
+		localPort:      localPort,
+		remoteIP:       media.RemoteIP.String(),
+		remotePort:     media.RemotePort,
+		remoteRTCPIP:   media.RemoteRTCPIP.String(),
+		remoteRTCPPort: media.RemoteRTCPPort,
+		rtcpMux:        media.RTCPMux,
+		profile:        media.Profile,
+	}
+}
+
+func (c *Call) resetMediaResourcesLocked() {
+	c.localQoSStatus = qosStatusNone
+	c.mediaResource = mediaResourceKey{}
+	c.qosMediaResource = mediaResourceKey{}
+	c.mediaGeneration++
+}
+
+func (c *Call) configureMediaResourceLocked(key mediaResourceKey) {
+	if c.mediaResource == key {
+		return
+	}
+	c.mediaResource = key
+	if c.qosMediaResource == key {
+		return
+	}
+	c.localQoSStatus = qosStatusNone
+	c.qosMediaResource = mediaResourceKey{}
+	c.mediaGeneration++
+}
+
 func (c *Call) openEarlyMedia(ctx context.Context, answer sdpOffer) error {
 	negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
 	if !ok {
@@ -38,6 +80,7 @@ func (c *Call) closeMedia() error {
 	c.mu.Lock()
 	transport := c.transport
 	c.transport = nil
+	c.resetMediaResourcesLocked()
 	c.mu.Unlock()
 	if transport == nil {
 		return nil
@@ -91,6 +134,7 @@ func (c *Call) prepareMedia(ctx context.Context) error {
 		return nil
 	}
 	c.transport = transport
+	c.resetMediaResourcesLocked()
 	c.mu.Unlock()
 	return nil
 }
@@ -114,12 +158,18 @@ func (c *Call) openMedia(ctx context.Context) error {
 		Media:            cloneNegotiatedMedia(media),
 		OnPacket:         c.recordMediaPacket,
 	}
+	resourceKey := newMediaResourceKey(localPort, media)
 	c.endpoint.emitMedia(c, media)
 	if transport != nil {
 		if configurable, ok := transport.(MediaTransportConfigurer); ok {
 			if err := configurable.ConfigureRemote(ctx, cfg); err != nil {
 				return fmt.Errorf("configuring voice media remote: %w", err)
 			}
+			c.mu.Lock()
+			if c.transport == transport {
+				c.configureMediaResourceLocked(resourceKey)
+			}
+			c.mu.Unlock()
 			return nil
 		}
 		if c.endpoint.cfg.OpenMedia == nil {
@@ -128,6 +178,7 @@ func (c *Call) openMedia(ctx context.Context) error {
 		c.mu.Lock()
 		if c.transport == transport {
 			c.transport = nil
+			c.resetMediaResourcesLocked()
 		}
 		c.mu.Unlock()
 		if err := transport.Close(); err != nil {
@@ -154,8 +205,86 @@ func (c *Call) openMedia(ctx context.Context) error {
 		return nil
 	}
 	c.transport = transport
+	c.configureMediaResourceLocked(resourceKey)
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *Call) confirmMediaResources(ctx context.Context, media NegotiatedMedia) error {
+	wait := c.endpoint.cfg.WaitMediaReady
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("confirming call media resources: call is closed")
+	}
+	resourceKey := newMediaResourceKey(c.localPort, media)
+	if c.qosMediaResource != resourceKey {
+		c.qosMediaResource = resourceKey
+		c.localQoSStatus = qosStatusNone
+		c.mediaGeneration++
+	}
+	if normalizedQoSStatus(c.localQoSStatus) == qosStatusSendRecv {
+		c.mu.Unlock()
+		return nil
+	}
+	if wait == nil {
+		c.mu.Unlock()
+		return errors.New("confirming call media resources: readiness callback is not configured")
+	}
+	generation := c.mediaGeneration
+	if c.callDone == nil {
+		c.callDone = make(chan struct{})
+	}
+	callDone := c.callDone
+	cfg := MediaConfig{
+		LocalPort:        c.localPort,
+		LocalDescription: descriptionFromLocalSDP(c.localSDP),
+		RemoteIP:         append(net.IP(nil), media.RemoteIP...),
+		RemotePort:       media.RemotePort,
+		RemoteRTCPIP:     append(net.IP(nil), media.RemoteRTCPIP...),
+		RemoteRTCPPort:   media.RemoteRTCPPort,
+		RTCPMux:          media.RTCPMux,
+		Media:            cloneNegotiatedMedia(media),
+	}
+	c.mu.Unlock()
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	waitCtx, cancel = cancelContextWithDone(waitCtx, cancel, callDone)
+	defer cancel()
+	if err := wait(waitCtx, cfg); err != nil {
+		c.mu.Lock()
+		stale := c.mediaGeneration != generation || c.qosMediaResource != resourceKey
+		closed := c.closed
+		c.mu.Unlock()
+		if stale {
+			return errors.New("confirming call media resources: media transport changed")
+		}
+		if closed {
+			return errors.New("confirming call media resources: call is closed")
+		}
+		return fmt.Errorf("confirming call media resources: %w", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("confirming call media resources: call is closed")
+	}
+	if c.mediaGeneration != generation || c.qosMediaResource != resourceKey {
+		return errors.New("confirming call media resources: media transport changed")
+	}
+	c.localQoSStatus = qosStatusSendRecv
+	return nil
+}
+
+func (c *Call) confirmedQoSStatus(media NegotiatedMedia) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.qosMediaResource != newMediaResourceKey(c.localPort, media) {
+		return qosStatusNone
+	}
+	return normalizedQoSStatus(c.localQoSStatus)
 }
 
 func descriptionFromLocalSDP(body []byte) MediaDescription {

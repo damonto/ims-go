@@ -43,6 +43,12 @@ func cloneAudioFormat(format AudioFormat) AudioFormat {
 }
 
 func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
+	c.mu.Lock()
+	if c.direction == CallDirectionIncoming && !c.incomingAlerted {
+		c.mu.Unlock()
+		return errors.New("answering call: media resources are not ready")
+	}
+	c.mu.Unlock()
 	if err := c.waitForReliableProvisionalAnswer(ctx); err != nil {
 		return err
 	}
@@ -65,6 +71,7 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 	prackAnsweredOffer := c.prackAnsweredOffer
 	provisionalAnswer := c.provisionalAnswer
 	c.mu.Unlock()
+	cfg := c.sdpConfig()
 
 	var (
 		answer []byte
@@ -76,9 +83,9 @@ func (c *Call) Answer(ctx context.Context, offer MediaOffer) error {
 	} else if provisionalAnswer {
 		// The INVITE offer was already answered in a provisional response.
 	} else if c.delayedOffer {
-		answer, media, err = buildSDPOffer(c.endpoint.cfg, c.endpoint.localIP(), localPort, offer)
+		answer, media, err = buildSDPOffer(cfg, c.endpoint.localIP(), localPort, offer)
 	} else {
-		answer, media, err = buildSDPAnswer(c.endpoint.cfg, c.endpoint.localIP(), localPort, remoteOffer, offer)
+		answer, media, err = buildSDPAnswer(cfg, c.endpoint.localIP(), localPort, remoteOffer, offer)
 	}
 	if err != nil {
 		return err
@@ -313,16 +320,19 @@ func (c *Call) finish(state CallState, cause string) {
 	stop := c.inviteOKStop
 	ringbackStop := c.ringbackStop
 	ringingStop := c.ringingStop
+	preconditionStop := c.preconditionStop
 	mediaStop := c.mediaWatchStop
 	reliableStop := c.reliableStop
 	sessionTimerStop := c.sessionTimerStop
 	provisionalReady := c.provisionalReady
 	cancelledInviteStop := c.cancelledInviteStop
 	inviteCancel := c.inviteCancel
+	callDone := c.callDone
 	c.inviteOKStop = nil
 	c.inviteOKCSeq = 0
 	c.ringbackStop = nil
 	c.ringingStop = nil
+	c.preconditionStop = nil
 	c.mediaActivity = nil
 	c.mediaWatchStop = nil
 	c.reliableStop = nil
@@ -332,6 +342,9 @@ func (c *Call) finish(state CallState, cause string) {
 	c.inviteCancel = nil
 	c.dialogAttachment = nil
 	c.mu.Unlock()
+	if callDone != nil {
+		close(callDone)
+	}
 
 	if stop != nil {
 		close(stop)
@@ -341,6 +354,9 @@ func (c *Call) finish(state CallState, cause string) {
 	}
 	if ringingStop != nil {
 		close(ringingStop)
+	}
+	if preconditionStop != nil {
+		close(preconditionStop)
 	}
 	if mediaStop != nil {
 		close(mediaStop)

@@ -53,6 +53,7 @@ type imsAccess struct {
 	OpenReliableSIP   func(context.Context) (imssession.Transport, error)
 	Security          imsSecurity
 	OpenMedia         func(context.Context, imsvoice.MediaConfig) (imsvoice.MediaTransport, error)
+	WaitMediaReady    func(context.Context, imsvoice.MediaConfig) error
 }
 
 type imsSecurity struct {

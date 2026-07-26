@@ -13,6 +13,28 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
+type outgoingPreconditionUpdate struct {
+	response     sip.Message
+	answer       sdpOffer
+	media        NegotiatedMedia
+	remoteTarget string
+	routes       []string
+}
+
+type outgoingPRACKFollowup struct {
+	openEarlyMedia bool
+	earlyMedia     sdpOffer
+	precondition   *outgoingPreconditionUpdate
+}
+
+type incomingPRACKFollowup struct {
+	answeringDelayedOffer          bool
+	acknowledgingProvisionalAnswer bool
+	delayedAnswer                  sdpOffer
+	delayedAnswerMedia             NegotiatedMedia
+	inviteRequest                  *session.Request
+}
+
 func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 	c.mu.Lock()
 	delayedOffer := c.delayedOffer
@@ -24,6 +46,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 	inviteReq := c.incomingRequest
 	pending := c.pendingReliable
 	c.mu.Unlock()
+	cfg := c.sdpConfig()
 
 	var rack rackHeader
 	if err := rack.UnmarshalText([]byte(req.Message.Header("RAck"))); err != nil {
@@ -36,7 +59,8 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 	answeringDelayedOffer := delayedOffer && !prackAnsweredOffer && state == CallStateRinging && pending.status == sipStatusSessionProgress
 	acknowledgingProvisionalAnswer := !delayedOffer && !provisionalAnswer && state == CallStateRinging && pending.status == sipStatusSessionProgress
 	var prackAnswer []byte
-	var preconditionUpdate sip.Message
+	var delayedAnswer sdpOffer
+	var delayedAnswerMedia NegotiatedMedia
 	if answeringDelayedOffer {
 		body, ok := sdpBody(req.Message)
 		if !ok {
@@ -46,15 +70,21 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			c.finish(CallStateFailed, "missing PRACK SDP answer")
 			return nil
 		}
-		var answer sdpOffer
-		if err := answer.UnmarshalBinary(body); err != nil {
-			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
+		if err := delayedAnswer.UnmarshalBinary(body); err != nil {
+			if writeErr := c.endpoint.writeSDPFailure(ctx, req, body, err); writeErr != nil {
 				return writeErr
 			}
 			c.finish(CallStateFailed, err.Error())
 			return nil
 		}
-		negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
+		if cfg.Preconditions && !delayedAnswer.Preconditions {
+			if err := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); err != nil {
+				return err
+			}
+			c.finish(CallStateFailed, "PRACK SDP answer omitted negotiated preconditions")
+			return nil
+		}
+		negotiated, ok := chooseCodec(delayedAnswer, cfg.Codecs)
 		if !ok {
 			if err := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); err != nil {
 				return err
@@ -62,48 +92,36 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			c.finish(CallStateFailed, "no compatible PRACK answer codec")
 			return nil
 		}
-		if err := c.acceptRemotePayloadMappings(answer); err != nil {
+		if err := c.acceptRemotePayloadMappings(delayedAnswer); err != nil {
 			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
 				return writeErr
 			}
 			c.finish(CallStateFailed, err.Error())
 			return nil
 		}
-		dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, negotiated.ClockRate)
-		answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, media.PTime), nonZeroDuration(answer.MaxPTime, media.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
+		dtmf, hasDTMF := chooseTelephoneEventForClock(delayedAnswer, cfg.Codecs, negotiated.ClockRate)
+		delayedAnswerMedia = negotiatedMedia(delayedAnswer, negotiated, nonZeroDuration(delayedAnswer.PTime, media.PTime), nonZeroDuration(delayedAnswer.MaxPTime, media.MaxPTime, cfg.MaxPTime), dtmf, hasDTMF)
 		c.mu.Lock()
-		c.media = answerMedia
-		c.prackAnsweredOffer = true
-		c.mu.Unlock()
-		if c.endpoint.cfg.Preconditions && answer.Preconditions && answer.RemoteQoSConfirmation {
-			body, err := buildSDPPreconditionUpdate(c.endpoint.cfg, c.endpoint.localIP(), localPort, answer, answerMedia)
-			if err != nil {
-				if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
-					return writeErr
-				}
-				return nil
+		c.media = delayedAnswerMedia
+		c.remoteSDP = append([]byte(nil), body...)
+		if delayedAnswer.Preconditions {
+			desired := strongerQoSDesiredStatus(invertQoSDesiredStatus(delayedAnswer.DesiredQoS), c.incomingQoS.desired)
+			c.incomingQoS = incomingQoSState{
+				desired:      desired,
+				remoteStatus: invertQoSStatus(delayedAnswer.LocalQoSStatus),
 			}
-			c.mu.Lock()
-			c.localSDP = append([]byte(nil), body...)
-			snap := c.dialogSnapshot()
-			c.mu.Unlock()
-			preconditionUpdate = snap.buildPreconditionUPDATE(c.nextCSeq(), body)
 		}
-		if err := c.openMedia(ctx); err != nil {
-			c.finish(CallStateFailed, err.Error())
-			c.signalProvisionalReady()
-			return nil
-		}
-		c.startMediaInactivityWatch()
+		c.incomingUnknown = incomingUnknownPreconditions(delayedAnswer)
+		c.mu.Unlock()
 	} else if body, ok := sdpBody(req.Message); ok {
 		var offer sdpOffer
 		if err := offer.UnmarshalBinary(body); err != nil {
-			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
+			if writeErr := c.endpoint.writeSDPFailure(ctx, req, body, err); writeErr != nil {
 				return writeErr
 			}
 			return nil
 		}
-		answer, answerMedia, err := buildSDPAnswer(c.endpoint.cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{})
+		answer, answerMedia, err := buildSDPAnswer(cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{})
 		if err != nil {
 			if writeErr := c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here"); writeErr != nil {
 				return writeErr
@@ -118,6 +136,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		}
 		c.mu.Lock()
 		c.remoteOffer = offer
+		c.remoteSDP = append([]byte(nil), body...)
 		c.media = answerMedia
 		c.localSDP = append([]byte(nil), answer...)
 		c.mu.Unlock()
@@ -127,40 +146,197 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 	if err := c.endpoint.writePRACKOK(ctx, req, prackAnswer); err != nil {
 		return err
 	}
-	c.clearReliableProvisional(rack.rseq)
-	if preconditionUpdate.StartLine != "" {
-		c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
-			c.sendPreconditionUPDATE(done, preconditionUpdate)
-		})
-	}
-	if acknowledgingProvisionalAnswer {
+	needsFollowup := answeringDelayedOffer || acknowledgingProvisionalAnswer
+	if needsFollowup {
 		c.mu.Lock()
-		c.provisionalAnswer = true
+		c.provisionalCompleting = true
 		c.mu.Unlock()
-		if err := c.prepareMedia(ctx); err != nil {
-			c.finish(CallStateFailed, err.Error())
-			c.signalProvisionalReady()
-			if inviteReq != nil {
-				return c.endpoint.writeStatus(ctx, *inviteReq, sipStatusNotAcceptableHere, "Not Acceptable Here")
-			}
-			return nil
-		}
 	}
-	if (answeringDelayedOffer || acknowledgingProvisionalAnswer) && inviteReq != nil {
-		if err := c.endpoint.writeRinging(ctx, *inviteReq, c); err != nil {
-			c.signalProvisionalReady()
-			return err
-		}
-		c.startRingingTimer()
+	c.clearReliableProvisional(rack.rseq)
+	if !needsFollowup {
+		c.signalProvisionalReady()
+		return nil
 	}
-	c.signalProvisionalReady()
+	followup := incomingPRACKFollowup{
+		answeringDelayedOffer:          answeringDelayedOffer,
+		acknowledgingProvisionalAnswer: acknowledgingProvisionalAnswer,
+		delayedAnswer:                  delayedAnswer,
+		delayedAnswerMedia:             delayedAnswerMedia,
+		inviteRequest:                  inviteReq,
+	}
+	if !c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
+		c.completeIncomingPRACK(done, followup)
+	}) {
+		c.mu.Lock()
+		c.provisionalCompleting = false
+		c.mu.Unlock()
+		c.signalProvisionalReady()
+	}
 	return nil
 }
 
-func (c *Call) sendPRACK(done <-chan struct{}, prack sip.Message, next sip.Message) {
-	ctx, cancel := contextWithDoneTimeout(done, callReleaseTimeout)
+func (c *Call) completeIncomingPRACK(done <-chan struct{}, followup incomingPRACKFollowup) {
+	defer func() {
+		c.mu.Lock()
+		c.provisionalCompleting = false
+		c.mu.Unlock()
+		c.signalProvisionalReady()
+	}()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	if c.callDone == nil {
+		c.callDone = make(chan struct{})
+	}
+	callDone := c.callDone
+	c.mu.Unlock()
+	ctx, cancel := contextWithDone(done)
+	ctx, cancel = cancelContextWithDone(ctx, cancel, callDone)
 	defer cancel()
-	resp, err := c.endpoint.sess.Exchange(ctx, prack)
+
+	if followup.answeringDelayedOffer {
+		if err := c.openMedia(ctx); err != nil {
+			c.failIncomingMedia(ctx, followup.inviteRequest, err, false)
+			return
+		}
+		c.startMediaInactivityWatch()
+		if c.preconditions || c.endpoint.cfg.WaitMediaReady != nil {
+			if err := c.confirmMediaResources(ctx, followup.delayedAnswerMedia); err != nil {
+				c.failIncomingMedia(ctx, followup.inviteRequest, err, c.preconditions)
+				return
+			}
+		}
+		if c.preconditions && followup.delayedAnswer.RemoteQoSConfirmation {
+			if err := c.sendIncomingPreconditionUPDATE(ctx, followup.delayedAnswer, followup.delayedAnswerMedia); err != nil {
+				c.failIncomingMedia(ctx, followup.inviteRequest, err, true)
+				return
+			}
+		}
+	}
+
+	if followup.acknowledgingProvisionalAnswer {
+		if err := c.prepareMedia(ctx); err != nil {
+			c.failIncomingMedia(ctx, followup.inviteRequest, err, false)
+			return
+		}
+		c.mu.Lock()
+		preparedMedia := cloneNegotiatedMedia(c.media)
+		preparedOffer := c.remoteOffer
+		c.mu.Unlock()
+		if c.preconditions || c.endpoint.cfg.WaitMediaReady != nil {
+			if err := c.confirmMediaResources(ctx, preparedMedia); err != nil {
+				c.failIncomingMedia(ctx, followup.inviteRequest, err, c.preconditions)
+				return
+			}
+		}
+		if c.preconditions && preparedOffer.RemoteQoSConfirmation {
+			if err := c.sendIncomingPreconditionUPDATE(ctx, preparedOffer, preparedMedia); err != nil {
+				c.failIncomingMedia(ctx, followup.inviteRequest, err, true)
+				return
+			}
+		}
+	}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	if followup.answeringDelayedOffer {
+		c.prackAnsweredOffer = true
+	}
+	if followup.acknowledgingProvisionalAnswer {
+		c.provisionalAnswer = true
+	}
+	c.incomingMediaReady = true
+	c.mu.Unlock()
+	if err := c.tryAlertIncoming(ctx); err != nil {
+		c.endpoint.emitError(err)
+		c.finish(CallStateFailed, err.Error())
+	}
+}
+
+func (c *Call) sendIncomingPreconditionUPDATE(ctx context.Context, remote sdpOffer, media NegotiatedMedia) error {
+	c.preconditionUpdateMu.Lock()
+	defer c.preconditionUpdateMu.Unlock()
+	if err := context.Cause(ctx); err != nil {
+		return fmt.Errorf("sending precondition UPDATE: %w", err)
+	}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("sending precondition UPDATE: call is closed")
+	}
+	localQoSStatus := c.localQoSStatus
+	localPort := c.localPort
+	desiredQoS := c.incomingQoS.desired
+	snap := c.dialogSnapshot()
+	c.mu.Unlock()
+	body, err := buildSDPPreconditionUpdate(c.sdpConfig(), sdpPreconditionUpdateState{
+		localIP:        c.endpoint.localIP(),
+		localPort:      localPort,
+		answer:         remote,
+		media:          media,
+		localQoSStatus: localQoSStatus,
+		desiredQoS:     &desiredQoS,
+	})
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("sending precondition UPDATE: call is closed")
+	}
+	c.localSDP = append([]byte(nil), body...)
+	c.mu.Unlock()
+	for attempt := range 2 {
+		update := snap.buildPreconditionUPDATE(c.nextCSeq(), body)
+		updateCtx, cancel := context.WithTimeout(ctx, callReleaseTimeout)
+		resp, err := c.endpoint.sess.Exchange(updateCtx, update)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("sending precondition UPDATE: %w", err)
+		}
+		if resp.StatusCode() >= sipStatusOK && resp.StatusCode() < sipStatusMultipleChoices {
+			return nil
+		}
+		if resp.StatusCode() != sipStatusRequestPending || attempt == 1 {
+			return fmt.Errorf("sending precondition UPDATE: expected 2xx, got %w", sip.NewResponseError(resp))
+		}
+		if err := waitPreconditionRetry(ctx, c.endpoint.preconditionRetryDelay(c.Direction())); err != nil {
+			return fmt.Errorf("sending precondition UPDATE: waiting to retry after 491: %w", err)
+		}
+	}
+	return errors.New("sending precondition UPDATE: retry exhausted")
+}
+
+func preconditionRetryDelay(direction CallDirection) time.Duration {
+	if direction == CallDirectionIncoming {
+		return time.Duration(rand.Int64N(2001)) * time.Millisecond
+	}
+	return time.Duration(2100+rand.Int64N(1901)) * time.Millisecond
+}
+
+func waitPreconditionRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *Call) sendPRACK(done <-chan struct{}, prack sip.Message, followup *outgoingPRACKFollowup) {
+	prackCtx, cancelPRACK := contextWithDoneTimeout(done, callReleaseTimeout)
+	resp, err := c.endpoint.sess.Exchange(prackCtx, prack)
+	cancelPRACK()
 	if err != nil {
 		c.endpoint.emitError(fmt.Errorf("sending call PRACK: %w", err))
 		return
@@ -169,23 +345,62 @@ func (c *Call) sendPRACK(done <-chan struct{}, prack sip.Message, next sip.Messa
 		c.endpoint.emitError(fmt.Errorf("sending call PRACK: expected 2xx, got %w", sip.NewResponseError(resp)))
 		return
 	}
-	if next.StartLine == "" {
+	if followup == nil {
 		return
 	}
-	resp, err = c.endpoint.sess.Exchange(ctx, next)
-	if err != nil {
-		c.endpoint.emitError(fmt.Errorf("sending precondition UPDATE: %w", err))
+	if followup.openEarlyMedia {
+		mediaCtx, cancelMedia := contextWithDone(done)
+		err := c.openEarlyMedia(mediaCtx, followup.earlyMedia)
+		cancelMedia()
+		if err != nil {
+			c.endpoint.emitError(err)
+			return
+		}
+	}
+	pending := followup.precondition
+	if pending == nil {
 		return
 	}
-	if resp.StatusCode() < sipStatusOK || resp.StatusCode() >= sipStatusMultipleChoices {
-		c.endpoint.emitError(fmt.Errorf("sending precondition UPDATE: expected 2xx, got %w", sip.NewResponseError(resp)))
-	}
-}
 
-func (c *Call) sendPreconditionUPDATE(done <-chan struct{}, update sip.Message) {
-	ctx, cancel := contextWithDoneTimeout(done, callReleaseTimeout)
-	defer cancel()
-	resp, err := c.endpoint.sess.Exchange(ctx, update)
+	readyCtx, cancelReady := contextWithDone(done)
+	if err := c.confirmMediaResources(readyCtx, pending.media); err != nil {
+		cancelReady()
+		c.endpoint.emitError(err)
+		return
+	}
+	cancelReady()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	localPort := c.localPort
+	localQoSStatus := c.localQoSStatus
+	snap := c.dialogSnapshot()
+	c.mu.Unlock()
+	body, err := buildSDPPreconditionUpdate(c.endpoint.cfg, sdpPreconditionUpdateState{
+		localIP:        c.endpoint.localIP(),
+		localPort:      localPort,
+		answer:         pending.answer,
+		media:          pending.media,
+		localQoSStatus: localQoSStatus,
+	})
+	if err != nil {
+		c.endpoint.emitError(err)
+		return
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.localSDP = append([]byte(nil), body...)
+	c.mu.Unlock()
+	next := snap.buildPreconditionUPDATEForResponse(pending.response, c.nextCSeq(), pending.remoteTarget, pending.routes, body)
+	updateCtx, cancelUpdate := contextWithDoneTimeout(done, callReleaseTimeout)
+	defer cancelUpdate()
+	resp, err = c.endpoint.sess.Exchange(updateCtx, next)
 	if err != nil {
 		c.endpoint.emitError(fmt.Errorf("sending precondition UPDATE: %w", err))
 		return
@@ -392,8 +607,9 @@ func (c *Call) waitForReliableProvisionalAnswer(ctx context.Context) error {
 		}
 		wait := c.direction == CallDirectionIncoming &&
 			c.state == CallStateRinging &&
-			c.pendingReliable.status == sipStatusSessionProgress &&
-			((c.delayedOffer && !c.prackAnsweredOffer) || (!c.delayedOffer && !c.provisionalAnswer))
+			(c.provisionalCompleting ||
+				(c.pendingReliable.status == sipStatusSessionProgress &&
+					((c.delayedOffer && !c.prackAnsweredOffer) || (!c.delayedOffer && !c.provisionalAnswer))))
 		ch := c.provisionalReady
 		if wait && ch == nil {
 			ch = make(chan struct{})

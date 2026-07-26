@@ -39,6 +39,10 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 	invite := c.inviteRequest
 	invite.Headers = invite.Headers.Clone()
 	invite.Body = append([]byte(nil), invite.Body...)
+	preconditions := c.endpoint.cfg.Preconditions
+	if c.direction == CallDirectionIncoming {
+		preconditions = c.preconditions
+	}
 	return dialogSnapshot{
 		id:                c.id,
 		sessionID:         c.sessionID,
@@ -52,7 +56,7 @@ func (c *Call) dialogSnapshot() dialogSnapshot {
 		inviteRequest:     invite,
 		localSDP:          append([]byte(nil), c.localSDP...),
 		sessionTimer:      c.endpoint.cfg.SessionTimer,
-		preconditions:     c.endpoint.cfg.Preconditions,
+		preconditions:     preconditions,
 		flow:              state.Flow,
 		userAgent:         state.UserAgent,
 		accessNetworkInfo: state.AccessNetworkInfo,

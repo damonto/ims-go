@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"sync"
+
+	imsvoice "github.com/damonto/ims-go/ims/voice"
 )
 
 // IMSPDNNetworkInfo contains the host-side network state negotiated for an IMS PDN.
@@ -50,6 +52,14 @@ func (s *networkedIMSPDNSession) Info() imsPDNInfo {
 	info := s.imsPDNSession.Info()
 	info.InterfaceName = s.interfaceName
 	return info
+}
+
+func (s *networkedIMSPDNSession) WaitMediaReady(ctx context.Context, cfg imsvoice.MediaConfig) error {
+	readiness, ok := s.imsPDNSession.(imsPDNMediaReadiness)
+	if !ok {
+		return errVoLTEMediaReadinessUnavailable
+	}
+	return readiness.WaitMediaReady(ctx, cfg)
 }
 
 func (s *networkedIMSPDNSession) Close() error {

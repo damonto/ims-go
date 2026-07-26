@@ -2,6 +2,7 @@ package ims
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"strings"
@@ -12,11 +13,63 @@ import (
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 
+func TestVoWiFiMediaReady(t *testing.T) {
+	tests := []struct {
+		name    string
+		cancel  bool
+		wantErr error
+	}{
+		{name: "active context"},
+		{name: "canceled context", cancel: true, wantErr: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.cancel {
+				cancel()
+			}
+			err := voWiFiMediaReady(ctx, imsvoice.MediaConfig{})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("voWiFiMediaReady() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 const testVoLTEPANI = "3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=1112233C476B4321"
 
 type imsPDNSessionStub struct {
 	info       imsPDNInfo
 	closeCalls int
+}
+
+func TestVoLTEMediaReady(t *testing.T) {
+	tests := []struct {
+		name    string
+		cancel  bool
+		wantErr error
+	}{
+		{name: "RTP transport is ready"},
+		{name: "canceled context", cancel: true, wantErr: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.cancel {
+				cancel()
+			}
+			access := &voLTEAccess{}
+			err := access.waitMediaReady(ctx, imsvoice.MediaConfig{RemotePort: 50000})
+			if tt.wantErr == nil && err != nil {
+				t.Fatalf("waitMediaReady() error = %v", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("waitMediaReady() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func (s *imsPDNSessionStub) Info() imsPDNInfo {

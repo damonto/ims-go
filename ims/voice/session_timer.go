@@ -13,6 +13,13 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
+type incomingUPDATEFollowup struct {
+	offer         sdpOffer
+	media         NegotiatedMedia
+	early         bool
+	inviteRequest *session.Request
+}
+
 func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) error {
 	if c.endpoint.unsupportedRequiredTimer(req.Message) {
 		return c.endpoint.writeUnsupportedRequired(ctx, req, sessionTimerOption)
@@ -26,7 +33,8 @@ func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) er
 	}
 	answer, media, hold, ok, err := c.sessionRefreshAnswer(req.Message)
 	if err != nil {
-		return c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
+		body, _ := sdpBody(req.Message)
+		return c.endpoint.writeSDPFailure(ctx, req, body, err)
 	}
 	if ok {
 		c.mu.Lock()
@@ -41,21 +49,36 @@ func (c *Call) handleSessionRefresh(ctx context.Context, req session.Request) er
 	resp := c.buildSessionRefreshOK(req.Message)
 	if len(answer) != 0 {
 		resp.Headers.Add("Content-Type", "application/sdp")
-		if c.endpoint.usesPreconditions(req.Message) && sdpUsesPreconditions(answer) {
+		if c.sdpConfig().Preconditions && sdpUsesPreconditions(answer) {
 			addTokenHeader(&resp, "Require", preconditionOption)
 		}
 		resp.Body = answer
 	}
-	if err := c.endpoint.sess.WriteResponse(ctx, req, resp); err != nil {
-		return fmt.Errorf("handling session refresh: %w", err)
-	}
+	var followup *incomingUPDATEFollowup
 	if len(answer) != 0 {
 		c.mu.Lock()
 		c.localSDP = append([]byte(nil), answer...)
 		c.mu.Unlock()
+		followup = c.updateIncomingPreconditions(req.Message, media)
+	}
+	if err := c.endpoint.sess.WriteResponse(ctx, req, resp); err != nil {
+		c.discardIncomingUPDATEFollowup(followup)
+		return fmt.Errorf("handling session refresh: %w", err)
 	}
 	c.updateRemoteTargetFromRequest(req.Message)
 	if err := c.applySessionTimerUASResponse(resp); err != nil {
+		c.discardIncomingUPDATEFollowup(followup)
+		return err
+	}
+	if followup != nil {
+		if !c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
+			c.completeIncomingUPDATE(done, *followup)
+		}) {
+			c.discardIncomingUPDATEFollowup(followup)
+			return errors.New("handling session refresh: starting precondition confirmation")
+		}
+	}
+	if err := c.tryAlertIncoming(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -79,7 +102,8 @@ func (c *Call) handleReINVITE(ctx context.Context, req session.Request) error {
 	}
 	answer, media, hold, ok, err := c.sessionRefreshAnswer(req.Message)
 	if err != nil {
-		return c.endpoint.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
+		body, _ := sdpBody(req.Message)
+		return c.endpoint.writeSDPFailure(ctx, req, body, err)
 	}
 	if ok {
 		c.mu.Lock()
@@ -93,10 +117,11 @@ func (c *Call) handleReINVITE(ctx context.Context, req session.Request) error {
 	}
 	resp := c.buildSessionRefreshOK(req.Message)
 	if len(answer) != 0 {
-		if err := setInviteResponseBody(&resp, c.endpoint.cfg, c.localURI, false, answer); err != nil {
+		cfg := c.sdpConfig()
+		if err := setInviteResponseBody(&resp, cfg, c.localURI, false, answer); err != nil {
 			return err
 		}
-		if c.endpoint.usesPreconditions(req.Message) && sdpUsesPreconditions(answer) {
+		if cfg.Preconditions && sdpUsesPreconditions(answer) {
 			addTokenHeader(&resp, "Require", preconditionOption)
 		}
 	}
@@ -556,14 +581,123 @@ func (c *Call) sessionRefreshAnswer(msg sip.Message) ([]byte, NegotiatedMedia, C
 	localPort := c.localPort
 	currentHold := c.hold
 	c.mu.Unlock()
-	answer, media, err := buildSDPAnswerWithLocalHold(c.endpoint.cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{}, holdHasLocal(currentHold))
+	direction := answerDirection(offer.Direction, holdHasLocal(currentHold))
+	cfg := c.sdpConfig()
+	answer, media, err := buildSDPAnswerWithState(cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{}, sdpAnswerState{
+		direction:      direction,
+		localQoSStatus: qosStatusNone,
+	})
 	if err != nil {
 		return nil, NegotiatedMedia{}, "", false, err
+	}
+	if localQoSStatus := c.confirmedQoSStatus(media); localQoSStatus != qosStatusNone {
+		answer, media, err = buildSDPAnswerWithState(cfg, c.endpoint.localIP(), localPort, offer, MediaOffer{}, sdpAnswerState{
+			direction:      direction,
+			localQoSStatus: localQoSStatus,
+		})
+		if err != nil {
+			return nil, NegotiatedMedia{}, "", false, err
+		}
 	}
 	if err := c.acceptRemotePayloadMappings(offer); err != nil {
 		return nil, NegotiatedMedia{}, "", false, fmt.Errorf("handling re-INVITE: %w", err)
 	}
 	return answer, media, setRemoteHold(currentHold, remoteHoldFromDirection(offer.Direction)), true, nil
+}
+
+func (c *Call) updateIncomingPreconditions(msg sip.Message, media NegotiatedMedia) *incomingUPDATEFollowup {
+	body, ok := sdpBody(msg)
+	if !ok {
+		return nil
+	}
+	var offer sdpOffer
+	if offer.UnmarshalBinary(body) != nil {
+		return nil
+	}
+	c.mu.Lock()
+	c.remoteOffer = offer
+	c.remoteSDP = append([]byte(nil), body...)
+	if c.direction != CallDirectionIncoming || !c.preconditions || !offer.Preconditions {
+		c.mu.Unlock()
+		return nil
+	}
+	c.incomingQoS = incomingQoSState{
+		desired:      answerQoSDesiredStatus(offer.DesiredQoS),
+		remoteStatus: invertQoSStatus(offer.LocalQoSStatus),
+	}
+	c.incomingUnknown = incomingUnknownPreconditions(offer)
+	early := c.state == CallStateRinging && !c.incomingAlerted
+	if early {
+		c.incomingConfirmations++
+	}
+	followup := &incomingUPDATEFollowup{
+		offer:         offer,
+		media:         cloneNegotiatedMedia(media),
+		early:         early,
+		inviteRequest: c.incomingRequest,
+	}
+	c.mu.Unlock()
+	return followup
+}
+
+func (c *Call) discardIncomingUPDATEFollowup(followup *incomingUPDATEFollowup) {
+	if followup == nil || !followup.early {
+		return
+	}
+	c.mu.Lock()
+	if c.incomingConfirmations > 0 {
+		c.incomingConfirmations--
+	}
+	c.mu.Unlock()
+}
+
+func (c *Call) completeIncomingUPDATE(done <-chan struct{}, followup incomingUPDATEFollowup) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	if c.callDone == nil {
+		c.callDone = make(chan struct{})
+	}
+	callDone := c.callDone
+	c.mu.Unlock()
+	ctx, cancel := contextWithDone(done)
+	ctx, cancel = cancelContextWithDone(ctx, cancel, callDone)
+	defer cancel()
+
+	if err := c.confirmMediaResources(ctx, followup.media); err != nil {
+		c.failIncomingUPDATE(ctx, followup, err)
+		return
+	}
+	if followup.offer.RemoteQoSConfirmation {
+		if err := c.sendIncomingPreconditionUPDATE(ctx, followup.offer, followup.media); err != nil {
+			c.failIncomingUPDATE(ctx, followup, err)
+			return
+		}
+	}
+
+	if followup.early {
+		c.mu.Lock()
+		if c.incomingConfirmations > 0 {
+			c.incomingConfirmations--
+		}
+		c.mu.Unlock()
+	}
+	if err := c.tryAlertIncoming(ctx); err != nil {
+		c.endpoint.emitError(err)
+		c.finish(CallStateFailed, err.Error())
+	}
+}
+
+func (c *Call) failIncomingUPDATE(ctx context.Context, followup incomingUPDATEFollowup, cause error) {
+	if followup.early {
+		c.failIncomingMedia(ctx, followup.inviteRequest, cause, true)
+		return
+	}
+	if !errors.Is(cause, context.Canceled) {
+		c.endpoint.emitError(cause)
+	}
 }
 
 func (c *Call) buildSessionRefreshOK(req sip.Message) sip.Message {

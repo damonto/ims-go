@@ -63,6 +63,10 @@ type voiceRTPOnlyMediaTransport struct {
 	writeCh  chan []byte
 }
 
+type voiceFixedMediaTransport struct {
+	closed bool
+}
+
 func newVoiceStubTransport() *voiceStubTransport {
 	return &voiceStubTransport{
 		local:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
@@ -256,6 +260,21 @@ func (t *voiceMediaTransport) isClosed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
+}
+
+func (t *voiceFixedMediaTransport) LocalAddr() net.Addr  { return nil }
+func (t *voiceFixedMediaTransport) RemoteAddr() net.Addr { return nil }
+
+func (t *voiceFixedMediaTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
+	<-ctx.Done()
+	return nil, nil, ctx.Err()
+}
+
+func (t *voiceFixedMediaTransport) WritePacket(context.Context, []byte) error { return nil }
+
+func (t *voiceFixedMediaTransport) Close() error {
+	t.closed = true
+	return nil
 }
 
 func (t *voiceMediaTransport) notify(packet MediaPacket) {
@@ -2295,6 +2314,8 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			readyStarted := make(chan MediaConfig, 1)
+			releaseReady := make(chan struct{})
 			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
@@ -2313,6 +2334,15 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 				Preconditions: true,
 				OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				WaitMediaReady: func(ctx context.Context, cfg MediaConfig) error {
+					readyStarted <- cfg
+					select {
+					case <-releaseReady:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
 				},
 			}, sess, reg)
 			if err != nil {
@@ -2371,7 +2401,7 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 						"m=audio 40000 RTP/AVP 104 110",
 						"a=curr:qos local sendrecv",
 						"a=des:qos mandatory local sendrecv",
-						"a=des:qos optional remote sendrecv",
+						"a=des:qos mandatory remote sendrecv",
 					} {
 						if !strings.Contains(body, want+"\r\n") {
 							t.Fatalf("UPDATE body missing %q:\n%s", want, body)
@@ -2385,9 +2415,29 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 				}
 			}
 
-			dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+			dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer dialCancel()
-			if _, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"}); err != nil {
+			dialErr := make(chan error, 1)
+			go func() {
+				_, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
+				dialErr <- err
+			}()
+			select {
+			case cfg := <-readyStarted:
+				if cfg.RemotePort != 50000 || !cfg.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+					t.Fatalf("media readiness remote = %v:%d, want 192.0.2.10:50000", cfg.RemoteIP, cfg.RemotePort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("media readiness wait did not start after PRACK")
+			}
+			if got := len(transport.messagesByMethod("PRACK")); got != 1 {
+				t.Fatalf("PRACK count before media readiness = %d, want 1", got)
+			}
+			if got := len(transport.messagesByMethod("UPDATE")); got != 0 {
+				t.Fatalf("UPDATE count before media readiness = %d, want 0", got)
+			}
+			close(releaseReady)
+			if err := <-dialErr; err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			if got := len(transport.messagesByMethod("PRACK")); got != 1 {
@@ -3163,7 +3213,6 @@ func TestIncomingInvitePreconditionResponseRequiresPrecondition(t *testing.T) {
 				_ = svc.Close()
 				_ = sess.Close()
 			}()
-
 			invite := inviteWithSDP()
 			invite.Headers.Set("Call-ID", "incoming-precondition")
 			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
@@ -3195,6 +3244,76 @@ func TestIncomingInvitePreconditionResponseRequiresPrecondition(t *testing.T) {
 	}
 }
 
+func TestIncomingInviteRejectsUnsupportedMandatoryPrecondition(t *testing.T) {
+	tests := []struct {
+		name      string
+		attribute string
+		want      string
+	}{
+		{
+			name:      "unsupported end to end QoS",
+			attribute: "a=des:qos mandatory e2e sendrecv\r\n",
+			want:      "a=des:qos failure e2e sendrecv\r\n",
+		},
+		{
+			name:      "unknown mandatory type",
+			attribute: "a=des:foo mandatory remote sendrecv\r\n",
+			want:      "a=des:foo unknown remote sendrecv\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			svc, err := New(Config{Logger: testLogger(), Preconditions: true}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() {
+				_ = svc.Close()
+				_ = sess.Close()
+			}()
+
+			invite := inviteWithSDP()
+			invite.Headers.Set("Call-ID", "unsupported-precondition-"+strings.ReplaceAll(tt.name, " ", "-"))
+			invite.Headers.Add("Supported", preconditionOption)
+			invite.Body = append(invite.Body, tt.attribute...)
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			failures := transport.messagesByStatus(sipStatusPreconditionFailure, "INVITE")
+			if len(failures) != 1 {
+				t.Fatalf("580 count = %d, want 1", len(failures))
+			}
+			if got := failures[0].Header("Content-Type"); got != "application/sdp" {
+				t.Fatalf("580 Content-Type = %q, want application/sdp", got)
+			}
+			body := string(failures[0].Body)
+			if !strings.Contains(body, "m=audio 0 ") || !strings.Contains(body, tt.want) {
+				t.Fatalf("580 failure SDP missing rejected media or %q:\n%s", tt.want, body)
+			}
+			if call := svc.lookupCall(invite.Header("Call-ID")); call != nil {
+				t.Fatalf("lookupCall() = %v, want no stored call", call)
+			}
+		})
+	}
+}
+
 func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -3208,23 +3327,13 @@ func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 				msg.Headers.Set("Call-ID", "incoming-precondition-final-answer")
 				msg.Headers.Add("Supported", preconditionOption)
 				msg.Body = append(msg.Body,
-					[]byte("a=curr:qos local none\r\n"+
+					[]byte("a=curr:qos local sendrecv\r\n"+
 						"a=curr:qos remote none\r\n"+
 						"a=des:qos mandatory local sendrecv\r\n"+
 						"a=des:qos optional remote sendrecv\r\n")...)
 				return msg
 			},
 			wantSDPLine: "a=curr:qos local none\r\n",
-		},
-		{
-			name: "delayed offer in final 200",
-			invite: func() sip.Message {
-				msg := delayedInvite()
-				msg.Headers.Set("Call-ID", "incoming-precondition-final-offer")
-				msg.Headers.Add("Supported", preconditionOption)
-				return msg
-			},
-			wantSDPLine: "a=des:qos mandatory local sendrecv\r\n",
 		},
 	}
 	for _, tt := range tests {
@@ -3246,6 +3355,9 @@ func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 			svc, err := New(Config{
 				Logger:        testLogger(),
 				Preconditions: true,
+				WaitMediaReady: func(context.Context, MediaConfig) error {
+					return nil
+				},
 				OnIncomingCall: func(event IncomingCall) {
 					incoming <- event
 				},
@@ -3265,7 +3377,12 @@ func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
-			got := <-incoming
+			var got IncomingCall
+			select {
+			case got = <-incoming:
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after resources were ready")
+			}
 			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
@@ -3480,7 +3597,333 @@ func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "UPDATE offer uses precondition"},
+		{name: "confirmed local resources are reported in UPDATE answer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			confirmation := make(chan sip.Message, 2)
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			incoming := make(chan IncomingCall, 1)
+			ready := make(chan MediaConfig, 1)
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				WaitMediaReady: func(ctx context.Context, cfg MediaConfig) error {
+					ready <- cfg
+					return nil
+				},
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- sess.Run(ctx)
+			}()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() != "UPDATE" {
+					return
+				}
+				confirmation <- msg
+			}
+
+			invite := inviteWithSDP()
+			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
+			invite.Headers.Add("Allow", sip.DefaultClientAllow)
+			invite.Body = append(invite.Body,
+				[]byte("a=curr:qos local none\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n"+
+					"a=conf:qos remote send\r\n")...)
+			transport.queue(invite)
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before preconditions: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
+			var progress sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+				if len(messages) == 0 {
+					return false
+				}
+				progress = messages[0]
+				return true
+			}) {
+				t.Fatal("183 Session Progress was not sent")
+			}
+			if !strings.Contains(string(progress.Body), "a=curr:qos local none\r\n") {
+				t.Fatalf("183 SDP marked local resources ready before confirmation:\n%s", progress.Body)
+			}
+			transport.queue(prackWithoutSDPForReliableProvisional(invite, progress))
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusOK, "PRACK")) == 1
+			}) {
+				t.Fatal("200 OK for PRACK was not sent")
+			}
+			select {
+			case cfg := <-ready:
+				if cfg.RemotePort != 50000 || !cfg.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+					t.Fatalf("media readiness remote = %v:%d, want 192.0.2.10:50000", cfg.RemoteIP, cfg.RemotePort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("media resources were not confirmed after PRACK")
+			}
+			select {
+			case update := <-confirmation:
+				if body := string(update.Body); !strings.Contains(body, "a=curr:qos local sendrecv\r\n") {
+					t.Fatalf("confirmation UPDATE did not report local resources:\n%s", body)
+				}
+				transport.queue(callStatus(update, sipStatusOK, "OK"))
+			case <-time.After(time.Second):
+				t.Fatal("confirmation UPDATE was not sent for the initial INVITE offer")
+			}
+			if got := len(transport.messagesByStatus(sipStatusRinging, "INVITE")); got != 0 {
+				t.Fatalf("180 Ringing count = %d before remote resources, want 0", got)
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before remote resources: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
+
+			update := sip.NewRequest("UPDATE", sip.AddressURI(invite.Header("To")))
+			update.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKupdateprecondition")
+			update.Headers.Add("From", invite.Header("From"))
+			update.Headers.Add("To", progress.Header("To"))
+			update.Headers.Add("Call-ID", invite.Header("Call-ID"))
+			update.Headers.Add("CSeq", "3 UPDATE")
+			update.Headers.Add("Supported", preconditionOption)
+			update.Headers.Add("Content-Type", "application/sdp")
+			update.Body = append(inviteWithSDP().Body,
+				[]byte("a=curr:qos local sendrecv\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n"+
+					"a=conf:qos remote sendrecv\r\n")...)
+
+			transport.queue(update)
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusOK, "UPDATE")) == 1
+			}) {
+				t.Fatalf("200 UPDATE count = %d, want 1", len(transport.messagesByStatus(sipStatusOK, "UPDATE")))
+			}
+			responses := transport.messagesByStatus(sipStatusOK, "UPDATE")
+			if got := responses[0].Header("Require"); got != preconditionOption {
+				t.Fatalf("200 UPDATE Require = %q, want %q", got, preconditionOption)
+			}
+			body := string(responses[0].Body)
+			for _, want := range []string{
+				"a=curr:qos local sendrecv\r\n",
+				"a=curr:qos remote sendrecv\r\n",
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("200 UPDATE body missing %q:\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, "a=conf:qos remote sendrecv\r\n") {
+				t.Fatalf("200 UPDATE requested confirmation for ready peer resources:\n%s", body)
+			}
+			var followup sip.Message
+			select {
+			case followup = <-confirmation:
+			case <-time.After(time.Second):
+				t.Fatal("confirmation UPDATE was not sent for the peer UPDATE")
+			}
+			if got := len(transport.messagesByStatus(sipStatusRinging, "INVITE")); got != 0 {
+				t.Fatalf("180 Ringing count = %d before confirmation UPDATE response, want 0", got)
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before confirmation UPDATE response: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
+			transport.queue(callStatus(followup, sipStatusOK, "OK"))
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusRinging, "INVITE")) == 1
+			}) {
+				t.Fatal("180 Ringing was not sent after local and remote resources were ready")
+			}
+			select {
+			case event := <-incoming:
+				if event.Call == nil {
+					t.Fatal("incoming call is nil")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after preconditions were met")
+			}
+		})
+	}
+}
+
+func TestIncomingPreconditionConfirmationWaitsForSuccessfulUPDATE(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "491 is retried before ringing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			updates := make(chan sip.Message, 2)
+			sess, err := session.Open(session.Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
+			}
+			incoming := make(chan IncomingCall, 1)
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				WaitMediaReady: func(context.Context, MediaConfig) error { return nil },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			svc.preconditionRetryDelay = func(CallDirection) time.Duration { return 0 }
+
+			ctx, cancel := context.WithCancel(context.Background())
+			runErr := make(chan error, 1)
+			go func() { runErr <- sess.Run(ctx) }()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+			transport.onWrite = func(msg sip.Message) {
+				if msg.Method() == "UPDATE" {
+					updates <- msg
+				}
+			}
+
+			invite := inviteWithSDP()
+			invite.Headers.Set("Call-ID", "precondition-confirmation-retry")
+			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
+			invite.Headers.Add("Allow", sip.DefaultClientAllow)
+			invite.Body = append(invite.Body,
+				[]byte("a=curr:qos local sendrecv\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n"+
+					"a=conf:qos remote sendrecv\r\n")...)
+			transport.queue(invite)
+
+			var progress sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+				if len(messages) == 0 {
+					return false
+				}
+				progress = messages[0]
+				return true
+			}) {
+				t.Fatal("183 Session Progress was not sent")
+			}
+			transport.queue(prackWithoutSDPForReliableProvisional(invite, progress))
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusOK, "PRACK")) == 1
+			}) {
+				t.Fatal("200 OK for PRACK was not sent")
+			}
+
+			var first sip.Message
+			select {
+			case first = <-updates:
+			case <-time.After(time.Second):
+				t.Fatal("first confirmation UPDATE was not sent")
+			}
+			if got := len(transport.messagesByStatus(sipStatusRinging, "INVITE")); got != 0 {
+				t.Fatalf("180 Ringing count = %d before confirmation response, want 0", got)
+			}
+			transport.queue(callStatus(first, sipStatusRequestPending, "Request Pending"))
+
+			var retry sip.Message
+			select {
+			case retry = <-updates:
+			case <-time.After(time.Second):
+				t.Fatal("confirmation UPDATE was not retried after 491")
+			}
+			if firstCSeq, retryCSeq := sip.CSeqNumber(first.Header("CSeq")), sip.CSeqNumber(retry.Header("CSeq")); retryCSeq <= firstCSeq {
+				t.Fatalf("confirmation UPDATE retry CSeq = %d, want greater than %d", retryCSeq, firstCSeq)
+			}
+			if got := len(transport.messagesByStatus(sipStatusRinging, "INVITE")); got != 0 {
+				t.Fatalf("180 Ringing count = %d before retry response, want 0", got)
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before confirmation succeeded: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
+			transport.queue(callStatus(retry, sipStatusOK, "OK"))
+
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusRinging, "INVITE")) == 1
+			}) {
+				t.Fatal("180 Ringing was not sent after confirmation succeeded")
+			}
+			select {
+			case event := <-incoming:
+				if event.Call == nil {
+					t.Fatal("incoming call is nil")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after confirmation succeeded")
+			}
+		})
+	}
+}
+
+func TestIncomingPreconditionTimeout(t *testing.T) {
+	const timeout = 40 * time.Millisecond
+	tests := []struct {
+		name   string
+		cancel bool
+	}{
+		{name: "unmet remote resources return 580"},
+		{name: "cancel stops timeout", cancel: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3497,66 +3940,251 @@ func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			svc, err := New(Config{Logger: testLogger(), Preconditions: true}, sess, reg)
+			incoming := make(chan IncomingCall, 1)
+			events := make(chan CallEvent, 4)
+			svc, err := New(Config{
+				Logger:                      testLogger(),
+				Preconditions:               true,
+				IncomingPreconditionTimeout: timeout,
+				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				WaitMediaReady: func(context.Context, MediaConfig) error { return nil },
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+				OnCallEvent:    func(event CallEvent) { events <- event },
+			}, sess, reg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			runErr := make(chan error, 1)
+			go func() { runErr <- sess.Run(ctx) }()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
 			defer func() {
+				cancel()
 				_ = svc.Close()
 				_ = sess.Close()
+				<-runErr
 			}()
 
-			call := &Call{
-				endpoint:  svc,
-				id:        "update-precondition-call",
-				sessionID: "update-precondition-session",
-				direction: CallDirectionIncoming,
-				state:     CallStateActive,
-				localURI:  "sip:001010123456789@example.com",
-				localTag:  "local-tag",
-				remoteURI: "sip:caller@example.com",
-				remoteTag: "remote-tag",
-				remoteTo:  "<sip:caller@example.com>;tag=remote-tag",
-				targetURI: "sip:caller@192.0.2.10:5060",
-				inviteSeq: 1,
-				localPort: 40000,
-				rtcpSSRC:  randomRTCPSSRC(),
-			}
-			if err := svc.storeCall(call); err != nil {
-				t.Fatalf("storeCall() error = %v", err)
-			}
-
-			update := sip.NewRequest("UPDATE", "sip:001010123456789@192.0.2.20:5062")
-			update.Headers.Add("Via", "SIP/2.0/TCP 192.0.2.10:5060;branch=z9hG4bKupdateprecondition")
-			update.Headers.Add("From", "<sip:caller@example.com>;tag=remote-tag")
-			update.Headers.Add("To", "<sip:001010123456789@example.com>;tag=local-tag")
-			update.Headers.Add("Call-ID", "update-precondition-call")
-			update.Headers.Add("CSeq", "2 UPDATE")
-			update.Headers.Add("Supported", preconditionOption)
-			update.Headers.Add("Content-Type", "application/sdp")
-			update.Body = append(inviteWithSDP().Body,
+			invite := inviteWithSDP()
+			invite.Headers.Set("Call-ID", "precondition-timeout-"+strings.ReplaceAll(tt.name, " ", "-"))
+			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
+			invite.Headers.Add("Allow", sip.DefaultClientAllow)
+			invite.Body = append(invite.Body,
 				[]byte("a=curr:qos local none\r\n"+
 					"a=curr:qos remote none\r\n"+
 					"a=des:qos mandatory local sendrecv\r\n"+
 					"a=des:qos optional remote sendrecv\r\n")...)
+			transport.queue(invite)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: update, Transport: transport})
+			var progress sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+				if len(messages) == 0 {
+					return false
+				}
+				progress = messages[0]
+				return true
+			}) {
+				t.Fatal("183 Session Progress was not sent")
+			}
+			transport.queue(prackWithoutSDPForReliableProvisional(invite, progress))
+			call := svc.lookupCall(invite.Header("Call-ID"))
+			if call == nil {
+				t.Fatal("incoming call was not stored")
+			}
+			if !waitForCallTest(func() bool {
+				call.mu.Lock()
+				defer call.mu.Unlock()
+				return call.preconditionStop != nil
+			}) {
+				t.Fatal("incoming precondition timer was not started")
+			}
+
+			if tt.cancel {
+				transport.queue(cancelForInvite(invite))
+				if !waitForCallTest(func() bool {
+					return len(transport.messagesByStatus(sipStatusOK, "CANCEL")) == 1 &&
+						len(transport.messagesByStatus(sipStatusRequestTerminated, "INVITE")) == 1
+				}) {
+					t.Fatal("CANCEL did not terminate the pending call")
+				}
+				time.Sleep(2 * timeout)
+				if got := len(transport.messagesByStatus(sipStatusPreconditionFailure, "INVITE")); got != 0 {
+					t.Fatalf("580 count after CANCEL = %d, want 0", got)
+				}
+			} else {
+				if !waitForCallTest(func() bool {
+					return len(transport.messagesByStatus(sipStatusPreconditionFailure, "INVITE")) == 1
+				}) {
+					t.Fatal("580 Precondition Failure was not sent after timeout")
+				}
+				if !waitForCallEvent(events, CallStateFailed, "incoming preconditions timed out", time.Second) {
+					t.Fatal("precondition timeout failure event was not observed")
+				}
+			}
+			if got := len(transport.messagesByStatus(sipStatusRinging, "INVITE")); got != 0 {
+				t.Fatalf("180 Ringing count = %d, want 0", got)
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported with unmet preconditions: %v", event.Call)
+			default:
+			}
+		})
+	}
+}
+
+func TestIncomingPreconditionReadinessDoesNotBlockSIPDispatch(t *testing.T) {
+	tests := []struct {
+		name          string
+		cancel        bool
+		wantStatus    int
+		wantWaitError error
+	}{
+		{name: "resource failure uses 580", wantStatus: sipStatusPreconditionFailure},
+		{name: "cancel interrupts resource wait", cancel: true, wantStatus: sipStatusRequestTerminated, wantWaitError: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newVoiceStubTransport()
+			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
-				t.Fatalf("HandleRequest() error = %v", err)
+				t.Fatalf("Open() error = %v", err)
 			}
-			if !handled {
-				t.Fatal("HandleRequest() handled = false, want true")
+			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
+				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				PublicIdentity:  "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				HomeDomain:      "ims.mnc001.mcc001.3gppnetwork.org",
+			}, sess, voiceStubCard{})
+			if err != nil {
+				t.Fatalf("registration.New() error = %v", err)
 			}
-			responses := transport.messagesByStatus(sipStatusOK, "UPDATE")
-			if len(responses) != 1 {
-				t.Fatalf("200 UPDATE count = %d, want 1", len(responses))
+			incoming := make(chan IncomingCall, 1)
+			readyStarted := make(chan struct{}, 1)
+			readyRelease := make(chan struct{})
+			readyResult := make(chan error, 1)
+			svc, err := New(Config{
+				Logger:        testLogger(),
+				Preconditions: true,
+				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				WaitMediaReady: func(ctx context.Context, _ MediaConfig) error {
+					readyStarted <- struct{}{}
+					var err error
+					select {
+					case <-readyRelease:
+						err = errors.New("dedicated voice bearer rejected")
+					case <-ctx.Done():
+						err = ctx.Err()
+					}
+					readyResult <- err
+					return err
+				},
+				OnIncomingCall: func(event IncomingCall) { incoming <- event },
+			}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
 			}
-			if got := responses[0].Header("Require"); got != preconditionOption {
-				t.Fatalf("200 UPDATE Require = %q, want %q", got, preconditionOption)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			runErr := make(chan error, 1)
+			go func() { runErr <- sess.Run(ctx) }()
+			if err := sess.WaitStarted(ctx); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
 			}
-			body := string(responses[0].Body)
-			if !strings.Contains(body, "a=conf:qos remote sendrecv\r\n") {
-				t.Fatalf("200 UPDATE body missing resource confirmation request:\n%s", body)
+			defer func() {
+				cancel()
+				_ = svc.Close()
+				_ = sess.Close()
+				<-runErr
+			}()
+
+			invite := inviteWithSDP()
+			invite.Headers.Set("Call-ID", "precondition-dispatch-"+strings.ReplaceAll(tt.name, " ", "-"))
+			invite.Headers.Add("Supported", reliableProvisionalOption+","+preconditionOption)
+			invite.Body = append(invite.Body,
+				[]byte("a=curr:qos local none\r\n"+
+					"a=curr:qos remote none\r\n"+
+					"a=des:qos mandatory local sendrecv\r\n"+
+					"a=des:qos optional remote sendrecv\r\n")...)
+			transport.queue(invite)
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before media readiness: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
+			var progress sip.Message
+			if !waitForCallTest(func() bool {
+				messages := transport.messagesByStatus(sipStatusSessionProgress, "INVITE")
+				if len(messages) == 0 {
+					return false
+				}
+				progress = messages[0]
+				return true
+			}) {
+				t.Fatal("183 Session Progress was not sent")
+			}
+			transport.queue(prackWithoutSDPForReliableProvisional(invite, progress))
+			if !waitForCallTest(func() bool {
+				return len(transport.messagesByStatus(sipStatusOK, "PRACK")) == 1
+			}) {
+				t.Fatal("200 OK for PRACK was not sent")
+			}
+			select {
+			case <-readyStarted:
+			case <-time.After(time.Second):
+				t.Fatal("media readiness wait did not start")
+			}
+
+			if tt.cancel {
+				transport.queue(cancelForInvite(invite))
+				if !waitForCallTest(func() bool {
+					return len(transport.messagesByStatus(sipStatusOK, "CANCEL")) == 1 &&
+						len(transport.messagesByStatus(sipStatusRequestTerminated, "INVITE")) == 1
+				}) {
+					t.Fatal("CANCEL was not handled while media readiness was pending")
+				}
+			} else {
+				close(readyRelease)
+				if !waitForCallTest(func() bool {
+					return len(transport.messagesByStatus(tt.wantStatus, "INVITE")) == 1
+				}) {
+					t.Fatalf("%d INVITE response was not sent", tt.wantStatus)
+				}
+			}
+
+			select {
+			case err := <-readyResult:
+				if tt.wantWaitError != nil && !errors.Is(err, tt.wantWaitError) {
+					t.Fatalf("WaitMediaReady() error = %v, want %v", err, tt.wantWaitError)
+				}
+				if tt.wantWaitError == nil && (err == nil || !strings.Contains(err.Error(), "dedicated voice bearer rejected")) {
+					t.Fatalf("WaitMediaReady() error = %v, want dedicated bearer rejection", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("media readiness wait did not finish")
+			}
+			if tt.cancel && len(transport.messagesByStatus(sipStatusPreconditionFailure, "INVITE")) != 0 {
+				t.Fatal("580 was sent after CANCEL had already terminated the INVITE")
+			}
+			if !tt.cancel {
+				failures := transport.messagesByStatus(sipStatusPreconditionFailure, "INVITE")
+				if len(failures) != 1 {
+					t.Fatalf("580 count = %d, want 1", len(failures))
+				}
+				if got := failures[0].Header("Content-Type"); got != "application/sdp" {
+					t.Fatalf("580 Content-Type = %q, want application/sdp", got)
+				}
+				body := string(failures[0].Body)
+				if !strings.Contains(body, "m=audio 0 ") || !strings.Contains(body, "a=des:qos failure remote sendrecv\r\n") {
+					t.Fatalf("580 failure SDP does not identify the failed media precondition:\n%s", body)
+				}
 			}
 		})
 	}
@@ -4163,6 +4791,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			events := make(chan CallEvent, 16)
 			media := &voiceMediaTransport{}
 			svc, err := New(Config{Logger: testLogger(),
+				Preconditions:       true,
 				ReliableProvisional: true,
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
 					media.local = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}
@@ -4211,11 +4840,10 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 
 			invite := reliableDelayedInvite()
 			transport.queue(invite)
-			var got IncomingCall
 			select {
-			case got = <-incoming:
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
 			}
 			var progress sip.Message
 			select {
@@ -4236,6 +4864,9 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			if body, ok := sdpBody(progress); !ok || !strings.Contains(string(body), "m=audio ") {
 				t.Fatalf("183 SDP present = %v body=%q, want audio offer", ok, string(body))
 			}
+			if body := string(progress.Body); strings.Contains(body, "a=curr:qos") || strings.Contains(body, "a=des:qos") {
+				t.Fatalf("183 SDP enabled preconditions for a peer that only advertised 100rel:\n%s", body)
+			}
 			if len(transport.messagesByStatus(180, "INVITE")) != 0 {
 				t.Fatal("180 Ringing was sent before PRACK")
 			}
@@ -4252,6 +4883,12 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			case ringing = <-ringingCh:
 			case <-time.After(time.Second):
 				t.Fatal("180 Ringing after PRACK timed out")
+			}
+			var got IncomingCall
+			select {
+			case got = <-incoming:
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after PRACK")
 			}
 			if got := ringing.Header("Require"); got != "100rel" {
 				t.Fatalf("180 Require = %q, want 100rel", got)
@@ -4446,12 +5083,10 @@ func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
 			invite.Headers.Add("Supported", "100rel")
 			invite.Headers.Add("Allow", sip.DefaultClientAllow)
 			transport.queue(invite)
-			var call *Call
 			select {
 			case event := <-incoming:
-				call = event.Call
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+				t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
 			}
 			var progress sip.Message
 			if !waitForCallTest(func() bool {
@@ -4502,6 +5137,13 @@ func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("PrepareMedia was not called after PRACK")
 			}
+			var call *Call
+			select {
+			case event := <-incoming:
+				call = event.Call
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after PRACK")
+			}
 			if media := call.Media(); media.RemotePort != 51002 || !media.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
 				t.Fatalf("call media remote = %v:%d, want 192.0.2.10:51002", media.RemoteIP, media.RemotePort)
 			}
@@ -4517,6 +5159,8 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			readyStarted := make(chan MediaConfig, 1)
+			releaseReady := make(chan struct{})
 			transport := newVoiceStubTransport()
 			sess, err := session.Open(session.Config{}, transport)
 			if err != nil {
@@ -4537,6 +5181,15 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 				Preconditions: true,
 				PrepareMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 40000}}, nil
+				},
+				WaitMediaReady: func(ctx context.Context, cfg MediaConfig) error {
+					readyStarted <- cfg
+					select {
+					case <-releaseReady:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
 				},
 				OnIncomingCall: func(event IncomingCall) { incoming <- event },
 			}, sess, reg)
@@ -4572,9 +5225,9 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 			invite.Headers.Add("Allow", sip.DefaultClientAllow)
 			transport.queue(invite)
 			select {
-			case <-incoming:
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
 			}
 			var progress sip.Message
 			if !waitForCallTest(func() bool {
@@ -4606,6 +5259,20 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 			}) {
 				t.Fatalf("200 PRACK count = %d, want 1", len(transport.messagesByStatus(sipStatusOK, "PRACK")))
 			}
+			select {
+			case cfg := <-readyStarted:
+				if cfg.RemotePort == 0 || cfg.RemoteIP == nil {
+					t.Fatalf("media readiness remote = %v:%d, want negotiated PRACK answer", cfg.RemoteIP, cfg.RemotePort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("media readiness wait did not start after PRACK response")
+			}
+			select {
+			case update := <-updateCh:
+				t.Fatalf("precondition UPDATE sent before media readiness: %s", update.StartLine)
+			case <-time.After(80 * time.Millisecond):
+			}
+			close(releaseReady)
 			var update sip.Message
 			select {
 			case update = <-updateCh:
@@ -4619,21 +5286,29 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 			for _, want := range []string{
 				"a=curr:qos local sendrecv",
 				"a=des:qos mandatory local sendrecv",
-				"a=des:qos optional remote sendrecv",
+				"a=des:qos mandatory remote sendrecv",
 			} {
 				if !strings.Contains(body, want+"\r\n") {
 					t.Fatalf("UPDATE body missing %q:\n%s", want, body)
 				}
 			}
+			if got := len(transport.messagesByStatus(sipStatusRinging, "INVITE")); got != 0 {
+				t.Fatalf("180 Ringing count = %d before remote resources, want 0", got)
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before remote resources: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
 		})
 	}
 }
 
-func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.T) {
+func TestIncomingReliableInviteAnswerGateSurvivesCancel(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "remote cancel closes PRACK wait"},
+		{name: "remote cancel closes a call that is not ready to answer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4676,11 +5351,10 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
-			var got IncomingCall
 			select {
-			case got = <-incoming:
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
 			}
 			select {
 			case <-progressCh:
@@ -4688,14 +5362,12 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 				t.Fatal("183 Session Progress timed out")
 			}
 
-			answerErr := make(chan error, 1)
-			go func() {
-				answerErr <- got.Call.Answer(context.Background(), MediaOffer{})
-			}()
-			select {
-			case err := <-answerErr:
-				t.Fatalf("Answer() completed before call ended: %v", err)
-			case <-time.After(80 * time.Millisecond):
+			call := svc.lookupCall(invite.Header("Call-ID"))
+			if call == nil {
+				t.Fatal("incoming call was not stored")
+			}
+			if err := call.Answer(context.Background(), MediaOffer{}); err == nil || !strings.Contains(err.Error(), "media resources are not ready") {
+				t.Fatalf("Answer() error = %v, want media readiness error", err)
 			}
 
 			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: cancelForInvite(invite), Transport: transport})
@@ -4705,18 +5377,7 @@ func TestIncomingReliableInviteAnswerUnblocksWhenCallEndsBeforePRACK(t *testing.
 			if !handled {
 				t.Fatal("HandleRequest(CANCEL) = false, want true")
 			}
-			select {
-			case err := <-answerErr:
-				if err == nil {
-					t.Fatal("Answer() error = nil, want closed call error")
-				}
-				if strings.Contains(err.Error(), "context") {
-					t.Fatalf("Answer() error = %v, want immediate closed call error", err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("Answer() did not return after call ended")
-			}
-			if got := got.Call.State(); got != CallStateEnded {
+			if got := call.State(); got != CallStateEnded {
 				t.Fatalf("call.State() = %s, want %s", got, CallStateEnded)
 			}
 			if !waitForCallEvent(events, CallStateEnded, "remote cancel", time.Second) {
@@ -4730,7 +5391,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "180 waits for prepared local media resource"},
+		{name: "180 waits for prepared media and dedicated bearer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4749,6 +5410,8 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 			}
 			prepareStarted := make(chan struct{}, 1)
 			releasePrepare := make(chan struct{})
+			readyStarted := make(chan MediaConfig, 1)
+			releaseReady := make(chan struct{})
 			incoming := make(chan IncomingCall, 1)
 			svc, err := New(Config{Logger: testLogger(),
 				PrepareMedia: func(ctx context.Context, cfg MediaConfig) (MediaTransport, error) {
@@ -4759,6 +5422,15 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 						return nil, ctx.Err()
 					}
 					return &voiceMediaTransport{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.LocalPort}}, nil
+				},
+				WaitMediaReady: func(ctx context.Context, cfg MediaConfig) error {
+					readyStarted <- cfg
+					select {
+					case <-releaseReady:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
 				},
 				OnIncomingCall: func(event IncomingCall) { incoming <- event },
 			}, sess, reg)
@@ -4817,9 +5489,28 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 			}
 			close(releasePrepare)
 			select {
+			case cfg := <-readyStarted:
+				if cfg.RemotePort != 50000 {
+					t.Fatalf("media readiness remote port = %d, want 50000", cfg.RemotePort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("WaitMediaReady was not called after media preparation")
+			}
+			select {
+			case ringing := <-ringingCh:
+				t.Fatalf("180 Ringing was sent before dedicated bearer readiness: %s", ringing.StartLine)
+			case <-time.After(80 * time.Millisecond):
+			}
+			select {
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before dedicated bearer readiness: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
+			}
+			close(releaseReady)
+			select {
 			case <-ringingCh:
 			case <-time.After(time.Second):
-				t.Fatal("180 Ringing was not sent after media prepared")
+				t.Fatal("180 Ringing was not sent after dedicated bearer readiness")
 			}
 			select {
 			case got := <-incoming:
@@ -4916,12 +5607,10 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			invite.Headers.Add("Supported", "100rel")
 			invite.Headers.Add("Allow", sip.DefaultClientAllow)
 			transport.queue(invite)
-
-			var got IncomingCall
 			select {
-			case got = <-incoming:
-			case <-time.After(time.Second):
-				t.Fatal("incoming call event timed out")
+			case event := <-incoming:
+				t.Fatalf("incoming call was reported before PRACK: %v", event.Call)
+			case <-time.After(80 * time.Millisecond):
 			}
 			var progress sip.Message
 			select {
@@ -4953,14 +5642,12 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			case <-time.After(80 * time.Millisecond):
 			}
 
-			answerErr := make(chan error, 1)
-			go func() {
-				answerErr <- got.Call.Answer(context.Background(), MediaOffer{})
-			}()
-			select {
-			case err := <-answerErr:
-				t.Fatalf("Answer() completed before PRACK: %v", err)
-			case <-time.After(80 * time.Millisecond):
+			call := svc.lookupCall(invite.Header("Call-ID"))
+			if call == nil {
+				t.Fatal("incoming call was not stored")
+			}
+			if err := call.Answer(context.Background(), MediaOffer{}); err == nil || !strings.Contains(err.Error(), "media resources are not ready") {
+				t.Fatalf("Answer() error = %v, want media readiness error", err)
 			}
 
 			transport.queue(prackWithoutSDPForReliableProvisional(invite, progress))
@@ -4990,8 +5677,13 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			if err != nil || ringingRSeq != progressRSeq+1 {
 				t.Fatalf("180 RSeq = %q, want %d", ringing.Header("RSeq"), progressRSeq+1)
 			}
-
-			if err := <-answerErr; err != nil {
+			var got IncomingCall
+			select {
+			case got = <-incoming:
+			case <-time.After(time.Second):
+				t.Fatal("incoming call was not reported after PRACK and media preparation")
+			}
+			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			var inviteOK sip.Message
@@ -6186,6 +6878,243 @@ func TestOpenMediaRequiresTransport(t *testing.T) {
 	}
 }
 
+func TestMediaTransportDoesNotConfirmLocalQoS(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare bool
+	}{
+		{name: "prepared transport", prepare: true},
+		{name: "opened transport"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &voiceMediaTransport{}
+			cfg := Config{}
+			if tt.prepare {
+				cfg.PrepareMedia = func(context.Context, MediaConfig) (MediaTransport, error) {
+					return transport, nil
+				}
+			} else {
+				cfg.OpenMedia = func(context.Context, MediaConfig) (MediaTransport, error) {
+					return transport, nil
+				}
+			}
+			call := &Call{
+				endpoint: &Endpoint{cfg: cfg},
+				media:    NegotiatedMedia{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000},
+			}
+			var err error
+			if tt.prepare {
+				err = call.prepareMedia(context.Background())
+			} else {
+				err = call.openMedia(context.Background())
+			}
+			if err != nil {
+				t.Fatalf("opening media transport: %v", err)
+			}
+			if got := normalizedQoSStatus(call.localQoSStatus); got != qosStatusNone {
+				t.Fatalf("local QoS status = %q, want %q before resource confirmation", got, qosStatusNone)
+			}
+			if err := call.closeMedia(); err != nil {
+				t.Fatalf("closing media transport: %v", err)
+			}
+			if call.localQoSStatus != qosStatusNone {
+				t.Fatalf("local QoS status after close = %q, want %q", call.localQoSStatus, qosStatusNone)
+			}
+		})
+	}
+}
+
+func TestConfirmMediaResources(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Call)
+		wantError string
+		wantQoS   string
+	}{
+		{
+			name: "explicit confirmation",
+			configure: func(call *Call) {
+				call.endpoint.cfg.WaitMediaReady = func(ctx context.Context, cfg MediaConfig) error {
+					if cfg.RemotePort != 50000 || !cfg.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+						t.Fatalf("media readiness remote = %v:%d, want 192.0.2.10:50000", cfg.RemoteIP, cfg.RemotePort)
+					}
+					return nil
+				}
+			},
+			wantQoS: qosStatusSendRecv,
+		},
+		{
+			name:      "missing confirmation callback",
+			configure: func(*Call) {},
+			wantError: "readiness callback is not configured",
+			wantQoS:   qosStatusNone,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{
+				endpoint: &Endpoint{},
+				media: NegotiatedMedia{
+					RemoteIP:   net.IPv4(192, 0, 2, 10),
+					RemotePort: 50000,
+				},
+			}
+			tt.configure(call)
+			err := call.confirmMediaResources(context.Background(), call.media)
+			if tt.wantError == "" && err != nil {
+				t.Fatalf("confirmMediaResources() error = %v", err)
+			}
+			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
+				t.Fatalf("confirmMediaResources() error = %v, want containing %q", err, tt.wantError)
+			}
+			if got := normalizedQoSStatus(call.localQoSStatus); got != tt.wantQoS {
+				t.Fatalf("local QoS status = %q, want %q", got, tt.wantQoS)
+			}
+		})
+	}
+}
+
+func TestConfirmMediaResourcesRejectsStaleCompletion(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	transport := &voiceFixedMediaTransport{}
+	call := &Call{
+		endpoint: &Endpoint{cfg: Config{
+			WaitMediaReady: func(ctx context.Context, cfg MediaConfig) error {
+				close(started)
+				select {
+				case <-release:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		}},
+		transport:       transport,
+		mediaGeneration: 1,
+		media:           NegotiatedMedia{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000},
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- call.confirmMediaResources(context.Background(), call.media)
+	}()
+	<-started
+	if err := call.closeMedia(); err != nil {
+		t.Fatalf("closeMedia() error = %v", err)
+	}
+	close(release)
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "media transport changed") {
+		t.Fatalf("confirmMediaResources() error = %v, want stale transport error", err)
+	}
+	if call.localQoSStatus != qosStatusNone {
+		t.Fatalf("local QoS status = %q, want %q", call.localQoSStatus, qosStatusNone)
+	}
+}
+
+func TestOpenMediaReplacementClearsLocalQoS(t *testing.T) {
+	old := &voiceFixedMediaTransport{}
+	call := &Call{
+		endpoint: &Endpoint{cfg: Config{
+			OpenMedia: func(context.Context, MediaConfig) (MediaTransport, error) {
+				return nil, errors.New("replacement unavailable")
+			},
+		}},
+		transport:       old,
+		mediaGeneration: 1,
+		localQoSStatus:  qosStatusSendRecv,
+		media:           NegotiatedMedia{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000},
+	}
+	if err := call.openMedia(context.Background()); err == nil || !strings.Contains(err.Error(), "replacement unavailable") {
+		t.Fatalf("openMedia() error = %v, want replacement error", err)
+	}
+	if call.transport != nil {
+		t.Fatalf("media transport = %T, want nil after failed replacement", call.transport)
+	}
+	if call.localQoSStatus != qosStatusNone {
+		t.Fatalf("local QoS status = %q, want %q", call.localQoSStatus, qosStatusNone)
+	}
+	if !old.closed {
+		t.Fatal("replaced media transport was not closed")
+	}
+}
+
+func TestConfigureRemoteBindsQoSToMediaResource(t *testing.T) {
+	tests := []struct {
+		name          string
+		remotePort    int
+		wantWaitCalls int
+	}{
+		{name: "same media keeps confirmation", remotePort: 50000},
+		{name: "changed media requires confirmation", remotePort: 50002, wantWaitCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			media := NegotiatedMedia{Profile: "RTP/AVP", RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: tt.remotePort}
+			original := NegotiatedMedia{Profile: "RTP/AVP", RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000}
+			originalKey := newMediaResourceKey(40000, original)
+			waitCalls := 0
+			call := &Call{
+				endpoint: &Endpoint{cfg: Config{WaitMediaReady: func(context.Context, MediaConfig) error {
+					waitCalls++
+					return nil
+				}}},
+				localPort:        40000,
+				media:            media,
+				transport:        &voiceMediaTransport{},
+				mediaGeneration:  1,
+				mediaResource:    originalKey,
+				qosMediaResource: originalKey,
+				localQoSStatus:   qosStatusSendRecv,
+			}
+			if err := call.openMedia(context.Background()); err != nil {
+				t.Fatalf("openMedia() error = %v", err)
+			}
+			if err := call.confirmMediaResources(context.Background(), media); err != nil {
+				t.Fatalf("confirmMediaResources() error = %v", err)
+			}
+			if waitCalls != tt.wantWaitCalls {
+				t.Fatalf("WaitMediaReady() calls = %d, want %d", waitCalls, tt.wantWaitCalls)
+			}
+			if got := normalizedQoSStatus(call.localQoSStatus); got != qosStatusSendRecv {
+				t.Fatalf("local QoS status = %q, want %q", got, qosStatusSendRecv)
+			}
+		})
+	}
+}
+
+func TestConfirmedQoSStatusMatchesMediaResource(t *testing.T) {
+	tests := []struct {
+		name       string
+		media      NegotiatedMedia
+		wantStatus string
+	}{
+		{
+			name:       "same media",
+			media:      NegotiatedMedia{Profile: "RTP/AVP", RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000},
+			wantStatus: qosStatusSendRecv,
+		},
+		{
+			name:       "changed remote port",
+			media:      NegotiatedMedia{Profile: "RTP/AVP", RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50002},
+			wantStatus: qosStatusNone,
+		},
+	}
+	original := NegotiatedMedia{Profile: "RTP/AVP", RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := &Call{
+				localPort:        40000,
+				qosMediaResource: newMediaResourceKey(40000, original),
+				localQoSStatus:   qosStatusSendRecv,
+			}
+			if got := call.confirmedQoSStatus(tt.media); got != tt.wantStatus {
+				t.Fatalf("confirmedQoSStatus() = %q, want %q", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
 func TestDialEndsAfterRTCPBye(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -7254,6 +8183,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			}()
 
 			var invite sip.Message
+			prackSeen := make(chan struct{}, 1)
 			transport.onWrite = func(msg sip.Message) {
 				switch msg.Method() {
 				case "INVITE":
@@ -7262,14 +8192,41 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 					progress.Headers.Add("P-Early-Media", "sendrecv")
 					transport.queue(progress)
 				case "PRACK":
+					prackSeen <- struct{}{}
 					transport.queue(callStatus(msg, 200, "OK"))
-					transport.queue(callOKWithoutSDP(invite, "early-tag"))
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
-			if err != nil {
-				t.Fatalf("Dial() error = %v", err)
+			type dialResult struct {
+				call *Call
+				err  error
+			}
+			dialDone := make(chan dialResult, 1)
+			go func() {
+				call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+				dialDone <- dialResult{call: call, err: err}
+			}()
+			select {
+			case <-prackSeen:
+			case <-time.After(time.Second):
+				t.Fatal("PRACK was not sent before opening authorized early media")
+			}
+			select {
+			case cfg := <-opened:
+				if cfg.RemotePort != 50000 || !cfg.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
+					t.Fatalf("OpenMedia remote = %v:%d, want 192.0.2.10:50000", cfg.RemoteIP, cfg.RemotePort)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("OpenMedia was not called after PRACK")
+			}
+			transport.queue(callOKWithoutSDP(invite, "early-tag"))
+			result := <-dialDone
+			if result.err != nil {
+				t.Fatalf("Dial() error = %v", result.err)
+			}
+			call := result.call
+			if call == nil {
+				t.Fatal("Dial() call = nil")
 			}
 			if !waitForCallEvent(events, CallStateEarlyMedia, "", time.Second) {
 				t.Fatalf("call state = %s, want early media event", call.State())
@@ -7279,14 +8236,6 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			}
 			if got := call.State(); got != CallStateConfirmed {
 				t.Fatalf("call.State() = %q, want %q", got, CallStateConfirmed)
-			}
-			select {
-			case cfg := <-opened:
-				if cfg.RemotePort != 50000 || !cfg.RemoteIP.Equal(net.IPv4(192, 0, 2, 10)) {
-					t.Fatalf("OpenMedia remote = %v:%d, want 192.0.2.10:50000", cfg.RemoteIP, cfg.RemotePort)
-				}
-			default:
-				t.Fatal("OpenMedia was not called for authorized early media")
 			}
 		})
 	}

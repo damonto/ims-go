@@ -217,10 +217,11 @@ func (c *Call) buildInviteOK(msg sip.Message, body []byte) (sip.Message, error) 
 	ok.Headers.Add("Accept", callAcceptHeader(false, false))
 	addInviteOKSessionTimer(&ok, msg, c.endpoint.cfg)
 	if len(body) != 0 {
-		if err := setInviteResponseBody(&ok, c.endpoint.cfg, c.localURI, false, body); err != nil {
+		cfg := c.sdpConfig()
+		if err := setInviteResponseBody(&ok, cfg, c.localURI, false, body); err != nil {
 			return sip.Message{}, err
 		}
-		if c.endpoint.usesPreconditions(msg) && sdpUsesPreconditions(body) {
+		if cfg.Preconditions && sdpUsesPreconditions(body) {
 			addTokenHeader(&ok, "Require", preconditionOption)
 		}
 	}
@@ -331,7 +332,9 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 	var authorized bool
 	var earlyTarget string
 	var earlyRoutes []string
-	var preconditionUpdateBody []byte
+	var openEarlyMediaAfterPRACK bool
+	var earlyMediaAnswer sdpOffer
+	var preconditionUpdate *outgoingPreconditionUpdate
 	if remoteTag != "" {
 		c.mu.Lock()
 		if c.earlyDialogs == nil {
@@ -357,10 +360,13 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 		if err := answer.UnmarshalBinary(body); err != nil {
 			return fmt.Errorf("handling provisional call answer: %w", err)
 		}
-		if authorized {
+		if authorized && !needsPRACK {
 			if err := c.openEarlyMedia(ctx, answer); err != nil {
 				return err
 			}
+		} else if authorized {
+			openEarlyMediaAfterPRACK = true
+			earlyMediaAnswer = answer
 		}
 		c.mu.Lock()
 		if remoteTag != "" {
@@ -369,15 +375,23 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 			dialog.hasAnswer = true
 			c.earlyDialogs[remoteTag] = dialog
 		}
-		if c.endpoint.cfg.Preconditions && tokenHeaderContains(msg, "Require", preconditionOption) && answer.Preconditions {
-			body, err := buildSDPPreconditionUpdate(c.endpoint.cfg, c.endpoint.localIP(), c.localPort, answer, c.media)
-			if err != nil {
-				c.mu.Unlock()
-				return err
-			}
-			preconditionUpdateBody = body
-		}
+		currentMedia := cloneNegotiatedMedia(c.media)
 		c.mu.Unlock()
+		if c.endpoint.cfg.Preconditions && tokenHeaderContains(msg, "Require", preconditionOption) && answer.Preconditions {
+			selected, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
+			if !ok {
+				return errors.New("handling provisional call answer: no compatible codec")
+			}
+			dtmf, hasDTMF := chooseTelephoneEventForClock(answer, c.endpoint.cfg.Codecs, selected.ClockRate)
+			media := negotiatedMedia(answer, selected, nonZeroDuration(answer.PTime, currentMedia.PTime), nonZeroDuration(answer.MaxPTime, currentMedia.MaxPTime, c.endpoint.cfg.MaxPTime), dtmf, hasDTMF)
+			preconditionUpdate = &outgoingPreconditionUpdate{
+				response:     cloneSIPMessage(msg),
+				answer:       answer,
+				media:        media,
+				remoteTarget: earlyTarget,
+				routes:       append([]string(nil), earlyRoutes...),
+			}
+		}
 	} else if remoteTag != "" {
 		c.mu.Lock()
 		if c.earlyDialogs == nil {
@@ -399,12 +413,16 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 	if err != nil {
 		return err
 	}
-	var preconditionUpdate sip.Message
-	if len(preconditionUpdateBody) != 0 {
-		preconditionUpdate = snap.buildPreconditionUPDATEForResponse(msg, c.nextCSeq(), earlyTarget, earlyRoutes, preconditionUpdateBody)
+	var followup *outgoingPRACKFollowup
+	if openEarlyMediaAfterPRACK || preconditionUpdate != nil {
+		followup = &outgoingPRACKFollowup{
+			openEarlyMedia: openEarlyMediaAfterPRACK,
+			earlyMedia:     earlyMediaAnswer,
+			precondition:   preconditionUpdate,
+		}
 	}
 	c.endpoint.startBackgroundTask(func(done <-chan struct{}) {
-		c.sendPRACK(done, prack, preconditionUpdate)
+		c.sendPRACK(done, prack, followup)
 	})
 	return nil
 }

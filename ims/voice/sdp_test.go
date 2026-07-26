@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"errors"
 	"net"
 	"slices"
 	"strconv"
@@ -1056,6 +1057,36 @@ func TestConfigNormalizedAllowsPreconditions(t *testing.T) {
 	}
 }
 
+func TestConfigNormalizedIncomingPreconditionTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "default", want: defaultIncomingPreconditionTimeout},
+		{name: "explicit", timeout: 45 * time.Second, want: 45 * time.Second},
+		{name: "negative", timeout: -time.Second, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (Config{IncomingPreconditionTimeout: tt.timeout}).Normalized()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Normalized() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			if got.IncomingPreconditionTimeout != tt.want {
+				t.Fatalf("Normalized() incoming precondition timeout = %v, want %v", got.IncomingPreconditionTimeout, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildSDPOfferIncludesQoSPreconditions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1098,11 +1129,18 @@ func TestBuildSDPOfferIncludesQoSPreconditions(t *testing.T) {
 	}
 }
 
-func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T) {
+func TestBuildSDPPreconditionUpdateUsesConfirmedState(t *testing.T) {
 	tests := []struct {
-		name string
+		name             string
+		answerLocalQoS   string
+		localQoS         string
+		direction        MediaDirection
+		wantRemoteStatus string
 	}{
-		{name: "selected codec only"},
+		{name: "local resources not ready", answerLocalQoS: qosStatusNone, localQoS: qosStatusNone, direction: MediaDirectionRecvOnly, wantRemoteStatus: qosStatusNone},
+		{name: "both resources ready", answerLocalQoS: qosStatusSendRecv, localQoS: qosStatusSendRecv, direction: MediaDirectionSendRecv, wantRemoteStatus: qosStatusSendRecv},
+		{name: "peer send direction becomes receive", answerLocalQoS: qosStatusSend, localQoS: qosStatusSendRecv, direction: MediaDirectionSendRecv, wantRemoteStatus: qosStatusRecv},
+		{name: "peer receive direction becomes send", answerLocalQoS: qosStatusRecv, localQoS: qosStatusSendRecv, direction: MediaDirectionSendRecv, wantRemoteStatus: qosStatusSend},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1119,7 +1157,7 @@ func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T)
 				"a=rtpmap:104 AMR-WB/16000\r\n" +
 				"a=rtpmap:110 telephone-event/16000\r\n" +
 				"a=ptime:20\r\n" +
-				"a=curr:qos local none\r\n" +
+				"a=curr:qos local " + tt.answerLocalQoS + "\r\n" +
 				"a=curr:qos remote none\r\n" +
 				"a=des:qos mandatory local sendrecv\r\n" +
 				"a=des:qos optional remote sendrecv\r\n"))
@@ -1127,7 +1165,13 @@ func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T)
 				t.Fatalf("unmarshalSDP() error = %v", err)
 			}
 
-			body, err := buildSDPPreconditionUpdate(cfg, net.IPv4(10, 0, 0, 1), 40000, answer, NegotiatedMedia{PTime: 20 * time.Millisecond})
+			body, err := buildSDPPreconditionUpdate(cfg, sdpPreconditionUpdateState{
+				localIP:        net.IPv4(10, 0, 0, 1),
+				localPort:      40000,
+				answer:         answer,
+				media:          NegotiatedMedia{PTime: 20 * time.Millisecond, Direction: tt.direction},
+				localQoSStatus: tt.localQoS,
+			})
 			if err != nil {
 				t.Fatalf("buildSDPPreconditionUpdate() error = %v", err)
 			}
@@ -1137,10 +1181,11 @@ func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T)
 				"a=rtpmap:104 AMR-WB/16000",
 				"a=rtpmap:110 telephone-event/16000",
 				"a=fmtp:110 0-15",
-				"a=curr:qos local sendrecv",
-				"a=curr:qos remote none",
+				"a=" + string(tt.direction),
+				"a=curr:qos local " + tt.localQoS,
+				"a=curr:qos remote " + tt.wantRemoteStatus,
 				"a=des:qos mandatory local sendrecv",
-				"a=des:qos optional remote sendrecv",
+				"a=des:qos mandatory remote sendrecv",
 			} {
 				if !strings.Contains(text, want+"\r\n") {
 					t.Fatalf("SDP update missing %q:\n%s", want, text)
@@ -1155,12 +1200,43 @@ func TestBuildSDPPreconditionUpdateSelectsCodecAndMarksLocalQoSMet(t *testing.T)
 
 func TestBuildSDPAnswerPreconditionConfirmation(t *testing.T) {
 	tests := []struct {
-		name     string
-		qosLocal string
-		wantConf bool
+		name             string
+		remoteLocalQoS   string
+		localQoS         string
+		wantLocalStatus  string
+		wantRemoteStatus string
+		wantConf         bool
 	}{
-		{name: "originating local resources not met", qosLocal: "none", wantConf: true},
-		{name: "originating local resources already met", qosLocal: "sendrecv"},
+		{
+			name:             "neither side ready",
+			remoteLocalQoS:   qosStatusNone,
+			localQoS:         qosStatusNone,
+			wantLocalStatus:  qosStatusNone,
+			wantRemoteStatus: qosStatusNone,
+			wantConf:         true,
+		},
+		{
+			name:             "peer ready",
+			remoteLocalQoS:   qosStatusSendRecv,
+			localQoS:         qosStatusNone,
+			wantLocalStatus:  qosStatusNone,
+			wantRemoteStatus: qosStatusSendRecv,
+		},
+		{
+			name:             "both sides ready",
+			remoteLocalQoS:   qosStatusSendRecv,
+			localQoS:         qosStatusSendRecv,
+			wantLocalStatus:  qosStatusSendRecv,
+			wantRemoteStatus: qosStatusSendRecv,
+		},
+		{
+			name:             "peer send direction becomes receive",
+			remoteLocalQoS:   qosStatusSend,
+			localQoS:         qosStatusNone,
+			wantLocalStatus:  qosStatusNone,
+			wantRemoteStatus: qosStatusRecv,
+			wantConf:         true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1176,7 +1252,7 @@ func TestBuildSDPAnswerPreconditionConfirmation(t *testing.T) {
 				"m=audio 50000 RTP/AVP 104 110\r\n" +
 				"a=rtpmap:104 AMR-WB/16000\r\n" +
 				"a=rtpmap:110 telephone-event/16000\r\n" +
-				"a=curr:qos local " + tt.qosLocal + "\r\n" +
+				"a=curr:qos local " + tt.remoteLocalQoS + "\r\n" +
 				"a=curr:qos remote none\r\n" +
 				"a=des:qos mandatory local sendrecv\r\n" +
 				"a=des:qos optional remote sendrecv\r\n"))
@@ -1184,13 +1260,188 @@ func TestBuildSDPAnswerPreconditionConfirmation(t *testing.T) {
 				t.Fatalf("unmarshalSDP() error = %v", err)
 			}
 
+			body, _, err := buildSDPAnswerWithState(cfg, net.IPv4(10, 0, 0, 1), 40000, remote, MediaOffer{}, sdpAnswerState{
+				direction:      MediaDirectionSendRecv,
+				localQoSStatus: tt.localQoS,
+			})
+			if err != nil {
+				t.Fatalf("buildSDPAnswerWithState() error = %v", err)
+			}
+			text := string(body)
+			for _, want := range []string{
+				"a=curr:qos local " + tt.wantLocalStatus + "\r\n",
+				"a=curr:qos remote " + tt.wantRemoteStatus + "\r\n",
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("SDP answer missing %q:\n%s", want, text)
+				}
+			}
+			gotConf := strings.Contains(text, "a=conf:qos remote sendrecv\r\n")
+			if gotConf != tt.wantConf {
+				t.Fatalf("SDP answer conf:qos present = %t, want %t:\n%s", gotConf, tt.wantConf, text)
+			}
+		})
+	}
+}
+
+func TestBuildSDPAnswerPreconditionDesiredStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		desired    string
+		wantLines  []string
+		rejectLine string
+	}{
+		{
+			name: "scope is inverted and local policy upgrades strength",
+			desired: "a=des:qos mandatory local sendrecv\r\n" +
+				"a=des:qos optional remote sendrecv\r\n",
+			wantLines: []string{
+				"a=des:qos mandatory local sendrecv\r\n",
+				"a=des:qos mandatory remote sendrecv\r\n",
+			},
+			rejectLine: "a=des:qos optional remote sendrecv\r\n",
+		},
+		{
+			name: "split directions are inverted independently",
+			desired: "a=des:qos optional local send\r\n" +
+				"a=des:qos mandatory local recv\r\n" +
+				"a=des:qos none remote sendrecv\r\n",
+			wantLines: []string{
+				"a=des:qos mandatory local sendrecv\r\n",
+				"a=des:qos mandatory remote send\r\n",
+				"a=des:qos optional remote recv\r\n",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := (Config{Preconditions: true}).Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			remote, err := unmarshalSDP([]byte("v=0\r\n" +
+				"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 50000 RTP/AVP 104\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				"a=curr:qos local none\r\n" +
+				"a=curr:qos remote none\r\n" + tt.desired))
+			if err != nil {
+				t.Fatalf("unmarshalSDP() error = %v", err)
+			}
 			body, _, err := buildSDPAnswer(cfg, net.IPv4(10, 0, 0, 1), 40000, remote, MediaOffer{})
 			if err != nil {
 				t.Fatalf("buildSDPAnswer() error = %v", err)
 			}
-			gotConf := strings.Contains(string(body), "a=conf:qos remote sendrecv\r\n")
-			if gotConf != tt.wantConf {
-				t.Fatalf("SDP answer conf:qos present = %t, want %t:\n%s", gotConf, tt.wantConf, string(body))
+			for _, want := range tt.wantLines {
+				if !strings.Contains(string(body), want) {
+					t.Fatalf("SDP answer missing %q:\n%s", want, body)
+				}
+			}
+			if tt.rejectLine != "" && strings.Contains(string(body), tt.rejectLine) {
+				t.Fatalf("SDP answer retained downgraded line %q:\n%s", tt.rejectLine, body)
+			}
+		})
+	}
+}
+
+func TestParseCurrentQoS(t *testing.T) {
+	tests := []struct {
+		name       string
+		line       string
+		wantScope  string
+		wantStatus string
+		wantOK     bool
+	}{
+		{name: "local", line: "a=curr:qos local none", wantScope: "local", wantStatus: qosStatusNone, wantOK: true},
+		{name: "remote", line: "a=curr:qos remote sendrecv", wantScope: "remote", wantStatus: qosStatusSendRecv, wantOK: true},
+		{name: "case insensitive", line: "A=CURR:QOS REMOTE SEND", wantScope: "remote", wantStatus: qosStatusSend, wantOK: true},
+		{name: "invalid scope", line: "a=curr:qos endpoint sendrecv"},
+		{name: "invalid status", line: "a=curr:qos local ready"},
+		{name: "missing status", line: "a=curr:qos local"},
+		{name: "extra field", line: "a=curr:qos local sendrecv extra"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scope, status, ok := parseCurrentQoS(tt.line)
+			if scope != tt.wantScope || status != tt.wantStatus || ok != tt.wantOK {
+				t.Fatalf("parseCurrentQoS(%q) = (%q, %q, %t), want (%q, %q, %t)", tt.line, scope, status, ok, tt.wantScope, tt.wantStatus, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestParseDesiredQoS(t *testing.T) {
+	tests := []struct {
+		name          string
+		line          string
+		wantStrength  string
+		wantScope     string
+		wantDirection string
+		wantOK        bool
+	}{
+		{name: "sendrecv", line: "a=des:qos mandatory local sendrecv", wantStrength: qosStrengthMandatory, wantScope: "local", wantDirection: qosStatusSendRecv, wantOK: true},
+		{name: "case insensitive", line: "A=DES:QOS OPTIONAL REMOTE RECV", wantStrength: qosStrengthOptional, wantScope: "remote", wantDirection: qosStatusRecv, wantOK: true},
+		{name: "invalid strength", line: "a=des:qos preferred local sendrecv"},
+		{name: "unsupported scope", line: "a=des:qos mandatory e2e sendrecv"},
+		{name: "invalid direction", line: "a=des:qos mandatory local none"},
+		{name: "missing direction", line: "a=des:qos mandatory local"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			strength, scope, direction, ok := parseDesiredQoS(tt.line)
+			if strength != tt.wantStrength || scope != tt.wantScope || direction != tt.wantDirection || ok != tt.wantOK {
+				t.Fatalf("parseDesiredQoS() = %q, %q, %q, %t; want %q, %q, %q, %t", strength, scope, direction, ok, tt.wantStrength, tt.wantScope, tt.wantDirection, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestUnmarshalSDPCurrentQoS(t *testing.T) {
+	tests := []struct {
+		name        string
+		attributes  string
+		wantLocal   string
+		wantRemote  string
+		wantConfirm bool
+	}{
+		{
+			name: "both scopes",
+			attributes: "a=curr:qos local sendrecv\r\n" +
+				"a=curr:qos remote none\r\n",
+			wantLocal:  qosStatusSendRecv,
+			wantRemote: qosStatusNone,
+		},
+		{
+			name: "case insensitive",
+			attributes: "A=CURR:QOS LOCAL RECV\r\n" +
+				"A=CURR:QOS REMOTE SEND\r\n" +
+				"A=CONF:QOS REMOTE SENDRECV\r\n",
+			wantLocal:   qosStatusRecv,
+			wantRemote:  qosStatusSend,
+			wantConfirm: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			offer, err := unmarshalSDP([]byte("v=0\r\n" +
+				"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 50000 RTP/AVP 104\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				tt.attributes))
+			if err != nil {
+				t.Fatalf("unmarshalSDP() error = %v", err)
+			}
+			if offer.LocalQoSStatus != tt.wantLocal || offer.RemoteQoSStatus != tt.wantRemote {
+				t.Fatalf("QoS statuses = local %q, remote %q; want local %q, remote %q", offer.LocalQoSStatus, offer.RemoteQoSStatus, tt.wantLocal, tt.wantRemote)
+			}
+			if offer.RemoteQoSConfirmation != tt.wantConfirm {
+				t.Fatalf("remote QoS confirmation = %t, want %t", offer.RemoteQoSConfirmation, tt.wantConfirm)
 			}
 		})
 	}
@@ -1203,7 +1454,9 @@ func TestParseQoSConfirmationRemote(t *testing.T) {
 		want bool
 	}{
 		{name: "remote sendrecv", line: "a=conf:qos remote sendrecv", want: true},
-		{name: "case insensitive", line: "a=conf:qos REMOTE SENDRECV", want: true},
+		{name: "remote send", line: "a=conf:qos remote send", want: true},
+		{name: "remote receive", line: "a=conf:qos remote recv", want: true},
+		{name: "case insensitive", line: "A=CONF:QOS REMOTE SENDRECV", want: true},
 		{name: "none is not confirmation", line: "a=conf:qos remote none"},
 		{name: "local confirmation", line: "a=conf:qos local sendrecv"},
 		{name: "missing status", line: "a=conf:qos remote"},
@@ -1213,6 +1466,153 @@ func TestParseQoSConfirmationRemote(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := parseQoSConfirmationRemote(tt.line); got != tt.want {
 				t.Fatalf("parseQoSConfirmationRemote(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnmarshalSDPRejectsUnsupportedPreconditions(t *testing.T) {
+	tests := []struct {
+		name         string
+		attribute    string
+		wantTyped    bool
+		wantStrength string
+	}{
+		{
+			name:         "end to end QoS",
+			attribute:    "a=des:qos mandatory e2e sendrecv\r\n",
+			wantTyped:    true,
+			wantStrength: qosStrengthFailure,
+		},
+		{
+			name:         "unknown mandatory precondition",
+			attribute:    "a=des:foo mandatory remote sendrecv\r\n",
+			wantTyped:    true,
+			wantStrength: qosStrengthUnknown,
+		},
+		{
+			name:      "malformed known QoS",
+			attribute: "a=des:qos mandatory remote sideways\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := unmarshalSDP([]byte("v=0\r\n" +
+				"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 50000 RTP/AVP 104\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				tt.attribute))
+			if err == nil {
+				t.Fatal("unmarshalSDP() error = nil, want precondition rejection")
+			}
+			failure, ok := errors.AsType[*sdpPreconditionFailureError](err)
+			if ok != tt.wantTyped {
+				t.Fatalf("precondition failure error = %t, want %t: %v", ok, tt.wantTyped, err)
+			}
+			if ok && failure.strength != tt.wantStrength {
+				t.Fatalf("failure strength = %q, want %q", failure.strength, tt.wantStrength)
+			}
+		})
+	}
+}
+
+func TestBuildSDPAnswerConfirmsUnknownMandatoryLocalPrecondition(t *testing.T) {
+	tests := []struct {
+		name        string
+		current     string
+		wantConfirm bool
+	}{
+		{name: "confirmation required", current: qosStatusNone, wantConfirm: true},
+		{name: "confirmation already met", current: qosStatusSend, wantConfirm: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote, err := unmarshalSDP([]byte("v=0\r\n" +
+				"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+				"s=-\r\n" +
+				"c=IN IP4 192.0.2.10\r\n" +
+				"t=0 0\r\n" +
+				"m=audio 50000 RTP/AVP 104\r\n" +
+				"a=rtpmap:104 AMR-WB/16000\r\n" +
+				"a=curr:foo local " + tt.current + "\r\n" +
+				"a=des:foo mandatory local send\r\n"))
+			if err != nil {
+				t.Fatalf("unmarshalSDP() error = %v", err)
+			}
+			cfg, err := (Config{Preconditions: true}).Normalized()
+			if err != nil {
+				t.Fatalf("Normalized() error = %v", err)
+			}
+			body, _, err := buildSDPAnswer(cfg, net.IPv4(192, 0, 2, 20), 40000, remote, MediaOffer{})
+			if err != nil {
+				t.Fatalf("buildSDPAnswer() error = %v", err)
+			}
+			text := string(body)
+			for _, want := range []string{
+				"a=curr:foo remote " + invertQoSStatus(tt.current) + "\r\n",
+				"a=des:foo mandatory remote recv\r\n",
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("SDP answer missing %q:\n%s", want, text)
+				}
+			}
+			gotConfirm := strings.Contains(text, "a=conf:foo remote recv\r\n")
+			if gotConfirm != tt.wantConfirm {
+				t.Fatalf("confirmation present = %t, want %t:\n%s", gotConfirm, tt.wantConfirm, text)
+			}
+		})
+	}
+}
+
+func TestBuildPreconditionFailureSDP(t *testing.T) {
+	remote := []byte("v=0\r\n" +
+		"o=- 1 1 IN IP4 192.0.2.10\r\n" +
+		"s=-\r\n" +
+		"c=IN IP4 192.0.2.10\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 50000 RTP/AVP 104\r\n" +
+		"a=des:qos optional remote sendrecv\r\n" +
+		"m=video 50002 RTP/AVP 96\r\n")
+	tests := []struct {
+		name    string
+		failure sdpPreconditionFailureError
+		want    string
+	}{
+		{
+			name: "resource failure",
+			failure: sdpPreconditionFailureError{
+				preconditionType: "qos",
+				statusType:       "remote",
+				direction:        qosStatusSendRecv,
+				strength:         qosStrengthFailure,
+			},
+			want: "a=des:qos failure remote sendrecv\r\n",
+		},
+		{
+			name: "unknown mandatory type",
+			failure: sdpPreconditionFailureError{
+				preconditionType: "foo",
+				statusType:       "remote",
+				direction:        qosStatusSend,
+				strength:         qosStrengthUnknown,
+			},
+			want: "a=des:foo unknown remote send\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := string(buildPreconditionFailureSDP(remote, tt.failure))
+			if strings.Count(body, "\r\nm=") != 2 {
+				t.Fatalf("failure SDP media line count is wrong:\n%s", body)
+			}
+			if !strings.Contains(body, "m=audio 0 RTP/AVP 104\r\n") || !strings.Contains(body, "m=video 0 RTP/AVP 96\r\n") {
+				t.Fatalf("failure SDP did not reject every media stream:\n%s", body)
+			}
+			if !strings.Contains(body, tt.want) {
+				t.Fatalf("failure SDP missing %q:\n%s", tt.want, body)
 			}
 		})
 	}

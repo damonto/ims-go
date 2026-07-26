@@ -161,6 +161,11 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 		call.finish(CallStateFailed, err.Error())
 		return nil, fmt.Errorf("dialing call: %w", err)
 	}
+	if s.cfg.Preconditions && answer.Preconditions && call.confirmedQoSStatus(answerMedia) != qosStatusSendRecv {
+		err := errors.New("dialing call: media resources for final response are not confirmed")
+		call.releaseAcknowledgedInviteFailure(err, reasonMediaBearerReleased)
+		return nil, err
+	}
 
 	if err := call.openMedia(ctx); err != nil {
 		call.releaseAcknowledgedInviteFailure(err, reasonMediaBearerReleased)

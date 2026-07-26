@@ -83,7 +83,12 @@ type sdpOffer struct {
 	RTCPMux               bool
 	Preconditions         bool
 	LocalQoSStatus        string
+	RemoteQoSStatus       string
 	RemoteQoSConfirmation bool
+	QoSConfirmation       string
+	DesiredQoS            qosDesiredStatus
+	UnknownLocalMandatory []sdpUnknownPrecondition
+	UnknownLocalStatus    map[string]string
 	TimeDescriptions      []string
 	Profile               string
 	Payloads              []int
@@ -96,6 +101,18 @@ type sdpOffer struct {
 	Direction             MediaDirection
 	Media                 []sdpMediaLine
 	AudioIndex            int
+}
+
+type qosDesiredStatus struct {
+	localSend  string
+	localRecv  string
+	remoteSend string
+	remoteRecv string
+}
+
+type sdpUnknownPrecondition struct {
+	preconditionType string
+	direction        string
 }
 
 type sdpMediaLine struct {

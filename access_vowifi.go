@@ -59,9 +59,14 @@ func (a *voWiFiAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcc
 			reliable, _, err := a.dialPCSCFTCP(ctx, []net.IP{selectedPCSCF})
 			return reliable, err
 		},
-		Security:  a.openSecurity(selectedPCSCF, cfg, associations),
-		OpenMedia: a.openMedia,
+		Security:       a.openSecurity(selectedPCSCF, cfg, associations),
+		OpenMedia:      a.openMedia,
+		WaitMediaReady: voWiFiMediaReady,
 	}, nil
+}
+
+func voWiFiMediaReady(ctx context.Context, _ imsvoice.MediaConfig) error {
+	return ctx.Err()
 }
 
 func (a *voWiFiAccess) PCSCFCandidateCount() int {

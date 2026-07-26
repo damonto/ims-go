@@ -40,6 +40,12 @@ type imsPDNSession interface {
 	Close() error
 }
 
+type imsPDNMediaReadiness interface {
+	WaitMediaReady(context.Context, imsvoice.MediaConfig) error
+}
+
+var errVoLTEMediaReadinessUnavailable = errors.New("IMS PDN does not report dedicated voice bearer readiness")
+
 type voLTEAccess struct {
 	mu         sync.Mutex
 	info       lte.Info
@@ -140,7 +146,15 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 		OpenMedia: func(ctx context.Context, cfg imsvoice.MediaConfig) (imsvoice.MediaTransport, error) {
 			return a.openMedia(ctx, cfg)
 		},
+		WaitMediaReady: a.waitMediaReady,
 	}, nil
+}
+
+func (a *voLTEAccess) waitMediaReady(ctx context.Context, _ imsvoice.MediaConfig) error {
+	// The voice layer calls this after opening the RTP transport. Treat that
+	// ordering point as locally ready because not every device exposes IMS
+	// dedicated-bearer state; this confirms signaling order, not actual QoS.
+	return ctx.Err()
 }
 
 func (a *voLTEAccess) openSIPTransportTo(ctx context.Context, cfg accessIMSConfig, route lte.Route) (imssession.Transport, error) {
