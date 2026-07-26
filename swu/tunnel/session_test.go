@@ -241,7 +241,7 @@ func TestConnectRejectsConcurrentConnect(t *testing.T) {
 
 	firstResult := make(chan error, 1)
 	go func() {
-		firstResult <- session.Connect(context.Background(), "356789012345678", sessionTestCard{})
+		firstResult <- session.Connect(context.Background(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 	}()
 
 	select {
@@ -250,7 +250,7 @@ func TestConnectRejectsConcurrentConnect(t *testing.T) {
 		t.Fatal("first Connect() did not reach write path")
 	}
 
-	err := session.Connect(context.Background(), "356789012345678", sessionTestCard{})
+	err := session.Connect(context.Background(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 	if err == nil || !strings.Contains(err.Error(), "connect already in progress") {
 		t.Fatalf("concurrent Connect() error = %v, want in-progress error", err)
 	}
@@ -261,7 +261,7 @@ func TestConnectRejectsConcurrentConnect(t *testing.T) {
 		t.Fatalf("first Connect() error = %v, want wrapped write failure", err)
 	}
 
-	err = session.Connect(context.Background(), "356789012345678", sessionTestCard{})
+	err = session.Connect(context.Background(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 	if err == nil {
 		t.Fatal("Connect() after failed in-flight attempt error = nil, want non-nil")
 	}

@@ -17,8 +17,9 @@ type Card interface {
 	IMSI() string
 	MCC() string
 	MNC() string
-	AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error)
 }
+
+type AKAAuthenticator func(context.Context, []byte, []byte) (usim.AKAResult, error)
 
 type Config struct {
 	LocalAddr  string
@@ -103,12 +104,13 @@ type ESPKeys struct {
 }
 
 type ConnectInput struct {
-	IMEI        string
-	Card        Card
-	OuterLocal  *net.UDPAddr
-	OuterRemote *net.UDPAddr
-	Logger      *slog.Logger
-	Config      Config
+	IMEI            string
+	Card            Card
+	AuthenticateAKA AKAAuthenticator
+	OuterLocal      *net.UDPAddr
+	OuterRemote     *net.UDPAddr
+	Logger          *slog.Logger
+	Config          Config
 }
 
 type SAInitState struct {
@@ -142,6 +144,8 @@ func (in ConnectInput) Validate() error {
 	switch {
 	case in.Card == nil:
 		return errors.New("validating connect input: card is nil")
+	case in.AuthenticateAKA == nil:
+		return errors.New("validating connect input: AKA authenticator is nil")
 	case in.IMEI == "":
 		return errors.New("validating connect input: imei is empty")
 	case in.OuterRemote == nil:

@@ -51,7 +51,7 @@ type nsdsFlow struct {
 func newNSDSFlow(req Request) (flow, bool, error) {
 	mcc := strings.TrimSpace(req.Card.MCC())
 	mnc := strings.TrimSpace(req.Card.MNC())
-	mncLength := cardMNCLength(req.Card)
+	mncLength := req.Card.MNCLength()
 	for _, profile := range nsdsProfiles {
 		if samePLMNDigits(profile.MCC, profile.MNC, mcc, mnc, mncLength) {
 			return nsdsFlow{req: req, profile: profile}, true, nil
@@ -102,18 +102,19 @@ func (f nsdsFlow) checkOnce(ctx context.Context) (Result, error) {
 	}
 	device := f.req.Device.Trimmed()
 	client := nsdsClient{
-		serverURL:  f.profile.ServerURL,
-		deviceID:   nsdsDeviceID(device.IMEI),
-		deviceName: device.Model,
-		imsiEAP:    imsiEAP,
-		userAgent:  nsdsUserAgent(device),
-		httpClient: f.req.HTTPClient,
+		serverURL:       f.profile.ServerURL,
+		deviceID:        nsdsDeviceID(device.IMEI),
+		deviceName:      device.Model,
+		imsiEAP:         imsiEAP,
+		authenticateAKA: f.req.AuthenticateAKA,
+		userAgent:       nsdsUserAgent(device),
+		httpClient:      f.req.HTTPClient,
 	}
 
 	checkCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	status, err := client.checkLocationAndTC(checkCtx, f.req.Card, f.req.Purpose)
+	status, err := client.checkLocationAndTC(checkCtx, f.req.Purpose)
 	if err != nil {
 		if nsdsActivationCheckOptional(f.req.Purpose, err) {
 			f.req.logger().Warn("wfc nsds setup did not complete; continuing activation", "carrier", f.profile.Carrier, "err", err)
@@ -217,7 +218,7 @@ func nsdsDeviceID(imei string) string {
 func nsdsIMSIEAP(card Card) (string, error) {
 	mcc := strings.TrimSpace(card.MCC())
 	mnc := strings.TrimSpace(card.MNC())
-	switch n := cardMNCLength(card); n {
+	switch n := card.MNCLength(); n {
 	case 2, 3:
 		formatted, err := nsdsFormatMNC(card.IMSI(), n)
 		if err != nil {
@@ -243,12 +244,13 @@ func nsdsFormatMNC(imsi string, mncLength int) (string, error) {
 }
 
 type nsdsClient struct {
-	serverURL  string
-	deviceID   string
-	deviceName string
-	imsiEAP    string
-	userAgent  string
-	httpClient *http.Client
+	serverURL       string
+	deviceID        string
+	deviceName      string
+	imsiEAP         string
+	authenticateAKA AKAAuthenticator
+	userAgent       string
+	httpClient      *http.Client
 }
 
 const (
@@ -385,12 +387,17 @@ func (status nsdsStatus) LocationTCOK() bool {
 	return status.LocationTC.LocationTCOK()
 }
 
-func (c nsdsClient) checkLocationAndTC(ctx context.Context, card Card, purpose Purpose) (nsdsStatus, error) {
+func (c nsdsClient) checkLocationAndTC(ctx context.Context, purpose Purpose) (nsdsStatus, error) {
 	authChallenge, err := c.requestChallenge(ctx)
 	if err != nil {
 		return nsdsStatus{}, err
 	}
-	challengeResponse, err := nsdsChallengeResponse(ctx, card, c.imsiEAP, authChallenge.AKAChallenge)
+	challengeResponse, err := eapAKAChallengeResponse(ctx, eapAKAResponseInput{
+		Authenticate: c.authenticateAKA,
+		Identity:     c.imsiEAP,
+		Challenge:    authChallenge.AKAChallenge,
+		Kind:         akaChallengeKindNSDS,
+	})
 	if err != nil {
 		return nsdsStatus{}, err
 	}
@@ -575,10 +582,6 @@ func nsdsResponseBody(resp *http.Response) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("decompressing nsds response: %w", err)
 	}
 	return reader, nil
-}
-
-func nsdsChallengeResponse(ctx context.Context, card Card, imsiEAP, challengeText string) (string, error) {
-	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP, challengeText, akaChallengeKindNSDS)
 }
 
 func nsdsRequireResponseCode(response nsdsResponse, want int, method string) error {

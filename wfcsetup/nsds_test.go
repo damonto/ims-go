@@ -85,11 +85,13 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
+	card := testCard{mcc: "310", mnc: "030", mncLength: 3, aka: testAKAResult(t)}
 	got, err := (nsdsFlow{
 		req: Request{
-			Card:    testCard{mcc: "310", mnc: "030", mncLength: 3, aka: testAKAResult(t)},
-			Device:  Device{IMEI: "123456789012345", Model: "Pixel", SoftwareVersion: "16"},
-			Purpose: PurposeEmergencyAddressUpdate,
+			Card:            card,
+			AuthenticateAKA: card.AKA,
+			Device:          Device{IMEI: "123456789012345", Model: "Pixel", SoftwareVersion: "16"},
+			Purpose:         PurposeEmergencyAddressUpdate,
 		},
 		profile: nsdsProfile{
 			Carrier:    "AT&T",

@@ -23,8 +23,9 @@ func TestConnectInputValidate(t *testing.T) {
 		input   ConnectInput
 		wantErr bool
 	}{
-		{name: "valid", input: ConnectInput{IMEI: "356789012345678", Card: stubCard{}, OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}}},
+		{name: "valid", input: ConnectInput{IMEI: "356789012345678", Card: stubCard{}, AuthenticateAKA: stubCard{}.AKA, OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}}},
 		{name: "missing card", input: ConnectInput{IMEI: "356789012345678", OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}}, wantErr: true},
+		{name: "missing authenticator", input: ConnectInput{IMEI: "356789012345678", Card: stubCard{}, OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}}, wantErr: true},
 		{name: "missing imei", input: ConnectInput{OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}}, wantErr: true},
 		{name: "missing remote", input: ConnectInput{IMEI: "356789012345678"}, wantErr: true},
 	}

@@ -88,7 +88,7 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 	cachedToken := ts43CachedToken(tokenKey)
 	check, err := ts43.CheckWFCEntitlementWithToken(checkCtx, ts43.Config{
 		Logger: req.Logger,
-		Source: ts43.Endpoint{Channel: ts43Channel{card: req.Card, identity: identity}},
+		Source: ts43.Endpoint{Channel: ts43Channel{authenticate: req.AuthenticateAKA, identity: identity}},
 	}, identity, ts43.Device{
 		IMEI:            device.IMEI,
 		Vendor:          device.Vendor,
@@ -255,12 +255,8 @@ func retryAfterDuration(header http.Header) time.Duration {
 }
 
 type ts43Channel struct {
-	card     Card
-	identity ts43.Identity
-}
-
-type eapAKACard interface {
-	EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error)
+	authenticate AKAAuthenticator
+	identity     ts43.Identity
 }
 
 func (c ts43Channel) Identity(context.Context) (*ts43.Identity, error) {
@@ -285,10 +281,10 @@ func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *ts43.AKARequest) 
 }
 
 func (c ts43Channel) authenticateAKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
-	if card, ok := c.card.(eapAKACard); ok {
-		return card.EAPAKA(ctx, rand, autn)
+	if c.authenticate == nil {
+		return usim.AKAResult{}, errAKAAuthenticatorRequired
 	}
-	return c.card.AKA(ctx, rand, autn)
+	return c.authenticate(ctx, rand, autn)
 }
 
 func ts43Identity(card Card) ts43.Identity {
@@ -297,6 +293,6 @@ func ts43Identity(card Card) ts43.Identity {
 		IMSI:  card.IMSI(),
 		MCC:   card.MCC(),
 		MNC:   card.MNC(),
-		GID1:  cardGID1(card),
+		GID1:  strings.TrimSpace(card.GID1()),
 	}
 }

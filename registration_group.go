@@ -24,28 +24,16 @@ func NewRegistrationGroup() *RegistrationGroup {
 	return &RegistrationGroup{}
 }
 
-func (cfg IMSConfig) coordinatedCard(card Card) Card {
+func (cfg IMSConfig) coordinatedAKA(authenticate func(context.Context, []byte, []byte) (usim.AKAResult, error)) func(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	if cfg.RegistrationGroup == nil {
-		return card
+		return authenticate
 	}
-	return registrationGroupCard{
-		Card:       card,
-		group:      cfg.RegistrationGroup,
-		preference: cfg.RegistrationPreference,
+	return func(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+		release, err := cfg.RegistrationGroup.BeginAKA(ctx, cfg.RegistrationPreference)
+		if err != nil {
+			return usim.AKAResult{}, fmt.Errorf("waiting for USIM AKA access: %w", err)
+		}
+		defer release()
+		return authenticate(ctx, rand, autn)
 	}
-}
-
-type registrationGroupCard struct {
-	Card
-	group      *RegistrationGroup
-	preference int
-}
-
-func (c registrationGroupCard) AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
-	release, err := c.group.BeginAKA(ctx, c.preference)
-	if err != nil {
-		return usim.AKAResult{}, fmt.Errorf("waiting for USIM AKA access: %w", err)
-	}
-	defer release()
-	return c.Card.AKA(ctx, rand, autn)
 }

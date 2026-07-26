@@ -135,6 +135,10 @@ func (stubCard) AKA(_ context.Context, _, _ []byte) (usim.AKAResult, error) {
 	}, nil
 }
 
+func (stubCard) EAPAKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
+	return stubCard{}.AKA(ctx, rand, autn)
+}
+
 type readerStub struct {
 	closeCalls        int
 	closeErr          error

@@ -1,10 +1,12 @@
 package ims
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/damonto/ims-go/lte"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 func TestIMSConfigMultipleRegistrationValidation(t *testing.T) {
@@ -99,6 +101,41 @@ func TestConfigDefaultsMultipleRegistrationByAccess(t *testing.T) {
 			}
 			if got.RegistrationPreference != tt.wantPreference {
 				t.Fatalf("RegistrationPreference = %d, want %d", got.RegistrationPreference, tt.wantPreference)
+			}
+		})
+	}
+}
+
+func TestIMSConfigCoordinatedAKA(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  IMSConfig
+	}{
+		{
+			name: "without registration group",
+		},
+		{
+			name: "with registration group",
+			cfg:  IMSConfig{RegistrationGroup: NewRegistrationGroup()},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			authenticate := func(context.Context, []byte, []byte) (usim.AKAResult, error) {
+				calls++
+				return usim.AKAResult{RES: []byte("response")}, nil
+			}
+			got, err := tt.cfg.coordinatedAKA(authenticate)(context.Background(), make([]byte, 16), make([]byte, 16))
+			if err != nil {
+				t.Fatalf("coordinatedAKA() error = %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("authenticate calls = %d, want 1", calls)
+			}
+			if string(got.RES) != "response" {
+				t.Fatalf("RES = %q, want response", got.RES)
 			}
 		})
 	}

@@ -38,12 +38,19 @@ type plmnWFCCard struct {
 
 var _ Card = minimalProfileCard{}
 
-func (minimalProfileCard) ICCID() string { return "" }
-func (minimalProfileCard) IMSI() string  { return "001010123456789" }
-func (minimalProfileCard) MCC() string   { return "001" }
-func (minimalProfileCard) MNC() string   { return "01" }
-func (minimalProfileCard) SMSC() string  { return "" }
+func (minimalProfileCard) ICCID() string  { return "" }
+func (minimalProfileCard) IMSI() string   { return "001010123456789" }
+func (minimalProfileCard) MCC() string    { return "001" }
+func (minimalProfileCard) MNC() string    { return "01" }
+func (minimalProfileCard) MNCLength() int { return 2 }
+func (minimalProfileCard) GID1() string   { return "" }
+func (minimalProfileCard) GID2() string   { return "" }
+func (minimalProfileCard) SPN() string    { return "" }
+func (minimalProfileCard) SMSC() string   { return "" }
 func (minimalProfileCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{}, nil
+}
+func (minimalProfileCard) EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{}, nil
 }
 
@@ -57,6 +64,9 @@ func (wfcTestCard) GID2() string   { return "" }
 func (wfcTestCard) SPN() string    { return "" }
 func (wfcTestCard) SMSC() string   { return "" }
 func (wfcTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{}, nil
+}
+func (wfcTestCard) EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{}, nil
 }
 
@@ -81,6 +91,9 @@ func (c plmnWFCCard) SPN() string    { return c.spn }
 func (c plmnWFCCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{}, nil
 }
+func (c plmnWFCCard) EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{}, nil
+}
 
 func (paddedTwoDigitMNCCard) ICCID() string  { return "" }
 func (paddedTwoDigitMNCCard) IMSI() string   { return "454000121084653" }
@@ -92,6 +105,9 @@ func (paddedTwoDigitMNCCard) GID2() string   { return "" }
 func (paddedTwoDigitMNCCard) SPN() string    { return "" }
 func (paddedTwoDigitMNCCard) SMSC() string   { return "" }
 func (paddedTwoDigitMNCCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
+	return usim.AKAResult{}, nil
+}
+func (paddedTwoDigitMNCCard) EAPAKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return usim.AKAResult{}, nil
 }
 

@@ -176,12 +176,12 @@ func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
 
 	mcc := strings.TrimSpace(card.MCC())
 	mnc := strings.TrimSpace(card.MNC())
-	mncLength := cardMNCLength(card)
+	mncLength := card.MNCLength()
 	imsi := normalizeDigits(card.IMSI())
 	iccid := normalizeDigits(card.ICCID())
-	spn := cardSPN(card)
-	gid1 := cardGID1(card)
-	gid2 := cardGID2(card)
+	spn := strings.TrimSpace(card.SPN())
+	gid1 := normalizeGID(card.GID1())
+	gid2 := normalizeGID(card.GID2())
 	bestIndex := -1
 	bestScore := imsProfileMatchScore{}
 	for index, profile := range profiles {
@@ -276,54 +276,6 @@ func matchesIMSIPrefix(imsi, pattern string) bool {
 		}
 	}
 	return true
-}
-
-type mncLengthCard interface {
-	MNCLength() int
-}
-
-func cardMNCLength(card Card) int {
-	provider, ok := card.(mncLengthCard)
-	if !ok {
-		return 0
-	}
-	return provider.MNCLength()
-}
-
-type gid1Card interface {
-	GID1() string
-}
-
-func cardGID1(card Card) string {
-	provider, ok := card.(gid1Card)
-	if !ok {
-		return ""
-	}
-	return normalizeGID(provider.GID1())
-}
-
-type gid2Card interface {
-	GID2() string
-}
-
-func cardGID2(card Card) string {
-	provider, ok := card.(gid2Card)
-	if !ok {
-		return ""
-	}
-	return normalizeGID(provider.GID2())
-}
-
-type spnCard interface {
-	SPN() string
-}
-
-func cardSPN(card Card) string {
-	provider, ok := card.(spnCard)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(provider.SPN())
 }
 
 func samePLMNDigits(profileMCC, profileMNC, cardMCC, cardMNC string, cardMNCLength int) bool {

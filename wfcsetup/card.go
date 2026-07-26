@@ -2,28 +2,6 @@ package wfcsetup
 
 import "strings"
 
-type mncLengthCard interface {
-	MNCLength() int
-}
-
-type gid1Card interface {
-	GID1() string
-}
-
-func cardMNCLength(card Card) int {
-	if card, ok := card.(mncLengthCard); ok {
-		return card.MNCLength()
-	}
-	return 0
-}
-
-func cardGID1(card Card) string {
-	if card, ok := card.(gid1Card); ok {
-		return strings.TrimSpace(card.GID1())
-	}
-	return ""
-}
-
 func samePLMNDigits(profileMCC, profileMNC, cardMCC, cardMNC string, cardMNCLength int) bool {
 	profileMCC = strings.TrimSpace(profileMCC)
 	profileMNC = strings.TrimSpace(profileMNC)
@@ -64,13 +42,29 @@ type simMatch struct {
 }
 
 func matchSIM(card Card, match simMatch) bool {
-	if !samePLMNDigits(match.MCC, match.MNC, card.MCC(), card.MNC(), cardMNCLength(card)) {
+	if !samePLMNDigits(match.MCC, match.MNC, card.MCC(), card.MNC(), card.MNCLength()) {
 		return false
 	}
 	if strings.TrimSpace(match.GID1) == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(match.GID1), cardGID1(card))
+	return sameGIDPrefix(match.GID1, card.GID1())
+}
+
+func sameGIDPrefix(profileGID, cardGID string) bool {
+	profileGID = normalizeGID(profileGID)
+	cardGID = normalizeGID(cardGID)
+	if profileGID == "" || cardGID == "" {
+		return false
+	}
+	return strings.HasPrefix(cardGID, profileGID)
+}
+
+func normalizeGID(gid string) string {
+	gid = strings.TrimSpace(gid)
+	gid = strings.TrimPrefix(gid, "0x")
+	gid = strings.TrimPrefix(gid, "0X")
+	return strings.ToUpper(gid)
 }
 
 func matchAnySIM(card Card, matches []simMatch) bool {

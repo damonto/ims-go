@@ -28,6 +28,71 @@ func (c testCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return c.aka, c.akaErr
 }
 
+func TestCheckAllowsNonAKAFlowsWithoutAuthenticator(t *testing.T) {
+	tests := []struct {
+		name         string
+		req          Request
+		wantScheme   Scheme
+		wantAction   Action
+		wantEntitled bool
+		wantWebsheet bool
+	}{
+		{
+			name:         "no matching profile uses activation fallback",
+			req:          Request{Card: testCard{mcc: "999", mnc: "99", mncLength: 2}, Purpose: PurposeActivation},
+			wantAction:   ActionAllowActivation,
+			wantEntitled: true,
+		},
+		{
+			name:         "canada metadata flow returns websheet",
+			req:          Request{Card: testCard{mcc: "302", mnc: "720", mncLength: 3}, Purpose: PurposeEmergencyAddressUpdate},
+			wantScheme:   SchemeCanada,
+			wantAction:   ActionOpenWebsheet,
+			wantEntitled: true,
+			wantWebsheet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Check(context.Background(), tt.req)
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			if got.Scheme != tt.wantScheme {
+				t.Fatalf("Scheme = %q, want %q", got.Scheme, tt.wantScheme)
+			}
+			if got.Action != tt.wantAction {
+				t.Fatalf("Action = %d, want %d", got.Action, tt.wantAction)
+			}
+			if got.Entitled != tt.wantEntitled {
+				t.Fatalf("Entitled = %t, want %t", got.Entitled, tt.wantEntitled)
+			}
+			if (got.Websheet != nil) != tt.wantWebsheet {
+				t.Fatalf("Websheet present = %t, want %t", got.Websheet != nil, tt.wantWebsheet)
+			}
+		})
+	}
+}
+
+func TestEAPAKAChallengeResponseRequiresAuthenticator(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr error
+	}{
+		{name: "missing authenticator", wantErr: errAKAAuthenticatorRequired},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := eapAKAChallengeResponse(context.Background(), eapAKAResponseInput{})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("eapAKAChallengeResponse() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCheckE911UpdateSupport(t *testing.T) {
 	tests := []struct {
 		name           string

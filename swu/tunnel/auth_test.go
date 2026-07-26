@@ -923,14 +923,16 @@ func TestAKAAuthFlowBuildChallengeResponseDuplicateRANDReturnsClientError(t *tes
 }
 
 func TestAKAAuthFlowBuildChallengeResponseUnexpectedAttributeReturnsClientError(t *testing.T) {
+	card := akaChallengeTestCard{result: usim.AKAResult{
+		RES: bytes.Repeat([]byte{0x11}, 8),
+		IK:  bytes.Repeat([]byte{0x22}, 16),
+		CK:  bytes.Repeat([]byte{0x33}, 16),
+	}}
 	flow := akaAuthFlow{
-		session: &Session{logger: slog.Default()},
-		card: akaChallengeTestCard{result: usim.AKAResult{
-			RES: bytes.Repeat([]byte{0x11}, 8),
-			IK:  bytes.Repeat([]byte{0x22}, 16),
-			CK:  bytes.Repeat([]byte{0x33}, 16),
-		}},
-		crypto: &ikeCrypto{},
+		session:         &Session{logger: slog.Default()},
+		card:            card,
+		authenticateAKA: card.AKA,
+		crypto:          &ikeCrypto{},
 	}
 	message := eapaka.AKAMessage{
 		Code:       eapCodeRequest,
@@ -994,13 +996,15 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
-				session:     &Session{logger: slog.Default()},
-				card:        akaChallengeTestCard{result: akaResult},
-				identity:    tt.identity,
-				eapIdentity: tt.identity,
-				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-				crypto:      &ikeCrypto{},
+				session:         &Session{logger: slog.Default()},
+				card:            card,
+				authenticateAKA: card.AKA,
+				identity:        tt.identity,
+				eapIdentity:     tt.identity,
+				realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:          &ikeCrypto{},
 			}
 			if len(tt.identityRequest) != 0 {
 				response := buildIdentityResponseForTest(t, &flow, eapaka.AKAMessage{
@@ -1046,13 +1050,15 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsBiddingDown(t *testing.T) {
 		IK:  bytes.Repeat([]byte{0x33}, 16),
 		CK:  bytes.Repeat([]byte{0x44}, 16),
 	}
+	card := akaChallengeTestCard{result: akaResult}
 	flow := akaAuthFlow{
-		session:     &Session{logger: slog.Default()},
-		card:        akaChallengeTestCard{result: akaResult},
-		identity:    identity,
-		eapIdentity: identity,
-		realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-		crypto:      &ikeCrypto{},
+		session:         &Session{logger: slog.Default()},
+		card:            card,
+		authenticateAKA: card.AKA,
+		identity:        identity,
+		eapIdentity:     identity,
+		realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+		crypto:          &ikeCrypto{},
 	}
 	wire := buildSignedAKAChallenge(t, 8, identity, rand, autn, akaResult, eapaka.AKAAttribute{
 		Type:  akaAttrBidding,
@@ -1096,13 +1102,15 @@ func TestAKAAuthFlowBuildChallengeResponseHonorsTrustIndication(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
-				session:     &Session{logger: slog.Default()},
-				card:        akaChallengeTestCard{result: akaResult},
-				identity:    identity,
-				eapIdentity: identity,
-				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-				crypto:      &ikeCrypto{},
+				session:         &Session{logger: slog.Default()},
+				card:            card,
+				authenticateAKA: card.AKA,
+				identity:        identity,
+				eapIdentity:     identity,
+				realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:          &ikeCrypto{},
 			}
 			wire := buildSignedAKAChallenge(t, 8, identity, rand, autn, akaResult, eapaka.AKAAttribute{
 				Type:  akaAttrTrustInd,
@@ -1180,6 +1188,7 @@ func TestAKAAuthFlowProcessesAKAPrimeChallengeInAuthenticatedStages(t *testing.T
 			flow := akaAuthFlow{
 				session:             &Session{logger: slog.Default()},
 				card:                card,
+				authenticateAKA:     card.AKA,
 				identity:            startIdentity,
 				eapIdentity:         startIdentity,
 				realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
@@ -1252,13 +1261,15 @@ func TestAKAAuthFlowFullAuthStoresUnusedReauthCounter(t *testing.T) {
 	if err := message.UnmarshalBinary(wire); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
+	card := akaChallengeTestCard{result: akaResult}
 	flow := akaAuthFlow{
-		session:     &Session{logger: slog.Default()},
-		card:        akaChallengeTestCard{result: akaResult},
-		identity:    identity,
-		eapIdentity: identity,
-		realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-		crypto:      &ikeCrypto{},
+		session:         &Session{logger: slog.Default()},
+		card:            card,
+		authenticateAKA: card.AKA,
+		identity:        identity,
+		eapIdentity:     identity,
+		realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+		crypto:          &ikeCrypto{},
 	}
 	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
 	if err != nil {
@@ -1293,13 +1304,15 @@ func TestAKAAuthFlowBuildChallengeResponseSupportsAKAPrime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveAKAPrimeKeys() error = %v", err)
 	}
+	card := akaChallengeTestCard{result: akaResult}
 	flow := akaAuthFlow{
-		session:     &Session{logger: slog.Default()},
-		card:        akaChallengeTestCard{result: akaResult},
-		identity:    identity,
-		eapIdentity: identity,
-		realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-		crypto:      &ikeCrypto{},
+		session:         &Session{logger: slog.Default()},
+		card:            card,
+		authenticateAKA: card.AKA,
+		identity:        identity,
+		eapIdentity:     identity,
+		realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+		crypto:          &ikeCrypto{},
 	}
 	wire := buildSignedAKAPrimeChallenge(t, 8, identity, rand, autn, networkName, akaResult)
 	var message eapaka.AKAMessage
@@ -1367,13 +1380,15 @@ func TestAKAAuthFlowBuildChallengeResponseUsesAKAPrimePermanentIdentity(t *testi
 			if err != nil {
 				t.Fatalf("DeriveAKAPrimeKeys() error = %v", err)
 			}
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
-				session:     &Session{logger: slog.Default()},
-				card:        akaChallengeTestCard{result: akaResult},
-				identity:    tt.startIdentity,
-				eapIdentity: tt.startIdentity,
-				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-				crypto:      &ikeCrypto{},
+				session:         &Session{logger: slog.Default()},
+				card:            card,
+				authenticateAKA: card.AKA,
+				identity:        tt.startIdentity,
+				eapIdentity:     tt.startIdentity,
+				realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:          &ikeCrypto{},
 			}
 			wire := buildSignedAKAPrimeChallenge(t, 8, tt.wantIdentity, rand, autn, networkName, akaResult)
 			var message eapaka.AKAMessage
@@ -1438,9 +1453,11 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsAKAPrimeNetworkNameMismatch(t *
 		CK:  []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
 	}
 	identity := "6123456789012345@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	card := akaFailTestCard{err: errors.New("AKA should not be called")}
 	flow := akaAuthFlow{
 		session:             &Session{logger: slog.Default()},
-		card:                akaFailTestCard{err: errors.New("AKA should not be called")},
+		card:                card,
+		authenticateAKA:     card.AKA,
 		identity:            identity,
 		eapIdentity:         identity,
 		realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
@@ -1534,9 +1551,11 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsInvalidAKAPrimeKDFAttributes(t 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			identity := "6123456789012345@nai.epc.mnc001.mcc001.3gppnetwork.org"
+			card := akaFailTestCard{err: errors.New("AKA should not be called")}
 			flow := akaAuthFlow{
 				session:             &Session{logger: slog.Default()},
-				card:                akaFailTestCard{err: errors.New("AKA should not be called")},
+				card:                card,
+				authenticateAKA:     card.AKA,
 				identity:            identity,
 				eapIdentity:         identity,
 				realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
@@ -1595,9 +1614,11 @@ func TestAKAAuthFlowBuildChallengeResponseNegotiatesAKAPrimeKDF(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaFailTestCard{err: errors.New("AKA should not be called")}
 			flow := akaAuthFlow{
 				session:             &Session{logger: slog.Default()},
-				card:                akaFailTestCard{err: errors.New("AKA should not be called")},
+				card:                card,
+				authenticateAKA:     card.AKA,
 				crypto:              &ikeCrypto{},
 				akaPrimeNetworkName: "WLAN",
 			}
@@ -1674,9 +1695,11 @@ func TestAKAAuthFlowBuildChallengeResponseAcceptsNegotiatedAKAPrimeKDF(t *testin
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
 				session:             &Session{logger: slog.Default()},
-				card:                akaChallengeTestCard{result: akaResult},
+				card:                card,
+				authenticateAKA:     card.AKA,
 				identity:            identity,
 				eapIdentity:         identity,
 				realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
@@ -1735,9 +1758,11 @@ func TestAKAAuthFlowBuildChallengeResponseCopiesNegotiatedKDFsOnAKAPrimeSyncFail
 	auts := bytes.Repeat([]byte{0x44}, 14)
 	unsupportedKDFAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault + 1})
 	kdfAttr := akaAttributeFromBinaryForTest(t, eapaka.KDF{Version: akaPrimeKDFDefault})
+	card := akaChallengeTestCard{result: usim.AKAResult{AUTS: auts}}
 	flow := akaAuthFlow{
 		session:             &Session{logger: slog.Default()},
-		card:                akaChallengeTestCard{result: usim.AKAResult{AUTS: auts}},
+		card:                card,
+		authenticateAKA:     card.AKA,
 		identity:            identity,
 		eapIdentity:         identity,
 		realm:               "nai.epc.mnc001.mcc001.3gppnetwork.org",
@@ -1789,13 +1814,15 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsAKAPrimeWithoutAMFSeparationBit
 		CK:  []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
 	}
 	identity := "6123456789012345@nai.epc.mnc001.mcc001.3gppnetwork.org"
+	card := akaFailTestCard{err: errors.New("AKA should not be called")}
 	flow := akaAuthFlow{
-		session:     &Session{logger: slog.Default()},
-		card:        akaFailTestCard{err: errors.New("AKA should not be called")},
-		identity:    identity,
-		eapIdentity: identity,
-		realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-		crypto:      &ikeCrypto{},
+		session:         &Session{logger: slog.Default()},
+		card:            card,
+		authenticateAKA: card.AKA,
+		identity:        identity,
+		eapIdentity:     identity,
+		realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+		crypto:          &ikeCrypto{},
 	}
 	wire := buildSignedAKAPrimeChallenge(t, 8, identity, rand, autn, networkName, akaResult)
 	var message eapaka.AKAMessage
@@ -1860,13 +1887,15 @@ func TestAKAAuthFlowBuildChallengeResponseVerifiesCheckcode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
-				session:     &Session{logger: slog.Default()},
-				card:        akaChallengeTestCard{result: akaResult},
-				identity:    identity,
-				eapIdentity: identity,
-				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-				crypto:      &ikeCrypto{},
+				session:         &Session{logger: slog.Default()},
+				card:            card,
+				authenticateAKA: card.AKA,
+				identity:        identity,
+				eapIdentity:     identity,
+				realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:          &ikeCrypto{},
 			}
 			identityRequest := eapaka.AKAMessage{
 				Code:       eapCodeRequest,
@@ -1946,13 +1975,15 @@ func TestAKAAuthFlowRequiresCheckcodeAfterExtendedIdentityRequest(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
-				session:     &Session{logger: slog.Default()},
-				card:        akaChallengeTestCard{result: akaResult},
-				identity:    identity,
-				eapIdentity: identity,
-				realm:       "nai.epc.mnc001.mcc001.3gppnetwork.org",
-				crypto:      &ikeCrypto{},
+				session:         &Session{logger: slog.Default()},
+				card:            card,
+				authenticateAKA: card.AKA,
+				identity:        identity,
+				eapIdentity:     identity,
+				realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:          &ikeCrypto{},
 			}
 			identityRequest := eapaka.AKAMessage{
 				Code:       eapCodeRequest,
@@ -2211,14 +2242,16 @@ func TestAKAAuthFlowProtectedResultIndRequiresSuccessNotification(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			card := akaChallengeTestCard{result: akaResult}
 			flow := akaAuthFlow{
-				session:        &Session{logger: slog.Default()},
-				card:           akaChallengeTestCard{result: akaResult},
-				identity:       identity,
-				eapIdentity:    identity,
-				realm:          "nai.epc.mnc001.mcc001.3gppnetwork.org",
-				crypto:         &ikeCrypto{},
-				ipmsIndication: tt.ipmsIndication,
+				session:         &Session{logger: slog.Default()},
+				card:            card,
+				authenticateAKA: card.AKA,
+				identity:        identity,
+				eapIdentity:     identity,
+				realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
+				crypto:          &ikeCrypto{},
+				ipmsIndication:  tt.ipmsIndication,
 			}
 			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
 			if err != nil {

@@ -18,8 +18,13 @@ type Card interface {
 	IMSI() string
 	MCC() string
 	MNC() string
+	MNCLength() int
+	GID1() string
+	GID2() string
+	SPN() string
 	SMSC() string
 	AKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error)
+	EAPAKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error)
 }
 
 type Client struct {

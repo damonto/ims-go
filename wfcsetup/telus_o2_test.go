@@ -115,9 +115,10 @@ func TestTelusCheckRunsEWGFlow(t *testing.T) {
 	defer server.Close()
 
 	got, err := Check(context.Background(), Request{
-		Card:       card,
-		Purpose:    PurposeActivation,
-		HTTPClient: testSetupHTTPClient(t, server.URL),
+		Card:            card,
+		AuthenticateAKA: card.AKA,
+		Purpose:         PurposeActivation,
+		HTTPClient:      testSetupHTTPClient(t, server.URL),
 	})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -208,9 +209,10 @@ func TestTelusCheckMapsEWGOutcomes(t *testing.T) {
 			defer server.Close()
 
 			got, err := Check(context.Background(), Request{
-				Card:       card,
-				Purpose:    PurposeActivation,
-				HTTPClient: testSetupHTTPClient(t, server.URL),
+				Card:            card,
+				AuthenticateAKA: card.AKA,
+				Purpose:         PurposeActivation,
+				HTTPClient:      testSetupHTTPClient(t, server.URL),
 			})
 			if err != nil {
 				t.Fatalf("Check() error = %v", err)
@@ -260,9 +262,10 @@ func TestTelusCheckRetriesTransientEWGFailure(t *testing.T) {
 	defer server.Close()
 
 	got, err := Check(context.Background(), Request{
-		Card:       card,
-		Purpose:    PurposeActivation,
-		HTTPClient: testSetupHTTPClient(t, server.URL),
+		Card:            card,
+		AuthenticateAKA: card.AKA,
+		Purpose:         PurposeActivation,
+		HTTPClient:      testSetupHTTPClient(t, server.URL),
 	})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -363,10 +366,11 @@ func TestO2UKCheckRunsGenericDevicesFlow(t *testing.T) {
 	defer server.Close()
 
 	got, err := Check(context.Background(), Request{
-		Card:       card,
-		Device:     Device{IMEI: "123456789012345", Model: "Pixel"},
-		Purpose:    PurposeActivation,
-		HTTPClient: testSetupHTTPClient(t, server.URL),
+		Card:            card,
+		AuthenticateAKA: card.AKA,
+		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
+		Purpose:         PurposeActivation,
+		HTTPClient:      testSetupHTTPClient(t, server.URL),
 	})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -418,10 +422,11 @@ func TestO2UKCheckReusesCachedAKAToken(t *testing.T) {
 	defer server.Close()
 
 	got, err := Check(context.Background(), Request{
-		Card:       card,
-		Device:     Device{IMEI: "123456789012345", Model: "Pixel"},
-		Purpose:    PurposeActivation,
-		HTTPClient: testSetupHTTPClient(t, server.URL),
+		Card:            card,
+		AuthenticateAKA: card.AKA,
+		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
+		Purpose:         PurposeActivation,
+		HTTPClient:      testSetupHTTPClient(t, server.URL),
 	})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -472,10 +477,11 @@ func TestO2UKCheckContinuesWithoutInitialAKAChallenge(t *testing.T) {
 	defer server.Close()
 
 	got, err := Check(context.Background(), Request{
-		Card:       card,
-		Device:     Device{IMEI: "123456789012345", Model: "Pixel"},
-		Purpose:    PurposeActivation,
-		HTTPClient: testSetupHTTPClient(t, server.URL),
+		Card:            card,
+		AuthenticateAKA: card.AKA,
+		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
+		Purpose:         PurposeActivation,
+		HTTPClient:      testSetupHTTPClient(t, server.URL),
 	})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -513,6 +519,11 @@ func TestO2UKCarrierMatching(t *testing.T) {
 			wantMatch: false,
 		},
 		{
+			name:      "giffgaff padded gid is excluded",
+			card:      testCard{mcc: "234", mnc: "10", mncLength: 2, gid1: "508FFFFFFFFF4D564E4520202020202020202020"},
+			wantMatch: false,
+		},
+		{
 			name:      "giffgaff gid is excluded with three digit mnc",
 			card:      testCard{mcc: "234", mnc: "010", mncLength: 3, gid1: "50"},
 			wantMatch: false,
@@ -526,6 +537,11 @@ func TestO2UKCarrierMatching(t *testing.T) {
 			name:      "tesco gid is excluded",
 			card:      testCard{mcc: "234", mnc: "10", mncLength: 2, gid1: "0A"},
 			wantMatch: false,
+		},
+		{
+			name:      "neighboring gid remains o2",
+			card:      testCard{mcc: "234", mnc: "10", mncLength: 2, gid1: "51FFFFFFFF"},
+			wantMatch: true,
 		},
 	}
 
@@ -605,10 +621,11 @@ func TestO2UKCheckMapsGenericDevicesOutcomes(t *testing.T) {
 			defer server.Close()
 
 			got, err := Check(context.Background(), Request{
-				Card:       card,
-				Device:     Device{IMEI: "123456789012345", Model: "Pixel"},
-				Purpose:    PurposeActivation,
-				HTTPClient: testSetupHTTPClient(t, server.URL),
+				Card:            card,
+				AuthenticateAKA: card.AKA,
+				Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
+				Purpose:         PurposeActivation,
+				HTTPClient:      testSetupHTTPClient(t, server.URL),
 			})
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
@@ -667,10 +684,11 @@ func TestO2UKCheckRetriesServerAKAChallengeWithFullAuth(t *testing.T) {
 	defer server.Close()
 
 	got, err := Check(context.Background(), Request{
-		Card:       card,
-		Device:     Device{IMEI: "123456789012345", Model: "Pixel"},
-		Purpose:    PurposeActivation,
-		HTTPClient: testSetupHTTPClient(t, server.URL),
+		Card:            card,
+		AuthenticateAKA: card.AKA,
+		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
+		Purpose:         PurposeActivation,
+		HTTPClient:      testSetupHTTPClient(t, server.URL),
 	})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)

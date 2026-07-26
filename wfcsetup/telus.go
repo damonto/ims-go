@@ -36,8 +36,9 @@ func newTelusFlow(req Request) (flow, bool, error) {
 
 func (f telusFlow) Check(ctx context.Context) (Result, error) {
 	client := telusClient{
-		Card:       f.req.Card,
-		HTTPClient: f.req.HTTPClient,
+		Card:            f.req.Card,
+		AuthenticateAKA: f.req.AuthenticateAKA,
+		HTTPClient:      f.req.HTTPClient,
 	}
 	result, err := client.Check(ctx)
 	result.Carrier = telusCarrierName(f.req)
@@ -58,8 +59,9 @@ func (f telusFlow) E911UpdateSupport(context.Context) (E911UpdateSupport, error)
 }
 
 type telusClient struct {
-	Card       Card
-	HTTPClient *http.Client
+	Card            Card
+	AuthenticateAKA AKAAuthenticator
+	HTTPClient      *http.Client
 }
 
 func (c telusClient) Check(ctx context.Context) (Result, error) {
@@ -148,7 +150,12 @@ func (c telusClient) accessToken(ctx context.Context) (string, error) {
 }
 
 func (c telusClient) challengeResponse(ctx context.Context, challenge string) (string, error) {
-	response, err := eapAKAChallengeResponse(ctx, c.Card, challenge)
+	response, err := eapAKAChallengeResponse(ctx, eapAKAResponseInput{
+		Authenticate: c.AuthenticateAKA,
+		Identity:     imsiEAP(c.Card),
+		Challenge:    challenge,
+		Kind:         akaChallengeKindEAPAKA,
+	})
 	if err != nil {
 		return "", fmt.Errorf("answering telus eap-aka challenge: %w", err)
 	}
@@ -338,7 +345,7 @@ func isTelusCarrier(req Request) bool {
 }
 
 func telusCarrierName(req Request) string {
-	gid1 := cardGID1(req.Card)
+	gid1 := strings.TrimSpace(req.Card.GID1())
 	switch {
 	case matchAnySIM(req.Card, []simMatch{
 		{MCC: "302", MNC: "220", GID1: "4B4F"},

@@ -81,7 +81,7 @@ func canadaPortalForCard(card Card) (canadaPortal, bool) {
 }
 
 func matchCanadaPortal(card Card, portal canadaPortal) bool {
-	if strings.TrimSpace(portal.SIM.GID1) == "" && cardGID1(card) != "" {
+	if strings.TrimSpace(portal.SIM.GID1) == "" && strings.TrimSpace(card.GID1()) != "" {
 		return false
 	}
 	return matchSIM(card, portal.SIM)

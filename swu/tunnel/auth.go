@@ -14,6 +14,7 @@ import (
 type akaAuthFlow struct {
 	session                   *Session
 	card                      Card
+	authenticateAKA           AKAAuthenticator
 	imei                      string
 	identity                  string
 	realm                     string
@@ -94,6 +95,7 @@ func (s *Session) authenticateEAPAKA(ctx context.Context, state *connectState, i
 	flow := akaAuthFlow{
 		session:                          s,
 		card:                             state.card,
+		authenticateAKA:                  AKAAuthenticator(state.input.AuthenticateAKA),
 		imei:                             state.imei,
 		identity:                         state.identity,
 		realm:                            state.realm,

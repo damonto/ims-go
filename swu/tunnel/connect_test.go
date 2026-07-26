@@ -1546,7 +1546,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 				readResults: tt.readResults,
 			}
 			session := mustDialSession(t, conn)
-			state, finish, err := session.prepareConnect("356789012345678", sessionTestCard{})
+			state, finish, err := session.prepareConnect(ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 			if err != nil {
 				t.Fatalf("prepareConnect() error = %v", err)
 			}

@@ -20,6 +20,7 @@ var (
 	ErrDenied                   = errors.New("wfc setup denied")
 	ErrExternalCredentialNeeded = errors.New("wfc setup requires external carrier credential")
 	ErrNotImplemented           = errors.New("wfc setup flow is not implemented")
+	errAKAAuthenticatorRequired = errors.New("AKA authenticator is required")
 )
 
 type Purpose int
@@ -133,8 +134,13 @@ type Card interface {
 	IMSI() string
 	MCC() string
 	MNC() string
-	AKA(context.Context, []byte, []byte) (usim.AKAResult, error)
+	MNCLength() int
+	GID1() string
 }
+
+// AKAAuthenticator performs one USIM EAP-AKA calculation for a setup flow.
+// The caller owns any serialization or card-session policy around the call.
+type AKAAuthenticator func(context.Context, []byte, []byte) (usim.AKAResult, error)
 
 type Device struct {
 	IMEI            string
@@ -153,13 +159,14 @@ func (d Device) Trimmed() Device {
 }
 
 type Request struct {
-	Card        Card
-	Device      Device
-	Purpose     Purpose
-	CurrentE911 *E911Info
-	Now         time.Time
-	Logger      *slog.Logger
-	HTTPClient  *http.Client
+	Card            Card
+	AuthenticateAKA AKAAuthenticator
+	Device          Device
+	Purpose         Purpose
+	CurrentE911     *E911Info
+	Now             time.Time
+	Logger          *slog.Logger
+	HTTPClient      *http.Client
 }
 
 func (req Request) validate() error {

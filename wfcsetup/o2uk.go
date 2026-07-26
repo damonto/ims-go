@@ -57,9 +57,10 @@ func newO2UKFlow(req Request) (flow, bool, error) {
 
 func (f o2ukFlow) Check(ctx context.Context) (Result, error) {
 	client := o2UKClient{
-		Card:       f.req.Card,
-		Device:     f.req.Device,
-		HTTPClient: f.req.HTTPClient,
+		Card:            f.req.Card,
+		AuthenticateAKA: f.req.AuthenticateAKA,
+		Device:          f.req.Device,
+		HTTPClient:      f.req.HTTPClient,
 	}
 	result, err := client.Check(ctx)
 	result.Carrier = "O2 UK"
@@ -80,9 +81,10 @@ func (f o2ukFlow) E911UpdateSupport(context.Context) (E911UpdateSupport, error) 
 }
 
 type o2UKClient struct {
-	Card       Card
-	Device     Device
-	HTTPClient *http.Client
+	Card            Card
+	AuthenticateAKA AKAAuthenticator
+	Device          Device
+	HTTPClient      *http.Client
 }
 
 var o2UKTokens = struct {
@@ -214,7 +216,12 @@ func (c o2UKClient) queryEntitlement(ctx context.Context, akaToken, challenge st
 }
 
 func (c o2UKClient) challengeResponse(ctx context.Context, challenge string) (string, error) {
-	response, err := eapAKAChallengeResponse(ctx, c.Card, challenge)
+	response, err := eapAKAChallengeResponse(ctx, eapAKAResponseInput{
+		Authenticate: c.AuthenticateAKA,
+		Identity:     imsiEAP(c.Card),
+		Challenge:    challenge,
+		Kind:         akaChallengeKindEAPAKA,
+	})
 	if err != nil {
 		return "", fmt.Errorf("answering o2 uk eap-aka challenge: %w", err)
 	}

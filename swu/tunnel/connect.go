@@ -52,8 +52,8 @@ type connectState struct {
 	espKeys                   ESPKeys
 }
 
-func (s *Session) Connect(ctx context.Context, imei string, card Card) error {
-	state, finish, err := s.prepareConnect(imei, card)
+func (s *Session) Connect(ctx context.Context, req ConnectRequest) error {
+	state, finish, err := s.prepareConnect(req)
 	if err != nil {
 		return fmt.Errorf("connecting swu session: %w", err)
 	}
@@ -104,13 +104,14 @@ func (s *Session) retryConnectWithPermanentAKA(ctx context.Context, state *conne
 	return retryState, nil
 }
 
-func (s *Session) prepareConnect(imei string, card Card) (*connectState, func(), error) {
+func (s *Session) prepareConnect(req ConnectRequest) (*connectState, func(), error) {
 	input := handshake.ConnectInput{
-		IMEI:        imei,
-		Card:        card,
-		OuterRemote: cloneUDPAddr(s.outerRemote),
-		Logger:      s.logger,
-		Config:      handshakeConfig(s.cfg),
+		IMEI:            req.IMEI,
+		Card:            req.Card,
+		AuthenticateAKA: handshake.AKAAuthenticator(req.AuthenticateAKA),
+		OuterRemote:     cloneUDPAddr(s.outerRemote),
+		Logger:          s.logger,
+		Config:          handshakeConfig(s.cfg),
 	}
 	if err := input.Validate(); err != nil {
 		return nil, nil, err

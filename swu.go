@@ -20,7 +20,11 @@ func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel
 	c.emitStatus(StatusAuthenticating)
 	c.logger.Info("connecting SWu tunnel", "tunnel_remote_addr", setup.tunnelCfg.RemoteAddr)
 
-	if err := session.Connect(ctx, c.cfg.Terminal.ID, setup.imsCfg.coordinatedCard(c.card)); err != nil {
+	if err := session.Connect(ctx, swutunnel.ConnectRequest{
+		IMEI:            c.cfg.Terminal.ID,
+		Card:            c.card,
+		AuthenticateAKA: setup.imsCfg.coordinatedAKA(c.card.EAPAKA),
+	}); err != nil {
 		return swutunnel.Info{}, fmt.Errorf("connecting swu: %w", err)
 	}
 	tunnelInfo := session.Info()

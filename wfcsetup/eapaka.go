@@ -10,8 +10,11 @@ import (
 	"github.com/damonto/ims-go/eapaka"
 )
 
-func eapAKAChallengeResponse(ctx context.Context, card Card, challengeText string) (string, error) {
-	return eapAKAChallengeResponseForIdentity(ctx, card, imsiEAP(card), challengeText, akaChallengeKindEAPAKA)
+type eapAKAResponseInput struct {
+	Authenticate AKAAuthenticator
+	Identity     string
+	Challenge    string
+	Kind         akaChallengeKind
 }
 
 type akaChallengeKind uint8
@@ -32,25 +35,24 @@ func (k akaChallengeKind) String() string {
 	}
 }
 
-func eapAKAChallengeResponseForIdentity(ctx context.Context, card Card, identity, challengeText string, kind akaChallengeKind) (string, error) {
-	challenge, err := decodeEAPAKAChallenge(challengeText, kind)
-	if err != nil {
-		return "", fmt.Errorf("decoding %s challenge: %w", kind, err)
+func eapAKAChallengeResponse(ctx context.Context, input eapAKAResponseInput) (string, error) {
+	if input.Authenticate == nil {
+		return "", errAKAAuthenticatorRequired
 	}
-	authenticate := card.AKA
-	if eapCard, ok := card.(eapAKACard); ok {
-		authenticate = eapCard.EAPAKA
-	}
-	aka, err := authenticate(ctx, challenge.RAND, challenge.AUTN)
+	challenge, err := decodeEAPAKAChallenge(input.Challenge, input.Kind)
 	if err != nil {
-		return "", fmt.Errorf("authenticating %s challenge: %w", kind, err)
+		return "", fmt.Errorf("decoding %s challenge: %w", input.Kind, err)
+	}
+	aka, err := input.Authenticate(ctx, challenge.RAND, challenge.AUTN)
+	if err != nil {
+		return "", fmt.Errorf("authenticating %s challenge: %w", input.Kind, err)
 	}
 	if aka.Reject {
-		return "", fmt.Errorf("USIM rejected %s challenge", kind)
+		return "", fmt.Errorf("USIM rejected %s challenge", input.Kind)
 	}
-	text, err := buildEAPAKAChallengeResponseText(challenge, aka.RES, aka.CK, aka.IK, aka.AUTS, identity)
+	text, err := buildEAPAKAChallengeResponseText(challenge, aka.RES, aka.CK, aka.IK, aka.AUTS, input.Identity)
 	if err != nil {
-		return "", fmt.Errorf("building %s challenge response: %w", kind, err)
+		return "", fmt.Errorf("building %s challenge response: %w", input.Kind, err)
 	}
 	return text, nil
 }

@@ -197,7 +197,10 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		}
 		return akaResponse{data: data}, nil
 	}
-	aka, err := f.card.AKA(ctx, parameters.RAND, parameters.AUTN)
+	if f.authenticateAKA == nil {
+		return akaResponse{}, errors.New("calculating aka response: AKA authenticator is nil")
+	}
+	aka, err := f.authenticateAKA(ctx, parameters.RAND, parameters.AUTN)
 	if err != nil {
 		return akaResponse{}, fmt.Errorf("calculating aka response: %w", err)
 	}
