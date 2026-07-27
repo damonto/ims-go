@@ -143,6 +143,8 @@ const (
 	amrModeChangeCapability = 2
 	amrMaxRedMillis         = 220
 	dtmfAllEventsMask       = 0xffff
+	maxDTMFEventCode        = 15
+	maxTelephoneEventCode   = 255
 
 	sdpNetworkIN      = "IN"
 	sdpAddressTypeIP4 = "IP4"

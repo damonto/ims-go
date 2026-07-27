@@ -1,11 +1,55 @@
 package wfcsetup
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	ts43 "github.com/damonto/ts43-go"
 )
+
+type ts43HTTPTransport struct {
+	called bool
+}
+
+func (t *ts43HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.called = true
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: io.NopCloser(strings.NewReader(
+			`{"APPLICATION":{"AppID":"ap2004","EntitlementStatus":"1","TC_Status":"2","AddrStatus":"2","ProvStatus":"2"}}`,
+		)),
+		Request: req,
+	}, nil
+}
+
+func TestTS43FlowUsesRequestHTTPClient(t *testing.T) {
+	transport := &ts43HTTPTransport{}
+	flow := ts43Flow{
+		req: Request{
+			Card:       testCard{mcc: "310", mnc: "260", mncLength: 3},
+			Device:     Device{IMEI: "111111111111111", Vendor: "Google", Model: "Pixel 8 Pro", SoftwareVersion: "15"},
+			Purpose:    PurposeActivation,
+			HTTPClient: &http.Client{Transport: transport},
+		},
+		wfc: ts43.WFCConfig{Server: "https://carrier.example/entitlement"},
+	}
+
+	result, err := flow.checkOnce(context.Background())
+	if err != nil {
+		t.Fatalf("checkOnce() error = %v", err)
+	}
+	if !transport.called {
+		t.Fatal("custom HTTP client was not used")
+	}
+	if result.Action != ActionAllowActivation || !result.Entitled {
+		t.Fatalf("result = %+v, want entitled activation", result)
+	}
+}
 
 func TestTS43WebsheetClientName(t *testing.T) {
 	status := ts43.WFCStatus{

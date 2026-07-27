@@ -11,26 +11,50 @@ import (
 )
 
 func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel.Info, error) {
-	session, err := swutunnel.Dial(ctx, setup.tunnelCfg)
-	if err != nil {
-		return swutunnel.Info{}, fmt.Errorf("dialing tunnel: %w", err)
-	}
-	setup.tunnel = session
-
 	c.emitStatus(StatusAuthenticating)
 	c.logger.Info("connecting SWu tunnel", "tunnel_remote_addr", setup.tunnelCfg.RemoteAddr)
 
-	if err := session.Connect(ctx, swutunnel.ConnectRequest{
-		IMEI:            c.cfg.Terminal.ID,
-		Card:            c.card,
-		AuthenticateAKA: setup.imsCfg.coordinatedAKA(c.card.EAPAKA),
-	}); err != nil {
-		return swutunnel.Info{}, fmt.Errorf("connecting swu: %w", err)
+	underlay := Underlay(nil)
+	if c.cfg.Access.VoWiFi != nil {
+		underlay = c.cfg.Access.VoWiFi.Underlay
 	}
-	tunnelInfo := session.Info()
-	c.recordSWUPDNTypeRestriction(tunnelInfo)
-	c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.DefaultInnerIP(), "pcscf_ip", tunnelInfo.DefaultPCSCFIP(), "pcscf_ips", tunnelInfo.PCSCFAddresses(), "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
-	return tunnelInfo, nil
+	remotes, err := epdgRemoteCandidates(ctx, underlay, setup.tunnelCfg.RemoteAddr, setup.tunnelCfg.InitialPort)
+	if err != nil {
+		return swutunnel.Info{}, err
+	}
+
+	var errs error
+	for attempt, remote := range remotes {
+		tunnelCfg := setup.tunnelCfg
+		tunnelCfg.RemoteAddr = remote
+		session, err := swutunnel.Dial(ctx, tunnelCfg)
+		if err == nil {
+			setup.tunnel = session
+			err = session.Connect(ctx, swutunnel.ConnectRequest{
+				IMEI:            c.cfg.Terminal.ID,
+				Card:            c.card,
+				AuthenticateAKA: setup.imsCfg.coordinatedAKA(c.card.EAPAKA),
+			})
+		}
+		if err == nil {
+			setup.tunnelCfg = tunnelCfg
+			tunnelInfo := session.Info()
+			c.recordSWUPDNTypeRestriction(tunnelInfo)
+			c.logger.Info("SWu tunnel established", "inner_ip", tunnelInfo.DefaultInnerIP(), "pcscf_ip", tunnelInfo.DefaultPCSCFIP(), "pcscf_ips", tunnelInfo.PCSCFAddresses(), "esp_initiator_spi", tunnelInfo.ESPInitiatorSPI, "esp_responder_spi", tunnelInfo.ESPResponderSPI)
+			return tunnelInfo, nil
+		}
+		if session := setup.tunnel; session != nil {
+			err = errors.Join(fmt.Errorf("connecting swu via %s: %w", remote, err), session.Close())
+			setup.tunnel = nil
+		} else {
+			err = fmt.Errorf("dialing tunnel via %s: %w", remote, err)
+		}
+		errs = errors.Join(errs, err)
+		if attempt+1 == len(remotes) || !shouldTryNextEPDG(ctx, err) {
+			break
+		}
+	}
+	return swutunnel.Info{}, errs
 }
 
 var errSWUBackoffDeactivated = errors.New("swu backoff deactivated")

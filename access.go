@@ -19,8 +19,9 @@ type AccessConfig struct {
 }
 
 type VoWiFiConfig struct {
-	EPDG   string
-	Tunnel swutunnel.Config
+	EPDG     string
+	Tunnel   swutunnel.Config
+	Underlay Underlay
 }
 
 func VoWiFi(cfg VoWiFiConfig) AccessConfig {

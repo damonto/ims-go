@@ -172,6 +172,51 @@ func mustDialSession(t *testing.T, conn net.PacketConn) *Session {
 	return session
 }
 
+func TestDialUsesListenPacket(t *testing.T) {
+	tests := []struct {
+		name        string
+		remote      string
+		wantNetwork string
+		wantAddress string
+	}{
+		{name: "ipv4", remote: "192.0.2.10:500", wantNetwork: "udp4", wantAddress: ":0"},
+		{name: "ipv6", remote: "[2001:db8::10]:500", wantNetwork: "udp6", wantAddress: "[::]:0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4zero, Port: 40000}}
+			var network, address string
+			session, err := Dial(context.Background(), Config{
+				RemoteAddr: tt.remote,
+				ListenPacket: func(_ context.Context, gotNetwork, gotAddress string) (net.PacketConn, error) {
+					network = gotNetwork
+					address = gotAddress
+					return conn, nil
+				},
+				Logger: testLogger(),
+			})
+			if err != nil {
+				t.Fatalf("Dial() error = %v", err)
+			}
+			if network != tt.wantNetwork || address != tt.wantAddress {
+				t.Fatalf("ListenPacket() = network %q address %q, want %q %q", network, address, tt.wantNetwork, tt.wantAddress)
+			}
+			if !session.owned {
+				t.Fatal("session does not own injected packet connection")
+			}
+			if err := session.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			conn.mu.Lock()
+			closed := conn.closed
+			conn.mu.Unlock()
+			if !closed {
+				t.Fatal("Close() did not close injected packet connection")
+			}
+		})
+	}
+}
+
 func TestWriteOuterSerializesDeadlineAndWrite(t *testing.T) {
 	releaseWrite := make(chan struct{})
 	writeStarted := make(chan struct{})

@@ -22,6 +22,10 @@ const (
 	ikeSPISeedLength          = 16
 )
 
+// ErrIKESAInitNoResponse reports that every IKE_SA_INIT retransmission timed
+// out without receiving a matching response from the peer.
+var ErrIKESAInitNoResponse = errors.New("ike_sa_init response not received")
+
 type connectState struct {
 	input                     handshake.ConnectInput
 	saInit                    handshake.SAInitState

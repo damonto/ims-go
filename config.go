@@ -206,6 +206,9 @@ func (cfg Config) validate() error {
 
 func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
 	tunnelCfg := cfg.Access.VoWiFi.Tunnel
+	if cfg.Access.VoWiFi.Underlay != nil && tunnelCfg.PacketConn == nil && tunnelCfg.ListenPacket == nil {
+		tunnelCfg.ListenPacket = cfg.Access.VoWiFi.Underlay.ListenPacket
+	}
 	if tunnelCfg.Logger == nil {
 		tunnelCfg.Logger = cfg.Logger
 	}

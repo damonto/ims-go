@@ -66,7 +66,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, owned, err := openSessionPacketConn(cfg)
+	conn, owned, err := openSessionPacketConn(ctx, cfg, remote)
 	if err != nil {
 		return nil, err
 	}
@@ -89,15 +89,35 @@ func resolveDialRemote(cfg Config) (*net.UDPAddr, error) {
 	return resolveUDPAddr(cfg.RemoteAddr, defaultValue(cfg.InitialPort, defaultIKEPort))
 }
 
-func openSessionPacketConn(cfg Config) (net.PacketConn, bool, error) {
+func openSessionPacketConn(ctx context.Context, cfg Config, remote *net.UDPAddr) (net.PacketConn, bool, error) {
 	if cfg.PacketConn != nil {
 		return cfg.PacketConn, false, nil
 	}
+	network := "udp"
+	if remote != nil {
+		switch {
+		case remote.IP.To4() != nil:
+			network = "udp4"
+		case remote.IP.To16() != nil:
+			network = "udp6"
+		}
+	}
 	listenAddr := cfg.LocalAddr
 	if listenAddr == "" {
-		listenAddr = ":0"
+		if network == "udp6" {
+			listenAddr = "[::]:0"
+		} else {
+			listenAddr = ":0"
+		}
 	}
-	conn, err := net.ListenPacket("udp", listenAddr)
+	if cfg.ListenPacket != nil {
+		conn, err := cfg.ListenPacket(ctx, network, listenAddr)
+		if err != nil {
+			return nil, false, fmt.Errorf("listening on %s: %w", listenAddr, err)
+		}
+		return conn, true, nil
+	}
+	conn, err := net.ListenPacket(network, listenAddr)
 	if err != nil {
 		return nil, false, fmt.Errorf("listening on %s: %w", listenAddr, err)
 	}

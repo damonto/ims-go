@@ -3,8 +3,8 @@ module github.com/damonto/ims-go
 go 1.26.3
 
 require (
-	github.com/damonto/ts43-go v0.0.0-20260712112859-5cbe97a5670f
-	github.com/damonto/wwan-go v0.0.0-20260721112859-6718d491a232
+	github.com/damonto/ts43-go v0.0.0-20260727131007-1e61ad99de1d
+	github.com/damonto/wwan-go v0.0.0-20260726044848-6c2a4b9b0a0e
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.40.0

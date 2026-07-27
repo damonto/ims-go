@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,11 @@ import (
 type Config struct {
 	LocalAddr  string
 	RemoteAddr string
-	APN        string
+	// ListenPacket creates the outer IKE/NAT-T socket. PacketConn takes
+	// precedence when supplied and remains available for tests and callers
+	// that own a socket themselves.
+	ListenPacket func(context.Context, string, string) (net.PacketConn, error)
+	APN          string
 	// RequestDefaultAPN omits IDr so the ePDG selects the default APN.
 	// APN must be empty when this option is enabled.
 	RequestDefaultAPN                bool
@@ -76,9 +81,10 @@ var (
 )
 
 const (
+	DefaultIKEPort               = 500
 	DefaultAPN                   = "ims"
 	defaultAKAPrimeNetworkName   = "WLAN"
-	defaultIKEPort               = 500
+	defaultIKEPort               = DefaultIKEPort
 	defaultNATTPort              = 4500
 	defaultSIPPort               = 5060
 	defaultNATKeepaliveInterval  = 20 * time.Second

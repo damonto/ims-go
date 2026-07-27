@@ -2,6 +2,7 @@ package ims
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/damonto/ims-go/wfcsetup"
@@ -9,6 +10,10 @@ import (
 
 func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) error {
 	terminal := cfg.Terminal.trimmed()
+	var httpClient *http.Client
+	if cfg.Access.VoWiFi != nil && cfg.Access.VoWiFi.Underlay != nil {
+		httpClient = underlayHTTPClient(cfg.Access.VoWiFi.Underlay)
+	}
 	result, err := wfcsetup.Check(ctx, wfcsetup.Request{
 		Card:            card,
 		AuthenticateAKA: cfg.IMS.coordinatedAKA(card.EAPAKA),
@@ -18,8 +23,9 @@ func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) erro
 			Model:           terminal.Model,
 			SoftwareVersion: terminal.SoftwareVersion,
 		},
-		Purpose: wfcsetup.PurposeActivation,
-		Logger:  cfg.Logger,
+		Purpose:    wfcsetup.PurposeActivation,
+		Logger:     cfg.Logger,
+		HTTPClient: httpClient,
 	})
 	if err != nil {
 		return err

@@ -1559,6 +1559,61 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 	}
 }
 
+func TestExchangeIKESAInitClassifiesNoResponse(t *testing.T) {
+	tests := []struct {
+		name           string
+		readResults    func(*testing.T, uint64) []readResult
+		wantNoResponse bool
+	}{
+		{
+			name:           "all attempts time out",
+			wantNoResponse: true,
+		},
+		{
+			name: "peer error response is not a timeout",
+			readResults: func(t *testing.T, initiatorSPI uint64) []readResult {
+				t.Helper()
+				return []readResult{{
+					data: mustIKEPacket(t, ike.IKEHeader{
+						InitiatorSPI: initiatorSPI,
+						ResponderSPI: 0x1112131415161718,
+						Version:      ikeVersion20,
+						ExchangeType: exchangeTypeIKESAInit,
+						Flags:        flagResponse,
+						MessageID:    0,
+					}, []ike.Payload{
+						&ike.NotifyPayload{NotifyType: notifyTypeNoProposalChosen},
+					}),
+					addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500},
+				}}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
+			session := mustDialSession(t, conn)
+			session.cfg.IKERetransmitDelays = []time.Duration{time.Millisecond}
+			state, finish, err := session.prepareConnect(ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
+			if err != nil {
+				t.Fatalf("prepareConnect() error = %v", err)
+			}
+			defer finish()
+			if tt.readResults != nil {
+				conn.readResults = tt.readResults(t, state.initiatorSPI)
+			}
+
+			err = session.exchangeIKESAInit(context.Background(), state)
+			if err == nil {
+				t.Fatal("exchangeIKESAInit() error = nil, want non-nil")
+			}
+			if got := errors.Is(err, ErrIKESAInitNoResponse); got != tt.wantNoResponse {
+				t.Fatalf("errors.Is(error, ErrIKESAInitNoResponse) = %t, want %t; error = %v", got, tt.wantNoResponse, err)
+			}
+		})
+	}
+}
+
 func TestIKESAInitNATDetection(t *testing.T) {
 	initiatorSPI := uint64(0x0102030405060708)
 	responderSPI := uint64(0x1112131415161718)

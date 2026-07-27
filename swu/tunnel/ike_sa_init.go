@@ -96,6 +96,9 @@ func (s *Session) exchangeIKESAInit(ctx context.Context, state *connectState) er
 		}
 		responseRaw, _, err := s.exchangeIKE(ctx, s.outerRemote, request, s.outerRemote.Port == s.cfg.NATTPort, 0)
 		if err != nil {
+			if errors.Is(err, handshake.ErrIKETimeout) {
+				return fmt.Errorf("%w: %w", ErrIKESAInitNoResponse, err)
+			}
 			return err
 		}
 		response, err := decodeIKESAInitPacket(responseRaw)

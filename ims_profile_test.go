@@ -1417,11 +1417,12 @@ func TestEmbeddedPixelIMSIPrefixProfiles(t *testing.T) {
 	}
 }
 
-func TestEmbeddedIMSUserAgentSourcePriority(t *testing.T) {
+func TestEmbeddedIMSUserAgentTemplate(t *testing.T) {
 	terminal := TerminalInfo{
-		Vendor: "Google",
-		Model:  "Pixel 10 Pro",
-		Build:  "BD1A.250702.001",
+		Vendor:          "Google",
+		Model:           "Pixel 10 Pro",
+		SoftwareVersion: "16",
+		Build:           "BD1A.250702.001",
 	}
 	tests := []struct {
 		name         string
@@ -1430,16 +1431,16 @@ func TestEmbeddedIMSUserAgentSourcePriority(t *testing.T) {
 		wantRendered string
 	}{
 		{
-			name:         "Pixel value wins",
+			name:         "Pixel profile",
 			card:         plmnWFCCard{mcc: "202", mnc: "01", mncLength: 2},
-			wantTemplate: "#MANUFACTURE# - #MODEL# - #BUILD#",
-			wantRendered: "Google - Pixel 10 Pro - BD1A.250702.001",
+			wantTemplate: "#MANUFACTURE#_#MODEL#*Android #AV#*#BUILD#",
+			wantRendered: "Google_Pixel 10 Pro*Android 16*BD1A.250702.001",
 		},
 		{
-			name:         "Samsung fallback uses Pixel placeholders",
+			name:         "Samsung fallback profile",
 			card:         plmnWFCCard{mcc: "202", mnc: "05", mncLength: 2},
-			wantTemplate: "#MODEL#-#BUILD# Samsung IMS 6.0",
-			wantRendered: "Pixel 10 Pro-BD1A.250702.001 Samsung IMS 6.0",
+			wantTemplate: "#MANUFACTURE#_#MODEL#*Android #AV#*#BUILD#",
+			wantRendered: "Google_Pixel 10 Pro*Android 16*BD1A.250702.001",
 		},
 	}
 

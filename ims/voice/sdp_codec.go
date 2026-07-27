@@ -742,7 +742,11 @@ func applyCodecFMTP(codec AudioCodecConfig, fmtp string) AudioCodecConfig {
 	codec.Bandwidth = fmtpParam(fmtp, "bw")
 	codec.HFOnly = fmtpFlag(fmtp, "hf-only")
 	if codec.Name == CodecTelephoneEvent {
-		codec.DTMFEventMask = dtmfEventMaskOrDefault(parseTelephoneEventMask(fmtp))
+		if strings.TrimSpace(fmtp) == "" {
+			codec.DTMFEventMask = dtmfAllEventsMask
+		} else {
+			codec.DTMFEventMask = parseTelephoneEventMask(fmtp)
+		}
 	}
 	if value, ok := fmtpSignedParam(fmtp, "ch-aw-recv"); ok {
 		codec.ChAwRecv = &value
@@ -786,22 +790,11 @@ func fmtpFlag(fmtp, want string) bool {
 func parseTelephoneEventMask(fmtp string) uint16 {
 	var mask uint16
 	for _, part := range strings.Split(fmtp, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
+		start, end, ok := parseTelephoneEventRange(part)
+		if !ok || start > maxDTMFEventCode {
 			continue
 		}
-		startText, endText, hasRange := strings.Cut(part, "-")
-		start, ok := parseBoundedDecimal(startText, 0, 15)
-		if !ok {
-			continue
-		}
-		end := start
-		if hasRange {
-			end, ok = parseBoundedDecimal(endText, start, 15)
-			if !ok {
-				continue
-			}
-		}
+		end = min(end, maxDTMFEventCode)
 		for event := start; event <= end; event++ {
 			mask |= 1 << event
 		}
@@ -818,19 +811,27 @@ func validTelephoneEventFMTP(fmtp string) bool {
 		if part == "" {
 			return false
 		}
-		startText, endText, hasRange := strings.Cut(part, "-")
-		start, ok := parseBoundedDecimal(startText, 0, 15)
-		if !ok {
+		if _, _, ok := parseTelephoneEventRange(part); !ok {
 			return false
-		}
-		if hasRange {
-			end, ok := parseBoundedDecimal(endText, start, 15)
-			if !ok || end < start {
-				return false
-			}
 		}
 	}
 	return true
+}
+
+func parseTelephoneEventRange(value string) (int, int, bool) {
+	startText, endText, hasRange := strings.Cut(strings.TrimSpace(value), "-")
+	start, ok := parseBoundedDecimal(startText, 0, maxTelephoneEventCode)
+	if !ok {
+		return 0, 0, false
+	}
+	if !hasRange {
+		return start, start, true
+	}
+	end, ok := parseBoundedDecimal(endText, start, maxTelephoneEventCode)
+	if !ok {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 func dtmfEventMaskOrDefault(mask uint16) uint16 {
@@ -843,12 +844,12 @@ func dtmfEventMaskOrDefault(mask uint16) uint16 {
 func formatTelephoneEventMask(mask uint16) string {
 	mask = dtmfEventMaskOrDefault(mask)
 	parts := make([]string, 0, 4)
-	for event := 0; event <= 15; event++ {
+	for event := 0; event <= maxDTMFEventCode; event++ {
 		if mask&(1<<event) == 0 {
 			continue
 		}
 		start := event
-		for event+1 <= 15 && mask&(1<<(event+1)) != 0 {
+		for event+1 <= maxDTMFEventCode && mask&(1<<(event+1)) != 0 {
 			event++
 		}
 		if start == event {

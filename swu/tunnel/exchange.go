@@ -75,7 +75,7 @@ func (s *Session) exchangeIKE(ctx context.Context, addr *net.UDPAddr, request []
 			return nil, nil, err
 		}
 	}
-	return nil, nil, fmt.Errorf("waiting message %d: timeout", messageID)
+	return nil, nil, fmt.Errorf("waiting message %d: %w", messageID, handshake.ErrIKETimeout)
 }
 
 type protectedIKEExchange struct {
