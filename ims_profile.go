@@ -1,8 +1,10 @@
 package ims
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -167,11 +169,17 @@ func loadIMSProfile(card Card) (imsProfile, bool, error) {
 }
 
 func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
-	var profiles []imsProfile
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&profiles); err != nil {
+	token, err := decoder.Token()
+	if err != nil {
 		return imsProfile{}, false, fmt.Errorf("decode json: %w", err)
+	}
+	if token == nil {
+		return imsProfile{}, false, nil
+	}
+	if token != json.Delim('[') {
+		return imsProfile{}, false, errors.New("decode json: expected profile array")
 	}
 
 	mcc := strings.TrimSpace(card.MCC())
@@ -182,9 +190,14 @@ func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
 	spn := strings.TrimSpace(card.SPN())
 	gid1 := normalizeGID(card.GID1())
 	gid2 := normalizeGID(card.GID2())
-	bestIndex := -1
+	var best imsProfile
 	bestScore := imsProfileMatchScore{}
-	for index, profile := range profiles {
+	found := false
+	for decoder.More() {
+		var profile imsProfile
+		if err := decoder.Decode(&profile); err != nil {
+			return imsProfile{}, false, fmt.Errorf("decode json: %w", err)
+		}
 		if !samePLMNDigits(profile.MCC, profile.MNC, mcc, mnc, mncLength) {
 			continue
 		}
@@ -208,15 +221,16 @@ func parseIMSProfile(raw []byte, card Card) (imsProfile, bool, error) {
 		}
 
 		score := newIMSProfileMatchScore(profile)
-		if bestIndex < 0 || score.betterThan(bestScore) {
-			bestIndex = index
+		if !found || score.betterThan(bestScore) {
+			best = profile
 			bestScore = score
+			found = true
 		}
 	}
-	if bestIndex >= 0 {
-		return profiles[bestIndex], true, nil
+	if _, err := decoder.Token(); err != nil {
+		return imsProfile{}, false, fmt.Errorf("decode json: %w", err)
 	}
-	return imsProfile{}, false, nil
+	return best, found, nil
 }
 
 type imsProfileMatchScore struct {

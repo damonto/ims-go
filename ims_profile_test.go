@@ -1080,6 +1080,50 @@ func TestParseIMSProfileOptionalCardMetadata(t *testing.T) {
 	}
 }
 
+func TestParseIMSProfileJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     string
+		wantEPDG string
+		wantOK   bool
+		wantErr  bool
+	}{
+		{
+			name:     "matching profile",
+			data:     `[{"mcc":"001","mnc":"01","epdg":"epdg.example"}]`,
+			wantEPDG: "epdg.example",
+			wantOK:   true,
+		},
+		{name: "empty array", data: `[]`},
+		{name: "null catalog", data: `null`},
+		{name: "object catalog", data: `{}`, wantErr: true},
+		{name: "truncated array", data: `[{"mcc":"001","mnc":"01"}`, wantErr: true},
+		{
+			name:    "unknown field after match",
+			data:    `[{"mcc":"001","mnc":"01"},{"unknownField":true}]`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile([]byte(tt.data), minimalProfileCard{})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseIMSProfile() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if ok != tt.wantOK {
+				t.Fatalf("parseIMSProfile() ok = %t, want %t", ok, tt.wantOK)
+			}
+			if profile.EPDG != tt.wantEPDG {
+				t.Fatalf("EPDG = %q, want %q", profile.EPDG, tt.wantEPDG)
+			}
+		})
+	}
+}
+
 func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 	tests := []struct {
 		name     string
