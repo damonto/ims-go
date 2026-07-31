@@ -37,7 +37,7 @@ func TestMultipleRegistrationRequestFields(t *testing.T) {
 			if got := sip.HeaderParam(params, "q"); got != tt.wantPreference {
 				t.Fatalf("Contact q = %q, want %q", got, tt.wantPreference)
 			}
-			if got := normalizeSIPInstance(sip.HeaderParam(params, "+sip.instance")); got != "urn:gsma:imei:123456789012345" {
+			if got := normalizeSIPInstance(sip.HeaderParam(params, "+sip.instance")); got != "urn:gsma:imei:12345678-901234-0" {
 				t.Fatalf("Contact +sip.instance = %q", got)
 			}
 			if !req.HeaderHasToken("Supported", "path") || !req.HeaderHasToken("Supported", "outbound") {
@@ -273,7 +273,7 @@ func TestPreferredFlowRevokesSingleRegistrationOwner(t *testing.T) {
 func TestContactMatchesRegisterBinding(t *testing.T) {
 	multiple := registerBinding{
 		uri:      "sip:subscriber@192.0.2.10:5060;transport=tcp",
-		instance: "urn:gsma:imei:123456789012345",
+		instance: "urn:gsma:imei:12345678-901234-0",
 		regID:    1,
 	}
 	tests := []struct {
@@ -284,6 +284,12 @@ func TestContactMatchesRegisterBinding(t *testing.T) {
 	}{
 		{
 			name:    "matches instance and registration id",
+			value:   `<sip:192.0.2.10:5060;transport=tcp>;reg-id=1;+sip.instance="<urn:gsma:imei:12345678-901234-0>"`,
+			binding: multiple,
+			want:    true,
+		},
+		{
+			name:    "normalizes legacy unformatted IMEI instance",
 			value:   `<sip:192.0.2.10:5060;transport=tcp>;reg-id=1;+sip.instance="<urn:gsma:imei:123456789012345>"`,
 			binding: multiple,
 			want:    true,
@@ -345,12 +351,12 @@ func TestContactMatchesRegisterBinding(t *testing.T) {
 func TestRegisterResponseExpiresMatchesRegistrationID(t *testing.T) {
 	binding := registerBinding{
 		uri:      "sip:192.0.2.10:5060",
-		instance: "urn:gsma:imei:123456789012345",
+		instance: "urn:gsma:imei:12345678-901234-0",
 		regID:    1,
 	}
 	contacts := []string{
-		`<sip:192.0.2.10:5060>;reg-id=2;+sip.instance="<urn:gsma:imei:123456789012345>";expires=200`,
-		`<sip:192.0.2.10:5060>;reg-id=1;+sip.instance="<urn:gsma:imei:123456789012345>";expires=100`,
+		`<sip:192.0.2.10:5060>;reg-id=2;+sip.instance="<urn:gsma:imei:12345678-901234-0>";expires=200`,
+		`<sip:192.0.2.10:5060>;reg-id=1;+sip.instance="<urn:gsma:imei:12345678-901234-0>";expires=100`,
 	}
 	tests := []struct {
 		name    string

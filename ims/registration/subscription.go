@@ -724,7 +724,7 @@ func currentSIPInstance(state State) string {
 	if imei == "" {
 		return ""
 	}
-	return "urn:gsma:imei:" + imei
+	return imeiURN(imei)
 }
 
 func normalizeSIPInstance(value string) string {
@@ -733,6 +733,12 @@ func normalizeSIPInstance(value string) string {
 	value = strings.TrimSpace(value)
 	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
 		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	const imeiURNPrefix = "urn:gsma:imei:"
+	if len(value) > len(imeiURNPrefix) && strings.EqualFold(value[:len(imeiURNPrefix)], imeiURNPrefix) {
+		if imei := value[len(imeiURNPrefix):]; validIMEI(imei) {
+			return imeiURN(imei)
+		}
 	}
 	return value
 }

@@ -407,7 +407,7 @@ func (s *Registrar) registerContactValueForFlow(flow Flow, port int) string {
 		`+g.3gpp.srvcc-alerting`,
 	}
 	if s.cfg.IMEI != "" {
-		params = append(params, fmt.Sprintf(`+sip.instance="<urn:gsma:imei:%s>"`, s.cfg.IMEI))
+		params = append(params, fmt.Sprintf(`+sip.instance="<%s>"`, imeiURN(s.cfg.IMEI)))
 	}
 	if s.multipleRegistration() {
 		params = append(params,

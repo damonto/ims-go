@@ -2136,6 +2136,26 @@ func TestNormalizeConfigRequiresIPSecAlgorithms(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigRejectsInvalidIMEI(t *testing.T) {
+	tests := []struct {
+		name string
+		imei string
+	}{
+		{name: "too short", imei: "12345678901234"},
+		{name: "too long", imei: "1234567890123456"},
+		{name: "non-decimal digit", imei: "12345678901234x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := normalizeConfig(withTestIPSecAlgorithms(Config{IMEI: tt.imei}))
+			if err == nil || !strings.Contains(err.Error(), "imei must contain exactly 15 decimal digits") {
+				t.Fatalf("normalizeConfig() error = %v, want invalid IMEI error", err)
+			}
+		})
+	}
+}
+
 func TestApplyRegisterChallengeRejectsAKAv2SHA256WithoutSecurityServerTLS(t *testing.T) {
 	tests := []struct {
 		name    string

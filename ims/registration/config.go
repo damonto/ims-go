@@ -17,6 +17,23 @@ type clientIdentity struct {
 	publicIdentity  string
 }
 
+const (
+	imeiDigitCount = 15
+	imeiTACEnd     = 8
+	imeiSNREnd     = 14
+)
+
+func validIMEI(imei string) bool {
+	return len(imei) == imeiDigitCount && strings.IndexFunc(imei, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) == -1
+}
+
+// 3GPP TS 23.003 section 13.8 excludes the IMEI check digit and appends a zero spare digit.
+func imeiURN(imei string) string {
+	return "urn:gsma:imei:" + imei[:imeiTACEnd] + "-" + imei[imeiTACEnd:imeiSNREnd] + "-0"
+}
+
 func normalizedPLMNDigits(card Card) (string, string, error) {
 	mcc := strings.TrimSpace(card.MCC())
 	if len(mcc) != 3 {
@@ -91,6 +108,9 @@ func normalizeConfig(cfg Config) (Config, error) {
 	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
 	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
 	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
+	if cfg.IMEI != "" && !validIMEI(cfg.IMEI) {
+		return Config{}, errors.New("normalizing registration config: imei must contain exactly 15 decimal digits")
+	}
 	if cfg.RegistrationGroup == nil {
 		if cfg.RegistrationID != 0 || cfg.RegistrationPreference != 0 {
 			return Config{}, errors.New("normalizing registration config: registration group is required for multiple registration settings")
