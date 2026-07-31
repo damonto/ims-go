@@ -50,7 +50,7 @@ func (c *MBIMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 	adapted := mbimIMSPDNSession{session}
 	info := session.Info()
 	return configureIMSPDNNetwork(ctx, adapted, c.network, IMSPDNNetworkInfo{
-		SessionID: info.SessionID,
+		SessionID: uint32(info.SessionID),
 		LocalIPv4: info.LocalIPv4,
 		LocalIPv6: info.LocalIPv6,
 		PCSCFIPs:  info.PCSCFIPs,
