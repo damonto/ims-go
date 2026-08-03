@@ -15,15 +15,13 @@ var (
 	_ encoding.BinaryMarshaler   = Params{}
 	_ encoding.BinaryUnmarshaler = (*Params)(nil)
 	_ io.WriterTo                = Params{}
-	_ io.ReaderFrom              = (*Params)(nil)
 	_ encoding.BinaryAppender    = Speech{}
 	_ encoding.BinaryMarshaler   = Speech{}
 	_ encoding.BinaryUnmarshaler = (*Speech)(nil)
 	_ io.WriterTo                = Speech{}
-	_ io.ReaderFrom              = (*Speech)(nil)
 )
 
-func TestParamsReadFromWriteTo(t *testing.T) {
+func TestParamsReadParamsFromWriteTo(t *testing.T) {
 	tests := []struct {
 		name string
 		mode Mode
@@ -49,15 +47,15 @@ func TestParamsReadFromWriteTo(t *testing.T) {
 			}
 
 			decoded := Params{Mode: tt.mode}
-			n, err = decoded.ReadFrom(bytes.NewReader(buf.Bytes()))
+			n, err = decoded.ReadParamsFrom(bytes.NewReader(buf.Bytes()))
 			if err != nil {
-				t.Fatalf("Params.ReadFrom() error = %v", err)
+				t.Fatalf("Params.ReadParamsFrom() error = %v", err)
 			}
 			if n != int64(wantBits) {
-				t.Fatalf("Params.ReadFrom() read %d, want %d", n, wantBits)
+				t.Fatalf("Params.ReadParamsFrom() read %d, want %d", n, wantBits)
 			}
 			if !slices.Equal(decoded.Values, values) {
-				t.Fatalf("Params.ReadFrom() = %v, want %v", decoded.Values, values)
+				t.Fatalf("Params.ReadParamsFrom() = %v, want %v", decoded.Values, values)
 			}
 		})
 	}
@@ -78,18 +76,18 @@ func TestParamsAppendBinaryPreservesPrefix(t *testing.T) {
 	}
 }
 
-func TestParamsReadFromRejectsShortInput(t *testing.T) {
+func TestParamsReadParamsFromRejectsShortInput(t *testing.T) {
 	params := Params{Mode: Mode885}
-	n, err := params.ReadFrom(bytes.NewReader([]byte{1, 0, 1}))
+	n, err := params.ReadParamsFrom(bytes.NewReader([]byte{1, 0, 1}))
 	if err == nil {
-		t.Fatal("Params.ReadFrom() error = nil")
+		t.Fatal("Params.ReadParamsFrom() error = nil")
 	}
 	if n != 3 {
-		t.Fatalf("Params.ReadFrom() read %d, want 3", n)
+		t.Fatalf("Params.ReadParamsFrom() read %d, want 3", n)
 	}
 }
 
-func TestSpeechReadFromWriteTo(t *testing.T) {
+func TestSpeechReadSpeechFromWriteTo(t *testing.T) {
 	tests := []struct {
 		name string
 		mode Mode
@@ -116,15 +114,15 @@ func TestSpeechReadFromWriteTo(t *testing.T) {
 			}
 
 			decoded := Speech{Mode: tt.mode}
-			n, err = decoded.ReadFrom(bytes.NewReader(buf.Bytes()))
+			n, err = decoded.ReadSpeechFrom(bytes.NewReader(buf.Bytes()))
 			if err != nil {
-				t.Fatalf("Speech.ReadFrom() error = %v", err)
+				t.Fatalf("Speech.ReadSpeechFrom() error = %v", err)
 			}
 			if n != int64(wantBytes) {
-				t.Fatalf("Speech.ReadFrom() read %d, want %d", n, wantBytes)
+				t.Fatalf("Speech.ReadSpeechFrom() read %d, want %d", n, wantBytes)
 			}
 			if !slices.Equal(decoded.Serial, serial) {
-				t.Fatalf("Speech.ReadFrom() = %v, want %v", decoded.Serial, serial)
+				t.Fatalf("Speech.ReadSpeechFrom() = %v, want %v", decoded.Serial, serial)
 			}
 		})
 	}
@@ -152,14 +150,14 @@ func TestSpeechAppendBinaryPreservesPrefix(t *testing.T) {
 	}
 }
 
-func TestSpeechReadFromRejectsShortInput(t *testing.T) {
+func TestSpeechReadSpeechFromRejectsShortInput(t *testing.T) {
 	speech := Speech{Mode: Mode885}
-	n, err := speech.ReadFrom(bytes.NewReader([]byte{0x80}))
+	n, err := speech.ReadSpeechFrom(bytes.NewReader([]byte{0x80}))
 	if err == nil {
-		t.Fatal("Speech.ReadFrom() error = nil")
+		t.Fatal("Speech.ReadSpeechFrom() error = nil")
 	}
 	if n != 1 {
-		t.Fatalf("Speech.ReadFrom() read %d, want 1", n)
+		t.Fatalf("Speech.ReadSpeechFrom() read %d, want 1", n)
 	}
 }
 

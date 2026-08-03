@@ -358,7 +358,7 @@ func (c *Call) applySessionRefreshINVITEAnswer(resp sip.Message) error {
 		return errors.New("refreshing session timer: missing re-INVITE SDP answer")
 	}
 	var answer sdpOffer
-	if err := answer.UnmarshalBinary(body); err != nil {
+	if err := answer.UnmarshalText(body); err != nil {
 		return fmt.Errorf("refreshing session timer: parsing re-INVITE SDP answer: %w", err)
 	}
 	negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)
@@ -574,7 +574,7 @@ func (c *Call) sessionRefreshAnswer(msg sip.Message) ([]byte, NegotiatedMedia, C
 		return nil, NegotiatedMedia{}, "", false, errors.New("handling re-INVITE: missing SDP offer")
 	}
 	var offer sdpOffer
-	if err := offer.UnmarshalBinary(body); err != nil {
+	if err := offer.UnmarshalText(body); err != nil {
 		return nil, NegotiatedMedia{}, "", false, err
 	}
 	c.mu.Lock()
@@ -611,7 +611,7 @@ func (c *Call) updateIncomingPreconditions(msg sip.Message, media NegotiatedMedi
 		return nil
 	}
 	var offer sdpOffer
-	if offer.UnmarshalBinary(body) != nil {
+	if offer.UnmarshalText(body) != nil {
 		return nil
 	}
 	c.mu.Lock()

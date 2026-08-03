@@ -121,8 +121,8 @@ func (p *Params) UnmarshalBinary(bits []byte) error {
 	return nil
 }
 
-// ReadFrom reads ETS serial bits for p from r.
-func (p *Params) ReadFrom(r io.Reader) (int64, error) {
+// ReadParamsFrom reads one ETS serial-bit sequence for p from r.
+func (p *Params) ReadParamsFrom(r io.Reader) (int64, error) {
 	bits, err := checkedBitLen(p.Widths)
 	if err != nil {
 		return 0, err
@@ -220,8 +220,8 @@ func (s *Speech) UnmarshalBinary(speech []byte) error {
 	return nil
 }
 
-// ReadFrom reads packed speech payload bytes for s from r.
-func (s *Speech) ReadFrom(r io.Reader) (int64, error) {
+// ReadSpeechFrom reads one packed speech payload for s from r.
+func (s *Speech) ReadSpeechFrom(r io.Reader) (int64, error) {
 	if err := validateBitLen(s.BitLen); err != nil {
 		return 0, err
 	}

@@ -10,6 +10,7 @@ import (
 )
 
 var (
+	_ encoding.BinaryAppender    = backoffTimerNotifyData{}
 	_ encoding.BinaryMarshaler   = backoffTimerNotifyData{}
 	_ encoding.BinaryUnmarshaler = (*backoffTimerNotifyData)(nil)
 )
@@ -76,7 +77,11 @@ type backoffTimerNotifyData struct {
 }
 
 func (d backoffTimerNotifyData) MarshalBinary() ([]byte, error) {
-	return []byte{backoffTimerLen, d.Value}, nil
+	return d.AppendBinary(nil)
+}
+
+func (d backoffTimerNotifyData) AppendBinary(dst []byte) ([]byte, error) {
+	return append(dst, backoffTimerLen, d.Value), nil
 }
 
 func (d *backoffTimerNotifyData) UnmarshalBinary(data []byte) error {

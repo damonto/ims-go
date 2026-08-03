@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"encoding"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -70,7 +71,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 			c.finish(CallStateFailed, "missing PRACK SDP answer")
 			return nil
 		}
-		if err := delayedAnswer.UnmarshalBinary(body); err != nil {
+		if err := delayedAnswer.UnmarshalText(body); err != nil {
 			if writeErr := c.endpoint.writeSDPFailure(ctx, req, body, err); writeErr != nil {
 				return writeErr
 			}
@@ -115,7 +116,7 @@ func (c *Call) handlePRACK(ctx context.Context, req session.Request) error {
 		c.mu.Unlock()
 	} else if body, ok := sdpBody(req.Message); ok {
 		var offer sdpOffer
-		if err := offer.UnmarshalBinary(body); err != nil {
+		if err := offer.UnmarshalText(body); err != nil {
 			if writeErr := c.endpoint.writeSDPFailure(ctx, req, body, err); writeErr != nil {
 				return writeErr
 			}
@@ -432,16 +433,29 @@ func (s dialogSnapshot) buildPRACKForResponse(resp sip.Message, cseq int64, remo
 
 type rseqHeader int64
 
+var (
+	_ encoding.TextAppender    = rseqHeader(0)
+	_ encoding.TextMarshaler   = rseqHeader(0)
+	_ encoding.TextUnmarshaler = (*rseqHeader)(nil)
+	_ encoding.TextAppender    = rackHeader{}
+	_ encoding.TextMarshaler   = rackHeader{}
+	_ encoding.TextUnmarshaler = (*rackHeader)(nil)
+)
+
 const (
 	rseqInitialMax = 1<<31 - 1
 	sipSequenceMax = 1<<32 - 1
 )
 
 func (h rseqHeader) MarshalText() ([]byte, error) {
+	return h.AppendText(nil)
+}
+
+func (h rseqHeader) AppendText(dst []byte) ([]byte, error) {
 	if h <= 0 || h > sipSequenceMax {
 		return nil, fmt.Errorf("building PRACK: invalid RSeq %d", h)
 	}
-	return []byte(strconv.FormatInt(int64(h), 10)), nil
+	return strconv.AppendInt(dst, int64(h), 10), nil
 }
 
 func (h *rseqHeader) UnmarshalText(text []byte) error {
@@ -455,6 +469,10 @@ func (h *rseqHeader) UnmarshalText(text []byte) error {
 }
 
 func (h rackHeader) MarshalText() ([]byte, error) {
+	return h.AppendText(nil)
+}
+
+func (h rackHeader) AppendText(dst []byte) ([]byte, error) {
 	if h.rseq <= 0 || h.rseq > sipSequenceMax {
 		return nil, fmt.Errorf("building PRACK: invalid RAck RSeq %d", h.rseq)
 	}
@@ -465,7 +483,7 @@ func (h rackHeader) MarshalText() ([]byte, error) {
 	if method == "" {
 		return nil, fmt.Errorf("building PRACK: invalid RAck method %q", h.method)
 	}
-	return fmt.Appendf(nil, "%d %d %s", h.rseq, h.cseq, method), nil
+	return fmt.Appendf(dst, "%d %d %s", h.rseq, h.cseq, method), nil
 }
 
 func (h *rackHeader) UnmarshalText(text []byte) error {

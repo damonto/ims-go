@@ -429,11 +429,9 @@ func TestTCPSegmentDecodeReadsMSSOption(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			var got TCPSegment
-			got.Src = &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1)}
-			got.Dst = &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2)}
-			if err := got.UnmarshalBinary(wire); err != nil {
-				t.Fatalf("UnmarshalBinary() error = %v", err)
+			got, err := decodeTCPSegment(net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), wire)
+			if err != nil {
+				t.Fatalf("decodeTCPSegment() error = %v", err)
 			}
 			if got.MSS != tt.want {
 				t.Fatalf("MSS = %d, want %d", got.MSS, tt.want)

@@ -29,12 +29,13 @@ type Message struct {
 var (
 	_ encoding.TextMarshaler   = Headers{}
 	_ encoding.TextUnmarshaler = (*Headers)(nil)
+	_ encoding.TextAppender    = Headers{}
 	_ io.WriterTo              = Headers{}
 
-	_ encoding.TextMarshaler   = Message{}
-	_ encoding.TextUnmarshaler = (*Message)(nil)
-	_ io.WriterTo              = Message{}
-	_ io.ReaderFrom            = (*Message)(nil)
+	_ encoding.BinaryAppender    = Message{}
+	_ encoding.BinaryMarshaler   = Message{}
+	_ encoding.BinaryUnmarshaler = (*Message)(nil)
+	_ io.WriterTo                = Message{}
 )
 
 func NewRequest(method, uri string) Message {
@@ -47,7 +48,7 @@ func NewResponse(code int, reason string) Message {
 
 func ParseMessage(data []byte) (Message, error) {
 	var msg Message
-	if err := msg.parseBytes(data); err != nil {
+	if err := msg.UnmarshalBinary(data); err != nil {
 		return Message{}, err
 	}
 	return msg, nil
@@ -123,12 +124,20 @@ func (hs *Headers) Del(name string) {
 }
 
 func (hs Headers) MarshalText() ([]byte, error) {
-	var buf bytes.Buffer
-	_, err := hs.WriteTo(&buf)
-	if err != nil {
+	return hs.AppendText(nil)
+}
+
+func (hs Headers) AppendText(dst []byte) ([]byte, error) {
+	if err := hs.validate(); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	for _, header := range hs {
+		dst = append(dst, header.Name...)
+		dst = append(dst, ':', ' ')
+		dst = append(dst, header.Value...)
+		dst = append(dst, '\r', '\n')
+	}
+	return dst, nil
 }
 
 func (hs *Headers) UnmarshalText(text []byte) error {
@@ -259,16 +268,31 @@ func (m Message) Validate() error {
 	return nil
 }
 
-func (m Message) MarshalText() ([]byte, error) {
-	var buf bytes.Buffer
-	if _, err := m.WriteTo(&buf); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+func (m Message) MarshalBinary() ([]byte, error) {
+	return m.AppendBinary(nil)
 }
 
-func (m *Message) UnmarshalText(text []byte) error {
-	return m.parseBytes(text)
+func (m Message) AppendBinary(dst []byte) ([]byte, error) {
+	if err := validateStartLine(m.StartLine); err != nil {
+		return nil, err
+	}
+	headers := m.serializedHeaders()
+	if err := headers.validate(); err != nil {
+		return nil, err
+	}
+	dst = append(dst, m.StartLine...)
+	dst = append(dst, '\r', '\n')
+	dst, err := headers.AppendText(dst)
+	if err != nil {
+		return nil, err
+	}
+	dst = append(dst, '\r', '\n')
+	dst = append(dst, m.Body...)
+	return dst, nil
+}
+
+func (m *Message) UnmarshalBinary(data []byte) error {
+	return m.parseBytes(data)
 }
 
 func (m Message) WriteTo(w io.Writer) (int64, error) {
@@ -298,7 +322,8 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 	return counter.n, nil
 }
 
-func (m *Message) ReadFrom(r io.Reader) (int64, error) {
+// ReadMessage reads exactly one Content-Length-framed SIP message from r.
+func (m *Message) ReadMessage(r io.Reader) (int64, error) {
 	br, ok := r.(*bufio.Reader)
 	if !ok {
 		// A temporary buffered reader must not read into the next SIP message.

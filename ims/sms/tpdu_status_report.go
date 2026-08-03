@@ -7,6 +7,7 @@ import (
 )
 
 var (
+	_ encoding.BinaryAppender    = statusReportTPDU{}
 	_ encoding.BinaryMarshaler   = statusReportTPDU{}
 	_ encoding.BinaryUnmarshaler = (*statusReportTPDU)(nil)
 )
@@ -16,6 +17,10 @@ type statusReportTPDU struct {
 }
 
 func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
+	return tp.AppendBinary(nil)
+}
+
+func (tp statusReportTPDU) AppendBinary(dst []byte) ([]byte, error) {
 	msg := tp.Message
 	if len(msg.UserData) == 0 && msg.UserDataLength != 0 {
 		return nil, errors.New("marshalling SMS-STATUS-REPORT: TP-UDL requires TP-UD")
@@ -53,7 +58,6 @@ func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshalling SMS-STATUS-REPORT recipient address: %w", err)
 	}
-	payload := make([]byte, 0, 32)
 	firstOctet := byte(tpduMTIStatusReport)
 	if !msg.MoreMessagesWaiting {
 		firstOctet |= tpduNoMoreMessagesFlag
@@ -67,12 +71,11 @@ func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 	if msg.HasUserDataHeader {
 		firstOctet |= tpduUserDataHeaderFlag
 	}
-	payload = append(payload, firstOctet)
-	payload = append(payload, msg.MessageReference)
-	payload = append(payload, recipient...)
-	payload = append(payload, encodeTimestamp(msg.ServiceCenterTime)...)
-	payload = append(payload, encodeTimestamp(msg.DischargeTime)...)
-	payload = append(payload, msg.Status.Code())
+	dst = append(dst, firstOctet, msg.MessageReference)
+	dst = append(dst, recipient...)
+	dst = append(dst, encodeTimestamp(msg.ServiceCenterTime)...)
+	dst = append(dst, encodeTimestamp(msg.DischargeTime)...)
+	dst = append(dst, msg.Status.Code())
 	var pi byte
 	if msg.HasProtocolIdentifier {
 		pi |= tpduParameterIndicatorPID
@@ -84,21 +87,21 @@ func (tp statusReportTPDU) MarshalBinary() ([]byte, error) {
 		pi |= tpduParameterIndicatorUDL
 	}
 	if pi == 0 {
-		return payload, nil
+		return dst, nil
 	}
-	payload = append(payload, pi)
+	dst = append(dst, pi)
 	if msg.HasProtocolIdentifier {
-		payload = append(payload, msg.ProtocolIdentifier)
+		dst = append(dst, msg.ProtocolIdentifier)
 	}
 	if msg.HasDataCodingScheme {
-		payload = append(payload, msg.DataCodingScheme)
+		dst = append(dst, msg.DataCodingScheme)
 	}
 	if len(msg.UserData) == 0 {
-		return payload, nil
+		return dst, nil
 	}
-	payload = append(payload, byte(userDataLength))
-	payload = append(payload, msg.UserData...)
-	return payload, nil
+	dst = append(dst, byte(userDataLength))
+	dst = append(dst, msg.UserData...)
+	return dst, nil
 }
 
 func (tp *statusReportTPDU) UnmarshalBinary(data []byte) error {

@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/sha1"
 	"crypto/sha256"
+	"encoding"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -38,6 +39,52 @@ func TestAKAMessageRoundTrip(t *testing.T) {
 			}
 			if got.Code != tt.message.Code || got.Identifier != tt.message.Identifier || got.Subtype != tt.message.Subtype {
 				t.Fatalf("AKAMessage = %+v, want %+v", got, tt.message)
+			}
+		})
+	}
+}
+
+func TestAppendBinaryPreservesPrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		appender  encoding.BinaryAppender
+		marshaler encoding.BinaryMarshaler
+	}{
+		{
+			name:      "eap packet",
+			appender:  EAPPacket{Code: eapCodeSuccess, Identifier: 1},
+			marshaler: EAPPacket{Code: eapCodeSuccess, Identifier: 1},
+		},
+		{
+			name:      "aka attribute",
+			appender:  AKAAttribute{Type: akaAttrRAND, Value: []byte{0x00, 0x00}},
+			marshaler: AKAAttribute{Type: akaAttrRAND, Value: []byte{0x00, 0x00}},
+		},
+		{
+			name: "aka message",
+			appender: AKAMessage{Code: eapCodeRequest, Identifier: 7, Subtype: akaSubtypeIdentity,
+				Attributes: []AKAAttribute{{Type: akaAttrRAND, Value: []byte{0x00, 0x00}}}},
+			marshaler: AKAMessage{Code: eapCodeRequest, Identifier: 7, Subtype: akaSubtypeIdentity,
+				Attributes: []AKAAttribute{{Type: akaAttrRAND, Value: []byte{0x00, 0x00}}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefix := make([]byte, 2, 256)
+			copy(prefix, []byte{0xaa, 0xbb})
+			got, err := tt.appender.AppendBinary(prefix)
+			if err != nil {
+				t.Fatalf("AppendBinary() error = %v", err)
+			}
+			want, err := tt.marshaler.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got[:2], []byte{0xaa, 0xbb}) || !bytes.Equal(got[2:], want) {
+				t.Fatalf("AppendBinary() = %x, want prefix plus %x", got, want)
+			}
+			if !bytes.Equal(prefix, []byte{0xaa, 0xbb}) {
+				t.Fatalf("prefix = %x, want unchanged", prefix)
 			}
 		})
 	}

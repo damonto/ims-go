@@ -6,10 +6,13 @@ import (
 )
 
 var (
+	_ encoding.BinaryAppender    = n1ModeCapabilityNotifyData{}
 	_ encoding.BinaryMarshaler   = n1ModeCapabilityNotifyData{}
 	_ encoding.BinaryUnmarshaler = (*n1ModeCapabilityNotifyData)(nil)
+	_ encoding.BinaryAppender    = n1ModeInformationNotifyData{}
 	_ encoding.BinaryMarshaler   = n1ModeInformationNotifyData{}
 	_ encoding.BinaryUnmarshaler = (*n1ModeInformationNotifyData)(nil)
+	_ encoding.BinaryAppender    = n1ModeSNSSAIPlmnIDNotifyData{}
 	_ encoding.BinaryMarshaler   = n1ModeSNSSAIPlmnIDNotifyData{}
 	_ encoding.BinaryUnmarshaler = (*n1ModeSNSSAIPlmnIDNotifyData)(nil)
 )
@@ -25,10 +28,14 @@ type n1ModeCapabilityNotifyData struct {
 }
 
 func (d n1ModeCapabilityNotifyData) MarshalBinary() ([]byte, error) {
+	return d.AppendBinary(nil)
+}
+
+func (d n1ModeCapabilityNotifyData) AppendBinary(dst []byte) ([]byte, error) {
 	if d.PDUSessionID == 0 {
 		return nil, fmt.Errorf("encoding N1_MODE_CAPABILITY notify: pdu session id is unset")
 	}
-	return []byte{n1ModePDUSessionIDLen, d.PDUSessionID}, nil
+	return append(dst, n1ModePDUSessionIDLen, d.PDUSessionID), nil
 }
 
 func (d *n1ModeCapabilityNotifyData) UnmarshalBinary(data []byte) error {
@@ -50,13 +57,16 @@ type n1ModeInformationNotifyData struct {
 }
 
 func (d n1ModeInformationNotifyData) MarshalBinary() ([]byte, error) {
+	return d.AppendBinary(nil)
+}
+
+func (d n1ModeInformationNotifyData) AppendBinary(dst []byte) ([]byte, error) {
 	if len(d.SNSSAI) > 0xff {
 		return nil, fmt.Errorf("encoding N1_MODE_INFORMATION notify: s-nssai length %d exceeds 255", len(d.SNSSAI))
 	}
-	out := make([]byte, n1ModeValueLenFieldLen+len(d.SNSSAI))
-	out[0] = byte(len(d.SNSSAI))
-	copy(out[n1ModeValueLenFieldLen:], d.SNSSAI)
-	return out, nil
+	dst = append(dst, byte(len(d.SNSSAI)))
+	dst = append(dst, d.SNSSAI...)
+	return dst, nil
 }
 
 func (d *n1ModeInformationNotifyData) UnmarshalBinary(data []byte) error {
@@ -76,13 +86,16 @@ type n1ModeSNSSAIPlmnIDNotifyData struct {
 }
 
 func (d n1ModeSNSSAIPlmnIDNotifyData) MarshalBinary() ([]byte, error) {
+	return d.AppendBinary(nil)
+}
+
+func (d n1ModeSNSSAIPlmnIDNotifyData) AppendBinary(dst []byte) ([]byte, error) {
 	if len(d.PLMNID) != n1ModePlmnIDLen {
 		return nil, fmt.Errorf("encoding N1_MODE_S_NSSAI_PLMN_ID notify: plmn id length %d does not match %d", len(d.PLMNID), n1ModePlmnIDLen)
 	}
-	out := make([]byte, n1ModeValueLenFieldLen+n1ModePlmnIDLen)
-	out[0] = n1ModePlmnIDLen
-	copy(out[n1ModeValueLenFieldLen:], d.PLMNID)
-	return out, nil
+	dst = append(dst, n1ModePlmnIDLen)
+	dst = append(dst, d.PLMNID...)
+	return dst, nil
 }
 
 func (d *n1ModeSNSSAIPlmnIDNotifyData) UnmarshalBinary(data []byte) error {

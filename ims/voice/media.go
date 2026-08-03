@@ -292,7 +292,7 @@ func descriptionFromLocalSDP(body []byte) MediaDescription {
 		return MediaDescription{}
 	}
 	var description MediaDescription
-	if err := description.UnmarshalBinary(body); err != nil {
+	if err := description.UnmarshalText(body); err != nil {
 		return MediaDescription{RawSDP: append([]byte(nil), body...)}
 	}
 	return description

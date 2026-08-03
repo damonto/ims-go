@@ -2,6 +2,7 @@ package sms
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,93 @@ func TestGSM7BinaryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGSM7TextRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "plain", text: "hello"},
+		{name: "extension", text: "{hello}^€"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var value GSM7
+			if err := value.UnmarshalText([]byte(tt.text)); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+
+			prefix := []byte("prefix:")
+			appended, err := value.AppendText(slices.Clone(prefix))
+			if err != nil {
+				t.Fatalf("AppendText() error = %v", err)
+			}
+			if got := string(appended[:len(prefix)]); got != string(prefix) {
+				t.Fatalf("AppendText() prefix = %q, want %q", got, prefix)
+			}
+			if got := string(appended[len(prefix):]); got != tt.text {
+				t.Fatalf("AppendText() text = %q, want %q", got, tt.text)
+			}
+
+			marshaled, err := value.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if got := string(marshaled); got != tt.text {
+				t.Fatalf("MarshalText() = %q, want %q", got, tt.text)
+			}
+		})
+	}
+}
+
+func TestGSM7UnmarshalTextRejectsUnsupportedRune(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "CJK", text: "你好"},
+		{name: "emoji", text: "🙂"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value, err := NewGSM7("original")
+			if err != nil {
+				t.Fatalf("NewGSM7() error = %v", err)
+			}
+			if err := value.UnmarshalText([]byte(tt.text)); err == nil {
+				t.Fatal("UnmarshalText() error = nil, want non-nil")
+			}
+			if got := value.String(); got != "original" {
+				t.Fatalf("String() after rejected text = %q, want %q", got, "original")
+			}
+		})
+	}
+}
+
+func TestGSM7MarshalTextRejectsInvalidSeptets(t *testing.T) {
+	tests := []struct {
+		name    string
+		septets []byte
+	}{
+		{name: "out of range", septets: []byte{0x80}},
+		{name: "dangling escape", septets: []byte{gsm7EscapeSeptet}},
+		{name: "unknown extension", septets: []byte{gsm7EscapeSeptet, 0x00}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var value GSM7
+			if err := value.UnmarshalBinary(tt.septets); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
+			}
+			if _, err := value.MarshalText(); err == nil {
+				t.Fatal("MarshalText() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
 func TestUCS2BinaryRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -144,6 +232,80 @@ func TestUCS2UnmarshalBinaryRejectsOddLength(t *testing.T) {
 	var got UCS2
 	if err := got.UnmarshalBinary([]byte{0x00}); err == nil {
 		t.Fatal("UnmarshalBinary() error = nil, want odd length error")
+	}
+}
+
+func TestUCS2TextRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "ASCII", text: "hello"},
+		{name: "CJK", text: "你好"},
+		{name: "supplementary rune", text: "🙂"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var value UCS2
+			if err := value.UnmarshalText([]byte(tt.text)); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
+			}
+			prefix := []byte("prefix:")
+			appended, err := value.AppendText(slices.Clone(prefix))
+			if err != nil {
+				t.Fatalf("AppendText() error = %v", err)
+			}
+			if !slices.Equal(appended[:len(prefix)], prefix) {
+				t.Fatalf("AppendText() prefix = %q, want %q", appended[:len(prefix)], prefix)
+			}
+			marshaled, err := value.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if got := string(marshaled); got != tt.text {
+				t.Errorf("MarshalText() = %q, want %q", got, tt.text)
+			}
+			if !slices.Equal(marshaled, appended[len(prefix):]) {
+				t.Errorf("MarshalText() = %q, AppendText() representation = %q", marshaled, appended[len(prefix):])
+			}
+		})
+	}
+}
+
+func TestUCS2TextRejectsInvalidUTF8(t *testing.T) {
+	tests := []struct {
+		name          string
+		value         UCS2
+		operation     func(*UCS2) error
+		wantPreserved bool
+	}{
+		{
+			name:  "unmarshal",
+			value: "original",
+			operation: func(value *UCS2) error {
+				return value.UnmarshalText([]byte{0xff})
+			},
+			wantPreserved: true,
+		},
+		{
+			name:  "marshal",
+			value: UCS2(string([]byte{0xff})),
+			operation: func(value *UCS2) error {
+				_, err := value.MarshalText()
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.value
+			if err := tt.operation(&got); err == nil {
+				t.Fatal("text operation error = nil, want non-nil")
+			}
+			if tt.wantPreserved && got != tt.value {
+				t.Errorf("text operation changed value to %q", got)
+			}
+		})
 	}
 }
 

@@ -63,18 +63,18 @@ func TestParseMessageIgnoresLeadingCRLF(t *testing.T) {
 	}
 }
 
-func TestReadFromIgnoresLeadingCRLF(t *testing.T) {
+func TestReadMessageIgnoresLeadingCRLF(t *testing.T) {
 	var msg Message
 
-	n, err := msg.ReadFrom(strings.NewReader("\r\nSIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\nnext"))
+	n, err := msg.ReadMessage(strings.NewReader("\r\nSIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\nnext"))
 	if err != nil {
-		t.Fatalf("ReadFrom() error = %v", err)
+		t.Fatalf("ReadMessage() error = %v", err)
 	}
 	if msg.StartLine != "SIP/2.0 200 OK" {
 		t.Fatalf("StartLine = %q, want response", msg.StartLine)
 	}
 	if n != int64(len("\r\nSIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n")) {
-		t.Fatalf("ReadFrom() n = %d, want counted SIP message only", n)
+		t.Fatalf("ReadMessage() n = %d, want counted SIP message only", n)
 	}
 }
 
@@ -374,7 +374,7 @@ func TestParseMessagePartialPreservesHeadersOnBodyError(t *testing.T) {
 	}
 }
 
-func TestMessageMarshalTextRecognizesCompactContentLength(t *testing.T) {
+func TestMessageMarshalBinaryRecognizesCompactContentLength(t *testing.T) {
 	msg := Message{
 		StartLine: "MESSAGE sip:+123@example.com SIP/2.0",
 		Headers: Headers{
@@ -383,12 +383,12 @@ func TestMessageMarshalTextRecognizesCompactContentLength(t *testing.T) {
 		Body: []byte("hello"),
 	}
 
-	got := mustMarshalText(t, msg)
+	got := mustMarshalBinary(t, msg)
 	if strings.Count(got, "Content-Length:") != 0 {
-		t.Fatalf("MarshalText() emitted long Content-Length despite compact l: %q", got)
+		t.Fatalf("MarshalBinary() emitted long Content-Length despite compact l: %q", got)
 	}
 	if strings.Count(got, "\r\nl: 5\r\n") != 1 {
-		t.Fatalf("MarshalText() = %q, want one compact l header", got)
+		t.Fatalf("MarshalBinary() = %q, want one compact l header", got)
 	}
 }
 
@@ -691,7 +691,7 @@ func TestMessageWriteToRejectsInvalidStartLine(t *testing.T) {
 	}
 }
 
-func TestMessageMarshalTextRoundTrip(t *testing.T) {
+func TestMessageMarshalBinaryRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  Message
@@ -714,26 +714,69 @@ func TestMessageMarshalTextRoundTrip(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "binary body",
+			msg: Message{
+				StartLine: "SIP/2.0 200 OK",
+				Headers:   Headers{{Name: "Content-Type", Value: "application/octet-stream"}},
+				Body:      []byte{0xff, 0x00, 0xfe},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			text, err := tt.msg.MarshalText()
+			data, err := tt.msg.MarshalBinary()
 			if err != nil {
-				t.Fatalf("MarshalText() error = %v", err)
+				t.Fatalf("MarshalBinary() error = %v", err)
 			}
 			var parsed Message
-			if err := parsed.UnmarshalText(text); err != nil {
-				t.Fatalf("UnmarshalText() error = %v", err)
+			if err := parsed.UnmarshalBinary(data); err != nil {
+				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			if got, want := mustMarshalText(t, parsed), mustMarshalText(t, tt.msg); got != want {
+			if got, want := mustMarshalBinary(t, parsed), mustMarshalBinary(t, tt.msg); got != want {
 				t.Fatalf("round trip = %q, want %q", got, want)
 			}
 		})
 	}
 }
 
-func TestMessageWriteToReadFrom(t *testing.T) {
+func TestMessageAppendBinaryPreservesPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  Message
+	}{
+		{
+			name: "binary body",
+			msg: Message{
+				StartLine: "SIP/2.0 200 OK",
+				Body:      []byte{0xff, 0x00, 0xfe},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefix := make([]byte, 2, 256)
+			copy(prefix, []byte{0xaa, 0xbb})
+			got, err := tt.msg.AppendBinary(prefix)
+			if err != nil {
+				t.Fatalf("AppendBinary() error = %v", err)
+			}
+			want, err := tt.msg.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got[:2], []byte{0xaa, 0xbb}) || !bytes.Equal(got[2:], want) {
+				t.Fatalf("AppendBinary() = %x, want prefix plus %x", got, want)
+			}
+			if !bytes.Equal(prefix, []byte{0xaa, 0xbb}) {
+				t.Fatalf("prefix = %x, want unchanged", prefix)
+			}
+		})
+	}
+}
+
+func TestMessageWriteToReadMessage(t *testing.T) {
 	tests := []struct {
 		name string
 		msg  Message
@@ -769,61 +812,61 @@ func TestMessageWriteToReadFrom(t *testing.T) {
 			if written != int64(len(buf.Bytes())) {
 				t.Fatalf("WriteTo() bytes = %d, want %d", written, len(buf.Bytes()))
 			}
-			if got, want := buf.String(), mustMarshalText(t, tt.msg); got != want {
+			if got, want := buf.String(), mustMarshalBinary(t, tt.msg); got != want {
 				t.Fatalf("WriteTo() output = %q, want %q", got, want)
 			}
 
 			var parsed Message
-			read, err := parsed.ReadFrom(strings.NewReader(buf.String()))
+			read, err := parsed.ReadMessage(strings.NewReader(buf.String()))
 			if err != nil {
-				t.Fatalf("ReadFrom() error = %v", err)
+				t.Fatalf("ReadMessage() error = %v", err)
 			}
 			if read != int64(len(buf.String())) {
-				t.Fatalf("ReadFrom() bytes = %d, want %d", read, len(buf.String()))
+				t.Fatalf("ReadMessage() bytes = %d, want %d", read, len(buf.String()))
 			}
-			if got := mustMarshalText(t, parsed); got != buf.String() {
-				t.Fatalf("ReadFrom() parsed = %q, want %q", got, buf.String())
+			if got := mustMarshalBinary(t, parsed); got != buf.String() {
+				t.Fatalf("ReadMessage() parsed = %q, want %q", got, buf.String())
 			}
 		})
 	}
 }
 
-func mustMarshalText(t *testing.T, msg Message) string {
+func mustMarshalBinary(t *testing.T, msg Message) string {
 	t.Helper()
-	text, err := msg.MarshalText()
+	data, err := msg.MarshalBinary()
 	if err != nil {
-		t.Fatalf("MarshalText() error = %v", err)
+		t.Fatalf("MarshalBinary() error = %v", err)
 	}
-	return string(text)
+	return string(data)
 }
 
-func TestMessageReadFromRejectsMissingContentLength(t *testing.T) {
+func TestMessageReadMessageRejectsMissingContentLength(t *testing.T) {
 	raw := "MESSAGE sip:+123@example.com SIP/2.0\r\nVia: SIP/2.0/TCP 127.0.0.1:5060\r\n\r\nhello"
 
 	var msg Message
-	read, err := msg.ReadFrom(strings.NewReader(raw))
+	read, err := msg.ReadMessage(strings.NewReader(raw))
 	if err == nil {
-		t.Fatal("ReadFrom() error = nil, want missing Content-Length error")
+		t.Fatal("ReadMessage() error = nil, want missing Content-Length error")
 	}
 	if read >= int64(len(raw)) {
-		t.Fatalf("ReadFrom() bytes = %d, want fewer than %d", read, len(raw))
+		t.Fatalf("ReadMessage() bytes = %d, want fewer than %d", read, len(raw))
 	}
 }
 
-func TestMessageReadFromRejectsLFLineEndings(t *testing.T) {
+func TestMessageReadMessageRejectsLFLineEndings(t *testing.T) {
 	raw := "MESSAGE sip:+123@example.com SIP/2.0\nVia: SIP/2.0/TCP 127.0.0.1:5060\nContent-Length: 5\n\nhello"
 
 	var msg Message
-	read, err := msg.ReadFrom(strings.NewReader(raw))
+	read, err := msg.ReadMessage(strings.NewReader(raw))
 	if err == nil {
-		t.Fatal("ReadFrom() error = nil, want invalid line ending error")
+		t.Fatal("ReadMessage() error = nil, want invalid line ending error")
 	}
 	if read == 0 {
-		t.Fatal("ReadFrom() bytes = 0, want consumed bytes")
+		t.Fatal("ReadMessage() bytes = 0, want consumed bytes")
 	}
 }
 
-func TestMessageReadFromPreservesNextMessage(t *testing.T) {
+func TestMessageReadMessagePreservesNextMessage(t *testing.T) {
 	first := "SIP/2.0 100 Trying\r\nContent-Length: 0\r\n\r\n"
 	second := "SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"
 	tests := []struct {
@@ -838,11 +881,11 @@ func TestMessageReadFromPreservesNextMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := tt.new(first + second)
 			var firstMsg, secondMsg Message
-			if _, err := firstMsg.ReadFrom(r); err != nil {
-				t.Fatalf("first ReadFrom() error = %v", err)
+			if _, err := firstMsg.ReadMessage(r); err != nil {
+				t.Fatalf("first ReadMessage() error = %v", err)
 			}
-			if _, err := secondMsg.ReadFrom(r); err != nil {
-				t.Fatalf("second ReadFrom() error = %v", err)
+			if _, err := secondMsg.ReadMessage(r); err != nil {
+				t.Fatalf("second ReadMessage() error = %v", err)
 			}
 			if firstMsg.StatusCode() != 100 || secondMsg.StatusCode() != 200 {
 				t.Fatalf("status codes = %d, %d; want 100, 200", firstMsg.StatusCode(), secondMsg.StatusCode())
@@ -851,7 +894,7 @@ func TestMessageReadFromPreservesNextMessage(t *testing.T) {
 	}
 }
 
-func TestMessageMarshalTextCorrectsContentLength(t *testing.T) {
+func TestMessageMarshalBinaryCorrectsContentLength(t *testing.T) {
 	tests := []struct {
 		name    string
 		headers Headers
@@ -867,13 +910,13 @@ func TestMessageMarshalTextCorrectsContentLength(t *testing.T) {
 			msg := NewRequest("MESSAGE", "sip:bob@example.com")
 			msg.Headers = tt.headers
 			msg.Body = []byte("hello")
-			got := mustMarshalText(t, msg)
+			got := mustMarshalBinary(t, msg)
 			if !strings.Contains(got, "\r\n"+tt.want+"\r\n") {
-				t.Fatalf("MarshalText() = %q, want %q", got, tt.want)
+				t.Fatalf("MarshalBinary() = %q, want %q", got, tt.want)
 			}
 			count := strings.Count(strings.ToLower(got), "\r\ncontent-length:") + strings.Count(strings.ToLower(got), "\r\nl:")
 			if count != 1 {
-				t.Fatalf("MarshalText() Content-Length count = %d, want 1", count)
+				t.Fatalf("MarshalBinary() Content-Length count = %d, want 1", count)
 			}
 		})
 	}

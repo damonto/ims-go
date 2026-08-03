@@ -3,6 +3,7 @@ package ims
 import (
 	"bytes"
 	_ "embed"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,6 +129,29 @@ type imsProfileDuration struct {
 	time.Duration
 }
 
+var (
+	_ encoding.TextAppender    = imsProfileDuration{}
+	_ encoding.TextMarshaler   = imsProfileDuration{}
+	_ encoding.TextUnmarshaler = (*imsProfileDuration)(nil)
+)
+
+func (d imsProfileDuration) MarshalText() ([]byte, error) {
+	return d.AppendText(nil)
+}
+
+func (d imsProfileDuration) AppendText(dst []byte) ([]byte, error) {
+	return append(dst, d.Duration.String()...), nil
+}
+
+func (d *imsProfileDuration) UnmarshalText(text []byte) error {
+	duration, err := time.ParseDuration(string(text))
+	if err != nil {
+		return fmt.Errorf("parsing duration %q: %w", text, err)
+	}
+	d.Duration = duration
+	return nil
+}
+
 func (d *imsProfileDuration) UnmarshalJSON(data []byte) error {
 	value := strings.TrimSpace(string(data))
 	if value == "null" {
@@ -143,12 +167,7 @@ func (d *imsProfileDuration) UnmarshalJSON(data []byte) error {
 		text = value + "s"
 	}
 
-	duration, err := time.ParseDuration(text)
-	if err != nil {
-		return fmt.Errorf("parsing duration %q: %w", text, err)
-	}
-	d.Duration = duration
-	return nil
+	return d.UnmarshalText([]byte(text))
 }
 
 func loadIMSProfile(card Card) (imsProfile, bool, error) {

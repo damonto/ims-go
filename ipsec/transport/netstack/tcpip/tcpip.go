@@ -31,6 +31,7 @@ package tcpip
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding"
 	"errors"
 	"fmt"
 	"io"
@@ -40,11 +41,11 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/damonto/ims-go/ipsec/transport/netstack/waiter"
-	"sync"
 )
 
 // Using the header package here would cause an import cycle.
@@ -2184,6 +2185,35 @@ func isZeros(addr []byte) bool {
 // It is typically a 6-byte MAC address.
 type LinkAddress string
 
+var (
+	_ encoding.TextAppender    = LinkAddress("")
+	_ encoding.TextMarshaler   = LinkAddress("")
+	_ encoding.TextUnmarshaler = (*LinkAddress)(nil)
+)
+
+// MarshalText returns the canonical IEEE 802 address for a.
+func (a LinkAddress) MarshalText() ([]byte, error) {
+	return a.AppendText(nil)
+}
+
+// AppendText appends the canonical IEEE 802 address for a to dst.
+func (a LinkAddress) AppendText(dst []byte) ([]byte, error) {
+	if len(a) != LinkAddressSize {
+		return nil, fmt.Errorf("marshaling link address: byte length %d does not match %d", len(a), LinkAddressSize)
+	}
+	return fmt.Appendf(dst, "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]), nil
+}
+
+// UnmarshalText parses an IEEE 802 address into a.
+func (a *LinkAddress) UnmarshalText(text []byte) error {
+	parsed, err := ParseMACAddress(string(text))
+	if err != nil {
+		return fmt.Errorf("parsing link address %q: %w", text, err)
+	}
+	*a = parsed
+	return nil
+}
+
 // String implements the fmt.Stringer interface.
 func (a LinkAddress) String() string {
 	switch len(a) {
@@ -2194,23 +2224,14 @@ func (a LinkAddress) String() string {
 	}
 }
 
-// ParseMACAddress parses an IEEE 802 address.
-//
-// It must be in the format aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff.
+// ParseMACAddress parses a 6-byte IEEE 802 address.
 func ParseMACAddress(s string) (LinkAddress, error) {
-	parts := strings.FieldsFunc(s, func(c rune) bool {
-		return c == ':' || c == '-'
-	})
-	if len(parts) != LinkAddressSize {
-		return "", fmt.Errorf("inconsistent parts: %s", s)
+	addr, err := net.ParseMAC(s)
+	if err != nil {
+		return "", fmt.Errorf("parsing MAC address %q: %w", s, err)
 	}
-	addr := make([]byte, 0, len(parts))
-	for _, part := range parts {
-		u, err := strconv.ParseUint(part, 16, 8)
-		if err != nil {
-			return "", fmt.Errorf("invalid hex digits: %s", s)
-		}
-		addr = append(addr, byte(u))
+	if len(addr) != LinkAddressSize {
+		return "", fmt.Errorf("parsing MAC address %q: byte length %d does not match %d", s, len(addr), LinkAddressSize)
 	}
 	return LinkAddress(addr), nil
 }

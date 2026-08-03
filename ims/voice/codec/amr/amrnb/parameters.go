@@ -100,8 +100,8 @@ func (p *Params) UnmarshalBinary(serial []byte) error {
 	return nil
 }
 
-// ReadFrom reads ETS serial bits for p from r.
-func (p *Params) ReadFrom(r io.Reader) (int64, error) {
+// ReadParamsFrom reads one ETS serial-bit sequence for p from r.
+func (p *Params) ReadParamsFrom(r io.Reader) (int64, error) {
 	values, n, err := paramSpec.ReadParamsFrom(r, p.Values, int(p.Mode))
 	if err != nil {
 		return n, err

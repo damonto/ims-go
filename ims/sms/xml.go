@@ -11,6 +11,7 @@ import (
 )
 
 var (
+	_ encoding.TextAppender    = xmlInfo{}
 	_ encoding.TextMarshaler   = xmlInfo{}
 	_ encoding.TextUnmarshaler = (*xmlInfo)(nil)
 	_ io.ReaderFrom            = (*xmlInfo)(nil)
@@ -51,11 +52,15 @@ func decodeXMLInfo(data []byte) (xmlInfo, error) {
 }
 
 func (info xmlInfo) MarshalText() ([]byte, error) {
+	return info.AppendText(nil)
+}
+
+func (info xmlInfo) AppendText(dst []byte) ([]byte, error) {
 	if err := info.validate(); err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	encoder := xml.NewEncoder(&buf)
+	buf := bytes.NewBuffer(dst)
+	encoder := xml.NewEncoder(buf)
 	if err := info.marshalXML(encoder); err != nil {
 		return nil, err
 	}

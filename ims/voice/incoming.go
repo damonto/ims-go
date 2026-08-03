@@ -102,7 +102,7 @@ func (s *Endpoint) handleIncomingInvite(ctx context.Context, req session.Request
 			return s.writeStatus(ctx, req, sipStatusNotAcceptableHere, "Not Acceptable Here")
 		}
 		remoteBody = append([]byte(nil), body...)
-		if err := offer.UnmarshalBinary(body); err != nil {
+		if err := offer.UnmarshalText(body); err != nil {
 			return s.writeSDPFailure(ctx, req, body, err)
 		}
 		preconditions = preconditions && (offer.Preconditions || len(offer.UnknownLocalMandatory) != 0)

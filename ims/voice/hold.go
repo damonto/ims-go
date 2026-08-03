@@ -267,7 +267,7 @@ func (c *Call) applyMediaReINVITEAnswer(ctx context.Context, resp sip.Message) e
 		return errors.New("missing re-INVITE SDP answer")
 	}
 	var answer sdpOffer
-	if err := answer.UnmarshalBinary(body); err != nil {
+	if err := answer.UnmarshalText(body); err != nil {
 		return fmt.Errorf("parsing re-INVITE SDP answer: %w", err)
 	}
 	negotiated, ok := chooseCodec(answer, c.endpoint.cfg.Codecs)

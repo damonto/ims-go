@@ -135,6 +135,23 @@ type Payload interface {
 }
 
 var (
+	_ encoding.BinaryAppender    = Attribute{}
+	_ encoding.BinaryAppender    = Transform{}
+	_ encoding.BinaryAppender    = Proposal{}
+	_ encoding.BinaryAppender    = (*SecurityAssociationPayload)(nil)
+	_ encoding.BinaryAppender    = (*KeyExchangePayload)(nil)
+	_ encoding.BinaryAppender    = (*NoncePayload)(nil)
+	_ encoding.BinaryAppender    = (*NotifyPayload)(nil)
+	_ encoding.BinaryAppender    = (*DeletePayload)(nil)
+	_ encoding.BinaryAppender    = (*IDPayload)(nil)
+	_ encoding.BinaryAppender    = (*AuthPayload)(nil)
+	_ encoding.BinaryAppender    = (*ConfigPayload)(nil)
+	_ encoding.BinaryAppender    = TrafficSelector{}
+	_ encoding.BinaryAppender    = (*TrafficSelectorPayload)(nil)
+	_ encoding.BinaryAppender    = (*EAPPayload)(nil)
+	_ encoding.BinaryAppender    = (*EncryptedPayload)(nil)
+	_ encoding.BinaryAppender    = (*EncryptedFragmentPayload)(nil)
+	_ encoding.BinaryAppender    = DeviceIdentity{}
 	_ encoding.BinaryMarshaler   = DeviceIdentity{}
 	_ encoding.BinaryUnmarshaler = (*DeviceIdentity)(nil)
 )
@@ -178,14 +195,19 @@ func NewTVAttribute(typeID, value uint16) Attribute {
 }
 
 func (a Attribute) MarshalBinary() ([]byte, error) {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint16(buf[0:2], uint16(a.Format)<<15|a.Type)
+	return a.AppendBinary(nil)
+}
+
+func (a Attribute) AppendBinary(dst []byte) ([]byte, error) {
+	start := len(dst)
+	dst = append(dst, make([]byte, 4)...)
+	binary.BigEndian.PutUint16(dst[start:start+2], uint16(a.Format)<<15|a.Type)
 	if a.Format == attributeFormatTV {
-		binary.BigEndian.PutUint16(buf[2:4], a.Value16)
-		return buf, nil
+		binary.BigEndian.PutUint16(dst[start+2:start+4], a.Value16)
+		return dst, nil
 	}
-	binary.BigEndian.PutUint16(buf[2:4], uint16(len(a.Value)))
-	return append(buf, a.Value...), nil
+	binary.BigEndian.PutUint16(dst[start+2:start+4], uint16(len(a.Value)))
+	return append(dst, a.Value...), nil
 }
 
 func (a *Attribute) UnmarshalBinary(data []byte) error {
@@ -245,28 +267,43 @@ type Transform struct {
 }
 
 func (t Transform) MarshalBinary() ([]byte, error) {
+	return t.AppendBinary(nil)
+}
+
+func (t Transform) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateTransformAttributes(t.Attributes); err != nil {
 		return nil, err
 	}
-	body := make([]byte, 4)
-	body[0] = t.TransformType
-	binary.BigEndian.PutUint16(body[2:4], t.ID)
+	start := len(dst)
+	dst = append(dst, make([]byte, 4)...)
+	dst[start] = t.TransformType
+	binary.BigEndian.PutUint16(dst[start+2:start+4], t.ID)
 	for _, attr := range t.Attributes {
-		encoded, err := attr.MarshalBinary()
+		var err error
+		dst, err = attr.AppendBinary(dst)
 		if err != nil {
 			return nil, fmt.Errorf("marshalling transform attribute: %w", err)
 		}
-		body = append(body, encoded...)
 	}
-	return body, nil
+	return dst, nil
 }
 
 func (t Transform) marshalBinary(next byte) ([]byte, error) {
-	body, err := t.MarshalBinary()
+	return t.appendBinary(nil, next)
+}
+
+func (t Transform) appendBinary(dst []byte, next byte) ([]byte, error) {
+	start := len(dst)
+	dst = append(dst, make([]byte, payloadHeaderSize)...)
+	var err error
+	dst, err = t.AppendBinary(dst)
 	if err != nil {
 		return nil, err
 	}
-	return marshalPayloadBlock(next, body)
+	if err := setPayloadHeader(dst[start:start+payloadHeaderSize], next, len(dst)-start); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
 
 func (t *Transform) UnmarshalBinary(data []byte) error {
@@ -315,31 +352,45 @@ type Proposal struct {
 }
 
 func (p Proposal) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p Proposal) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateProposalShape(len(p.SPI), len(p.Transforms)); err != nil {
 		return nil, err
 	}
-	body := []byte{p.Number, p.ProtocolID, byte(len(p.SPI)), byte(len(p.Transforms))}
-	body = append(body, p.SPI...)
+	dst = append(dst, p.Number, p.ProtocolID, byte(len(p.SPI)), byte(len(p.Transforms)))
+	dst = append(dst, p.SPI...)
 	for i, transform := range p.Transforms {
 		nextType := payloadTypeNone
 		if i+1 < len(p.Transforms) {
 			nextType = payloadTypeTransform
 		}
-		encoded, err := transform.marshalBinary(nextType)
+		var err error
+		dst, err = transform.appendBinary(dst, nextType)
 		if err != nil {
 			return nil, fmt.Errorf("marshalling transform: %w", err)
 		}
-		body = append(body, encoded...)
 	}
-	return body, nil
+	return dst, nil
 }
 
 func (p Proposal) marshalBinary(next byte) ([]byte, error) {
-	body, err := p.MarshalBinary()
+	return p.appendBinary(nil, next)
+}
+
+func (p Proposal) appendBinary(dst []byte, next byte) ([]byte, error) {
+	start := len(dst)
+	dst = append(dst, make([]byte, payloadHeaderSize)...)
+	var err error
+	dst, err = p.AppendBinary(dst)
 	if err != nil {
 		return nil, err
 	}
-	return marshalPayloadBlock(next, body)
+	if err := setPayloadHeader(dst[start:start+payloadHeaderSize], next, len(dst)-start); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
 
 func (p *Proposal) UnmarshalBinary(data []byte) error {
@@ -423,13 +474,16 @@ type SecurityAssociationPayload struct {
 func (p *SecurityAssociationPayload) Type() byte { return payloadTypeSA }
 
 func (p *SecurityAssociationPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *SecurityAssociationPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if len(p.Proposals) == 0 {
 		return nil, errors.New("marshalling security association: proposal count is zero")
 	}
 	if len(p.Proposals) > math.MaxUint8 {
 		return nil, fmt.Errorf("marshalling security association: proposal count %d exceeds 255", len(p.Proposals))
 	}
-	body := make([]byte, 0)
 	for i, proposal := range p.Proposals {
 		if proposal.Number == 0 {
 			proposal.Number = byte(i + 1)
@@ -441,13 +495,13 @@ func (p *SecurityAssociationPayload) MarshalBinary() ([]byte, error) {
 		if i+1 < len(p.Proposals) {
 			nextType = payloadTypeProposal
 		}
-		encoded, err := proposal.marshalBinary(nextType)
+		var err error
+		dst, err = proposal.appendBinary(dst, nextType)
 		if err != nil {
 			return nil, fmt.Errorf("marshalling proposal: %w", err)
 		}
-		body = append(body, encoded...)
 	}
-	return body, nil
+	return dst, nil
 }
 
 func (p *SecurityAssociationPayload) UnmarshalBinary(data []byte) error {
@@ -512,13 +566,18 @@ type KeyExchangePayload struct {
 func (p *KeyExchangePayload) Type() byte { return payloadTypeKE }
 
 func (p *KeyExchangePayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *KeyExchangePayload) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateKeyExchangeDataLength(p.DHGroup, len(p.Data)); err != nil {
 		return nil, fmt.Errorf("marshalling key exchange: %w", err)
 	}
-	body := make([]byte, keyExchangeBodyHeaderLen)
-	binary.BigEndian.PutUint16(body[0:2], p.DHGroup)
-	body = append(body, p.Data...)
-	return body, nil
+	start := len(dst)
+	dst = append(dst, make([]byte, keyExchangeBodyHeaderLen)...)
+	binary.BigEndian.PutUint16(dst[start:start+2], p.DHGroup)
+	dst = append(dst, p.Data...)
+	return dst, nil
 }
 
 func (p *KeyExchangePayload) UnmarshalBinary(data []byte) error {
@@ -571,10 +630,14 @@ const (
 func (p *NoncePayload) Type() byte { return payloadTypeNonce }
 
 func (p *NoncePayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *NoncePayload) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateNonceDataLen(len(p.Data)); err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), p.Data...), nil
+	return append(dst, p.Data...), nil
 }
 
 func (p *NoncePayload) UnmarshalBinary(data []byte) error {
@@ -610,17 +673,22 @@ type NotifyPayload struct {
 func (p *NotifyPayload) Type() byte { return payloadTypeNotify }
 
 func (p *NotifyPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *NotifyPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if len(p.SPI) > math.MaxUint8 {
 		return nil, fmt.Errorf("marshalling notify payload: spi size %d exceeds 255", len(p.SPI))
 	}
 	if err := validateNotifyPayloadSPIShape(p.ProtocolID, p.NotifyType, len(p.SPI), false); err != nil {
 		return nil, fmt.Errorf("marshalling notify payload: %w", err)
 	}
-	body := []byte{p.ProtocolID, byte(len(p.SPI)), 0x00, 0x00}
-	binary.BigEndian.PutUint16(body[2:4], p.NotifyType)
-	body = append(body, p.SPI...)
-	body = append(body, p.Data...)
-	return body, nil
+	start := len(dst)
+	dst = append(dst, p.ProtocolID, byte(len(p.SPI)), 0x00, 0x00)
+	binary.BigEndian.PutUint16(dst[start+2:start+4], p.NotifyType)
+	dst = append(dst, p.SPI...)
+	dst = append(dst, p.Data...)
+	return dst, nil
 }
 
 func (p *NotifyPayload) UnmarshalBinary(data []byte) error {
@@ -695,6 +763,10 @@ type DeletePayload struct {
 func (p *DeletePayload) Type() byte { return payloadTypeDelete }
 
 func (p *DeletePayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *DeletePayload) AppendBinary(dst []byte) ([]byte, error) {
 	spiSize := 0
 	if len(p.SPIs) > 0 {
 		spiSize = len(p.SPIs[0])
@@ -710,12 +782,13 @@ func (p *DeletePayload) MarshalBinary() ([]byte, error) {
 	if err := validateDeletePayloadSPIShape(p.ProtocolID, spiSize, len(p.SPIs)); err != nil {
 		return nil, fmt.Errorf("marshalling delete payload: %w", err)
 	}
-	body := []byte{p.ProtocolID, byte(spiSize), 0x00, 0x00}
-	binary.BigEndian.PutUint16(body[2:4], uint16(len(p.SPIs)))
+	start := len(dst)
+	dst = append(dst, p.ProtocolID, byte(spiSize), 0x00, 0x00)
+	binary.BigEndian.PutUint16(dst[start+2:start+4], uint16(len(p.SPIs)))
 	for _, spi := range p.SPIs {
-		body = append(body, spi...)
+		dst = append(dst, spi...)
 	}
-	return body, nil
+	return dst, nil
 }
 
 func (p *DeletePayload) UnmarshalBinary(data []byte) error {
@@ -775,12 +848,16 @@ type IDPayload struct {
 func (p *IDPayload) Type() byte { return p.Tag }
 
 func (p *IDPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *IDPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if len(p.Data) == 0 {
 		return nil, errors.New("marshalling identification: data is empty")
 	}
-	body := []byte{p.IDType, 0x00, 0x00, 0x00}
-	body = append(body, p.Data...)
-	return body, nil
+	dst = append(dst, p.IDType, 0x00, 0x00, 0x00)
+	dst = append(dst, p.Data...)
+	return dst, nil
 }
 
 func (p *IDPayload) UnmarshalBinary(data []byte) error {
@@ -815,9 +892,13 @@ type AuthPayload struct {
 func (p *AuthPayload) Type() byte { return payloadTypeAUTH }
 
 func (p *AuthPayload) MarshalBinary() ([]byte, error) {
-	body := []byte{p.Method, 0x00, 0x00, 0x00}
-	body = append(body, p.Data...)
-	return body, nil
+	return p.AppendBinary(nil)
+}
+
+func (p *AuthPayload) AppendBinary(dst []byte) ([]byte, error) {
+	dst = append(dst, p.Method, 0x00, 0x00, 0x00)
+	dst = append(dst, p.Data...)
+	return dst, nil
 }
 
 func (p *AuthPayload) UnmarshalBinary(data []byte) error {
@@ -845,21 +926,25 @@ type ConfigPayload struct {
 func (p *ConfigPayload) Type() byte { return payloadTypeCP }
 
 func (p *ConfigPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *ConfigPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateConfigType(p.ConfigType); err != nil {
 		return nil, fmt.Errorf("marshalling configuration: %w", err)
 	}
 	if err := validateConfigAttributes(p.ConfigType, p.Attributes); err != nil {
 		return nil, err
 	}
-	body := []byte{p.ConfigType, 0x00, 0x00, 0x00}
+	dst = append(dst, p.ConfigType, 0x00, 0x00, 0x00)
 	for _, attr := range p.Attributes {
-		encoded, err := marshalConfigAttribute(attr)
+		var err error
+		dst, err = appendConfigAttribute(dst, attr)
 		if err != nil {
 			return nil, fmt.Errorf("marshalling config attribute: %w", err)
 		}
-		body = append(body, encoded...)
 	}
-	return body, nil
+	return dst, nil
 }
 
 func (p *ConfigPayload) UnmarshalBinary(data []byte) error {
@@ -895,7 +980,7 @@ func validateConfigType(configType byte) error {
 	}
 }
 
-func marshalConfigAttribute(attr Attribute) ([]byte, error) {
+func appendConfigAttribute(dst []byte, attr Attribute) ([]byte, error) {
 	if len(attr.Value) > math.MaxUint16 {
 		return nil, fmt.Errorf("configuration attribute %d length %d exceeds uint16", attr.Type, len(attr.Value))
 	}
@@ -905,10 +990,11 @@ func marshalConfigAttribute(attr Attribute) ([]byte, error) {
 	if err := validateConfigAttributeValue(attr.Type, attr.Value); err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint16(buf[0:2], attr.Type&0x7fff)
-	binary.BigEndian.PutUint16(buf[2:4], uint16(len(attr.Value)))
-	return append(buf, attr.Value...), nil
+	start := len(dst)
+	dst = append(dst, make([]byte, 4)...)
+	binary.BigEndian.PutUint16(dst[start:start+2], attr.Type&0x7fff)
+	binary.BigEndian.PutUint16(dst[start+2:start+4], uint16(len(attr.Value)))
+	return append(dst, attr.Value...), nil
 }
 
 func decodeConfigAttributes(data []byte) ([]Attribute, error) {
@@ -1030,14 +1116,19 @@ type TrafficSelector struct {
 }
 
 func (s TrafficSelector) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(nil)
+}
+
+func (s TrafficSelector) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateTrafficSelector(s); err != nil {
 		return nil, err
 	}
-	buf := make([]byte, trafficSelectorHeaderLen)
-	buf[0] = s.Type
-	buf[1] = s.ProtocolID
-	binary.BigEndian.PutUint16(buf[2:4], uint16(len(s.Data)+trafficSelectorHeaderLen))
-	return append(buf, s.Data...), nil
+	start := len(dst)
+	dst = append(dst, make([]byte, trafficSelectorHeaderLen)...)
+	dst[start] = s.Type
+	dst[start+1] = s.ProtocolID
+	binary.BigEndian.PutUint16(dst[start+2:start+4], uint16(len(s.Data)+trafficSelectorHeaderLen))
+	return append(dst, s.Data...), nil
 }
 
 func (s *TrafficSelector) UnmarshalBinary(data []byte) error {
@@ -1177,21 +1268,25 @@ type TrafficSelectorPayload struct {
 func (p *TrafficSelectorPayload) Type() byte { return p.Tag }
 
 func (p *TrafficSelectorPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *TrafficSelectorPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if len(p.Selectors) == 0 {
 		return nil, errors.New("marshalling traffic selectors: expected at least one selector")
 	}
 	if len(p.Selectors) > math.MaxUint8 {
 		return nil, fmt.Errorf("marshalling traffic selectors: selector count %d exceeds 255", len(p.Selectors))
 	}
-	body := []byte{byte(len(p.Selectors)), 0x00, 0x00, 0x00}
+	dst = append(dst, byte(len(p.Selectors)), 0x00, 0x00, 0x00)
 	for _, selector := range p.Selectors {
-		encoded, err := selector.MarshalBinary()
+		var err error
+		dst, err = selector.AppendBinary(dst)
 		if err != nil {
 			return nil, fmt.Errorf("marshalling traffic selector: %w", err)
 		}
-		body = append(body, encoded...)
 	}
-	return body, nil
+	return dst, nil
 }
 
 func (p *TrafficSelectorPayload) UnmarshalBinary(data []byte) error {
@@ -1248,10 +1343,14 @@ const eapMessageHeaderLen = 4
 func (p *EAPPayload) Type() byte { return payloadTypeEAP }
 
 func (p *EAPPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *EAPPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateEAPMessageLength(p.Data); err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), p.Data...), nil
+	return append(dst, p.Data...), nil
 }
 
 func (p *EAPPayload) UnmarshalBinary(data []byte) error {
@@ -1289,7 +1388,11 @@ type EncryptedPayload struct {
 func (p *EncryptedPayload) Type() byte { return payloadTypeEncrypted }
 
 func (p *EncryptedPayload) MarshalBinary() ([]byte, error) {
-	return append([]byte(nil), p.Raw...), nil
+	return p.AppendBinary(nil)
+}
+
+func (p *EncryptedPayload) AppendBinary(dst []byte) ([]byte, error) {
+	return append(dst, p.Raw...), nil
 }
 
 func (p *EncryptedPayload) UnmarshalBinary(data []byte) error {
@@ -1315,17 +1418,22 @@ type EncryptedFragmentPayload struct {
 func (p *EncryptedFragmentPayload) Type() byte { return payloadTypeEncryptedFragment }
 
 func (p *EncryptedFragmentPayload) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p *EncryptedFragmentPayload) AppendBinary(dst []byte) ([]byte, error) {
 	if p.FragmentNumber == 0 || p.TotalFragments == 0 {
 		return nil, errors.New("marshalling encrypted fragment: fragment number and total fragments must be non-zero")
 	}
 	if p.FragmentNumber > p.TotalFragments {
 		return nil, fmt.Errorf("marshalling encrypted fragment: fragment number %d exceeds total fragments %d", p.FragmentNumber, p.TotalFragments)
 	}
-	body := make([]byte, 4, 4+len(p.Raw))
-	binary.BigEndian.PutUint16(body[0:2], p.FragmentNumber)
-	binary.BigEndian.PutUint16(body[2:4], p.TotalFragments)
-	body = append(body, p.Raw...)
-	return body, nil
+	start := len(dst)
+	dst = append(dst, make([]byte, 4)...)
+	binary.BigEndian.PutUint16(dst[start:start+2], p.FragmentNumber)
+	binary.BigEndian.PutUint16(dst[start+2:start+4], p.TotalFragments)
+	dst = append(dst, p.Raw...)
+	return dst, nil
 }
 
 func (p *EncryptedFragmentPayload) UnmarshalBinary(data []byte) error {
@@ -1372,33 +1480,63 @@ func MarshalPayloadChain(payloads []Payload) (byte, []byte, error) {
 		} else if i+1 < len(payloads) {
 			next = payloads[i+1].Type()
 		}
-		encoded, err := marshalSinglePayload(payload, next)
+		var err error
+		body, err = appendSinglePayload(body, payload, next)
 		if err != nil {
 			return 0, nil, err
 		}
-		body = append(body, encoded...)
 	}
 	return first, body, nil
 }
 
 func marshalSinglePayload(payload Payload, next byte) ([]byte, error) {
-	body, err := payload.MarshalBinary()
+	return appendSinglePayload(nil, payload, next)
+}
+
+func appendSinglePayload(dst []byte, payload Payload, next byte) ([]byte, error) {
+	start := len(dst)
+	dst = append(dst, make([]byte, payloadHeaderSize)...)
+	var err error
+	if appender, ok := payload.(encoding.BinaryAppender); ok {
+		dst, err = appender.AppendBinary(dst)
+	} else {
+		var body []byte
+		body, err = payload.MarshalBinary()
+		dst = append(dst, body...)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return marshalPayloadBlock(next, body)
+	if err := setPayloadHeader(dst[start:start+payloadHeaderSize], next, len(dst)-start); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
 
 func marshalPayloadBlock(next byte, body []byte) ([]byte, error) {
+	return appendPayloadBlock(nil, next, body)
+}
+
+func appendPayloadBlock(dst []byte, next byte, body []byte) ([]byte, error) {
 	length := len(body) + payloadHeaderSize
 	if length > math.MaxUint16 {
 		return nil, fmt.Errorf("marshalling payload: payload length %d exceeds uint16", length)
 	}
-	buf := make([]byte, payloadHeaderSize)
-	buf[0] = next
-	binary.BigEndian.PutUint16(buf[2:4], uint16(length))
-	buf = append(buf, body...)
-	return buf, nil
+	start := len(dst)
+	dst = append(dst, make([]byte, payloadHeaderSize)...)
+	if err := setPayloadHeader(dst[start:start+payloadHeaderSize], next, length); err != nil {
+		return nil, err
+	}
+	return append(dst, body...), nil
+}
+
+func setPayloadHeader(header []byte, next byte, length int) error {
+	if length > math.MaxUint16 {
+		return fmt.Errorf("marshalling payload: payload length %d exceeds uint16", length)
+	}
+	header[0] = next
+	binary.BigEndian.PutUint16(header[2:4], uint16(length))
+	return nil
 }
 
 func DecodePayloadChain(firstType byte, data []byte) ([]Payload, error) {
@@ -1613,6 +1751,10 @@ func NewDeviceIdentity(identity string, requestedType byte) (DeviceIdentity, err
 }
 
 func (d DeviceIdentity) MarshalBinary() ([]byte, error) {
+	return d.AppendBinary(nil)
+}
+
+func (d DeviceIdentity) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateDeviceIdentityType(d.Type); err != nil {
 		return nil, err
 	}
@@ -1621,11 +1763,12 @@ func (d DeviceIdentity) MarshalBinary() ([]byte, error) {
 			return nil, fmt.Errorf("encoding device identity: value length %d does not match %d", len(d.Value), deviceIdentityValueLen)
 		}
 	}
-	data := make([]byte, deviceIdentityLengthFieldLen+deviceIdentityTypeLen+len(d.Value))
-	binary.BigEndian.PutUint16(data[:deviceIdentityLengthFieldLen], uint16(deviceIdentityTypeLen+len(d.Value)))
-	data[deviceIdentityLengthFieldLen] = d.Type
-	copy(data[deviceIdentityLengthFieldLen+deviceIdentityTypeLen:], d.Value)
-	return data, nil
+	start := len(dst)
+	dst = append(dst, make([]byte, deviceIdentityLengthFieldLen+deviceIdentityTypeLen)...)
+	binary.BigEndian.PutUint16(dst[start:start+deviceIdentityLengthFieldLen], uint16(deviceIdentityTypeLen+len(d.Value)))
+	dst[start+deviceIdentityLengthFieldLen] = d.Type
+	dst = append(dst, d.Value...)
+	return dst, nil
 }
 
 func (d *DeviceIdentity) UnmarshalBinary(data []byte) error {

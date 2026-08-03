@@ -15,9 +15,7 @@ var (
 	_ encoding.BinaryMarshaler   = FrameHeader{}
 	_ encoding.BinaryUnmarshaler = (*FrameHeader)(nil)
 	_ io.WriterTo                = Frame{}
-	_ io.ReaderFrom              = (*Frame)(nil)
 	_ io.WriterTo                = FrameHeader{}
-	_ io.ReaderFrom              = (*FrameHeader)(nil)
 )
 
 func TestFrameHeaderBinaryRoundTrip(t *testing.T) {
@@ -49,7 +47,7 @@ func TestFrameHeaderBinaryRoundTrip(t *testing.T) {
 	}
 }
 
-func TestFrameHeaderReadFromWriteTo(t *testing.T) {
+func TestFrameHeaderReadHeaderFromWriteTo(t *testing.T) {
 	header := FrameHeader{Mode: ModeSID, Quality: true}
 	var buf bytes.Buffer
 
@@ -61,15 +59,15 @@ func TestFrameHeaderReadFromWriteTo(t *testing.T) {
 		t.Fatalf("FrameHeader.WriteTo() bytes = %d, want 1", written)
 	}
 	var got FrameHeader
-	read, err := got.ReadFrom(&buf)
+	read, err := got.ReadHeaderFrom(&buf)
 	if err != nil {
-		t.Fatalf("FrameHeader.ReadFrom() error = %v", err)
+		t.Fatalf("FrameHeader.ReadHeaderFrom() error = %v", err)
 	}
 	if read != written {
-		t.Fatalf("FrameHeader.ReadFrom() bytes = %d, want %d", read, written)
+		t.Fatalf("FrameHeader.ReadHeaderFrom() bytes = %d, want %d", read, written)
 	}
 	if got != header {
-		t.Fatalf("FrameHeader.ReadFrom() = %+v, want %+v", got, header)
+		t.Fatalf("FrameHeader.ReadHeaderFrom() = %+v, want %+v", got, header)
 	}
 }
 
@@ -105,7 +103,7 @@ func TestFrameBinaryRoundTrip(t *testing.T) {
 	}
 }
 
-func TestFrameReadFromWriteTo(t *testing.T) {
+func TestFrameReadFrameFromWriteTo(t *testing.T) {
 	frame := Frame{Mode: ModeSID, Quality: true, Data: []byte{0x01, 0x23, 0x45, 0x67, 0x80}}
 	var buf bytes.Buffer
 
@@ -117,15 +115,15 @@ func TestFrameReadFromWriteTo(t *testing.T) {
 		t.Fatalf("WriteTo() bytes = %d, want 6", written)
 	}
 	var got Frame
-	read, err := got.ReadFrom(&buf)
+	read, err := got.ReadFrameFrom(&buf)
 	if err != nil {
-		t.Fatalf("ReadFrom() error = %v", err)
+		t.Fatalf("ReadFrameFrom() error = %v", err)
 	}
 	if read != written {
-		t.Fatalf("ReadFrom() bytes = %d, want %d", read, written)
+		t.Fatalf("ReadFrameFrom() bytes = %d, want %d", read, written)
 	}
 	if got.Mode != frame.Mode || got.Quality != frame.Quality || !bytes.Equal(got.Data, frame.Data) {
-		t.Fatalf("ReadFrom() = %d/%v/% X, want %d/%v/% X",
+		t.Fatalf("ReadFrameFrom() = %d/%v/% X, want %d/%v/% X",
 			got.Mode, got.Quality, got.Data, frame.Mode, frame.Quality, frame.Data)
 	}
 }

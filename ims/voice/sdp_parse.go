@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	_ encoding.BinaryUnmarshaler = (*sdpOffer)(nil)
-	_ encoding.BinaryUnmarshaler = (*MediaDescription)(nil)
+	_ encoding.TextUnmarshaler = (*sdpOffer)(nil)
+	_ encoding.TextUnmarshaler = (*MediaDescription)(nil)
 )
 
 type sdpPreconditionFailureError struct {
@@ -24,20 +24,20 @@ func (e *sdpPreconditionFailureError) Error() string {
 	return fmt.Sprintf("parsing voice SDP: unsupported mandatory %s precondition", e.preconditionType)
 }
 
-// UnmarshalBinary decodes an SDP body into its audio media description.
-func (description *MediaDescription) UnmarshalBinary(data []byte) error {
+// UnmarshalText decodes an SDP body into its audio media description.
+func (description *MediaDescription) UnmarshalText(text []byte) error {
 	*description = MediaDescription{}
 	var offer sdpOffer
-	if err := offer.UnmarshalBinary(data); err != nil {
+	if err := offer.UnmarshalText(text); err != nil {
 		return err
 	}
 	*description = mediaDescriptionFromSDP(offer)
 	return nil
 }
 
-func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
+func (offer *sdpOffer) UnmarshalText(text []byte) error {
 	*offer = sdpOffer{
-		RawSDP:             append([]byte(nil), data...),
+		RawSDP:             append([]byte(nil), text...),
 		Codecs:             make(map[int]AudioCodecConfig),
 		FMTP:               make(map[int]string),
 		UnknownLocalStatus: make(map[string]string),
@@ -49,7 +49,7 @@ func (offer *sdpOffer) UnmarshalBinary(data []byte) error {
 	seenMedia := false
 	sessionDirection := MediaDirectionSendRecv
 	var sessionIP net.IP
-	lines := strings.FieldsFunc(string(data), func(r rune) bool { return r == '\n' || r == '\r' })
+	lines := strings.FieldsFunc(string(text), func(r rune) bool { return r == '\n' || r == '\r' })
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" {

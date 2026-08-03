@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -744,6 +745,12 @@ type nsdsAIDExpiration struct {
 	time.Time
 }
 
+var (
+	_ encoding.TextAppender    = nsdsAIDExpiration{}
+	_ encoding.TextMarshaler   = nsdsAIDExpiration{}
+	_ encoding.TextUnmarshaler = (*nsdsAIDExpiration)(nil)
+)
+
 func (a *nsdsAIDExpiration) UnmarshalText(text []byte) error {
 	value := strings.TrimSpace(string(text))
 	if value == "" {
@@ -762,10 +769,14 @@ func (a *nsdsAIDExpiration) UnmarshalText(text []byte) error {
 }
 
 func (a nsdsAIDExpiration) MarshalText() ([]byte, error) {
+	return a.AppendText(nil)
+}
+
+func (a nsdsAIDExpiration) AppendText(dst []byte) ([]byte, error) {
 	if a.Time.IsZero() {
-		return nil, nil
+		return dst, nil
 	}
-	return []byte(a.Time.Format(time.RFC3339Nano)), nil
+	return append(dst, a.Time.Format(time.RFC3339Nano)...), nil
 }
 
 func (response nsdsResponse) LocationTCOK() bool {

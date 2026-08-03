@@ -135,7 +135,7 @@ func (t *voiceStubTransport) WritePacket(ctx context.Context, data []byte) error
 	t.mu.Unlock()
 	if onWrite != nil {
 		var msg sip.Message
-		if _, err := msg.ReadFrom(bytes.NewReader(data)); err == nil {
+		if _, err := msg.ReadMessage(bytes.NewReader(data)); err == nil {
 			onWrite(msg)
 		}
 	}
@@ -156,7 +156,7 @@ func (t *voiceStubTransport) queue(msg sip.Message) {
 }
 
 func marshalSIPMessageForTest(msg sip.Message) []byte {
-	data, err := msg.MarshalText()
+	data, err := msg.MarshalBinary()
 	if err != nil {
 		panic(err)
 	}
@@ -169,7 +169,7 @@ func (t *voiceStubTransport) countMethod(method string) int {
 	count := 0
 	for _, data := range t.writes {
 		var msg sip.Message
-		if _, err := msg.ReadFrom(bytes.NewReader(data)); err != nil {
+		if _, err := msg.ReadMessage(bytes.NewReader(data)); err != nil {
 			continue
 		}
 		if msg.Method() == method {
@@ -185,7 +185,7 @@ func (t *voiceStubTransport) messagesByMethod(method string) []sip.Message {
 	var messages []sip.Message
 	for _, data := range t.writes {
 		var msg sip.Message
-		if _, err := msg.ReadFrom(bytes.NewReader(data)); err != nil {
+		if _, err := msg.ReadMessage(bytes.NewReader(data)); err != nil {
 			continue
 		}
 		if msg.Method() == method {
@@ -201,7 +201,7 @@ func (t *voiceStubTransport) messagesByStatus(code int, cseqMethod string) []sip
 	var messages []sip.Message
 	for _, data := range t.writes {
 		var msg sip.Message
-		if _, err := msg.ReadFrom(bytes.NewReader(data)); err != nil {
+		if _, err := msg.ReadMessage(bytes.NewReader(data)); err != nil {
 			continue
 		}
 		if msg.StatusCode() == code && (cseqMethod == "" || sip.CSeqMethod(msg.Header("CSeq")) == cseqMethod) {

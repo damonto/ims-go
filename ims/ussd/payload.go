@@ -1,14 +1,13 @@
 package ussd
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-go/ims/sip"
 	"mime"
-	"mime/multipart"
 	"strconv"
 	"strings"
+
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 var errBadInfoPackage = errors.New("bad info package")
@@ -347,12 +346,4 @@ func acceptsMedia(value string) bool {
 		}
 	}
 	return hasXML && hasSDP && hasMixed
-}
-
-func ioReadAll(part *multipart.Part) ([]byte, error) {
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(part); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }

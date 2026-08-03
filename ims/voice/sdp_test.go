@@ -1,6 +1,8 @@
 package voice
 
 import (
+	"bytes"
+	"encoding"
 	"errors"
 	"net"
 	"slices"
@@ -12,7 +14,7 @@ import (
 
 func unmarshalSDP(data []byte) (sdpOffer, error) {
 	var offer sdpOffer
-	if err := offer.UnmarshalBinary(data); err != nil {
+	if err := offer.UnmarshalText(data); err != nil {
 		return sdpOffer{}, err
 	}
 	return offer, nil
@@ -153,7 +155,7 @@ func TestParseSDPInfersStaticRTPPayloads(t *testing.T) {
 	}
 }
 
-func TestMediaDescriptionUnmarshalBinaryPreservesFormats(t *testing.T) {
+func TestMediaDescriptionUnmarshalTextPreservesFormats(t *testing.T) {
 	tests := []struct {
 		name          string
 		sdp           string
@@ -187,8 +189,8 @@ func TestMediaDescriptionUnmarshalBinaryPreservesFormats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var description MediaDescription
-			if err := description.UnmarshalBinary([]byte(tt.sdp)); err != nil {
-				t.Fatalf("UnmarshalBinary() error = %v", err)
+			if err := description.UnmarshalText([]byte(tt.sdp)); err != nil {
+				t.Fatalf("UnmarshalText() error = %v", err)
 			}
 			if description.Profile != defaultRTPProfile || description.PTime != tt.wantPTime || description.MaxPTime != tt.wantMaxPTime || description.Direction != tt.wantDirection {
 				t.Fatalf("MediaDescription = %+v, want profile %s ptime/maxptime %s/%s direction %s", description, defaultRTPProfile, tt.wantPTime, tt.wantMaxPTime, tt.wantDirection)
@@ -1751,6 +1753,50 @@ func TestSDPAudioLineTextRoundTrip(t *testing.T) {
 			}
 			if string(text) != tt.text {
 				t.Fatalf("MarshalText() = %q, want %q", string(text), tt.text)
+			}
+		})
+	}
+}
+
+func TestSDPLineAppendTextPreservesPrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		appender  encoding.TextAppender
+		marshaler encoding.TextMarshaler
+	}{
+		{
+			name:      "connection",
+			appender:  sdpConnectionLine{IP: net.IPv4(192, 0, 2, 1)},
+			marshaler: sdpConnectionLine{IP: net.IPv4(192, 0, 2, 1)},
+		},
+		{
+			name:      "audio",
+			appender:  sdpAudioLine{Port: 49170, Protocol: "RTP/AVP", Payloads: []int{104}},
+			marshaler: sdpAudioLine{Port: 49170, Protocol: "RTP/AVP", Payloads: []int{104}},
+		},
+		{
+			name:      "generic media",
+			appender:  sdpMediaLine{Media: "video", Port: 0, Protocol: "RTP/AVP", Formats: []string{"96"}},
+			marshaler: sdpMediaLine{Media: "video", Port: 0, Protocol: "RTP/AVP", Formats: []string{"96"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefix := make([]byte, 2, 128)
+			copy(prefix, "x=")
+			got, err := tt.appender.AppendText(prefix)
+			if err != nil {
+				t.Fatalf("AppendText() error = %v", err)
+			}
+			want, err := tt.marshaler.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			if !bytes.Equal(got[:2], []byte("x=")) || !bytes.Equal(got[2:], want) {
+				t.Fatalf("AppendText() = %q, want prefix plus %q", got, want)
+			}
+			if !bytes.Equal(prefix, []byte("x=")) {
+				t.Fatalf("prefix = %q, want unchanged", prefix)
 			}
 		})
 	}

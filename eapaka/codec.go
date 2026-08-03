@@ -67,13 +67,20 @@ const (
 )
 
 var (
+	_ encoding.BinaryAppender    = EAPPacket{}
 	_ encoding.BinaryMarshaler   = EAPPacket{}
 	_ encoding.BinaryUnmarshaler = (*EAPPacket)(nil)
+	_ encoding.BinaryAppender    = AKAAttribute{}
 	_ encoding.BinaryMarshaler   = AKAAttribute{}
 	_ encoding.BinaryUnmarshaler = (*AKAAttribute)(nil)
+	_ encoding.BinaryAppender    = AKAMessage{}
 	_ encoding.BinaryMarshaler   = AKAMessage{}
 	_ encoding.BinaryUnmarshaler = (*AKAMessage)(nil)
 	_ encoding.BinaryUnmarshaler = (*AKAChallenge)(nil)
+	_ encoding.BinaryAppender    = IPMSIndication{}
+	_ encoding.BinaryAppender    = KDFInput{}
+	_ encoding.BinaryAppender    = KDF{}
+	_ encoding.BinaryAppender    = Bidding{}
 )
 
 type EAPPacket struct {
@@ -89,6 +96,10 @@ func (p EAPPacket) IsIdentityRequest() bool {
 }
 
 func (p EAPPacket) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p EAPPacket) AppendBinary(dst []byte) ([]byte, error) {
 	switch p.Code {
 	case eapCodeRequest, eapCodeResponse:
 		if !p.HasType {
@@ -109,15 +120,16 @@ func (p EAPPacket) MarshalBinary() ([]byte, error) {
 	if length > eapMaxLen {
 		return nil, fmt.Errorf("marshalling eap packet: length %d exceeds uint16", length)
 	}
-	buf := make([]byte, eapHeaderLen)
-	buf[0] = p.Code
-	buf[1] = p.Identifier
-	binary.BigEndian.PutUint16(buf[2:eapHeaderLen], uint16(length))
+	start := len(dst)
+	dst = append(dst, make([]byte, eapHeaderLen)...)
+	dst[start] = p.Code
+	dst[start+1] = p.Identifier
+	binary.BigEndian.PutUint16(dst[start+2:start+eapHeaderLen], uint16(length))
 	if p.HasType {
-		buf = append(buf, p.Type)
+		dst = append(dst, p.Type)
 	}
-	buf = append(buf, p.Data...)
-	return buf, nil
+	dst = append(dst, p.Data...)
+	return dst, nil
 }
 
 func (p *EAPPacket) UnmarshalBinary(data []byte) error {
@@ -200,6 +212,10 @@ type AKAAttribute struct {
 }
 
 func (a AKAAttribute) MarshalBinary() ([]byte, error) {
+	return a.AppendBinary(nil)
+}
+
+func (a AKAAttribute) AppendBinary(dst []byte) ([]byte, error) {
 	wireLen := len(a.Value) + 2
 	if wireLen%4 != 0 {
 		return nil, fmt.Errorf("marshalling aka attribute: unaligned attribute length %d", wireLen)
@@ -207,9 +223,9 @@ func (a AKAAttribute) MarshalBinary() ([]byte, error) {
 	if wireLen > akaAttributeMaxWireLen {
 		return nil, fmt.Errorf("marshalling aka attribute: length %d exceeds encodable maximum %d", wireLen, akaAttributeMaxWireLen)
 	}
-	buf := []byte{a.Type, byte(wireLen / 4)}
-	buf = append(buf, a.Value...)
-	return buf, nil
+	dst = append(dst, a.Type, byte(wireLen/4))
+	dst = append(dst, a.Value...)
+	return dst, nil
 }
 
 func (a *AKAAttribute) UnmarshalBinary(data []byte) error {
@@ -356,6 +372,10 @@ func (m AKAMessage) verifyMAC(autKey, extra []byte, wantKeyLen int, newHash func
 }
 
 func (m AKAMessage) MarshalBinary() ([]byte, error) {
+	return m.AppendBinary(nil)
+}
+
+func (m AKAMessage) AppendBinary(dst []byte) ([]byte, error) {
 	eapType, err := m.eapType()
 	if err != nil {
 		return nil, err
@@ -370,14 +390,14 @@ func (m AKAMessage) MarshalBinary() ([]byte, error) {
 		if known {
 			seen[attr.Type] = true
 		}
-		encoded, err := attr.MarshalBinary()
+		var err error
+		data, err = attr.AppendBinary(data)
 		if err != nil {
 			return nil, err
 		}
-		data = append(data, encoded...)
 	}
 	packet := EAPPacket{Code: m.Code, Identifier: m.Identifier, Type: eapType, HasType: true, Data: data}
-	return packet.MarshalBinary()
+	return packet.AppendBinary(dst)
 }
 
 func (m AKAMessage) eapType() (byte, error) {

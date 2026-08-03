@@ -2,15 +2,19 @@ package voice
 
 import (
 	"context"
+	"encoding"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"mime"
+	"strings"
+
 	"github.com/damonto/ims-go/ims/pidf"
 	"github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/ims/sip"
-	"mime"
-	"strings"
 )
+
+var _ encoding.TextUnmarshaler = (*currentLocationDiscoveryRequest)(nil)
 
 type currentLocationDiscoveryRequest struct {
 	XMLName      xml.Name  `xml:"requestForLocationInformation"`
@@ -19,16 +23,19 @@ type currentLocationDiscoveryRequest struct {
 	StopSending  *struct{} `xml:"stopSending"`
 }
 
-func (r *currentLocationDiscoveryRequest) UnmarshalBinary(data []byte) error {
-	if len(data) == 0 {
+func (r *currentLocationDiscoveryRequest) UnmarshalText(text []byte) error {
+	if len(text) == 0 {
 		return errors.New("parsing current location discovery: empty body")
 	}
-	if err := xml.Unmarshal(data, r); err != nil {
+	type wireRequest currentLocationDiscoveryRequest
+	var parsed wireRequest
+	if err := xml.Unmarshal(text, &parsed); err != nil {
 		return fmt.Errorf("parsing current location discovery: %w", err)
 	}
-	if r.OneShot == nil && r.StartSending == nil && r.StopSending == nil {
+	if parsed.OneShot == nil && parsed.StartSending == nil && parsed.StopSending == nil {
 		return errors.New("parsing current location discovery: request action is missing")
 	}
+	*r = currentLocationDiscoveryRequest(parsed)
 	return nil
 }
 
@@ -79,7 +86,7 @@ func decodeCurrentLocationDiscoveryINFO(msg sip.Message) (currentLocationDiscove
 		}
 	}
 	var req currentLocationDiscoveryRequest
-	if err := req.UnmarshalBinary(msg.Body); err != nil {
+	if err := req.UnmarshalText(msg.Body); err != nil {
 		return currentLocationDiscoveryRequest{}, sipStatusBadRequest, "Bad Request", err
 	}
 	return req, 0, "", nil

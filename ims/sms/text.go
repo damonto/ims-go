@@ -3,10 +3,12 @@ package sms
 import (
 	"encoding"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const (
@@ -23,10 +25,18 @@ type GSM7 struct {
 type UCS2 string
 
 var (
+	_ encoding.BinaryAppender    = GSM7{}
 	_ encoding.BinaryMarshaler   = GSM7{}
 	_ encoding.BinaryUnmarshaler = (*GSM7)(nil)
+	_ encoding.TextAppender      = GSM7{}
+	_ encoding.TextMarshaler     = GSM7{}
+	_ encoding.TextUnmarshaler   = (*GSM7)(nil)
+	_ encoding.BinaryAppender    = UCS2("")
 	_ encoding.BinaryMarshaler   = UCS2("")
 	_ encoding.BinaryUnmarshaler = (*UCS2)(nil)
+	_ encoding.TextAppender      = UCS2("")
+	_ encoding.TextMarshaler     = UCS2("")
+	_ encoding.TextUnmarshaler   = (*UCS2)(nil)
 )
 
 func NewGSM7(text string) (GSM7, error) {
@@ -38,11 +48,35 @@ func NewGSM7(text string) (GSM7, error) {
 }
 
 func (g GSM7) MarshalBinary() ([]byte, error) {
-	return slices.Clone(g.septets), nil
+	return g.AppendBinary(nil)
+}
+
+func (g GSM7) AppendBinary(dst []byte) ([]byte, error) {
+	return append(dst, g.septets...), nil
 }
 
 func (g *GSM7) UnmarshalBinary(data []byte) error {
 	g.septets = slices.Clone(data)
+	return nil
+}
+
+func (g GSM7) MarshalText() ([]byte, error) {
+	return g.AppendText(nil)
+}
+
+func (g GSM7) AppendText(dst []byte) ([]byte, error) {
+	if err := validateGSM7Septets(g.septets); err != nil {
+		return nil, err
+	}
+	return append(dst, g.String()...), nil
+}
+
+func (g *GSM7) UnmarshalText(text []byte) error {
+	value, err := NewGSM7(string(text))
+	if err != nil {
+		return err
+	}
+	*g = value
 	return nil
 }
 
@@ -59,7 +93,11 @@ func (g GSM7) SeptetCount() int {
 }
 
 func (u UCS2) MarshalBinary() ([]byte, error) {
-	return encodeUCS2Words(utf16.Encode([]rune(string(u)))), nil
+	return u.AppendBinary(nil)
+}
+
+func (u UCS2) AppendBinary(dst []byte) ([]byte, error) {
+	return append(dst, encodeUCS2Words(utf16.Encode([]rune(string(u))))...), nil
 }
 
 func (u *UCS2) UnmarshalBinary(data []byte) error {
@@ -67,6 +105,25 @@ func (u *UCS2) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("decoding UCS2: byte length %d is odd", len(data))
 	}
 	*u = UCS2(decodeUCS2String(data))
+	return nil
+}
+
+func (u UCS2) MarshalText() ([]byte, error) {
+	return u.AppendText(nil)
+}
+
+func (u UCS2) AppendText(dst []byte) ([]byte, error) {
+	if !utf8.ValidString(string(u)) {
+		return nil, errors.New("marshaling UCS2 text: invalid UTF-8")
+	}
+	return append(dst, u...), nil
+}
+
+func (u *UCS2) UnmarshalText(text []byte) error {
+	if !utf8.Valid(text) {
+		return errors.New("parsing UCS2 text: invalid UTF-8")
+	}
+	*u = UCS2(text)
 	return nil
 }
 
@@ -126,6 +183,26 @@ func decodeGSM7Septets(septets []byte) string {
 		b.WriteRune('�')
 	}
 	return b.String()
+}
+
+func validateGSM7Septets(septets []byte) error {
+	for i := 0; i < len(septets); i++ {
+		septet := septets[i]
+		if septet != gsm7EscapeSeptet {
+			if _, ok := gsm7DecodeMap[septet]; !ok {
+				return fmt.Errorf("marshaling GSM7 text: invalid septet 0x%02X", septet)
+			}
+			continue
+		}
+		if i+1 >= len(septets) {
+			return errors.New("marshaling GSM7 text: escape septet is missing its extension")
+		}
+		i++
+		if _, ok := gsm7ExtensionDecodeMap[septets[i]]; !ok {
+			return fmt.Errorf("marshaling GSM7 text: invalid extension septet 0x%02X", septets[i])
+		}
+	}
+	return nil
 }
 
 func gsm7OctetCount(septets int) int {

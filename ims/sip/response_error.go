@@ -1,10 +1,17 @@
 package sip
 
 import (
+	"encoding"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+)
+
+var (
+	_ encoding.TextAppender    = WarningValue{}
+	_ encoding.TextMarshaler   = WarningValue{}
+	_ encoding.TextUnmarshaler = (*WarningValue)(nil)
 )
 
 type WarningValue struct {
@@ -81,6 +88,10 @@ func ParseWarningValues(values []string) []WarningValue {
 }
 
 func (w WarningValue) MarshalText() ([]byte, error) {
+	return w.AppendText(nil)
+}
+
+func (w WarningValue) AppendText(dst []byte) ([]byte, error) {
 	if w.Code < 100 || w.Code > 999 {
 		return nil, fmt.Errorf("marshaling SIP Warning: code %d is not three digits", w.Code)
 	}
@@ -94,7 +105,7 @@ func (w WarningValue) MarshalText() ([]byte, error) {
 	if !validSIPQuotedText(w.Text) {
 		return nil, errors.New("marshaling SIP Warning: text contains an invalid control character")
 	}
-	return fmt.Appendf(nil, `%03d %s "%s"`, w.Code, agent, quoteSIPString(w.Text)), nil
+	return fmt.Appendf(dst, `%03d %s "%s"`, w.Code, agent, quoteSIPString(w.Text)), nil
 }
 
 func (w *WarningValue) UnmarshalText(text []byte) error {

@@ -727,7 +727,7 @@ func (t *gatedCancelTransport) queueRead(msg imssip.Message) {
 }
 
 func marshalSIPMessageForTest(msg imssip.Message) []byte {
-	data, err := msg.MarshalText()
+	data, err := msg.MarshalBinary()
 	if err != nil {
 		panic(err)
 	}

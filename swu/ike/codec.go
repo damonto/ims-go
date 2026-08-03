@@ -25,8 +25,10 @@ const (
 const ikeHeaderSize = 28
 
 var (
+	_ encoding.BinaryAppender    = IKEHeader{}
 	_ encoding.BinaryMarshaler   = IKEHeader{}
 	_ encoding.BinaryUnmarshaler = (*IKEHeader)(nil)
+	_ encoding.BinaryAppender    = IKEPacket{}
 	_ encoding.BinaryMarshaler   = IKEPacket{}
 	_ encoding.BinaryUnmarshaler = (*IKEPacket)(nil)
 )
@@ -43,16 +45,21 @@ type IKEHeader struct {
 }
 
 func (h IKEHeader) MarshalBinary() ([]byte, error) {
-	buf := make([]byte, ikeHeaderSize)
-	binary.BigEndian.PutUint64(buf[0:8], h.InitiatorSPI)
-	binary.BigEndian.PutUint64(buf[8:16], h.ResponderSPI)
-	buf[16] = h.NextPayload
-	buf[17] = h.Version
-	buf[18] = h.ExchangeType
-	buf[19] = h.Flags
-	binary.BigEndian.PutUint32(buf[20:24], h.MessageID)
-	binary.BigEndian.PutUint32(buf[24:28], h.Length)
-	return buf, nil
+	return h.AppendBinary(nil)
+}
+
+func (h IKEHeader) AppendBinary(dst []byte) ([]byte, error) {
+	start := len(dst)
+	dst = append(dst, make([]byte, ikeHeaderSize)...)
+	binary.BigEndian.PutUint64(dst[start:start+8], h.InitiatorSPI)
+	binary.BigEndian.PutUint64(dst[start+8:start+16], h.ResponderSPI)
+	dst[start+16] = h.NextPayload
+	dst[start+17] = h.Version
+	dst[start+18] = h.ExchangeType
+	dst[start+19] = h.Flags
+	binary.BigEndian.PutUint32(dst[start+20:start+24], h.MessageID)
+	binary.BigEndian.PutUint32(dst[start+24:start+28], h.Length)
+	return dst, nil
 }
 
 func (h *IKEHeader) UnmarshalBinary(data []byte) error {
@@ -79,6 +86,10 @@ type IKEPacket struct {
 }
 
 func (p IKEPacket) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p IKEPacket) AppendBinary(dst []byte) ([]byte, error) {
 	firstPayload, body, err := MarshalPayloadChain(p.Payloads)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling ike packet: %w", err)
@@ -86,12 +97,12 @@ func (p IKEPacket) MarshalBinary() ([]byte, error) {
 	header := p.Header
 	header.NextPayload = firstPayload
 	header.Length = uint32(len(body) + ikeHeaderSize)
-	buf, err := header.MarshalBinary()
+	dst, err = header.AppendBinary(dst)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling ike header: %w", err)
 	}
-	buf = append(buf, body...)
-	return buf, nil
+	dst = append(dst, body...)
+	return dst, nil
 }
 
 func (p *IKEPacket) UnmarshalBinary(data []byte) error {

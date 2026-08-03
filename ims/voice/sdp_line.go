@@ -9,8 +9,17 @@ import (
 	"strings"
 )
 
-var _ encoding.TextMarshaler = sdpConnectionLine{}
-var _ encoding.TextUnmarshaler = (*sdpConnectionLine)(nil)
+var (
+	_ encoding.TextAppender    = sdpConnectionLine{}
+	_ encoding.TextMarshaler   = sdpConnectionLine{}
+	_ encoding.TextUnmarshaler = (*sdpConnectionLine)(nil)
+	_ encoding.TextAppender    = sdpAudioLine{}
+	_ encoding.TextMarshaler   = sdpAudioLine{}
+	_ encoding.TextUnmarshaler = (*sdpAudioLine)(nil)
+	_ encoding.TextAppender    = sdpMediaLine{}
+	_ encoding.TextMarshaler   = sdpMediaLine{}
+	_ encoding.TextUnmarshaler = (*sdpMediaLine)(nil)
+)
 
 func parseConnectionLine(line string) (net.IP, error) {
 	var conn sdpConnectionLine
@@ -21,6 +30,10 @@ func parseConnectionLine(line string) (net.IP, error) {
 }
 
 func (l sdpConnectionLine) MarshalText() ([]byte, error) {
+	return l.AppendText(nil)
+}
+
+func (l sdpConnectionLine) AppendText(dst []byte) ([]byte, error) {
 	network := strings.TrimSpace(l.Network)
 	if network == "" {
 		network = sdpNetworkIN
@@ -39,7 +52,7 @@ func (l sdpConnectionLine) MarshalText() ([]byte, error) {
 	if err := validateSDPConnectionAddress(addressType, l.IP); err != nil {
 		return nil, err
 	}
-	return fmt.Appendf(nil, "c=%s %s %s", sdpNetworkIN, strings.ToUpper(addressType), l.IP.String()), nil
+	return fmt.Appendf(dst, "c=%s %s %s", sdpNetworkIN, strings.ToUpper(addressType), l.IP.String()), nil
 }
 
 func (l *sdpConnectionLine) UnmarshalText(text []byte) error {
@@ -78,6 +91,10 @@ func validateSDPConnectionAddress(addressType string, ip net.IP) error {
 }
 
 func (l sdpAudioLine) MarshalText() ([]byte, error) {
+	return l.AppendText(nil)
+}
+
+func (l sdpAudioLine) AppendText(dst []byte) ([]byte, error) {
 	if l.Port <= 0 || l.Port > 65535 {
 		return nil, fmt.Errorf("building voice SDP: invalid audio port %d", l.Port)
 	}
@@ -101,7 +118,7 @@ func (l sdpAudioLine) MarshalText() ([]byte, error) {
 		}
 		payloads = append(payloads, strconv.Itoa(payload))
 	}
-	return fmt.Appendf(nil, "m=audio %s %s %s", port, l.Protocol, strings.Join(payloads, " ")), nil
+	return fmt.Appendf(dst, "m=audio %s %s %s", port, l.Protocol, strings.Join(payloads, " ")), nil
 }
 
 func (l *sdpAudioLine) UnmarshalText(text []byte) error {
@@ -127,21 +144,63 @@ func (l *sdpAudioLine) UnmarshalText(text []byte) error {
 }
 
 func parseMediaLine(line string) (sdpMediaLine, error) {
+	var media sdpMediaLine
+	if err := media.UnmarshalText([]byte(line)); err != nil {
+		return sdpMediaLine{}, err
+	}
+	return media, nil
+}
+
+func (l sdpMediaLine) MarshalText() ([]byte, error) {
+	return l.AppendText(nil)
+}
+
+func (l sdpMediaLine) AppendText(dst []byte) ([]byte, error) {
+	if strings.TrimSpace(l.Media) == "" {
+		return nil, errors.New("building voice SDP: media is empty")
+	}
+	if l.Port < 0 || l.Port > 65535 {
+		return nil, fmt.Errorf("building voice SDP: invalid media port %d", l.Port)
+	}
+	if l.PortCount < 0 || l.PortCount > 65535 {
+		return nil, fmt.Errorf("building voice SDP: invalid media port count %d", l.PortCount)
+	}
+	if strings.TrimSpace(l.Protocol) == "" {
+		return nil, errors.New("building voice SDP: media protocol is empty")
+	}
+	port := strconv.Itoa(l.Port)
+	if l.PortCount > 0 {
+		port += "/" + strconv.Itoa(l.PortCount)
+	}
+	dst = fmt.Appendf(dst, "m=%s %s %s", l.Media, port, l.Protocol)
+	for _, format := range l.Formats {
+		if strings.TrimSpace(format) == "" || strings.ContainsAny(format, " \t\r\n") {
+			return nil, fmt.Errorf("building voice SDP: invalid media format %q", format)
+		}
+		dst = append(dst, ' ')
+		dst = append(dst, format...)
+	}
+	return dst, nil
+}
+
+func (l *sdpMediaLine) UnmarshalText(text []byte) error {
+	line := string(text)
 	fields := strings.Fields(strings.TrimPrefix(line, "m="))
 	if len(fields) < 3 {
-		return sdpMediaLine{}, fmt.Errorf("parsing voice SDP: invalid media line %q", line)
+		return fmt.Errorf("parsing voice SDP: invalid media line %q", line)
 	}
 	port, portCount, ok := parseMediaPort(fields[1], 0)
 	if !ok {
-		return sdpMediaLine{}, fmt.Errorf("parsing voice SDP: invalid media port %q", fields[1])
+		return fmt.Errorf("parsing voice SDP: invalid media port %q", fields[1])
 	}
-	return sdpMediaLine{
+	*l = sdpMediaLine{
 		Media:     fields[0],
 		Port:      port,
 		PortCount: portCount,
 		Protocol:  fields[2],
 		Formats:   append([]string(nil), fields[3:]...),
-	}, nil
+	}
+	return nil
 }
 
 func parseMediaPort(value string, minimum int) (port, count int, ok bool) {

@@ -39,12 +39,14 @@ const (
 )
 
 var (
+	_ encoding.BinaryAppender    = IPPacket{}
 	_ encoding.BinaryMarshaler   = IPPacket{}
 	_ encoding.BinaryUnmarshaler = (*IPPacket)(nil)
+	_ encoding.BinaryAppender    = UDPSegment{}
 	_ encoding.BinaryMarshaler   = UDPSegment{}
-	_ encoding.BinaryUnmarshaler = (*UDPSegment)(nil)
+	_ encoding.BinaryAppender    = TCPSegment{}
 	_ encoding.BinaryMarshaler   = TCPSegment{}
-	_ encoding.BinaryUnmarshaler = (*TCPSegment)(nil)
+	_ encoding.BinaryAppender    = InnerPacket{}
 	_ encoding.BinaryMarshaler   = InnerPacket{}
 	_ encoding.BinaryUnmarshaler = (*InnerPacket)(nil)
 )
@@ -136,40 +138,47 @@ func DecodePayload(proto byte, srcIP, dstIP net.IP, payload []byte) (InnerPacket
 }
 
 func (p IPPacket) MarshalBinary() ([]byte, error) {
-	version, src, dst, err := normalizeIPPair(p.SrcIP, p.DstIP, p.Version)
+	return p.AppendBinary(nil)
+}
+
+func (p IPPacket) AppendBinary(dst []byte) ([]byte, error) {
+	version, srcIP, dstIP, err := normalizeIPPair(p.SrcIP, p.DstIP, p.Version)
 	if err != nil {
 		return nil, err
 	}
-	payload := append([]byte(nil), p.Payload...)
 	switch version {
 	case IPVersion4:
-		if len(payload) > maxIPPacketBytes-20 {
-			return nil, fmt.Errorf("marshalling ipv4 packet: payload length %d exceeds %d", len(payload), maxIPPacketBytes-20)
+		if len(p.Payload) > maxIPPacketBytes-20 {
+			return nil, fmt.Errorf("marshalling ipv4 packet: payload length %d exceeds %d", len(p.Payload), maxIPPacketBytes-20)
 		}
-		packet := make([]byte, 20+len(payload))
+		start := len(dst)
+		dst = append(dst, make([]byte, 20)...)
+		dst = append(dst, p.Payload...)
+		packet := dst[start:]
 		packet[0] = 0x45
 		packet[1] = 0x00
 		binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
 		packet[8] = 64
 		packet[9] = p.Protocol
-		copy(packet[12:16], src.To4())
-		copy(packet[16:20], dst.To4())
+		copy(packet[12:16], srcIP.To4())
+		copy(packet[16:20], dstIP.To4())
 		binary.BigEndian.PutUint16(packet[10:12], ipv4HeaderChecksum(packet[:20]))
-		copy(packet[20:], payload)
-		return packet, nil
+		return dst, nil
 	case IPVersion6:
-		if len(payload) > maxIPPayloadBytes {
-			return nil, fmt.Errorf("marshalling ipv6 packet: payload length %d exceeds %d", len(payload), maxIPPayloadBytes)
+		if len(p.Payload) > maxIPPayloadBytes {
+			return nil, fmt.Errorf("marshalling ipv6 packet: payload length %d exceeds %d", len(p.Payload), maxIPPayloadBytes)
 		}
-		packet := make([]byte, 40+len(payload))
+		start := len(dst)
+		dst = append(dst, make([]byte, 40)...)
+		dst = append(dst, p.Payload...)
+		packet := dst[start:]
 		packet[0] = 0x60
-		binary.BigEndian.PutUint16(packet[4:6], uint16(len(payload)))
+		binary.BigEndian.PutUint16(packet[4:6], uint16(len(p.Payload)))
 		packet[6] = p.Protocol
 		packet[7] = 64
-		copy(packet[8:24], src.To16())
-		copy(packet[24:40], dst.To16())
-		copy(packet[40:], payload)
-		return packet, nil
+		copy(packet[8:24], srcIP.To16())
+		copy(packet[24:40], dstIP.To16())
+		return dst, nil
 	default:
 		return nil, fmt.Errorf("marshalling ip packet: unsupported ip version %d", version)
 	}
@@ -197,6 +206,10 @@ func (p *IPPacket) UnmarshalBinary(data []byte) error {
 }
 
 func (s UDPSegment) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(nil)
+}
+
+func (s UDPSegment) AppendBinary(dst []byte) ([]byte, error) {
 	if s.Src == nil || s.Dst == nil {
 		return nil, errors.New("marshalling udp segment: endpoint is nil")
 	}
@@ -206,31 +219,29 @@ func (s UDPSegment) MarshalBinary() ([]byte, error) {
 	if err := validateTransportPort("destination", s.Dst.Port); err != nil {
 		return nil, fmt.Errorf("marshalling udp segment: %w", err)
 	}
-	_, src, dst, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
+	_, srcIP, dstIP, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
 	if err != nil {
 		return nil, err
 	}
 	if len(s.Payload) > maxUDPSegmentBytes-8 {
 		return nil, fmt.Errorf("marshalling udp segment: payload length %d exceeds %d", len(s.Payload), maxUDPSegmentBytes-8)
 	}
-	udp := make([]byte, 8+len(s.Payload))
+	start := len(dst)
+	dst = append(dst, make([]byte, 8)...)
+	dst = append(dst, s.Payload...)
+	udp := dst[start:]
 	binary.BigEndian.PutUint16(udp[0:2], uint16(s.Src.Port))
 	binary.BigEndian.PutUint16(udp[2:4], uint16(s.Dst.Port))
 	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
-	copy(udp[8:], s.Payload)
-	if src.To4() != nil {
+	if srcIP.To4() != nil {
 		if s.ZeroIPv4Checksum {
-			return udp, nil
+			return dst, nil
 		}
-		binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv4(src.To4(), dst.To4(), udp)))
-		return udp, nil
+		binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv4(srcIP.To4(), dstIP.To4(), udp)))
+		return dst, nil
 	}
-	binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv6(src.To16(), dst.To16(), udp)))
-	return udp, nil
-}
-
-func (s *UDPSegment) UnmarshalBinary(data []byte) error {
-	return s.decode(data, ipFromUDPAddr(s.Src), ipFromUDPAddr(s.Dst))
+	binary.BigEndian.PutUint16(udp[6:8], udpWireChecksum(udpChecksumIPv6(srcIP.To16(), dstIP.To16(), udp)))
+	return dst, nil
 }
 
 func (s *UDPSegment) decode(data []byte, srcIP, dstIP net.IP) error {
@@ -243,6 +254,10 @@ func (s *UDPSegment) decode(data []byte, srcIP, dstIP net.IP) error {
 }
 
 func (s TCPSegment) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(nil)
+}
+
+func (s TCPSegment) AppendBinary(dst []byte) ([]byte, error) {
 	if s.Src == nil || s.Dst == nil {
 		return nil, errors.New("marshalling tcp segment: endpoint is nil")
 	}
@@ -252,7 +267,7 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	if err := validateTransportPort("destination", s.Dst.Port); err != nil {
 		return nil, fmt.Errorf("marshalling tcp segment: %w", err)
 	}
-	_, src, dst, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
+	_, srcIP, dstIP, err := normalizeIPPair(s.Src.IP, s.Dst.IP, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +280,10 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	if len(s.Payload) > maxTCPSegmentBytes-headerLen {
 		return nil, fmt.Errorf("marshalling tcp segment: payload length %d exceeds %d", len(s.Payload), maxTCPSegmentBytes-headerLen)
 	}
-	tcp := make([]byte, headerLen+len(s.Payload))
+	start := len(dst)
+	dst = append(dst, make([]byte, headerLen)...)
+	dst = append(dst, s.Payload...)
+	tcp := dst[start:]
 	binary.BigEndian.PutUint16(tcp[0:2], uint16(s.Src.Port))
 	binary.BigEndian.PutUint16(tcp[2:4], uint16(s.Dst.Port))
 	binary.BigEndian.PutUint32(tcp[4:8], s.Seq)
@@ -274,13 +292,12 @@ func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	tcp[13] = s.Flags
 	binary.BigEndian.PutUint16(tcp[14:16], s.Window)
 	copy(tcp[20:headerLen], options)
-	copy(tcp[headerLen:], s.Payload)
-	if src.To4() != nil {
-		binary.BigEndian.PutUint16(tcp[16:18], tcpChecksumIPv4(src.To4(), dst.To4(), tcp))
-		return tcp, nil
+	if srcIP.To4() != nil {
+		binary.BigEndian.PutUint16(tcp[16:18], tcpChecksumIPv4(srcIP.To4(), dstIP.To4(), tcp))
+		return dst, nil
 	}
-	binary.BigEndian.PutUint16(tcp[16:18], tcpChecksumIPv6(src.To16(), dst.To16(), tcp))
-	return tcp, nil
+	binary.BigEndian.PutUint16(tcp[16:18], tcpChecksumIPv6(srcIP.To16(), dstIP.To16(), tcp))
+	return dst, nil
 }
 
 func validateTransportPort(name string, port int) error {
@@ -288,10 +305,6 @@ func validateTransportPort(name string, port int) error {
 		return fmt.Errorf("%s port %d is out of range", name, port)
 	}
 	return nil
-}
-
-func (s *TCPSegment) UnmarshalBinary(data []byte) error {
-	return s.decode(data, ipFromTCPAddr(s.Src), ipFromTCPAddr(s.Dst))
 }
 
 func (s *TCPSegment) decode(data []byte, srcIP, dstIP net.IP) error {
@@ -304,6 +317,10 @@ func (s *TCPSegment) decode(data []byte, srcIP, dstIP net.IP) error {
 }
 
 func (p InnerPacket) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p InnerPacket) AppendBinary(dst []byte) ([]byte, error) {
 	ip := p.IP
 	switch {
 	case p.UDP != nil:
@@ -336,7 +353,7 @@ func (p InnerPacket) MarshalBinary() ([]byte, error) {
 			return nil, errors.New("marshalling inner packet: payload is empty")
 		}
 	}
-	return ip.MarshalBinary()
+	return ip.AppendBinary(dst)
 }
 
 func (p *InnerPacket) UnmarshalBinary(data []byte) error {

@@ -7,6 +7,7 @@ import (
 )
 
 var (
+	_ encoding.BinaryAppender    = rpMessage{}
 	_ encoding.BinaryMarshaler   = rpMessage{}
 	_ encoding.BinaryUnmarshaler = (*rpMessage)(nil)
 )
@@ -177,6 +178,10 @@ func newRPSMMAMessage(reference byte) rpMessage {
 }
 
 func (m rpMessage) MarshalBinary() ([]byte, error) {
+	return m.AppendBinary(nil)
+}
+
+func (m rpMessage) AppendBinary(dst []byte) ([]byte, error) {
 	switch m.Type {
 	case rpDataMSToNetwork, rpDataNetworkToMS:
 		if len(m.TPDU) == 0 {
@@ -193,34 +198,34 @@ func (m rpMessage) MarshalBinary() ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("marshalling RP-DATA destination address: %w", err)
 		}
-		payload := []byte{m.Type, m.Reference}
-		payload = append(payload, originator...)
-		payload = append(payload, destination...)
-		payload = append(payload, byte(len(m.TPDU)))
-		payload = append(payload, m.TPDU...)
-		return payload, nil
+		dst = append(dst, m.Type, m.Reference)
+		dst = append(dst, originator...)
+		dst = append(dst, destination...)
+		dst = append(dst, byte(len(m.TPDU)))
+		dst = append(dst, m.TPDU...)
+		return dst, nil
 	case rpAckMSToNetwork, rpAckNetworkToMS:
 		if len(m.UserData) > maxRPAckErrorUserDataOctets {
 			return nil, fmt.Errorf("marshalling RP-ACK: user data too long %d", len(m.UserData))
 		}
-		payload := []byte{m.Type, m.Reference}
+		dst = append(dst, m.Type, m.Reference)
 		if len(m.UserData) == 0 {
-			return payload, nil
+			return dst, nil
 		}
-		payload = append(payload, marshalRPUserData(m.UserData)...)
-		return payload, nil
+		dst = append(dst, marshalRPUserData(m.UserData)...)
+		return dst, nil
 	case rpErrorMSToNetwork, rpErrorNetworkToMS:
 		if len(m.UserData) > maxRPAckErrorUserDataOctets {
 			return nil, fmt.Errorf("marshalling RP-ERROR: user data too long %d", len(m.UserData))
 		}
-		payload := []byte{m.Type, m.Reference, rpCauseValueOctets, m.Cause}
+		dst = append(dst, m.Type, m.Reference, rpCauseValueOctets, m.Cause)
 		if len(m.UserData) == 0 {
-			return payload, nil
+			return dst, nil
 		}
-		payload = append(payload, marshalRPUserData(m.UserData)...)
-		return payload, nil
+		dst = append(dst, marshalRPUserData(m.UserData)...)
+		return dst, nil
 	case rpSMMAMSToNetwork:
-		return []byte{m.Type, m.Reference}, nil
+		return append(dst, m.Type, m.Reference), nil
 	default:
 		return nil, fmt.Errorf("marshalling RP: unsupported type 0x%02X", m.Type)
 	}

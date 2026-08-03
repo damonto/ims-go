@@ -63,7 +63,7 @@ func (t *stubTransport) queue(msg sip.Message) {
 }
 
 func marshalSIPMessageForTest(msg sip.Message) []byte {
-	data, err := msg.MarshalText()
+	data, err := msg.MarshalBinary()
 	if err != nil {
 		panic(err)
 	}

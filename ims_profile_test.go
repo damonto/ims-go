@@ -1,6 +1,7 @@
 package ims
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"slices"
@@ -13,6 +14,67 @@ import (
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 	usim "github.com/damonto/wwan-go/sim"
 )
+
+func TestIMSProfileDurationText(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want time.Duration
+	}{
+		{name: "zero", text: "0s", want: 0},
+		{name: "seconds", text: "90s", want: 90 * time.Second},
+		{name: "combined units", text: "1m30s", want: 90 * time.Second},
+		{name: "negative", text: "-250ms", want: -250 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got imsProfileDuration
+			if err := got.UnmarshalText([]byte(tt.text)); err != nil {
+				t.Fatalf("UnmarshalText(%q) error = %v", tt.text, err)
+			}
+			if got.Duration != tt.want {
+				t.Fatalf("UnmarshalText(%q) = %v, want %v", tt.text, got.Duration, tt.want)
+			}
+
+			marshaled, err := got.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText() error = %v", err)
+			}
+			appended, err := got.AppendText([]byte("prefix:"))
+			if err != nil {
+				t.Fatalf("AppendText() error = %v", err)
+			}
+			if !bytes.Equal(marshaled, appended[len("prefix:"):]) {
+				t.Errorf("MarshalText() = %q, AppendText() representation = %q", marshaled, appended[len("prefix:"):])
+			}
+			if !bytes.HasPrefix(appended, []byte("prefix:")) {
+				t.Errorf("AppendText() = %q, want prefix preserved", appended)
+			}
+		})
+	}
+}
+
+func TestIMSProfileDurationUnmarshalTextError(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "empty", text: ""},
+		{name: "missing unit", text: "90"},
+		{name: "unknown unit", text: "1day"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := imsProfileDuration{Duration: time.Minute}
+			if err := got.UnmarshalText([]byte(tt.text)); err == nil {
+				t.Fatalf("UnmarshalText(%q) error = nil, want error", tt.text)
+			}
+			if got.Duration != time.Minute {
+				t.Errorf("UnmarshalText(%q) changed duration to %v", tt.text, got.Duration)
+			}
+		})
+	}
+}
 
 type wfcTestCard struct{}
 type paddedTwoDigitMNCCard struct{}

@@ -61,6 +61,7 @@ const (
 )
 
 var (
+	_ encoding.BinaryAppender    = ESPPacket{}
 	_ encoding.BinaryMarshaler   = ESPPacket{}
 	_ encoding.BinaryUnmarshaler = (*ESPPacket)(nil)
 )
@@ -87,19 +88,24 @@ func validateESPHeader(spi, sequence uint32) error {
 }
 
 func (p ESPPacket) MarshalBinary() ([]byte, error) {
+	return p.AppendBinary(nil)
+}
+
+func (p ESPPacket) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateESPHeader(p.SPI, p.Sequence); err != nil {
 		return nil, fmt.Errorf("marshalling esp packet: %w", err)
 	}
-	buf := make([]byte, espHeaderLen)
-	binary.BigEndian.PutUint32(buf[:espSPILen], p.SPI)
-	binary.BigEndian.PutUint32(buf[espSPILen:espHeaderLen], p.Sequence)
-	buf = append(buf, p.Payload...)
+	start := len(dst)
+	dst = append(dst, make([]byte, espHeaderLen)...)
+	binary.BigEndian.PutUint32(dst[start:start+espSPILen], p.SPI)
+	binary.BigEndian.PutUint32(dst[start+espSPILen:start+espHeaderLen], p.Sequence)
+	dst = append(dst, p.Payload...)
 	padLen := paddingLength(len(p.Payload)+espTrailerLen, espDefaultAlign)
 	for i := 1; i <= padLen; i++ {
-		buf = append(buf, byte(i))
+		dst = append(dst, byte(i))
 	}
-	buf = append(buf, byte(padLen), p.NextHeader)
-	return buf, nil
+	dst = append(dst, byte(padLen), p.NextHeader)
+	return dst, nil
 }
 
 func (p *ESPPacket) UnmarshalBinary(data []byte) error {

@@ -7,6 +7,7 @@ import (
 )
 
 var (
+	_ encoding.BinaryAppender    = deliverTPDU{}
 	_ encoding.BinaryMarshaler   = deliverTPDU{}
 	_ encoding.BinaryUnmarshaler = (*deliverTPDU)(nil)
 )
@@ -28,6 +29,10 @@ func newDeliverTPDU(from string, part userDataPart) deliverTPDU {
 }
 
 func (tp deliverTPDU) MarshalBinary() ([]byte, error) {
+	return tp.AppendBinary(nil)
+}
+
+func (tp deliverTPDU) AppendBinary(dst []byte) ([]byte, error) {
 	from, err := encodeTPAddress(tp.From)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling SMS-DELIVER originator address: %w", err)
@@ -36,14 +41,13 @@ func (tp deliverTPDU) MarshalBinary() ([]byte, error) {
 	if tp.Part.udhi {
 		firstOctet |= tpduUserDataHeaderFlag
 	}
-	payload := make([]byte, 0, 32+len(tp.Part.userData))
-	payload = append(payload, firstOctet)
-	payload = append(payload, from...)
-	payload = append(payload, tp.Part.pid, tp.Part.dcs)
-	payload = append(payload, tpduZeroTimestamp[:]...)
-	payload = append(payload, byte(tp.Part.udl))
-	payload = append(payload, tp.Part.userData...)
-	return payload, nil
+	dst = append(dst, firstOctet)
+	dst = append(dst, from...)
+	dst = append(dst, tp.Part.pid, tp.Part.dcs)
+	dst = append(dst, tpduZeroTimestamp[:]...)
+	dst = append(dst, byte(tp.Part.udl))
+	dst = append(dst, tp.Part.userData...)
+	return dst, nil
 }
 
 func decodeDeliverFields(data []byte) (deliverFields, error) {

@@ -54,8 +54,8 @@ func (h *FrameHeader) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-// ReadFrom reads one AMR-NB ToC byte from r.
-func (h *FrameHeader) ReadFrom(r io.Reader) (int64, error) {
+// ReadHeaderFrom reads one AMR-NB ToC byte from r.
+func (h *FrameHeader) ReadHeaderFrom(r io.Reader) (int64, error) {
 	var header amrpayload.Header
 	n, err := frameSpec.ReadHeader(r, &header)
 	if err != nil {
@@ -90,8 +90,8 @@ func (f Frame) WriteTo(w io.Writer) (int64, error) {
 	return frameSpec.WriteFrame(w, f.payloadFrame())
 }
 
-// ReadFrom reads one AMR-NB binary frame from r.
-func (f *Frame) ReadFrom(r io.Reader) (int64, error) {
+// ReadFrameFrom reads one AMR-NB binary frame from r.
+func (f *Frame) ReadFrameFrom(r io.Reader) (int64, error) {
 	frame := amrpayload.Frame{Data: f.Data}
 	n, err := frameSpec.ReadFrame(r, &frame)
 	if err != nil {

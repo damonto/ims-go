@@ -514,14 +514,14 @@ func buildPreconditionFailureSDP(remote []byte, failure sdpPreconditionFailureEr
 }
 
 func appendRejectedMediaLine(b *strings.Builder, media sdpMediaLine) {
-	if media.Media == "" || media.Protocol == "" {
+	media.Port = 0
+	media.PortCount = 0
+	line, err := media.MarshalText()
+	if err != nil {
 		return
 	}
-	line := "m=" + media.Media + " 0 " + media.Protocol
-	if len(media.Formats) > 0 {
-		line += " " + strings.Join(media.Formats, " ")
-	}
-	fmt.Fprintf(b, "%s\r\n", line)
+	b.Write(line)
+	b.WriteString("\r\n")
 }
 
 func appendRTCPBandwidth(b *strings.Builder, rs int, rr int) {

@@ -90,10 +90,14 @@ type IPMSIndication struct {
 }
 
 func (i IPMSIndication) MarshalBinary() ([]byte, error) {
+	return i.AppendBinary(nil)
+}
+
+func (i IPMSIndication) AppendBinary(dst []byte) ([]byte, error) {
 	if !validIPMSSupport(i.Support) {
 		return nil, fmt.Errorf("marshalling ipms indication: invalid support %d", i.Support)
 	}
-	return AKAAttribute{Type: akaAttrIPMSInd, Value: []byte{0x00, byte(i.Support)}}.MarshalBinary()
+	return AKAAttribute{Type: akaAttrIPMSInd, Value: []byte{0x00, byte(i.Support)}}.AppendBinary(dst)
 }
 
 type IPMSResult struct {
@@ -117,6 +121,10 @@ type KDF struct {
 }
 
 func (i KDFInput) MarshalBinary() ([]byte, error) {
+	return i.AppendBinary(nil)
+}
+
+func (i KDFInput) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateAKANetworkName(i.NetworkName); err != nil {
 		return nil, fmt.Errorf("marshalling kdf input: %w", err)
 	}
@@ -126,7 +134,7 @@ func (i KDFInput) MarshalBinary() ([]byte, error) {
 	for (len(value)+akaAttributeReservedLen)%akaAttributeBlockSize != 0 {
 		value = append(value, 0x00)
 	}
-	return AKAAttribute{Type: akaAttrKDFInput, Value: value}.MarshalBinary()
+	return AKAAttribute{Type: akaAttrKDFInput, Value: value}.AppendBinary(dst)
 }
 
 func (i *KDFInput) UnmarshalBinary(data []byte) error {
@@ -143,7 +151,11 @@ func (i *KDFInput) UnmarshalBinary(data []byte) error {
 }
 
 func (k KDF) MarshalBinary() ([]byte, error) {
-	return buildAKAUint16Attribute(akaAttrKDF, k.Version).MarshalBinary()
+	return k.AppendBinary(nil)
+}
+
+func (k KDF) AppendBinary(dst []byte) ([]byte, error) {
+	return buildAKAUint16Attribute(akaAttrKDF, k.Version).AppendBinary(dst)
 }
 
 func (k *KDF) UnmarshalBinary(data []byte) error {
@@ -160,11 +172,15 @@ func (k *KDF) UnmarshalBinary(data []byte) error {
 }
 
 func (b Bidding) MarshalBinary() ([]byte, error) {
+	return b.AppendBinary(nil)
+}
+
+func (b Bidding) AppendBinary(dst []byte) ([]byte, error) {
 	flags := uint16(0)
 	if b.SupportsAKAPrime {
 		flags = akaBiddingSupportsAKAPrimeMask
 	}
-	return buildAKAUint16Attribute(akaAttrBidding, flags).MarshalBinary()
+	return buildAKAUint16Attribute(akaAttrBidding, flags).AppendBinary(dst)
 }
 
 func (b *Bidding) UnmarshalBinary(data []byte) error {
@@ -306,11 +322,11 @@ func rejectUnrecognizedAKAAttributes(attrs []AKAAttribute) error {
 func marshalAKAAttributes(attrs []AKAAttribute) ([]byte, error) {
 	buf := make([]byte, 0)
 	for _, attr := range attrs {
-		encoded, err := attr.MarshalBinary()
+		var err error
+		buf, err = attr.AppendBinary(buf)
 		if err != nil {
 			return nil, err
 		}
-		buf = append(buf, encoded...)
 	}
 	return buf, nil
 }

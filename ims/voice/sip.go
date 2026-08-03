@@ -2,6 +2,7 @@ package voice
 
 import (
 	"bytes"
+	"encoding"
 	"errors"
 	"fmt"
 	"github.com/damonto/ims-go/ims/pidf"
@@ -248,14 +249,27 @@ type minSEHeader struct {
 	params  []string
 }
 
+var (
+	_ encoding.TextAppender    = minSEHeader{}
+	_ encoding.TextMarshaler   = minSEHeader{}
+	_ encoding.TextUnmarshaler = (*minSEHeader)(nil)
+	_ encoding.TextAppender    = sessionExpiresHeader{}
+	_ encoding.TextMarshaler   = sessionExpiresHeader{}
+	_ encoding.TextUnmarshaler = (*sessionExpiresHeader)(nil)
+)
+
 func (h minSEHeader) MarshalText() ([]byte, error) {
+	return h.AppendText(nil)
+}
+
+func (h minSEHeader) AppendText(dst []byte) ([]byte, error) {
 	if h.seconds < durationSeconds(defaultMinSessionExpires) {
 		return nil, fmt.Errorf("building Min-SE: invalid delta %d", h.seconds)
 	}
 	parts := make([]string, 0, len(h.params)+1)
 	parts = append(parts, strconv.Itoa(h.seconds))
 	parts = append(parts, h.params...)
-	return []byte(strings.Join(parts, ";")), nil
+	return append(dst, strings.Join(parts, ";")...), nil
 }
 
 func (h *minSEHeader) UnmarshalText(text []byte) error {
@@ -302,6 +316,10 @@ func (h sessionExpiresHeader) String() string {
 }
 
 func (h sessionExpiresHeader) MarshalText() ([]byte, error) {
+	return h.AppendText(nil)
+}
+
+func (h sessionExpiresHeader) AppendText(dst []byte) ([]byte, error) {
 	if h.seconds <= 0 {
 		return nil, fmt.Errorf("building Session-Expires: invalid delta %d", h.seconds)
 	}
@@ -314,7 +332,7 @@ func (h sessionExpiresHeader) MarshalText() ([]byte, error) {
 	if h.refresher != "" {
 		parts = append(parts, "refresher="+h.refresher)
 	}
-	return []byte(strings.Join(parts, ";")), nil
+	return append(dst, strings.Join(parts, ";")...), nil
 }
 
 func (h *sessionExpiresHeader) UnmarshalText(text []byte) error {

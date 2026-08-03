@@ -14,8 +14,10 @@ import (
 )
 
 var (
+	_ encoding.TextAppender      = xmlBody{}
 	_ encoding.TextMarshaler     = xmlBody{}
 	_ encoding.TextUnmarshaler   = (*xmlBody)(nil)
+	_ encoding.BinaryAppender    = multipartBody{}
 	_ encoding.BinaryMarshaler   = multipartBody{}
 	_ encoding.BinaryUnmarshaler = (*multipartBody)(nil)
 	_ xml.Unmarshaler            = (*xmlPayload)(nil)
@@ -32,6 +34,10 @@ type multipartBody struct {
 }
 
 func (b xmlBody) MarshalText() ([]byte, error) {
+	return b.AppendText(nil)
+}
+
+func (b xmlBody) AppendText(dst []byte) ([]byte, error) {
 	language := strings.TrimSpace(b.Message.Language)
 	if err := validateLanguage(language); err != nil {
 		return nil, err
@@ -61,7 +67,8 @@ func (b xmlBody) MarshalText() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encoding USSD XML: %w", err)
 	}
-	return append([]byte(xml.Header), body...), nil
+	dst = append(dst, xml.Header...)
+	return append(dst, body...), nil
 }
 
 func (b *xmlBody) UnmarshalText(text []byte) error {
@@ -231,8 +238,12 @@ func validateLanguage(language string) error {
 }
 
 func (b multipartBody) MarshalBinary() ([]byte, error) {
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
+	return b.AppendBinary(nil)
+}
+
+func (b multipartBody) AppendBinary(dst []byte) ([]byte, error) {
+	buf := bytes.NewBuffer(dst)
+	writer := multipart.NewWriter(buf)
 	if err := writer.SetBoundary(b.Boundary); err != nil {
 		return nil, fmt.Errorf("building multipart body: %w", err)
 	}
@@ -262,7 +273,7 @@ func (b *multipartBody) UnmarshalBinary(data []byte) error {
 			}
 			return fmt.Errorf("parsing multipart body: %w", err)
 		}
-		body, err := ioReadAll(part)
+		body, err := io.ReadAll(part)
 		if err != nil {
 			return fmt.Errorf("reading multipart part: %w", err)
 		}

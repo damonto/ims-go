@@ -2,6 +2,7 @@ package registration
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -9,6 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+)
+
+var (
+	_ encoding.TextAppender    = regInfo{}
+	_ encoding.TextMarshaler   = regInfo{}
+	_ encoding.TextUnmarshaler = (*regInfo)(nil)
+	_ io.ReaderFrom            = (*regInfo)(nil)
+	_ io.WriterTo              = regInfo{}
 )
 
 const (
@@ -86,6 +95,10 @@ func (i *regInfo) UnmarshalText(text []byte) error {
 }
 
 func (i regInfo) MarshalText() ([]byte, error) {
+	return i.AppendText(nil)
+}
+
+func (i regInfo) AppendText(dst []byte) ([]byte, error) {
 	if _, ok := i.version(); !ok {
 		return nil, fmtRegInfoError("version must be a 32-bit non-negative integer")
 	}
@@ -98,7 +111,11 @@ func (i regInfo) MarshalText() ([]byte, error) {
 	}
 	type regInfoXML regInfo
 	out := regInfoXML(i)
-	return xml.Marshal(out)
+	text, err := xml.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	return append(dst, text...), nil
 }
 
 func (i *regInfo) ReadFrom(r io.Reader) (int64, error) {

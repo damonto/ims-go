@@ -2,6 +2,7 @@ package ike
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/binary"
 	"net"
 	"strings"
@@ -83,6 +84,52 @@ func TestIKEPacketRoundTrip(t *testing.T) {
 			}
 			if !bytes.Equal(nonce.Data, bytes.Repeat([]byte{0x01}, nonceDataMinLen)) {
 				t.Fatalf("NoncePayload.Data = %x", nonce.Data)
+			}
+		})
+	}
+}
+
+func TestAppendBinaryPreservesPrefix(t *testing.T) {
+	packet := IKEPacket{
+		Header: IKEHeader{Version: ikeVersion20, ExchangeType: exchangeTypeIKESAInit},
+		Payloads: []Payload{
+			&NoncePayload{Data: bytes.Repeat([]byte{0x01}, nonceDataMinLen)},
+		},
+	}
+	tests := []struct {
+		name      string
+		appender  encoding.BinaryAppender
+		marshaler encoding.BinaryMarshaler
+	}{
+		{
+			name:      "header",
+			appender:  IKEHeader{Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Length: ikeHeaderSize},
+			marshaler: IKEHeader{Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Length: ikeHeaderSize},
+		},
+		{name: "packet", appender: packet, marshaler: packet},
+		{
+			name:      "transform",
+			appender:  Transform{TransformType: 1, ID: 12, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}},
+			marshaler: Transform{TransformType: 1, ID: 12, Attributes: []Attribute{NewTVAttribute(transformAttrKeyLength, 256)}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefix := make([]byte, 2, 512)
+			copy(prefix, []byte{0xaa, 0xbb})
+			got, err := tt.appender.AppendBinary(prefix)
+			if err != nil {
+				t.Fatalf("AppendBinary() error = %v", err)
+			}
+			want, err := tt.marshaler.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+			if !bytes.Equal(got[:2], []byte{0xaa, 0xbb}) || !bytes.Equal(got[2:], want) {
+				t.Fatalf("AppendBinary() = %x, want prefix plus %x", got, want)
+			}
+			if !bytes.Equal(prefix, []byte{0xaa, 0xbb}) {
+				t.Fatalf("prefix = %x, want unchanged", prefix)
 			}
 		})
 	}

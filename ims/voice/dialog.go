@@ -117,7 +117,7 @@ func (c *Call) handleACK(ctx context.Context, req session.Request) error {
 		return nil
 	}
 	var answer sdpOffer
-	if err := answer.UnmarshalBinary(body); err != nil {
+	if err := answer.UnmarshalText(body); err != nil {
 		c.finish(CallStateFailed, err.Error())
 		return nil
 	}
@@ -357,7 +357,7 @@ func (c *Call) handleProvisionalResponse(ctx context.Context, msg sip.Message) e
 	}
 	if body, ok := sdpBody(msg); ok {
 		var answer sdpOffer
-		if err := answer.UnmarshalBinary(body); err != nil {
+		if err := answer.UnmarshalText(body); err != nil {
 			return fmt.Errorf("handling provisional call answer: %w", err)
 		}
 		if authorized && !needsPRACK {
@@ -473,7 +473,7 @@ func (c *Call) handleEarlyDialogTerminated(msg sip.Message) {
 func (c *Call) answerFromFinalResponse(resp sip.Message) (sdpOffer, bool, error) {
 	if answerBody, ok := sdpBody(resp); ok {
 		var answer sdpOffer
-		if err := answer.UnmarshalBinary(answerBody); err != nil {
+		if err := answer.UnmarshalText(answerBody); err != nil {
 			return sdpOffer{}, false, err
 		}
 		return answer, true, nil

@@ -54,8 +54,8 @@ func (s *Speech) UnmarshalBinary(speech []byte) error {
 	return nil
 }
 
-// ReadFrom reads AMR-NB speech payload bytes for s from r.
-func (s *Speech) ReadFrom(r io.Reader) (int64, error) {
+// ReadSpeechFrom reads one AMR-NB speech payload for s from r.
+func (s *Speech) ReadSpeechFrom(r io.Reader) (int64, error) {
 	serial, n, err := speechSpec.ReadSpeechFrom(r, s.Serial, int(s.Mode))
 	if err != nil {
 		return n, err

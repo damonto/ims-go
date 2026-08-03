@@ -87,19 +87,23 @@ type Authorization struct {
 }
 
 var (
+	_ encoding.TextAppender    = Param{}
 	_ encoding.TextMarshaler   = Param{}
 	_ encoding.TextUnmarshaler = (*Param)(nil)
 	_ fmt.Stringer             = Param{}
 
+	_ encoding.TextAppender    = Params{}
 	_ encoding.TextMarshaler   = Params{}
 	_ encoding.TextUnmarshaler = (*Params)(nil)
 	_ fmt.Stringer             = Params{}
 
 	_ encoding.TextUnmarshaler = (*Challenge)(nil)
 
+	_ encoding.TextAppender    = Info{}
 	_ encoding.TextMarshaler   = Info{}
 	_ encoding.TextUnmarshaler = (*Info)(nil)
 
+	_ encoding.TextAppender  = Authorization{}
 	_ encoding.TextMarshaler = Authorization{}
 	_ fmt.Stringer           = Authorization{}
 )
@@ -354,7 +358,11 @@ func akaChallengeFailure(aka usim.AKAResult) *AKAChallengeFailure {
 }
 
 func (p Param) MarshalText() ([]byte, error) {
-	return []byte(paramString(p)), nil
+	return p.AppendText(nil)
+}
+
+func (p Param) AppendText(dst []byte) ([]byte, error) {
+	return append(dst, paramString(p)...), nil
 }
 
 func paramString(p Param) string {
@@ -386,7 +394,11 @@ func (ps *Params) UnmarshalText(text []byte) error {
 }
 
 func (ps Params) MarshalText() ([]byte, error) {
-	return []byte(paramsString(ps)), nil
+	return ps.AppendText(nil)
+}
+
+func (ps Params) AppendText(dst []byte) ([]byte, error) {
+	return append(dst, paramsString(ps)...), nil
 }
 
 func paramsString(ps Params) string {
@@ -500,6 +512,10 @@ func (i *Info) UnmarshalText(text []byte) error {
 }
 
 func (i Info) MarshalText() ([]byte, error) {
+	return i.AppendText(nil)
+}
+
+func (i Info) AppendText(dst []byte) ([]byte, error) {
 	fields := make([]string, 0, 5)
 	if i.NextNonce != "" {
 		fields = append(fields, "nextnonce="+quoteHeaderValue(i.NextNonce))
@@ -516,11 +532,15 @@ func (i Info) MarshalText() ([]byte, error) {
 	if i.NonceCount != "" {
 		fields = append(fields, "nc="+i.NonceCount)
 	}
-	return []byte(strings.Join(fields, ",")), nil
+	return append(dst, strings.Join(fields, ",")...), nil
 }
 
 func (a Authorization) MarshalText() ([]byte, error) {
-	return []byte(authorizationString(a)), nil
+	return a.AppendText(nil)
+}
+
+func (a Authorization) AppendText(dst []byte) ([]byte, error) {
+	return append(dst, authorizationString(a)...), nil
 }
 
 func authorizationString(a Authorization) string {

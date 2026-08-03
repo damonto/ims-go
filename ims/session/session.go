@@ -502,7 +502,7 @@ func (s *Session) dispatchInbound(ctx context.Context, inbound inboundMessage) e
 		}
 		return nil
 	}
-	text, err := inbound.msg.MarshalText()
+	text, err := inbound.msg.MarshalBinary()
 	if err != nil {
 		s.logger.Debug("sip message", "direction", "recv", "start_line", inbound.msg.StartLine, "marshal_error", err)
 	} else {
@@ -745,7 +745,7 @@ func (s *Session) Send(ctx context.Context, req sip.Message) error {
 }
 
 func (s *Session) prepareRequestTransport(ctx context.Context, preferred Transport, req sip.Message) (Transport, sip.Message, error) {
-	packet, err := messagePacket(req)
+	packet, err := req.MarshalBinary()
 	if err != nil {
 		return nil, sip.Message{}, fmt.Errorf("encoding %s request: %w", req.Method(), err)
 	}
@@ -910,7 +910,7 @@ func setRequestViaTransport(req *sip.Message, transport Transport) error {
 }
 
 func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip.Message) error {
-	packet, err := messagePacket(req)
+	packet, err := req.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("encoding %s request: %w", req.Method(), err)
 	}
@@ -1341,7 +1341,7 @@ func (s *Session) writePacketTo(ctx context.Context, transport Transport, data [
 }
 
 func (s *Session) writeResponse(ctx context.Context, transport Transport, peer net.Addr, req sip.Message, resp sip.Message) error {
-	data, err := messagePacket(resp)
+	data, err := resp.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("encoding %d response: %w", resp.StatusCode(), err)
 	}
@@ -1388,14 +1388,6 @@ func sameAddr(left, right net.Addr) bool {
 		return left == right
 	}
 	return left.Network() == right.Network() && left.String() == right.String()
-}
-
-func messagePacket(msg sip.Message) ([]byte, error) {
-	var buf bytes.Buffer
-	if _, err := msg.WriteTo(&buf); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 func responseDestination(remote net.Addr, via string) net.Addr {
