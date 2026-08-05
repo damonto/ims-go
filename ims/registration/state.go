@@ -2,6 +2,8 @@ package registration
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -76,7 +78,7 @@ func sameRegisterContactURI(got, want string) bool {
 	wantURI, wantOK := parseComparableSIPURI(want)
 	if !gotOK || !wantOK || gotURI.scheme != wantURI.scheme ||
 		gotURI.userinfo != wantURI.userinfo ||
-		!strings.EqualFold(gotURI.hostPort, wantURI.hostPort) {
+		!sameSIPHostPort(gotURI.hostPort, wantURI.hostPort) {
 		return false
 	}
 	gotTransport, gotHasTransport := gotURI.parameters["transport"]
@@ -96,9 +98,22 @@ func sameContactURI(got, want string) bool {
 	}
 	return gotURI.scheme == wantURI.scheme &&
 		gotURI.userinfo == wantURI.userinfo &&
-		strings.EqualFold(gotURI.hostPort, wantURI.hostPort) &&
+		sameSIPHostPort(gotURI.hostPort, wantURI.hostPort) &&
 		uriParametersMatch(gotURI.parameters, wantURI.parameters) &&
 		uriComponentsMatch(gotURI.headers, wantURI.headers)
+}
+
+func sameSIPHostPort(left, right string) bool {
+	leftHost, leftPort, leftErr := net.SplitHostPort(left)
+	rightHost, rightPort, rightErr := net.SplitHostPort(right)
+	if leftErr == nil && rightErr == nil && leftPort == rightPort {
+		leftAddr, leftAddrErr := netip.ParseAddr(leftHost)
+		rightAddr, rightAddrErr := netip.ParseAddr(rightHost)
+		if leftAddrErr == nil && rightAddrErr == nil {
+			return leftAddr == rightAddr
+		}
+	}
+	return strings.EqualFold(left, right)
 }
 
 type comparableSIPURI struct {

@@ -690,6 +690,7 @@ func TestSameContactURIUsesRFC3261ComparisonRules(t *testing.T) {
 		want  bool
 	}{
 		{name: "same URI", left: "sip:alice@example.com:5060", right: "sip:alice@EXAMPLE.com:5060", want: true},
+		{name: "expanded and compressed IPv6 addresses are equivalent", left: "sip:alice@[2001:db8:0:0:0:0:0:1]:5060", right: "sip:alice@[2001:DB8::1]:5060", want: true},
 		{name: "userinfo is case sensitive", left: "sip:Alice@example.com:5060", right: "sip:alice@example.com:5060"},
 		{name: "semicolon in userinfo is case sensitive", left: "sip:alice;Day=Tue@example.com", right: "sip:alice;day=tue@example.com"},
 		{name: "semicolon in userinfo precedes URI parameters", left: "sip:alice;day=tuesday@example.com;transport=udp", right: "sip:alice;day=tuesday@EXAMPLE.COM;TRANSPORT=UDP", want: true},
@@ -711,6 +712,14 @@ func TestSameContactURIUsesRFC3261ComparisonRules(t *testing.T) {
 				t.Fatalf("sameContactURI(%q, %q) = %t, want %t", tt.left, tt.right, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSameRegisterContactURIUsesSemanticIPv6Comparison(t *testing.T) {
+	got := "sip:token@[2001:DB8:0:0:0:0:0:1]:26705;Hpt=example;suid=opaque"
+	want := "sip:token@[2001:db8::1]:26705;transport=tcp"
+	if !sameRegisterContactURI(got, want) {
+		t.Fatalf("sameRegisterContactURI(%q, %q) = false, want true", got, want)
 	}
 }
 
