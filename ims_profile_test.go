@@ -654,11 +654,11 @@ func TestIMSProfileMapsChinaCarrierIPSecCapabilities(t *testing.T) {
 			wantModes:      []string{"trans"},
 		},
 		{
-			name:           "China Telecom keeps expanded capabilities",
+			name:           "China Telecom uses transport mode",
 			card:           plmnWFCCard{mcc: "460", mnc: "11", mncLength: 2},
 			wantIntegrity:  []string{"hmac-md5-96", "hmac-sha-1-96"},
 			wantEncryption: []string{"null", "aes-cbc"},
-			wantModes:      []string{"trans", "UDP-enc-tun"},
+			wantModes:      []string{"trans"},
 		},
 	}
 
@@ -739,8 +739,8 @@ func TestIMSProfileDoesNotTieMD5ToTransportMode(t *testing.T) {
 	if !slices.Equal(normalized.IPSecIntegrityAlgorithms, []string{"hmac-md5-96"}) {
 		t.Fatalf("IPsec integrity algorithms = %v, want [hmac-md5-96]", normalized.IPSecIntegrityAlgorithms)
 	}
-	if !slices.Equal(normalized.IPSecModes, []string{"trans", "UDP-enc-tun"}) {
-		t.Fatalf("IPsec modes = %v, want [trans UDP-enc-tun]", normalized.IPSecModes)
+	if !slices.Equal(normalized.IPSecModes, []string{"trans"}) {
+		t.Fatalf("IPsec modes = %v, want [trans]", normalized.IPSecModes)
 	}
 }
 
