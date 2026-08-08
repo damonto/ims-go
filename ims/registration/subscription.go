@@ -45,11 +45,30 @@ type regInfoRegistrationEntry struct {
 	Contacts map[string]regInfoContact
 }
 
-func (s *Registrar) Subscribe(ctx context.Context) error {
-	return s.subscribe(ctx, false)
+func (s *Registrar) Subscribe(ctx context.Context) (retErr error) {
+	operationCtx, finishOperation, err := s.beginMaintenanceOperation(ctx)
+	if err != nil {
+		return fmt.Errorf("subscribing IMS registration: %w", err)
+	}
+	defer func() {
+		finishOperation()
+		if errors.Is(context.Cause(operationCtx), errRegistrationStopped) {
+			retErr = fmt.Errorf("subscribing IMS registration: %w", errRegistrationStopped)
+		}
+	}()
+	return s.subscribe(operationCtx, false)
 }
 
 func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(context.Cause(ctx), errRegistrationStopped) {
+			return errRegistrationStopped
+		}
+		return err
+	}
+	if channelClosed(s.registrationMaintenanceStop) {
+		return errRegistrationStopped
+	}
 	if s.isSubscribeUnsupported() {
 		return nil
 	}
@@ -65,8 +84,14 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 		}
 		return fmt.Errorf("subscribing IMS registration: %w", err)
 	}
+	s.registrationCommitMu.Lock()
+	if channelClosed(s.registrationMaintenanceStop) {
+		s.registrationCommitMu.Unlock()
+		return errRegistrationStopped
+	}
 	if acceptedByNotify {
 		s.setSubscribeUnsupported(false)
+		s.registrationCommitMu.Unlock()
 		s.logger.Info("registration event subscription active", "expires", s.currentSubscribeExpires())
 		return nil
 	}
@@ -76,25 +101,30 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 	if resp.StatusCode() == sipStatusBadEvent {
 		s.setSubscribeUnsupported(true)
 		s.resetSubscription()
+		s.registrationCommitMu.Unlock()
 		s.logger.Info("registration event subscription unavailable", "status", resp.StatusCode())
 		return nil
 	}
 	if subscription.active && resp.StatusCode() == sipStatusCallTransactionDoesNotExist && !retried {
 		s.resetSubscription()
 		s.resetRegInfoState()
+		s.registrationCommitMu.Unlock()
 		return s.subscribe(ctx, true)
 	}
 	if resp.StatusCode() == sipStatusServiceUnavailable {
 		if retryAfter, ok := retryAfterDelay(resp); ok {
+			s.registrationCommitMu.Unlock()
 			return fmt.Errorf("subscribing IMS registration: %w after %w", &subscriptionRetryAfter{retryAfter: retryAfter}, sip.NewResponseError(resp))
 		}
 	}
 	if resp.StatusCode() != sipStatusOK {
+		s.registrationCommitMu.Unlock()
 		return fmt.Errorf("subscribing IMS registration: expected 200, got %w", sip.NewResponseError(resp))
 	}
 	s.setSubscribeUnsupported(false)
 	s.applySubscribeExpires(resp)
 	s.applySubscribeDialog(msg, resp)
+	s.registrationCommitMu.Unlock()
 	s.logger.Info("registration event subscription active", "expires", s.currentSubscribeExpires())
 	return nil
 }
@@ -270,6 +300,9 @@ func (s *Registrar) publishRegistrationEvent(err error) {
 }
 
 func (s *Registrar) requestSubscribeRefresh() {
+	if channelClosed(s.registrationMaintenanceStop) {
+		return
+	}
 	select {
 	case s.subscribeRefreshRequests <- struct{}{}:
 	default:
@@ -293,6 +326,16 @@ func resetTimer(timer *time.Timer, next time.Duration) {
 		}
 	}
 	timer.Reset(next)
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
 }
 
 func refreshIntervalFor(expires time.Duration) time.Duration {

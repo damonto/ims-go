@@ -2223,6 +2223,87 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 	}
 }
 
+func TestIMSRunnerReportsExpectedRegistrationReplacementWithoutError(t *testing.T) {
+	tests := []struct {
+		name      string
+		cause     error
+		wantError bool
+	}{
+		{
+			name:  "preferred flow replacement is expected",
+			cause: registration.ErrRegistrationReplaced,
+		},
+		{
+			name:      "ordinary IMS failure remains an error",
+			cause:     errors.New("ims session stopped"),
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newReadyClient(t, Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			})
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Errorf("Client.Close() error = %v", err)
+				}
+			})
+			events := client.Events()
+			defer events.Close()
+
+			oldActive := &activeConn{scope: newConnectionScope()}
+			newActive := &activeConn{scope: newConnectionScope()}
+			defer newActive.scope.stop()
+			setClientActive(t, client, oldActive)
+
+			var reconnectCause error
+			runner := connectionRunner{
+				client: client,
+				active: oldActive,
+				reconnect: func(cause error) (*activeConn, error) {
+					reconnectCause = cause
+					setClientActive(t, client, newActive)
+					return newActive, nil
+				},
+			}
+			if !runner.reconnectAfterIMSFailure(tt.cause) {
+				t.Fatal("reconnectAfterIMSFailure() = false, want true")
+			}
+			if !errors.Is(reconnectCause, tt.cause) {
+				t.Fatalf("reconnect cause = %v, want %v", reconnectCause, tt.cause)
+			}
+
+			select {
+			case err := <-events.Errors:
+				if !tt.wantError {
+					t.Fatalf("unexpected error event: %v", err)
+				}
+				if !errors.Is(err, tt.cause) {
+					t.Fatalf("error event = %v, want %v", err, tt.cause)
+				}
+			default:
+				if tt.wantError {
+					t.Fatal("error event missing")
+				}
+			}
+
+			for _, want := range []ClientStatus{StatusReconnecting, StatusRegistered} {
+				select {
+				case state := <-events.State:
+					if state.Status != want {
+						t.Fatalf("state event status = %s, want %s", state.Status, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("waiting for %s state event", want)
+				}
+			}
+		})
+	}
+}
+
 func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()

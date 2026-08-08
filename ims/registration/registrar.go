@@ -138,18 +138,31 @@ type Registrar struct {
 	regInfoVersionSet    bool
 	regInfoRegistrations map[string]regInfoRegistrationEntry
 
-	registrationEvents        chan error
-	subscribeRefreshRequests  chan struct{}
-	done                      chan struct{}
-	secureServerAttachments   []session.Attachment
-	secureResponseAttachments []session.Attachment
-	unprotectedPrimary        session.Transport
-	drainTimers               []*attachmentDrain
-	activeSecureSAExpiresAt   time.Time
-	activeSecureSAExpiry      *secureAssociationExpiry
-	registrationKeepAlive     *registrationKeepAlive
-	bgWG                      sync.WaitGroup
-	closed                    bool
+	registrationEvents          chan error
+	subscribeRefreshRequests    chan struct{}
+	registrationMaintenanceStop chan struct{}
+	registrationReplacementDone chan struct{}
+	done                        chan struct{}
+	secureServerAttachments     []session.Attachment
+	secureResponseAttachments   []session.Attachment
+	unprotectedPrimary          session.Transport
+	drainTimers                 []*attachmentDrain
+	activeSecureSAExpiresAt     time.Time
+	activeSecureSAExpiry        *secureAssociationExpiry
+	registrationKeepAlive       *registrationKeepAlive
+	bgWG                        sync.WaitGroup
+	secureCleanupWG             sync.WaitGroup
+	maintenanceWG               sync.WaitGroup
+	replacementWG               sync.WaitGroup
+	// registrationCommitMu serializes maintenance response commits with
+	// network-driven registration cleanup.
+	registrationCommitMu            sync.Mutex
+	maintenanceCancels              map[uint64]context.CancelCauseFunc
+	nextMaintenanceOperation        uint64
+	registrationMaintenanceStopped  bool
+	registrationReplacementPending  bool
+	registrationReplacementFinished bool
+	closed                          bool
 }
 
 const defaultIMSExpires = 600000 * time.Second
@@ -196,14 +209,17 @@ func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
 			UseTelURIForPIDFXML: cfg.UseTelURIForPIDFXML,
 			registrationID:      cfg.RegistrationID,
 		},
-		flow:                     newFlow(host, port, ipsecAlgorithmsFromConfig(cfg)),
-		callID:                   callID,
-		sessionID:                sessionID,
-		tag:                      tag,
-		regInfoRegistrations:     make(map[string]regInfoRegistrationEntry),
-		registrationEvents:       make(chan error, 1),
-		subscribeRefreshRequests: make(chan struct{}, 1),
-		done:                     make(chan struct{}),
+		flow:                        newFlow(host, port, ipsecAlgorithmsFromConfig(cfg)),
+		callID:                      callID,
+		sessionID:                   sessionID,
+		tag:                         tag,
+		regInfoRegistrations:        make(map[string]regInfoRegistrationEntry),
+		registrationEvents:          make(chan error, 1),
+		subscribeRefreshRequests:    make(chan struct{}, 1),
+		registrationMaintenanceStop: make(chan struct{}),
+		registrationReplacementDone: make(chan struct{}),
+		maintenanceCancels:          make(map[uint64]context.CancelCauseFunc),
+		done:                        make(chan struct{}),
 	}
 	attachment, err := sess.Attach(registrar)
 	if err != nil {
@@ -227,6 +243,29 @@ func (s *Registrar) closeDoneLocked() {
 	}
 	s.closed = true
 	close(s.done)
+}
+
+func (s *Registrar) beginMaintenanceOperation(ctx context.Context) (context.Context, func(), error) {
+	operationCtx, cancel := context.WithCancelCause(ctx)
+	s.mu.Lock()
+	if s.closed || s.registrationMaintenanceStopped {
+		s.mu.Unlock()
+		cancel(errRegistrationStopped)
+		return nil, nil, errRegistrationStopped
+	}
+	operationID := s.nextMaintenanceOperation
+	s.nextMaintenanceOperation++
+	s.maintenanceCancels[operationID] = cancel
+	s.maintenanceWG.Add(1)
+	s.mu.Unlock()
+
+	return operationCtx, func() {
+		s.mu.Lock()
+		delete(s.maintenanceCancels, operationID)
+		s.mu.Unlock()
+		cancel(nil)
+		s.maintenanceWG.Done()
+	}, nil
 }
 
 func contextWithDoneTimeout(done <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -314,10 +353,12 @@ func (s *Registrar) Establish(ctx context.Context) error {
 }
 
 func (s *Registrar) beginRegistration(ctx context.Context) (func(), error) {
-	if s.cfg.RegistrationGroup != nil {
-		return s.group.beginRegistrationForFlow(ctx, s.cfg.RegistrationID, s.cfg.RegistrationPreference)
-	}
-	return s.group.BeginRegistration(ctx, s.cfg.RegistrationPreference)
+	return s.group.beginRegistrationForFlowUntil(
+		ctx,
+		s.cfg.RegistrationID,
+		s.cfg.RegistrationPreference,
+		s.registrationMaintenanceStop,
+	)
 }
 
 func (s *Registrar) beginDeregistration(ctx context.Context) (func(), bool, error) {
@@ -542,9 +583,15 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		if err != nil {
 			return fmt.Errorf("refreshing IMS registration: %w", err)
 		}
+		s.registrationCommitMu.Lock()
+		if channelClosed(s.registrationMaintenanceStop) {
+			s.registrationCommitMu.Unlock()
+			return errRegistrationStopped
+		}
 		s.commitReauthentication(challenge, authorizationHeader, nextFlow, nil, nil, password)
 		s.applyRegisterCapability(singleRegistration)
 		s.applyRegisterSuccess(resp)
+		s.registrationCommitMu.Unlock()
 		return nil
 	}
 	nextFlow.MessagePort = nextFlow.SecurityClient.PortS
@@ -618,9 +665,15 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	if err != nil {
 		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
+	s.registrationCommitMu.Lock()
+	if channelClosed(s.registrationMaintenanceStop) {
+		s.registrationCommitMu.Unlock()
+		return errRegistrationStopped
+	}
 	oldExpiresAt := s.currentSecureAssociationExpiresAt()
 	oldAttachment, err := s.sess.PromotePrimary(outbound)
 	if err != nil {
+		s.registrationCommitMu.Unlock()
 		return fmt.Errorf("refreshing IMS registration: promoting secure IMS transport: %w", err)
 	}
 	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
@@ -628,21 +681,33 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	s.commitReauthentication(challenge, authorizationHeader, nextFlow, ck, ik, password)
 	s.applyRegisterCapability(singleRegistration)
 	s.applyRegisterSuccess(resp)
+	s.registrationCommitMu.Unlock()
+	committed = true
 	s.closeOldSecurityAfterNewInbound(
 		append(append(oldServerAttachments, oldResponseAttachments...), oldAttachment),
 		oldExpiresAt,
 		inboundWatch,
 	)
-	committed = true
 	return nil
 }
 
-func (s *Registrar) Refresh(ctx context.Context) error {
+func (s *Registrar) Refresh(ctx context.Context) (retErr error) {
 	release, err := s.beginRegistration(ctx)
 	if err != nil {
 		return fmt.Errorf("refreshing IMS registration: %w", err)
 	}
 	defer release()
+	operationCtx, finishOperation, err := s.beginMaintenanceOperation(ctx)
+	if err != nil {
+		return fmt.Errorf("refreshing IMS registration: %w", err)
+	}
+	defer func() {
+		finishOperation()
+		if errors.Is(context.Cause(operationCtx), errRegistrationStopped) {
+			retErr = fmt.Errorf("refreshing IMS registration: %w", errRegistrationStopped)
+		}
+	}()
+	ctx = operationCtx
 
 	flow := s.CurrentFlow()
 	if flow.SecurityVerify != nil {
@@ -690,27 +755,54 @@ func (s *Registrar) Refresh(ctx context.Context) error {
 func (s *Registrar) Maintain(ctx context.Context) error {
 	registerTimer := time.NewTimer(s.refreshInterval())
 	defer registerTimer.Stop()
+	registerTimerC := registerTimer.C
 	subscribeTimer := time.NewTimer(s.subscribeRefreshInterval())
 	defer subscribeTimer.Stop()
+	subscribeTimerC := subscribeTimer.C
+	subscribeRefreshRequests := (<-chan struct{})(s.subscribeRefreshRequests)
+	maintenanceStop := (<-chan struct{})(s.registrationMaintenanceStop)
+	stopMaintenance := func() {
+		maintenanceStop = nil
+		registerTimerC = nil
+		subscribeTimerC = nil
+		subscribeRefreshRequests = nil
+		stopTimer(registerTimer)
+		stopTimer(subscribeTimer)
+		s.logger.Info("IMS registration maintenance stopped")
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-maintenanceStop:
+			stopMaintenance()
 		case err := <-s.registrationEvents:
 			return err
-		case <-s.subscribeRefreshRequests:
+		case <-subscribeRefreshRequests:
+			if channelClosed(s.registrationMaintenanceStop) {
+				stopMaintenance()
+				continue
+			}
 			s.refreshSubscription(ctx)
 			resetTimer(subscribeTimer, s.subscribeRefreshInterval())
-		case <-registerTimer.C:
+		case <-registerTimerC:
 			if err := s.Refresh(ctx); err != nil {
 				if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 					return ctx.Err()
+				}
+				if errors.Is(err, errRegistrationStopped) {
+					stopMaintenance()
+					continue
 				}
 				return err
 			}
 			s.logger.Info("IMS registration refreshed", "next_refresh", s.refreshInterval())
 			registerTimer.Reset(s.refreshInterval())
-		case <-subscribeTimer.C:
+		case <-subscribeTimerC:
+			if channelClosed(s.registrationMaintenanceStop) {
+				stopMaintenance()
+				continue
+			}
 			s.refreshSubscription(ctx)
 			subscribeTimer.Reset(s.subscribeRefreshInterval())
 		}
@@ -768,14 +860,84 @@ func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool
 	return errors.New("deregistering IMS: exhausted retries")
 }
 
-func (s *Registrar) revokeSingleRegistration(ctx context.Context) error {
-	err := s.deregisterCurrent(ctx, true)
-	if s.isRegistered() {
-		return err
+func (s *Registrar) retireSingleRegistration() {
+	s.mu.Lock()
+	if s.closed || s.registrationReplacementPending {
+		s.mu.Unlock()
+		return
 	}
-	s.releaseRegistrationOwnership()
-	s.publishRegistrationEvent(errRegistrationReplaced)
-	return err
+	s.registrationReplacementPending = true
+	s.stopRegistrationMaintenanceLocked()
+	done := s.done
+	replacementDone := s.registrationReplacementDone
+	// There is no dedicated protocol timer for a missing replacement NOTIFY.
+	// Timer F provides a bounded watchdog consistent with other non-INVITE
+	// registration transactions on this connection.
+	timeout := s.sess.TransactionTimers().TF
+	s.replacementWG.Go(func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if !s.finishRegistrationReplacement() {
+				return
+			}
+			s.logger.Warn("network replacement notification timed out; retiring IMS flow locally")
+			s.registrationCommitMu.Lock()
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				s.registrationCommitMu.Unlock()
+				return
+			}
+			err := s.clearRegistrationState()
+			s.registrationCommitMu.Unlock()
+			if err != nil {
+				s.logger.Error("deleting replaced IMS registration security state", "err", err)
+			}
+			s.publishRegistrationEvent(ErrRegistrationReplaced)
+		case <-replacementDone:
+		case <-done:
+		}
+	})
+	s.mu.Unlock()
+
+	s.logger.Info("IMS registration replaced; waiting for network deregistration", "timeout", timeout)
+}
+
+func (s *Registrar) stopRegistrationMaintenance() {
+	s.mu.Lock()
+	s.stopRegistrationMaintenanceLocked()
+	s.mu.Unlock()
+}
+
+func (s *Registrar) stopRegistrationMaintenanceLocked() {
+	if s.registrationMaintenanceStopped {
+		return
+	}
+	s.registrationMaintenanceStopped = true
+	close(s.registrationMaintenanceStop)
+	for _, cancel := range s.maintenanceCancels {
+		cancel(errRegistrationStopped)
+	}
+}
+
+func (s *Registrar) finishRegistrationReplacement() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || !s.registrationReplacementPending || s.registrationReplacementFinished {
+		return false
+	}
+	s.registrationReplacementFinished = true
+	close(s.registrationReplacementDone)
+	return true
+}
+
+func (s *Registrar) registrationReplacementActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && s.registrationReplacementPending
 }
 
 func (s *Registrar) buildDeregisterMessage(ctx context.Context, verify *security.Param, challenge security.Challenge) (sip.Message, error) {

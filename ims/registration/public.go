@@ -3,6 +3,7 @@ package registration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/damonto/ims-go/ims/security"
@@ -69,6 +70,8 @@ func (s *Registrar) StrictDialogRequestPolicy(routes []string) sip.ClientRequest
 }
 
 func (s *Registrar) Close() error {
+	s.stopRegistrationMaintenance()
+	s.maintenanceWG.Wait()
 	err := errors.Join(s.closeSecureResources(), s.closeAttachment())
 	s.setRegistered(false)
 	return err
@@ -110,7 +113,19 @@ func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (boo
 	}
 	subscriptionTerminated := s.applySubscriptionStateFromNotify(req.Message)
 	notifyErr := s.applyRegInfoNotify(req.Message)
+	networkDeregistered := errors.Is(notifyErr, errNetworkDeregistered)
+	if networkDeregistered {
+		s.stopRegistrationMaintenance()
+	}
+	replacement := networkDeregistered && s.registrationReplacementActive()
+	if replacement {
+		s.finishRegistrationReplacement()
+	}
 	if err := s.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
+		if replacement {
+			s.publishRegistrationEvent(ErrRegistrationReplaced)
+			return true, fmt.Errorf("acknowledging replaced IMS registration: %w: %w", ErrRegistrationReplaced, err)
+		}
 		return true, err
 	}
 	s.completePendingSubscription(pending, pendingAccepted && !subscriptionTerminated)
@@ -122,18 +137,33 @@ func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (boo
 		}
 	}
 	if notifyErr != nil {
+		eventErr := notifyErr
+		if replacement {
+			eventErr = ErrRegistrationReplaced
+		}
 		if errors.Is(notifyErr, errNetworkDeregistered) {
 			// TS 24.229 requires deleting registration state and security
 			// associations after the NOTIFY server transaction completes.
+			s.registrationCommitMu.Lock()
 			if strings.EqualFold(sip.TransportToken(req.Transport.LocalAddr()), "UDP") {
 				s.resetRegistrationState()
-				s.clearSecureResourcesAfter(s.sess.TransactionTimers().TJ)
-			} else if err := s.clearRegistrationState(); err != nil {
-				s.publishRegistrationEvent(notifyErr)
+				s.clearSecureResourcesAfter(s.sess.TransactionTimers().TJ, func() {
+					s.publishRegistrationEvent(eventErr)
+				})
+				s.registrationCommitMu.Unlock()
+				return true, nil
+			}
+			err := s.clearRegistrationState()
+			s.registrationCommitMu.Unlock()
+			if err != nil {
+				s.publishRegistrationEvent(eventErr)
+				if replacement {
+					return true, fmt.Errorf("deleting replaced IMS registration state: %w: %w", eventErr, err)
+				}
 				return true, err
 			}
 		}
-		s.publishRegistrationEvent(notifyErr)
+		s.publishRegistrationEvent(eventErr)
 	}
 	return true, nil
 }

@@ -5,9 +5,13 @@ import (
 	"time"
 )
 
+// ErrRegistrationReplaced means a preferred access flow successfully replaced
+// this registrar's network binding.
+var ErrRegistrationReplaced = errors.New("ims registration replaced by preferred flow")
+
 var (
 	errRegisterBindingMissing    = errors.New("register response omitted current binding")
-	errRegistrationReplaced      = errors.New("ims registration replaced by preferred flow")
+	errRegistrationStopped       = errors.New("ims registration flow is stopping")
 	errNetworkDeregistered       = errors.New("ims registration terminated by network")
 	errInitialRegistrationNeeded = errors.New("initial registration required")
 	errSecureSAExpired           = errors.New("ims security association lifetime expired")

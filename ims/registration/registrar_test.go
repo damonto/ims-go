@@ -177,25 +177,41 @@ func (c identityStubCard) PrivateIdentity() string { return c.privateIdentity }
 
 func (c identityStubCard) PublicIdentity() string { return c.publicIdentity }
 
+type testServiceConfig struct {
+	registrar Config
+	session   session.Config
+	transport session.Transport
+	card      Card
+}
+
 func newTestService(t *testing.T, cfg Config, transport session.Transport, card Card) *Registrar {
+	return newConfiguredTestService(t, testServiceConfig{
+		registrar: cfg,
+		transport: transport,
+		card:      card,
+	})
+}
+
+func newConfiguredTestService(t *testing.T, testCfg testServiceConfig) *Registrar {
 	t.Helper()
+	cfg := testCfg.registrar
 	cfg = withTestIPSecAlgorithms(cfg)
 	cfg.Logger = testLogger()
 	if cfg.DialSecureTCP == nil {
 		cfg.DialSecureTCP = func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error) {
-			return transport, nil
+			return testCfg.transport, nil
 		}
 	}
 	if cfg.DialSecureUDP == nil {
 		cfg.DialSecureUDP = func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error) {
-			return transport, nil
+			return testCfg.transport, nil
 		}
 	}
-	sess, err := session.Open(session.Config{}, transport)
+	sess, err := session.Open(testCfg.session, testCfg.transport)
 	if err != nil {
 		t.Fatalf("session.Open() error = %v", err)
 	}
-	svc, err := New(cfg, sess, card)
+	svc, err := New(cfg, sess, testCfg.card)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -231,6 +247,34 @@ func registerService(t *testing.T, svc *Registrar, transport *stubTransport) {
 	if err := svc.Register(context.Background()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
+}
+
+func networkDeregistrationNotify(t *testing.T, svc *Registrar, event string) sip.Message {
+	t.Helper()
+	info := regInfo{
+		Version: "1",
+		State:   regInfoStateFull,
+		Registration: []regInfoRegistration{{
+			ID:    "reg-1",
+			AOR:   svc.State().PublicIdentity,
+			State: regInfoRegistrationStateActive,
+			Contact: []regInfoContact{{
+				ID:    "contact-1",
+				State: regInfoContactStateTerminated,
+				Event: event,
+				URI:   svc.currentRegisterContactURI(),
+			}},
+		}},
+	}
+	body, err := info.MarshalText()
+	if err != nil {
+		t.Fatalf("marshaling network deregistration NOTIFY: %v", err)
+	}
+	notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+	notify.Headers.Add("Event", regEventPackage)
+	notify.Headers.Add("Content-Type", regInfoContentType)
+	notify.Body = body
+	return notify
 }
 
 func TestAwaitRegisterChallengeRetriesNATPortCollision(t *testing.T) {
@@ -522,6 +566,18 @@ func expectRegistrationEvent(t *testing.T, svc *Registrar, want error) {
 	}
 }
 
+func waitForRegistrationEvent(t *testing.T, svc *Registrar, want error) {
+	t.Helper()
+	select {
+	case err := <-svc.registrationEvents:
+		if !errors.Is(err, want) {
+			t.Fatalf("registration event = %v, want %v", err, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("registration event missing, want %v", want)
+	}
+}
+
 func expectNoRegistrationEvent(t *testing.T, svc *Registrar) {
 	t.Helper()
 	select {
@@ -735,11 +791,48 @@ func TestAccessNetworkInfo(t *testing.T) {
 			want: "",
 		},
 		{
-			name: "explicit value wins",
+			name: "explicit LTE value is preserved",
+			cfg: Config{
+				AccessNetworkInfo: "3GPP-E-UTRAN-TDD;utran-cell-id-3gpp=4600053AC8C595D0",
+			},
+			want: "3GPP-E-UTRAN-TDD;utran-cell-id-3gpp=4600053AC8C595D0",
+		},
+		{
+			name: "bare WLAN omits node id",
+			cfg: Config{
+				AccessNetworkInfo: "IEEE-802.11",
+			},
+			want: "IEEE-802.11",
+		},
+		{
+			name: "WLAN country omits node id",
+			cfg: Config{
+				AccessNetworkInfo: "IEEE-802.11;country=GB",
+			},
+			want: "IEEE-802.11;country=GB",
+		},
+		{
+			name: "bare WLAN uses configured node id",
+			cfg: Config{
+				AccessNetworkInfo: "IEEE-802.11",
+				WLANNodeID:        "01:02:03:04:05:06",
+			},
+			want: "IEEE-802.11;i-wlan-node-id=010203040506",
+		},
+		{
+			name: "complete WLAN value wins",
 			cfg: Config{
 				AccessNetworkInfo: "IEEE-802.11ac;i-wlan-node-id=aabbcc",
 			},
 			want: "IEEE-802.11ac;i-wlan-node-id=aabbcc",
+		},
+		{
+			name: "explicit empty WLAN node id is preserved",
+			cfg: Config{
+				AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=",
+				WLANNodeID:        "01:02:03:04:05:06",
+			},
+			want: "IEEE-802.11;i-wlan-node-id=",
 		},
 		{
 			name: "wlan node id adds access info",
@@ -793,6 +886,20 @@ func TestBuildRegisterAccessNetworkInfoFollowsSecurityState(t *testing.T) {
 			},
 			verify: &security.Param{Mechanism: "ipsec-3gpp"},
 			want:   "IEEE-802.11;i-wlan-node-id=aabbcc",
+		},
+		{
+			name: "protected bare WLAN omits node id",
+			cfg:  Config{AccessNetworkInfo: "IEEE-802.11"},
+			auth: &security.Authorization{
+				Username:           "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
+				Realm:              "ims.mnc001.mcc001.3gppnetwork.org",
+				URI:                "sip:ims.mnc001.mcc001.3gppnetwork.org",
+				Nonce:              testNonce,
+				Response:           "response",
+				IntegrityProtected: "yes",
+			},
+			verify: &security.Param{Mechanism: "ipsec-3gpp"},
+			want:   "IEEE-802.11",
 		},
 		{
 			name: "existing security association allows access network info",
@@ -1679,6 +1786,66 @@ func TestClearRegistrationStateRestoresUnprotectedTransport(t *testing.T) {
 			}
 			if svc.unprotectedPrimary != nil {
 				t.Fatal("unprotectedPrimary retained after reset")
+			}
+		})
+	}
+}
+
+func TestCloseAfterSessionStoppedRestoresPrimary(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "registrar cleanup restores the unprotected session transport"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := newTCPTransport(5062, 5060)
+			secure := newTCPTransport(45000, 4060)
+			sess, err := session.Open(session.Config{}, plain)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			secureAttachment, err := sess.AddTransport(secure)
+			if err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if err := svc.commitRegisterSecurity(&registerSecurity{
+				outbound:           secure,
+				outboundAttachment: secureAttachment,
+			}); err != nil {
+				t.Fatalf("commitRegisterSecurity() error = %v", err)
+			}
+
+			runCtx, runCancel := context.WithCancel(context.Background())
+			runErr := make(chan error, 1)
+			go func() { runErr <- sess.Run(runCtx) }()
+			if err := sess.WaitStarted(context.Background()); err != nil {
+				t.Fatalf("WaitStarted() error = %v", err)
+			}
+			runCancel()
+			if err := <-runErr; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run() error = %v, want context.Canceled", err)
+			}
+
+			if err := svc.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if sess.LocalAddr() != plain.LocalAddr() {
+				t.Fatalf("LocalAddr() = %v, want restored transport %v", sess.LocalAddr(), plain.LocalAddr())
+			}
+			if got := closeCount(secure); got != 1 {
+				t.Fatalf("secure closeCount before session close = %d, want 1", got)
+			}
+			if err := sess.Close(); err != nil {
+				t.Fatalf("Session.Close() error = %v", err)
+			}
+			if got := closeCount(secure); got != 1 {
+				t.Fatalf("secure closeCount after session close = %d, want 1", got)
 			}
 		})
 	}
@@ -5165,6 +5332,414 @@ func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) 
 	}
 }
 
+func TestNetworkDeregistrationStopsRegistrationMaintenance(t *testing.T) {
+	tests := []struct {
+		name         string
+		newTransport func() *stubTransport
+		timerJ       time.Duration
+	}{
+		{
+			name:         "UDP waits for Timer J without refreshing",
+			newTransport: func() *stubTransport { return newUDPTransport(5062, 5060) },
+			timerJ:       20 * time.Millisecond,
+		},
+		{
+			name:         "TCP stops refreshing before immediate cleanup",
+			newTransport: func() *stubTransport { return newTCPTransport(5062, 5060) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := tt.newTransport()
+			svc := newConfiguredTestService(t, testServiceConfig{
+				registrar: Config{},
+				session: session.Config{
+					TransactionTimers: session.TransactionTimers{TJ: tt.timerJ},
+				},
+				transport: transport,
+				card:      stubCard{},
+			})
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Errorf("Registrar.Close() error = %v", err)
+				}
+				if err := svc.sess.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			})
+			svc.setRegistered(true)
+
+			notify := networkDeregistrationNotify(t, svc, regInfoContactEventUnregistered)
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			if err != nil {
+				t.Fatalf("HandleRequest() error = %v", err)
+			}
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+
+			operations := []struct {
+				name string
+				run  func(context.Context) error
+			}{
+				{name: "REGISTER refresh", run: svc.Refresh},
+				{name: "SUBSCRIBE refresh", run: svc.Subscribe},
+			}
+			for _, operation := range operations {
+				t.Run(operation.name, func(t *testing.T) {
+					operationCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer cancel()
+					err := operation.run(operationCtx)
+					if !errors.Is(err, errRegistrationStopped) {
+						t.Fatalf("maintenance operation error = %v, want %v", err, errRegistrationStopped)
+					}
+				})
+			}
+			if got := countWrites(transport); got != 1 {
+				t.Fatalf("write count = %d, want only the NOTIFY 200 response", got)
+			}
+			waitForRegistrationEvent(t, svc, errNetworkDeregistered)
+		})
+	}
+}
+
+func TestStoppingRegistrationMaintenanceCancelsInFlightOperation(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		prepare   func(*testing.T, *Registrar, *stubTransport)
+		operation func(*Registrar, context.Context) error
+	}{
+		{
+			name:    "REGISTER refresh",
+			method:  "REGISTER",
+			prepare: registerService,
+			operation: func(svc *Registrar, ctx context.Context) error {
+				return svc.Refresh(ctx)
+			},
+		},
+		{
+			name:   "SUBSCRIBE refresh",
+			method: "SUBSCRIBE",
+			prepare: func(t *testing.T, svc *Registrar, transport *stubTransport) {
+				svc.setRegistered(true)
+			},
+			operation: func(svc *Registrar, ctx context.Context) error {
+				return svc.Subscribe(ctx)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Errorf("Registrar.Close() error = %v", err)
+				}
+				if err := svc.sess.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			})
+			tt.prepare(t, svc, transport)
+
+			transport.mu.Lock()
+			transport.writes = nil
+			transport.mu.Unlock()
+			requestWritten := make(chan struct{}, 1)
+			requestParseErr := make(chan error, 1)
+			transport.onWrite = func(data []byte) {
+				msg, err := sip.ParseMessage(data)
+				if err != nil {
+					requestParseErr <- err
+					return
+				}
+				if strings.EqualFold(msg.Method(), tt.method) {
+					requestWritten <- struct{}{}
+				}
+			}
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- tt.operation(svc, context.Background())
+			}()
+
+			select {
+			case <-requestWritten:
+			case err := <-requestParseErr:
+				t.Fatalf("parsing %s request: %v", tt.method, err)
+			case <-time.After(time.Second):
+				t.Fatalf("waiting for %s request", tt.method)
+			}
+			svc.stopRegistrationMaintenance()
+
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, errRegistrationStopped) {
+					t.Fatalf("maintenance operation error = %v, want %v", err, errRegistrationStopped)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("maintenance operation was not canceled")
+			}
+			if got := countWrites(transport); got != 1 {
+				t.Fatalf("write count = %d, want one in-flight %s request", got, tt.method)
+			}
+		})
+	}
+}
+
+func TestStoppedRegistrationRejectsLateMaintenanceSuccess(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		prepare   func(*testing.T, *Registrar, *stubTransport)
+		operation func(*Registrar, context.Context) error
+	}{
+		{
+			name:    "late REGISTER 200 cannot restore cleared registration",
+			method:  "REGISTER",
+			prepare: registerService,
+			operation: func(svc *Registrar, ctx context.Context) error {
+				return svc.Refresh(ctx)
+			},
+		},
+		{
+			name:   "late SUBSCRIBE 200 cannot restore cleared dialog",
+			method: "SUBSCRIBE",
+			prepare: func(t *testing.T, svc *Registrar, transport *stubTransport) {
+				svc.setRegistered(true)
+			},
+			operation: func(svc *Registrar, ctx context.Context) error {
+				return svc.Subscribe(ctx)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Errorf("Registrar.Close() error = %v", err)
+				}
+				if err := svc.sess.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			})
+			tt.prepare(t, svc, transport)
+
+			transport.mu.Lock()
+			transport.writes = nil
+			transport.mu.Unlock()
+			requestWritten := make(chan struct{}, 1)
+			requestParseErr := make(chan error, 1)
+			transport.onWrite = func(data []byte) {
+				req, err := sip.ParseMessage(data)
+				if err != nil {
+					requestParseErr <- err
+					return
+				}
+				if !strings.EqualFold(req.Method(), tt.method) {
+					return
+				}
+				transport.queue(newResponse(req, sipStatusOK, "OK"))
+				requestWritten <- struct{}{}
+			}
+
+			svc.registrationCommitMu.Lock()
+			commitLocked := true
+			defer func() {
+				if commitLocked {
+					svc.registrationCommitMu.Unlock()
+				}
+			}()
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- tt.operation(svc, context.Background())
+			}()
+
+			select {
+			case <-requestWritten:
+			case err := <-requestParseErr:
+				t.Fatalf("parsing %s request: %v", tt.method, err)
+			case <-time.After(time.Second):
+				t.Fatalf("waiting for %s request", tt.method)
+			}
+			svc.stopRegistrationMaintenance()
+			svc.resetRegistrationState()
+			svc.registrationCommitMu.Unlock()
+			commitLocked = false
+
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, errRegistrationStopped) {
+					t.Fatalf("maintenance operation error = %v, want %v", err, errRegistrationStopped)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("late maintenance response was not rejected")
+			}
+			if svc.State().Registered {
+				t.Fatal("Registered = true after late maintenance success")
+			}
+			if svc.currentSubscription().active {
+				t.Fatal("subscription remains active after late maintenance success")
+			}
+		})
+	}
+}
+
+func TestNetworkDeregistrationWriteFailurePreservesReplacementError(t *testing.T) {
+	tests := []struct {
+		name              string
+		replacement       bool
+		finishReplacement bool
+		wantReplacement   bool
+	}{
+		{
+			name:            "replacement NOTIFY keeps sentinel in direct error",
+			replacement:     true,
+			wantReplacement: true,
+		},
+		{
+			name:              "completed replacement race keeps sentinel",
+			replacement:       true,
+			finishReplacement: true,
+			wantReplacement:   true,
+		},
+		{
+			name: "ordinary network deregistration does not report replacement",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, transport, stubCard{})
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Errorf("Registrar.Close() error = %v", err)
+				}
+				if err := svc.sess.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			})
+			svc.setRegistered(true)
+			if tt.replacement {
+				svc.retireSingleRegistration()
+			}
+			if tt.finishReplacement && !svc.finishRegistrationReplacement() {
+				t.Fatal("finishRegistrationReplacement() = false, want true")
+			}
+
+			writeErr := errors.New("NOTIFY response connection reset")
+			transport.mu.Lock()
+			transport.writeErr = writeErr
+			transport.mu.Unlock()
+
+			notify := networkDeregistrationNotify(t, svc, regInfoContactEventUnregistered)
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			if !errors.Is(err, writeErr) {
+				t.Fatalf("HandleRequest() error = %v, want wrapped %v", err, writeErr)
+			}
+			if got := errors.Is(err, ErrRegistrationReplaced); got != tt.wantReplacement {
+				t.Fatalf("errors.Is(error, ErrRegistrationReplaced) = %t, want %t", got, tt.wantReplacement)
+			}
+			if tt.wantReplacement {
+				expectRegistrationEvent(t, svc, ErrRegistrationReplaced)
+			} else {
+				expectNoRegistrationEvent(t, svc)
+			}
+		})
+	}
+}
+
+func TestNetworkDeregistrationCleanupFailurePreservesReplacementError(t *testing.T) {
+	tests := []struct {
+		name            string
+		replacement     bool
+		wantReplacement bool
+		wantEvent       error
+	}{
+		{
+			name:            "replacement cleanup keeps sentinel",
+			replacement:     true,
+			wantReplacement: true,
+			wantEvent:       ErrRegistrationReplaced,
+		},
+		{
+			name:      "ordinary cleanup remains network deregistration",
+			wantEvent: errNetworkDeregistered,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := newTCPTransport(5062, 5060)
+			secure := newTCPTransport(45000, 4060)
+			sess, err := session.Open(session.Config{}, plain)
+			if err != nil {
+				t.Fatalf("session.Open() error = %v", err)
+			}
+			secureAttachment, err := sess.AddTransport(secure)
+			if err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+			svc, err := New(withTestIPSecAlgorithms(Config{Logger: testLogger()}), sess, stubCard{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Errorf("Registrar.Close() error = %v", err)
+				}
+				if err := sess.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			})
+
+			if err := svc.commitRegisterSecurity(&registerSecurity{
+				outbound:           secure,
+				outboundAttachment: secureAttachment,
+			}); err != nil {
+				t.Fatalf("commitRegisterSecurity() error = %v", err)
+			}
+			if _, err := sess.PromotePrimary(plain); err != nil {
+				t.Fatalf("PromotePrimary(plain) error = %v", err)
+			}
+			plainAttachment, err := sess.PromotePrimary(secure)
+			if err != nil {
+				t.Fatalf("PromotePrimary(secure) error = %v", err)
+			}
+			if err := plainAttachment.Close(); err != nil {
+				t.Fatalf("closing plain transport attachment: %v", err)
+			}
+
+			svc.setRegistered(true)
+			if tt.replacement {
+				svc.retireSingleRegistration()
+			}
+			notify := networkDeregistrationNotify(t, svc, regInfoContactEventUnregistered)
+			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: secure})
+			if !handled {
+				t.Fatal("HandleRequest() handled = false, want true")
+			}
+			if err == nil {
+				t.Fatal("HandleRequest() error = nil, want cleanup error")
+			}
+			if got := errors.Is(err, ErrRegistrationReplaced); got != tt.wantReplacement {
+				t.Fatalf("errors.Is(error, ErrRegistrationReplaced) = %t, want %t", got, tt.wantReplacement)
+			}
+			expectRegistrationEvent(t, svc, tt.wantEvent)
+		})
+	}
+}
+
 func TestRegInfoNetworkTerminationKeepsActiveSiblingBinding(t *testing.T) {
 	tests := []struct {
 		name string
@@ -5202,26 +5777,53 @@ func TestRegInfoNetworkTerminationKeepsActiveSiblingBinding(t *testing.T) {
 
 func TestSecureCleanupCanWaitForServerTransaction(t *testing.T) {
 	tests := []struct {
-		name  string
-		delay time.Duration
+		name           string
+		delay          time.Duration
+		closeRegistrar bool
 	}{
 		{name: "UDP Timer J delay", delay: 20 * time.Millisecond},
+		{name: "Registrar.Close waits for deferred cleanup", delay: time.Hour, closeRegistrar: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			primary := newUDPTransport(5062, 5060)
 			secureInbound := newUDPTransport(5063, 4060)
+			var securePrimary *stubTransport
 			svc := newTestService(t, Config{}, primary, stubCard{})
+			if tt.closeRegistrar {
+				securePrimary = newUDPTransport(5064, 4060)
+				secureAttachment, err := svc.sess.AddTransport(securePrimary)
+				if err != nil {
+					t.Fatalf("adding secure primary: %v", err)
+				}
+				if err := svc.commitRegisterSecurity(&registerSecurity{
+					outbound:           securePrimary,
+					outboundAttachment: secureAttachment,
+				}); err != nil {
+					t.Fatalf("committing secure primary: %v", err)
+				}
+			}
 			attachment, err := svc.sess.AddTransport(secureInbound)
 			if err != nil {
 				t.Fatalf("AddTransport() error = %v", err)
 			}
 			svc.replaceSecureServerAttachments([]session.Attachment{attachment})
 
-			svc.clearSecureResourcesAfter(tt.delay)
+			svc.clearSecureResourcesAfter(tt.delay, nil)
 			if got := closeCount(secureInbound); got != 0 {
 				t.Fatalf("secure closeCount before delay = %d, want 0", got)
+			}
+			if tt.closeRegistrar {
+				if err := svc.Close(); err != nil {
+					t.Fatalf("Registrar.Close() error = %v", err)
+				}
+				if svc.sess.LocalAddr() != primary.LocalAddr() {
+					t.Fatalf("LocalAddr() = %v, want restored transport %v", svc.sess.LocalAddr(), primary.LocalAddr())
+				}
+				if got := closeCount(securePrimary); got != 1 {
+					t.Fatalf("secure primary closeCount = %d, want 1", got)
+				}
 			}
 			waitForCloseCount(t, secureInbound, 1)
 		})

@@ -132,7 +132,7 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{
-			name: "higher preference replaces current owner",
+			name: "higher preference attempts replacement before ownership transfer",
 			run: func(t *testing.T) {
 				group := &Group{}
 				group.useSingleRegistration(2, 500)
@@ -147,8 +147,8 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 				owner := group.singleRegistrationID
 				preference := group.singleRegistrationPreference
 				group.mu.Unlock()
-				if owner != 1 || preference != 1000 {
-					t.Fatalf("owner = (%d, %d), want (1, 1000)", owner, preference)
+				if owner != 2 || preference != 500 {
+					t.Fatalf("owner = (%d, %d), want original owner (2, 500)", owner, preference)
 				}
 			},
 		},
@@ -160,11 +160,7 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 
 				acquired := make(chan error, 1)
 				go func() {
-					release, err := group.beginRegistrationForFlow(context.Background(), 2, 500)
-					if err == nil {
-						release()
-					}
-					acquired <- err
+					acquired <- group.WaitForRegistration(context.Background(), 2, 500)
 				}()
 				waitForSingleRegistrationWaiter(t, group)
 
@@ -212,6 +208,30 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "retiring flow stops waiting for owner release",
+			run: func(t *testing.T) {
+				group := &Group{}
+				group.useSingleRegistration(1, 1000)
+				stop := make(chan struct{})
+				errCh := make(chan error, 1)
+				go func() {
+					_, err := group.beginRegistrationForFlowUntil(context.Background(), 2, 500, stop)
+					errCh <- err
+				}()
+				waitForSingleRegistrationWaiter(t, group)
+				close(stop)
+
+				select {
+				case err := <-errCh:
+					if !errors.Is(err, errRegistrationStopped) {
+						t.Fatalf("waiting flow error = %v, want %v", err, errRegistrationStopped)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("waiting for retiring flow")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -219,48 +239,56 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 	}
 }
 
-func TestGroupRevokesLowerPreferenceOwnerBeforeReplacement(t *testing.T) {
-	wantErr := errors.New("deregister rejected")
+func TestGroupTransfersSingleRegistrationOwnerAfterSuccess(t *testing.T) {
 	tests := []struct {
-		name      string
-		revokeErr error
-		wantErr   error
+		name           string
+		registrationID uint32
+		preference     int
+		wantPrevious   bool
+		wantOwner      uint32
 	}{
-		{name: "replacement waits for deregistration"},
-		{name: "replacement stops when deregistration fails", revokeErr: wantErr, wantErr: wantErr},
+		{
+			name:           "replacement returns previous owner retirement",
+			registrationID: 1,
+			preference:     1000,
+			wantPrevious:   true,
+			wantOwner:      1,
+		},
+		{
+			name:           "refresh keeps current owner",
+			registrationID: 2,
+			preference:     500,
+			wantOwner:      2,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			group := &Group{}
-			revoked := false
-			group.setSingleRegistrationOwner(2, 500, func(context.Context) error {
-				revoked = true
-				if tt.revokeErr == nil {
-					group.releaseSingleRegistration(2)
-				}
-				return tt.revokeErr
+			retired := false
+			group.setSingleRegistrationOwner(2, 500, func() {
+				retired = true
 			})
 
-			release, err := group.beginRegistrationForFlow(context.Background(), 1, 1000)
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("beginRegistrationForFlow() error = %v, want %v", err, tt.wantErr)
+			previous := group.setSingleRegistrationOwner(tt.registrationID, tt.preference, func() {})
+			if got := previous != nil; got != tt.wantPrevious {
+				t.Fatalf("previous retirement present = %t, want %t", got, tt.wantPrevious)
 			}
-			if release != nil {
-				release()
+			if retired {
+				t.Fatal("previous owner retired before caller committed replacement")
 			}
-			if !revoked {
-				t.Fatal("old owner was not revoked")
+			if previous != nil {
+				previous()
+			}
+			if retired != tt.wantPrevious {
+				t.Fatalf("previous owner retired = %t, want %t", retired, tt.wantPrevious)
 			}
 
 			group.mu.Lock()
 			owner := group.singleRegistrationID
 			group.mu.Unlock()
-			if tt.wantErr == nil && owner != 0 {
-				t.Fatalf("owner = %d, want released before replacement", owner)
-			}
-			if tt.wantErr != nil && owner != 2 {
-				t.Fatalf("owner = %d, want original owner 2 after failed revocation", owner)
+			if owner != tt.wantOwner {
+				t.Fatalf("owner = %d, want %d", owner, tt.wantOwner)
 			}
 		})
 	}

@@ -634,10 +634,25 @@ func (c *Client) reconnect(cause error) (*activeConn, error) {
 
 	backoff := newReconnectBackoff(c.cfg.ReconnectDelay, c.cfg.ReconnectMaxDelay)
 	registrationBackoff := newReconnectBackoff(c.cfg.IMS.RegistrationRetryBase, c.cfg.IMS.RegistrationRetryMax)
-	initialDelay := c.reconnectDelay(cause, backoff, registrationBackoff)
-	c.logger.Info("reconnect scheduled", "reconnect_id", reconnectID, "delay", initialDelay, "cause", cause)
 	clientCtx, stopClientCtx := c.state.context(context.Background())
 	defer stopClientCtx()
+	replaced := errors.Is(cause, registration.ErrRegistrationReplaced)
+	if replaced && c.cfg.IMS.RegistrationGroup != nil {
+		c.logger.Info("fallback IMS flow waiting for preferred registration release", "reconnect_id", reconnectID)
+		if err := c.cfg.IMS.RegistrationGroup.WaitForRegistration(
+			clientCtx,
+			c.cfg.IMS.RegistrationID,
+			c.cfg.IMS.RegistrationPreference,
+		); err != nil {
+			return nil, err
+		}
+		c.logger.Info("preferred IMS registration released; restoring fallback flow", "reconnect_id", reconnectID)
+	}
+	initialDelay := time.Duration(0)
+	if !replaced {
+		initialDelay = c.reconnectDelay(cause, backoff, registrationBackoff)
+	}
+	c.logger.Info("reconnect scheduled", "reconnect_id", reconnectID, "delay", initialDelay, "cause", cause)
 	if err := sleepContext(clientCtx, initialDelay); err != nil {
 		return nil, err
 	}
@@ -875,8 +890,13 @@ func (r *connectionRunner) reconnectAfterIMSFailure(cause error) bool {
 		r.client.emitStatusError(StatusFailed, runErr)
 		return false
 	}
-	r.client.emitStatusError(StatusReconnecting, runErr)
-	r.client.logger.Info("reconnecting client", "cause", cause)
+	if errors.Is(cause, registration.ErrRegistrationReplaced) {
+		r.client.emitStatus(StatusReconnecting)
+		r.client.logger.Info("parking fallback IMS flow after preferred registration succeeded")
+	} else {
+		r.client.emitStatusError(StatusReconnecting, runErr)
+		r.client.logger.Info("reconnecting client", "cause", cause)
+	}
 
 	next, err := r.reconnect(runErr)
 	r.client.finishReconnect()

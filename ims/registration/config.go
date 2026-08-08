@@ -169,13 +169,33 @@ func normalizeConfig(cfg Config) (Config, error) {
 }
 
 func accessNetworkInfo(cfg Config) string {
-	if value := strings.TrimSpace(cfg.AccessNetworkInfo); value != "" {
+	value := strings.TrimSpace(cfg.AccessNetworkInfo)
+	nodeID := normalizeWLANNodeID(cfg.WLANNodeID)
+	if value == "" {
+		if nodeID == "" {
+			return ""
+		}
+		return "IEEE-802.11;i-wlan-node-id=" + nodeID
+	}
+	if !isWLANAccessNetwork(value) || wlanNodeIDParameterPresent(value) || nodeID == "" {
 		return value
 	}
-	if nodeID := strings.TrimSpace(cfg.WLANNodeID); nodeID != "" {
-		return "IEEE-802.11;i-wlan-node-id=" + normalizeWLANNodeID(nodeID)
+	return value + ";i-wlan-node-id=" + nodeID
+}
+
+func isWLANAccessNetwork(value string) bool {
+	accessType, _, _ := strings.Cut(value, ";")
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(accessType)), "ieee-802.11")
+}
+
+func wlanNodeIDParameterPresent(value string) bool {
+	for _, parameter := range strings.Split(value, ";")[1:] {
+		name, _, _ := strings.Cut(parameter, "=")
+		if strings.EqualFold(strings.TrimSpace(name), "i-wlan-node-id") {
+			return true
+		}
 	}
-	return ""
+	return false
 }
 
 func normalizeWLANNodeID(nodeID string) string {

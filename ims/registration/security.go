@@ -326,31 +326,50 @@ func (s *Registrar) forgetDrain(drain *attachmentDrain) {
 }
 
 func (s *Registrar) closeSecureResources() error {
+	s.registrationCommitMu.Lock()
 	resources := s.takeSecureResourcesForClose()
+	s.registrationCommitMu.Unlock()
 	resources.stop()
 	s.bgWG.Wait()
-	return resources.close(s.sess)
+	err := resources.close(s.sess)
+	s.secureCleanupWG.Wait()
+	s.replacementWG.Wait()
+	return err
 }
 
 func (s *Registrar) clearSecureResources() error {
-	resources := s.takeSecureResourcesForReset()
+	resources, _, started := s.beginSecureResourceReset()
+	if !started {
+		return nil
+	}
+	defer s.secureCleanupWG.Done()
 	resources.stop()
 	s.bgWG.Wait()
 	return resources.close(s.sess)
 }
 
-func (s *Registrar) clearSecureResourcesAfter(delay time.Duration) {
-	resources := s.takeSecureResourcesForReset()
-	resources.stop()
-	s.bgWG.Wait()
-	if delay <= 0 {
-		if err := resources.close(s.sess); err != nil {
-			s.logger.Error("deleting IMS security association", "err", err)
+func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func()) {
+	resources, done, started := s.beginSecureResourceReset()
+	if !started {
+		if after != nil {
+			after()
 		}
 		return
 	}
-	done := s.done
+	resources.stop()
+	s.bgWG.Wait()
+	if delay <= 0 {
+		defer s.secureCleanupWG.Done()
+		if err := resources.close(s.sess); err != nil {
+			s.logger.Error("deleting IMS security association", "err", err)
+		}
+		if after != nil {
+			after()
+		}
+		return
+	}
 	go func() {
+		defer s.secureCleanupWG.Done()
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -360,7 +379,22 @@ func (s *Registrar) clearSecureResourcesAfter(delay time.Duration) {
 		if err := resources.close(s.sess); err != nil {
 			s.logger.Error("deleting IMS security association", "err", err)
 		}
+		if after != nil {
+			after()
+		}
 	}()
+}
+
+func (s *Registrar) beginSecureResourceReset() (secureResources, <-chan struct{}, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return secureResources{}, nil, false
+	}
+	resources := s.takeSecureResourcesForResetLocked()
+	done := s.done
+	s.secureCleanupWG.Add(1)
+	return resources, done, true
 }
 
 func (s *Registrar) takeSecureResourcesForClose() secureResources {
@@ -370,8 +404,7 @@ func (s *Registrar) takeSecureResourcesForClose() secureResources {
 	return resources
 }
 
-func (s *Registrar) takeSecureResourcesForReset() secureResources {
-	s.mu.Lock()
+func (s *Registrar) takeSecureResourcesForResetLocked() secureResources {
 	resources := secureResources{
 		serverAttachments:   s.secureServerAttachments,
 		responseAttachments: s.secureResponseAttachments,
@@ -387,7 +420,6 @@ func (s *Registrar) takeSecureResourcesForReset() secureResources {
 	s.activeSecureSAExpiry = nil
 	s.activeSecureSAExpiresAt = time.Time{}
 	s.registrationKeepAlive = nil
-	s.mu.Unlock()
 	return resources
 }
 

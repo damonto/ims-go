@@ -150,8 +150,14 @@ func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Mess
 		if err != nil {
 			return false, fmt.Errorf("refreshing IMS registration: %w", err)
 		}
+		s.registrationCommitMu.Lock()
+		if channelClosed(s.registrationMaintenanceStop) {
+			s.registrationCommitMu.Unlock()
+			return false, errRegistrationStopped
+		}
 		s.applyRegisterCapability(singleRegistration)
 		s.applyRegisterSuccess(resp)
+		s.registrationCommitMu.Unlock()
 		return true, nil
 	case sipStatusUnauthorized, sipStatusProxyAuthenticationRequired:
 		if err := s.reauthenticateRefresh(ctx, resp, state.flow); err != nil {

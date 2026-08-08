@@ -375,7 +375,7 @@ func (s *Registrar) validateRegisterSuccess(msg sip.Message) (bool, error) {
 
 func (s *Registrar) validateRegisterSuccessForFlow(msg sip.Message, flow Flow) (bool, error) {
 	if !s.multipleRegistration() {
-		return false, nil
+		return s.cfg.RegistrationGroup != nil, nil
 	}
 	binding := s.registerBindingForFlow(flow)
 	for _, value := range msg.HeadersByName("Contact") {
@@ -396,10 +396,13 @@ func (s *Registrar) applyRegisterCapability(singleRegistration bool) {
 		s.mu.Unlock()
 		return
 	}
-	s.group.setSingleRegistrationOwner(s.cfg.RegistrationID, s.cfg.RegistrationPreference, s.revokeSingleRegistration)
+	previousRetire := s.group.setSingleRegistrationOwner(s.cfg.RegistrationID, s.cfg.RegistrationPreference, s.retireSingleRegistration)
 	s.mu.Lock()
 	s.flow.Outbound = false
 	s.mu.Unlock()
+	if previousRetire != nil {
+		previousRetire()
+	}
 	s.logger.Info("IMS registrar does not support multiple registration; using one preferred flow", "registration_id", s.cfg.RegistrationID)
 }
 

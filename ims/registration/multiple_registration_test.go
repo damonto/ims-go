@@ -3,11 +3,13 @@ package registration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/ims/sip"
 )
 
@@ -174,85 +176,100 @@ func TestValidateMultipleRegistrationSuccess(t *testing.T) {
 	}
 }
 
-func TestPreferredFlowRevokesSingleRegistrationOwner(t *testing.T) {
+func TestPreferredFlowReplacesSingleRegistrationOwnerAfterSuccess(t *testing.T) {
 	tests := []struct {
-		name           string
-		deregisterCode int
-		cleanupFails   bool
-		wantErr        bool
-		wantRegistered bool
-		wantOwner      uint32
-		wantEvent      bool
+		name               string
+		preferredCode      int
+		wantErr            bool
+		wantOldRegistered  bool
+		wantNewRegistered  bool
+		wantOwner          uint32
+		confirmReplacement bool
 	}{
 		{
-			name:           "successful deregistration releases owner",
-			deregisterCode: sipStatusOK,
-			wantEvent:      true,
+			name:               "successful replacement waits for network deregistration",
+			wantOldRegistered:  true,
+			wantNewRegistered:  true,
+			wantOwner:          1,
+			confirmReplacement: true,
 		},
 		{
-			name:           "local cleanup error still releases owner",
-			deregisterCode: sipStatusOK,
-			cleanupFails:   true,
-			wantErr:        true,
-			wantEvent:      true,
-		},
-		{
-			name:           "rejected deregistration keeps owner",
-			deregisterCode: sipStatusForbidden,
-			wantErr:        true,
-			wantRegistered: true,
-			wantOwner:      2,
+			name:              "failed replacement keeps old owner",
+			preferredCode:     sipStatusForbidden,
+			wantErr:           true,
+			wantOldRegistered: true,
+			wantOwner:         2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			group := &Group{}
-			transport := newTCPTransport(5062, 5060)
-			svc := newTestService(t, Config{
+			oldTransport := newTCPTransport(5062, 5060)
+			old := newTestService(t, Config{
 				IMEI:                   "123456789012345",
 				RegistrationGroup:      group,
 				RegistrationID:         2,
 				RegistrationPreference: 500,
-			}, transport, stubCard{})
+			}, oldTransport, stubCard{})
 
-			transport.onWrite = func(data []byte) {
+			oldTransport.onWrite = func(data []byte) {
 				req := mustParseMessage(t, data)
-				switch countWrites(transport) {
+				switch countWrites(oldTransport) {
 				case 1:
-					transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
+					oldTransport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
 				case 2:
-					transport.queue(newResponse(req, sipStatusOK, "OK",
+					oldTransport.queue(newResponse(req, sipStatusOK, "OK",
 						sip.Header{Name: "Authentication-Info", Value: authenticationInfoForRequest(t, req, testNonce)},
 						sip.Header{Name: "Contact", Value: req.Header("Contact") + ";expires=600"},
 					))
-				case 3:
-					if got := req.Header("Expires"); got != "0" {
-						t.Errorf("deregister Expires = %q, want 0", got)
-					}
-					transport.queue(newResponse(req, tt.deregisterCode, "Deregister Result"))
 				default:
-					t.Fatalf("unexpected write count %d", countWrites(transport))
+					t.Fatalf("old flow sent unexpected REGISTER count %d", countWrites(oldTransport))
 				}
 			}
 
-			if err := svc.Register(context.Background()); err != nil {
-				t.Fatalf("Register() error = %v", err)
+			if err := old.Register(context.Background()); err != nil {
+				t.Fatalf("registering old flow: %v", err)
 			}
-			if tt.cleanupFails {
-				svc.mu.Lock()
-				svc.unprotectedPrimary = newTCPTransport(5099, 5060)
-				svc.mu.Unlock()
+
+			preferredTransport := newTCPTransport(5072, 5060)
+			preferred := newTestService(t, Config{
+				IMEI:                   "123456789012345",
+				RegistrationGroup:      group,
+				RegistrationID:         1,
+				RegistrationPreference: 1000,
+			}, preferredTransport, stubCard{})
+			preferredTransport.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				switch countWrites(preferredTransport) {
+				case 1:
+					if tt.preferredCode != 0 {
+						preferredTransport.queue(newResponse(req, tt.preferredCode, "Replacement Result"))
+						return
+					}
+					preferredTransport.queue(newUnauthorizedRegisterResponse(req, testNonce, 0))
+				case 2:
+					preferredTransport.queue(newResponse(req, sipStatusOK, "OK",
+						sip.Header{Name: "Authentication-Info", Value: authenticationInfoForRequest(t, req, testNonce)},
+						sip.Header{Name: "Contact", Value: req.Header("Contact") + ";expires=600"},
+					))
+				default:
+					t.Fatalf("preferred flow sent unexpected REGISTER count %d", countWrites(preferredTransport))
+				}
 			}
-			release, err := group.beginRegistrationForFlow(context.Background(), 1, 1000)
-			if release != nil {
-				release()
-			}
+
+			err := preferred.Register(context.Background())
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("beginRegistrationForFlow() error = %v, want error %t", err, tt.wantErr)
+				t.Fatalf("preferred Register() error = %v, want error %t", err, tt.wantErr)
 			}
-			if got := svc.State().Registered; got != tt.wantRegistered {
-				t.Fatalf("old owner Registered = %t, want %t", got, tt.wantRegistered)
+			if got := old.State().Registered; got != tt.wantOldRegistered {
+				t.Fatalf("old owner Registered = %t, want %t", got, tt.wantOldRegistered)
+			}
+			if got := preferred.State().Registered; got != tt.wantNewRegistered {
+				t.Fatalf("preferred flow Registered = %t, want %t", got, tt.wantNewRegistered)
+			}
+			if got := countWrites(oldTransport); got != 2 {
+				t.Fatalf("old flow REGISTER writes = %d, want 2 without Expires: 0", got)
 			}
 
 			group.mu.Lock()
@@ -261,11 +278,102 @@ func TestPreferredFlowRevokesSingleRegistrationOwner(t *testing.T) {
 			if owner != tt.wantOwner {
 				t.Fatalf("single registration owner = %d, want %d", owner, tt.wantOwner)
 			}
-			if tt.wantEvent {
-				expectRegistrationEvent(t, svc, errRegistrationReplaced)
-			} else {
-				expectNoRegistrationEvent(t, svc)
+			expectNoRegistrationEvent(t, old)
+			if !tt.confirmReplacement {
+				return
 			}
+
+			oldTransport.onWrite = nil
+			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")
+			notify.Headers.Add("Event", regEventPackage)
+			notify.Headers.Add("Content-Type", regInfoContentType)
+			notify.Body = fmt.Appendf(nil, `<?xml version="1.0"?>
+<reginfo xmlns="urn:ietf:params:xml:ns:reginfo" version="1" state="full">
+  <registration aor="%s" id="reg-1" state="active">
+    <contact id="contact-1" state="terminated" event="unregistered">
+      <uri>%s</uri>
+    </contact>
+  </registration>
+</reginfo>`, old.State().PublicIdentity, old.currentRegisterContactURI())
+			if handled, err := old.HandleRequest(context.Background(), session.Request{Message: notify, Transport: oldTransport}); err != nil {
+				t.Fatalf("handling replacement NOTIFY: %v", err)
+			} else if !handled {
+				t.Fatal("replacement NOTIFY was not handled")
+			}
+			if old.State().Registered {
+				t.Fatal("old owner remains registered after replacement NOTIFY")
+			}
+			expectRegistrationEvent(t, old, ErrRegistrationReplaced)
+		})
+	}
+}
+
+func TestSingleRegistrationReplacementFallsBackAfterNotifyTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{name: "missing NOTIFY retires the old flow locally", timeout: 20 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group := &Group{}
+			transport := newTCPTransport(5062, 5060)
+			old := newConfiguredTestService(t, testServiceConfig{
+				registrar: Config{
+					IMEI:                   "123456789012345",
+					RegistrationGroup:      group,
+					RegistrationID:         2,
+					RegistrationPreference: 500,
+				},
+				session:   session.Config{TransactionTimers: session.TransactionTimers{TF: tt.timeout}},
+				transport: transport,
+				card:      stubCard{},
+			})
+			old.setRegistered(true)
+			group.setSingleRegistrationOwner(2, 500, old.retireSingleRegistration)
+
+			secureOutbound := newTCPTransport(5064, 4060)
+			secureOutboundAttachment, err := old.sess.AddTransport(secureOutbound)
+			if err != nil {
+				t.Fatalf("adding secure outbound transport: %v", err)
+			}
+			if err := old.commitRegisterSecurity(&registerSecurity{
+				outbound:           secureOutbound,
+				outboundAttachment: secureOutboundAttachment,
+			}); err != nil {
+				t.Fatalf("committing secure transport: %v", err)
+			}
+
+			secureInbound := newTCPTransport(5063, 4060)
+			attachment, err := old.sess.AddTransport(secureInbound)
+			if err != nil {
+				t.Fatalf("adding secure inbound transport: %v", err)
+			}
+			old.replaceSecureServerAttachments([]session.Attachment{attachment})
+
+			old.retireSingleRegistration()
+			expectNoRegistrationEvent(t, old)
+			if !old.State().Registered {
+				t.Fatal("old owner retired before replacement timeout")
+			}
+			if got := closeCount(secureInbound); got != 0 {
+				t.Fatalf("secure inbound close count before timeout = %d, want 0", got)
+			}
+			if got := closeCount(secureOutbound); got != 0 {
+				t.Fatalf("secure outbound close count before timeout = %d, want 0", got)
+			}
+
+			waitForRegistrationEvent(t, old, ErrRegistrationReplaced)
+			if old.State().Registered {
+				t.Fatal("old owner remains registered after replacement timeout")
+			}
+			if old.sess.LocalAddr() != transport.LocalAddr() {
+				t.Fatalf("LocalAddr() = %v, want restored transport %v", old.sess.LocalAddr(), transport.LocalAddr())
+			}
+			waitForCloseCount(t, secureOutbound, 1)
+			waitForCloseCount(t, secureInbound, 1)
 		})
 	}
 }

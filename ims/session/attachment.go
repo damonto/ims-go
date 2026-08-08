@@ -130,9 +130,9 @@ func (s *Session) PromotePrimary(t Transport) (Attachment, error) {
 	if s.closed {
 		return nil, errors.New("promoting primary transport: session is closed")
 	}
-	if s.started && !s.running {
-		return nil, errors.New("promoting primary transport: session has stopped")
-	}
+	// A stopped session still owns its active transports. Allowing promotion
+	// during teardown lets protocol layers restore an unprotected primary before
+	// detaching the protected transport; a closed session owns nothing.
 	if _, ok := s.active[t]; !ok {
 		return nil, errors.New("promoting primary transport: transport is not active")
 	}
