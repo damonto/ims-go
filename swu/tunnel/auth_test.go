@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,15 +51,45 @@ type akaStateTestCard struct {
 	state usim.AKAIdentityState
 }
 
+type akaReadOnlyStateTestCard struct {
+	sessionTestCard
+	state usim.AKAIdentityState
+}
+
+type plmnTestCard struct {
+	sessionTestCard
+	mcc string
+	mnc string
+}
+
 func (twoDigitMNCCard) IMSI() string { return "204020123456789" }
 func (twoDigitMNCCard) MCC() string  { return "204" }
 func (twoDigitMNCCard) MNC() string  { return "02" }
+
+func (c plmnTestCard) MCC() string { return c.mcc }
+func (c plmnTestCard) MNC() string { return c.mnc }
 
 func (c *akaStateTestCard) AKAIdentityState() usim.AKAIdentityState {
 	return cloneAKAIdentityState(c.state)
 }
 func (c *akaStateTestCard) SetAKAIdentityState(state usim.AKAIdentityState) {
 	c.state = cloneAKAIdentityState(state)
+}
+
+func (c akaReadOnlyStateTestCard) AKAIdentityState() usim.AKAIdentityState {
+	return cloneAKAIdentityState(c.state)
+}
+
+func assertAKAIdentityState(t *testing.T, got, want usim.AKAIdentityState) {
+	t.Helper()
+	if got.Pseudonym != want.Pseudonym ||
+		got.ReauthIdentity != want.ReauthIdentity ||
+		got.Counter != want.Counter ||
+		!slices.Equal(got.MK, want.MK) ||
+		!slices.Equal(got.KEncr, want.KEncr) ||
+		!slices.Equal(got.KAut, want.KAut) {
+		t.Fatalf("AKA identity state = %+v, want %+v", got, want)
+	}
 }
 
 func (c akaChallengeTestCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
@@ -314,99 +345,140 @@ func checkcodeForTest(packets [][]byte) []byte {
 	return append([]byte{0x00, 0x00}, sum.Sum(nil)...)
 }
 
-func TestInitialAKAIdentityPadsTwoDigitMNC(t *testing.T) {
-	identity, realm, _, err := initialAKAIdentity(twoDigitMNCCard{})
-	if err != nil {
-		t.Fatalf("initialAKAIdentity() error = %v", err)
+func TestSelectInitialAKAIdentity(t *testing.T) {
+	const realm = "nai.epc.mnc001.mcc001.3gppnetwork.org"
+	validReauthState := usim.AKAIdentityState{
+		Pseudonym:      "pseudonym123",
+		ReauthIdentity: "reauth123",
+		Counter:        7,
+		MK:             []byte{0x01},
+		KEncr:          []byte{0x02},
+		KAut:           []byte{0x03},
 	}
-
-	if realm != "nai.epc.mnc002.mcc204.3gppnetwork.org" {
-		t.Fatalf("realm = %q, want %q", realm, "nai.epc.mnc002.mcc204.3gppnetwork.org")
-	}
-	if identity != "0204020123456789@nai.epc.mnc002.mcc204.3gppnetwork.org" {
-		t.Fatalf("identity = %q, want %q", identity, "0204020123456789@nai.epc.mnc002.mcc204.3gppnetwork.org")
-	}
-}
-
-func TestAKATemporaryIdentityState(t *testing.T) {
 	tests := []struct {
-		name    string
-		state   usim.AKAIdentityState
-		wantHas bool
+		name         string
+		card         Card
+		wantIdentity string
+		wantRealm    string
+		wantType     akaIdentityType
+		wantState    usim.AKAIdentityState
 	}{
 		{
-			name: "valid reauth",
-			state: usim.AKAIdentityState{
-				ReauthIdentity: "reauth123",
+			name:         "fast reauthentication",
+			card:         &akaStateTestCard{state: cloneAKAIdentityState(validReauthState)},
+			wantIdentity: "reauth123@" + realm,
+			wantRealm:    realm,
+			wantType:     akaIdentityFastReauth,
+			wantState:    cloneAKAIdentityState(validReauthState),
+		},
+		{
+			name:         "pseudonym",
+			card:         &akaStateTestCard{state: usim.AKAIdentityState{Pseudonym: "pseudonym123"}},
+			wantIdentity: "pseudonym123@" + realm,
+			wantRealm:    realm,
+			wantType:     akaIdentityPseudonym,
+			wantState:    usim.AKAIdentityState{Pseudonym: "pseudonym123"},
+		},
+		{
+			name: "blank reauthentication identity falls back to pseudonym",
+			card: &akaStateTestCard{state: usim.AKAIdentityState{
+				Pseudonym:      "pseudonym123",
+				ReauthIdentity: " \t ",
+				MK:             []byte{0x01},
+				KEncr:          []byte{0x02},
+				KAut:           []byte{0x03},
+			}},
+			wantIdentity: "pseudonym123@" + realm,
+			wantRealm:    realm,
+			wantType:     akaIdentityPseudonym,
+			wantState: usim.AKAIdentityState{
+				Pseudonym:      "pseudonym123",
+				ReauthIdentity: " \t ",
 				MK:             []byte{0x01},
 				KEncr:          []byte{0x02},
 				KAut:           []byte{0x03},
 			},
-			wantHas: true,
 		},
 		{
-			name:    "pseudonym",
-			state:   usim.AKAIdentityState{Pseudonym: "pseudonym123"},
-			wantHas: true,
+			name:         "blank pseudonym falls back to permanent identity",
+			card:         &akaStateTestCard{state: usim.AKAIdentityState{Pseudonym: " \t "}},
+			wantIdentity: "0001010123456789@" + realm,
+			wantRealm:    realm,
+			wantType:     akaIdentityPermanent,
+			wantState:    usim.AKAIdentityState{Pseudonym: " \t "},
 		},
 		{
-			name:  "invalid reauth only",
-			state: usim.AKAIdentityState{ReauthIdentity: "reauth123"},
+			name:         "read-only temporary state is unavailable",
+			card:         akaReadOnlyStateTestCard{state: cloneAKAIdentityState(validReauthState)},
+			wantIdentity: "0001010123456789@" + realm,
+			wantRealm:    realm,
+			wantType:     akaIdentityPermanent,
 		},
 		{
-			name: "empty",
+			name:         "permanent identity pads two-digit mnc",
+			card:         twoDigitMNCCard{},
+			wantIdentity: "0204020123456789@nai.epc.mnc002.mcc204.3gppnetwork.org",
+			wantRealm:    "nai.epc.mnc002.mcc204.3gppnetwork.org",
+			wantType:     akaIdentityPermanent,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := hasAKATemporaryIdentity(tt.state); got != tt.wantHas {
-				t.Fatalf("hasAKATemporaryIdentity() = %t, want %t", got, tt.wantHas)
+			got, err := selectInitialAKAIdentity(tt.card)
+			if err != nil {
+				t.Fatalf("selectInitialAKAIdentity() error = %v", err)
 			}
+			if got.identity != tt.wantIdentity || got.realm != tt.wantRealm || got.identityType != tt.wantType {
+				t.Fatalf("selectInitialAKAIdentity() = {%q, %q, %q}, want {%q, %q, %q}", got.identity, got.realm, got.identityType, tt.wantIdentity, tt.wantRealm, tt.wantType)
+			}
+			assertAKAIdentityState(t, got.state, tt.wantState)
+		})
+	}
+}
 
-			cleared := withoutAKATemporaryIdentity(tt.state)
-			if cleared.Pseudonym != "" || cleared.ReauthIdentity != "" || cleared.Counter != 0 || len(cleared.MK) != 0 || len(cleared.KEncr) != 0 || len(cleared.KAut) != 0 {
-				t.Fatalf("withoutAKATemporaryIdentity() = %+v, want no temporary identity", cleared)
+func TestAKAIdentityTypeString(t *testing.T) {
+	tests := []struct {
+		name         string
+		identityType akaIdentityType
+		want         string
+	}{
+		{name: "unknown", identityType: akaIdentityUnknown, want: "unknown"},
+		{name: "permanent", identityType: akaIdentityPermanent, want: "permanent"},
+		{name: "pseudonym", identityType: akaIdentityPseudonym, want: "pseudonym"},
+		{name: "fast reauthentication", identityType: akaIdentityFastReauth, want: "fast_reauth"},
+		{name: "invalid", identityType: akaIdentityType(255), want: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.identityType.String(); got != tt.want {
+				t.Fatalf("akaIdentityType.String() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestInitialAKAIdentityUsesPermanentAfterTemporaryStateDiscard(t *testing.T) {
-	card := &akaStateTestCard{
-		state: usim.AKAIdentityState{
-			Pseudonym:      "pseudonym123",
-			ReauthIdentity: "reauth123",
-			Counter:        7,
-			MK:             []byte{0x01},
-			KEncr:          []byte{0x02},
-			KAut:           []byte{0x03},
-		},
-	}
-	identity, realm, state, err := initialAKAIdentity(card)
-	if err != nil {
-		t.Fatalf("initialAKAIdentity() error = %v", err)
-	}
-	if identity != "reauth123@nai.epc.mnc001.mcc001.3gppnetwork.org" {
-		t.Fatalf("identity = %q, want reauth identity", identity)
-	}
-	if !hasAKATemporaryIdentity(state) {
-		t.Fatal("hasAKATemporaryIdentity() = false, want true")
+func TestSelectInitialAKAIdentityRejectsInvalidPLMN(t *testing.T) {
+	tests := []struct {
+		name string
+		mcc  string
+		mnc  string
+	}{
+		{name: "short mcc", mcc: "01", mnc: "001"},
+		{name: "non-digit mcc", mcc: "00x", mnc: "001"},
+		{name: "short mnc", mcc: "001", mnc: "1"},
+		{name: "non-digit two-digit mnc", mcc: "001", mnc: "0x"},
+		{name: "non-digit three-digit mnc", mcc: "001", mnc: "00x"},
 	}
 
-	discardStoredAKATemporaryIdentity(card, state)
-	identity, realm, state, err = initialAKAIdentity(card)
-	if err != nil {
-		t.Fatalf("initialAKAIdentity() after discard error = %v", err)
-	}
-	if realm != "nai.epc.mnc001.mcc001.3gppnetwork.org" {
-		t.Fatalf("realm = %q, want home realm", realm)
-	}
-	if identity != "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org" {
-		t.Fatalf("identity = %q, want permanent identity", identity)
-	}
-	if hasAKATemporaryIdentity(state) {
-		t.Fatalf("hasAKATemporaryIdentity() = true after discard: %+v", state)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := selectInitialAKAIdentity(plmnTestCard{mcc: tt.mcc, mnc: tt.mnc})
+			if err == nil {
+				t.Fatal("selectInitialAKAIdentity() error = nil, want error")
+			}
+		})
 	}
 }
 
@@ -813,7 +885,7 @@ func TestAKAAuthFlowDiscardsStoredReauthStateWhenUsed(t *testing.T) {
 			if len(card.state.MK) != 0 || len(card.state.KAut) != 0 || len(card.state.KEncr) != 0 {
 				t.Fatalf("stored keys were not cleared")
 			}
-			if !validAKAReauthState(flow.currentState) {
+			if !flow.currentState.HasReauth() {
 				t.Fatalf("flow current reauth state was cleared during active exchange")
 			}
 		})
@@ -2963,6 +3035,9 @@ func TestOpenIKEAuthResponsePlaintextNotify(t *testing.T) {
 			if tt.wantSentinel != nil && !errors.Is(err, tt.wantSentinel) {
 				t.Fatalf("errors.Is(%v) = false", tt.wantSentinel)
 			}
+			if isProtectedIKEAuthenticationFailed(err) {
+				t.Fatal("plaintext AUTHENTICATION_FAILED marked as protected authentication failure")
+			}
 		})
 	}
 }
@@ -2974,9 +3049,18 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 		wantErr      string
 		wantAccess   bool
 		wantNetwork  bool
+		wantAuthFail bool
 		wantSentinel error
 		wantBackoff  time.Duration
 	}{
+		{
+			name: "authentication failure",
+			payloads: []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeAuthenticationFailed},
+			},
+			wantErr:      "AUTHENTICATION_FAILED (24)",
+			wantAuthFail: true,
+		},
 		{
 			name: "network failure with backoff",
 			payloads: []ike.Payload{
@@ -3049,6 +3133,9 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 			}
 			if got := NetworkFailure(err); got != tt.wantNetwork {
 				t.Fatalf("NetworkFailure() = %t, want %t", got, tt.wantNetwork)
+			}
+			if got := isProtectedIKEAuthenticationFailed(err); got != tt.wantAuthFail {
+				t.Fatalf("isProtectedIKEAuthenticationFailed() = %t, want %t", got, tt.wantAuthFail)
 			}
 			if tt.wantSentinel != nil && !errors.Is(err, tt.wantSentinel) {
 				t.Fatalf("errors.Is(%v) = false", tt.wantSentinel)

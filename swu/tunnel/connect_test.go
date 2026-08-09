@@ -54,80 +54,270 @@ func TestNewConnectStateUsesConfiguredDHGroup(t *testing.T) {
 	}
 }
 
-func TestConnectStateShouldRetryPermanentAKA(t *testing.T) {
-	userUnknownErr := accessRejectionErrorFor(notifyTypeUserUnknown, errors.New("reject"))
-	noAPNErr := accessRejectionErrorFor(notifyTypeNoAPNSubscription, errors.New("reject"))
+func TestConnectStateConsumeInitialAKAReauthIdentity(t *testing.T) {
+	initialState := usim.AKAIdentityState{
+		Pseudonym:      "pseudonym123",
+		ReauthIdentity: "reauth123",
+		Counter:        7,
+		MK:             []byte{0x01},
+		KEncr:          []byte{0x02},
+		KAut:           []byte{0x03},
+	}
 	tests := []struct {
-		name  string
-		state *connectState
-		err   error
-		want  bool
+		name         string
+		identityType akaIdentityType
+		hasStorage   bool
+		wantConsumed bool
 	}{
 		{
-			name:  "temporary identity user unknown",
-			state: &connectState{initialAKAState: usim.AKAIdentityState{Pseudonym: "pseudonym123"}},
-			err:   userUnknownErr,
-			want:  true,
+			name:         "fast reauth",
+			identityType: akaIdentityFastReauth,
+			hasStorage:   true,
+			wantConsumed: true,
 		},
 		{
-			name:  "permanent identity user unknown",
-			state: &connectState{},
-			err:   userUnknownErr,
+			name:         "fast reauth without identity storage",
+			identityType: akaIdentityFastReauth,
 		},
 		{
-			name:  "temporary identity no apn",
-			state: &connectState{initialAKAState: usim.AKAIdentityState{Pseudonym: "pseudonym123"}},
-			err:   noAPNErr,
+			name:         "pseudonym",
+			identityType: akaIdentityPseudonym,
+			hasStorage:   true,
 		},
 		{
-			name: "invalid reauth user unknown",
-			state: &connectState{initialAKAState: usim.AKAIdentityState{
-				ReauthIdentity: "reauth123",
-			}},
-			err: userUnknownErr,
+			name:         "permanent",
+			identityType: akaIdentityPermanent,
+			hasStorage:   true,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.state.shouldRetryPermanentAKA(tt.err); got != tt.want {
-				t.Fatalf("shouldRetryPermanentAKA() = %t, want %t", got, tt.want)
+			storedCard := &akaStateTestCard{state: cloneAKAIdentityState(initialState)}
+			var card Card = sessionTestCard{}
+			if tt.hasStorage {
+				card = storedCard
 			}
+			state := &connectState{
+				card:            card,
+				identityType:    tt.identityType,
+				initialAKAState: cloneAKAIdentityState(initialState),
+			}
+
+			if got := state.consumeInitialAKAReauthIdentity(); got != tt.wantConsumed {
+				t.Fatalf("consumeInitialAKAReauthIdentity() = %t, want %t", got, tt.wantConsumed)
+			}
+
+			if tt.hasStorage {
+				wantStored := cloneAKAIdentityState(initialState)
+				if tt.wantConsumed {
+					wantStored = withoutAKAReauthState(initialState)
+				}
+				assertAKAIdentityState(t, storedCard.AKAIdentityState(), wantStored)
+			}
+			assertAKAIdentityState(t, state.initialAKAState, initialState)
 		})
 	}
 }
 
-func TestConnectStateUsePermanentAKAIdentity(t *testing.T) {
-	card := &akaStateTestCard{
-		state: usim.AKAIdentityState{
-			Pseudonym:      "pseudonym123",
-			ReauthIdentity: "reauth123",
-			MK:             []byte{0x01},
-			KEncr:          []byte{0x02},
-			KAut:           []byte{0x03},
+func TestConnectStateDiscardRejectedAKAPseudonym(t *testing.T) {
+	initialState := usim.AKAIdentityState{
+		Pseudonym:      "pseudonym123",
+		ReauthIdentity: "stale-reauth",
+		Counter:        7,
+		MK:             []byte{0x01},
+		KEncr:          []byte{0x02},
+		KAut:           []byte{0x03},
+	}
+	authenticationFailure := &protectedIKEAuthenticationFailedError{err: errors.New("received protected AUTHENTICATION_FAILED")}
+	tests := []struct {
+		name          string
+		identityType  akaIdentityType
+		err           error
+		hasStorage    bool
+		wantDiscarded bool
+	}{
+		{
+			name:          "protected failure rejects pseudonym",
+			identityType:  akaIdentityPseudonym,
+			err:           authenticationFailure,
+			hasStorage:    true,
+			wantDiscarded: true,
+		},
+		{
+			name:         "unprotected failure cannot reject pseudonym",
+			identityType: akaIdentityPseudonym,
+			err:          errors.New("received unencrypted AUTHENTICATION_FAILED (24)"),
+			hasStorage:   true,
+		},
+		{
+			name:         "fast reauth already has one-time handling",
+			identityType: akaIdentityFastReauth,
+			err:          authenticationFailure,
+			hasStorage:   true,
+		},
+		{
+			name:         "permanent identity has no fallback",
+			identityType: akaIdentityPermanent,
+			err:          authenticationFailure,
+			hasStorage:   true,
+		},
+		{
+			name:         "missing storage cannot discard pseudonym",
+			identityType: akaIdentityPseudonym,
+			err:          authenticationFailure,
 		},
 	}
-	state, err := newConnectState(handshake.ConnectInput{
-		IMEI:        "356789012345678",
-		Card:        card,
-		OuterRemote: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 500},
-	})
-	if err != nil {
-		t.Fatalf("newConnectState() error = %v", err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storedCard := &akaStateTestCard{state: cloneAKAIdentityState(initialState)}
+			var card Card = sessionTestCard{}
+			if tt.hasStorage {
+				card = storedCard
+			}
+			state := &connectState{
+				card:            card,
+				identityType:    tt.identityType,
+				initialAKAState: cloneAKAIdentityState(initialState),
+			}
+
+			if got := state.discardRejectedAKAPseudonym(tt.err); got != tt.wantDiscarded {
+				t.Fatalf("discardRejectedAKAPseudonym() = %t, want %t", got, tt.wantDiscarded)
+			}
+
+			if tt.hasStorage {
+				wantStored := cloneAKAIdentityState(initialState)
+				if tt.wantDiscarded {
+					wantStored = usim.AKAIdentityState{}
+				}
+				assertAKAIdentityState(t, storedCard.AKAIdentityState(), wantStored)
+			}
+			assertAKAIdentityState(t, state.initialAKAState, initialState)
+		})
 	}
-	if !state.usesTemporaryAKAIdentity() {
-		t.Fatal("usesTemporaryAKAIdentity() = false, want true")
+}
+
+func TestAuthenticationFailureAdvancesAKAIdentityOnNextConnect(t *testing.T) {
+	const realm = "nai.epc.mnc001.mcc001.3gppnetwork.org"
+	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
+	tests := []struct {
+		name                string
+		initialState        usim.AKAIdentityState
+		wantInitialType     akaIdentityType
+		wantInitialIdentity string
+		wantStoredState     usim.AKAIdentityState
+		wantNextType        akaIdentityType
+		wantNextIdentity    string
+	}{
+		{
+			name: "pseudonym follows consumed reauth identity",
+			initialState: usim.AKAIdentityState{
+				Pseudonym:      "pseudonym123",
+				ReauthIdentity: "reauth123",
+				Counter:        7,
+				MK:             []byte{0x01},
+				KEncr:          []byte{0x02},
+				KAut:           []byte{0x03},
+			},
+			wantInitialType:     akaIdentityFastReauth,
+			wantInitialIdentity: "reauth123@" + realm,
+			wantStoredState:     usim.AKAIdentityState{Pseudonym: "pseudonym123"},
+			wantNextType:        akaIdentityPseudonym,
+			wantNextIdentity:    "pseudonym123@" + realm,
+		},
+		{
+			name: "permanent identity follows consumed reauth identity without pseudonym",
+			initialState: usim.AKAIdentityState{
+				ReauthIdentity: "reauth123",
+				Counter:        7,
+				MK:             []byte{0x01},
+				KEncr:          []byte{0x02},
+				KAut:           []byte{0x03},
+			},
+			wantInitialType:     akaIdentityFastReauth,
+			wantInitialIdentity: "reauth123@" + realm,
+			wantNextType:        akaIdentityPermanent,
+			wantNextIdentity:    "0001010123456789@" + realm,
+		},
+		{
+			name:                "permanent identity follows rejected pseudonym",
+			initialState:        usim.AKAIdentityState{Pseudonym: "pseudonym123"},
+			wantInitialType:     akaIdentityPseudonym,
+			wantInitialIdentity: "pseudonym123@" + realm,
+			wantNextType:        akaIdentityPermanent,
+			wantNextIdentity:    "0001010123456789@" + realm,
+		},
 	}
 
-	state.usePermanentAKAIdentity()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card := &akaStateTestCard{state: cloneAKAIdentityState(tt.initialState)}
+			input := handshake.ConnectInput{
+				IMEI:        "356789012345678",
+				Card:        card,
+				OuterRemote: peer,
+			}
+			state, err := newConnectState(input)
+			if err != nil {
+				t.Fatalf("newConnectState() error = %v", err)
+			}
+			if state.identityType != tt.wantInitialType {
+				t.Fatalf("identity type = %q, want %q", state.identityType, tt.wantInitialType)
+			}
 
-	if state.usesTemporaryAKAIdentity() {
-		t.Fatal("usesTemporaryAKAIdentity() = true after permanent identity selection")
-	}
-	if state.identity != "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org" {
-		t.Fatalf("identity = %q, want permanent identity", state.identity)
-	}
-	if state.auth.Identity != state.identity {
-		t.Fatalf("auth identity = %q, want %q", state.auth.Identity, state.identity)
+			crypto := testIKECrypto()
+			state.crypto = crypto
+			state.initiatorSPI = 0x0102030405060708
+			state.responderSPI = 0x1112131415161718
+			state.espInitiatorSPI = 0x01020304
+			response := protectedIKEWire(t, crypto, exchangeTypeIKEAuth, flagResponse, 1, []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeAuthenticationFailed},
+			}, false)
+			conn := &fakePacketConn{
+				local:       &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				readResults: []readResult{{data: response, addr: peer}},
+			}
+			session := mustDialSession(t, conn)
+			session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
+
+			exchangeErr := session.exchangeIKEAuth(context.Background(), state)
+			if exchangeErr == nil || !strings.Contains(exchangeErr.Error(), "protected ike_auth notify AUTHENTICATION_FAILED (24)") {
+				t.Fatalf("exchangeIKEAuth() error = %v, want protected AUTHENTICATION_FAILED", exchangeErr)
+			}
+			if !isProtectedIKEAuthenticationFailed(exchangeErr) {
+				t.Fatal("isProtectedIKEAuthenticationFailed(exchangeIKEAuth() error) = false")
+			}
+			conn.mu.Lock()
+			if len(conn.writes) != 1 {
+				conn.mu.Unlock()
+				t.Fatalf("IKE_AUTH write count = %d, want 1", len(conn.writes))
+			}
+			request := append([]byte(nil), conn.writes[0]...)
+			conn.mu.Unlock()
+			var packet ike.IKEPacket
+			if err := packet.UnmarshalBinary(request); err != nil {
+				t.Fatalf("IKE_AUTH request UnmarshalBinary() error = %v", err)
+			}
+			payloads, err := crypto.OpenIKE(packet, true)
+			if err != nil {
+				t.Fatalf("IKE_AUTH request OpenIKE() error = %v", err)
+			}
+			idi := ike.FindIDPayload(payloads, payloadTypeIDi)
+			if idi == nil || string(idi.Data) != tt.wantInitialIdentity {
+				t.Fatalf("IKE_AUTH IDi = %v, want %q", idi, tt.wantInitialIdentity)
+			}
+
+			assertAKAIdentityState(t, card.AKAIdentityState(), tt.wantStoredState)
+
+			next, err := newConnectState(input)
+			if err != nil {
+				t.Fatalf("newConnectState() after authentication failure error = %v", err)
+			}
+			if next.identity != tt.wantNextIdentity || next.identityType != tt.wantNextType {
+				t.Fatalf("next identity = %q (%s), want %q (%s)", next.identity, next.identityType, tt.wantNextIdentity, tt.wantNextType)
+			}
+		})
 	}
 }
 

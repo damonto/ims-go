@@ -11,6 +11,26 @@ import (
 	"github.com/damonto/ims-go/swu/ike"
 )
 
+// protectedIKEAuthenticationFailedError never marks a plaintext Notify. It
+// proves only that the sender participated in IKE_SA_INIT, not the sender's
+// identity, so callers must limit recovery to tearing down and rebuilding state.
+type protectedIKEAuthenticationFailedError struct {
+	err error
+}
+
+func (e *protectedIKEAuthenticationFailedError) Error() string {
+	return e.err.Error()
+}
+
+func (e *protectedIKEAuthenticationFailedError) Unwrap() error {
+	return e.err
+}
+
+func isProtectedIKEAuthenticationFailed(err error) bool {
+	_, ok := errors.AsType[*protectedIKEAuthenticationFailedError](err)
+	return ok
+}
+
 func responderIDRawFromPayloads(payloads []ike.Payload, requestedAPN string, requestedDefaultAPN bool) ([]byte, string, error) {
 	idr := ike.FindIDPayload(payloads, payloadTypeIDr)
 	if idr == nil {
@@ -216,11 +236,11 @@ func hasEncryptedPayload(payloads []ike.Payload) bool {
 }
 
 func plaintextIKENotifyError(payloads []ike.Payload) error {
-	return ikeAuthNotifyError(payloads, "unencrypted", false)
+	return ikeAuthNotifyError(payloads, false)
 }
 
 func protectedIKENotifyError(payloads []ike.Payload) error {
-	return ikeAuthNotifyError(payloads, "protected", true)
+	return ikeAuthNotifyError(payloads, true)
 }
 
 func protectedIKEAuthNotifyError(action ikeAction, payloads []ike.Payload) error {
@@ -236,9 +256,13 @@ func protectedIKEAuthNotifyError(action ikeAction, payloads []ike.Payload) error
 	return nil
 }
 
-func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorNotify bool) error {
+func ikeAuthNotifyError(payloads []ike.Payload, protected bool) error {
+	protection := "unencrypted"
+	if protected {
+		protection = "protected"
+	}
 	if len(payloads) == 0 {
-		if requireErrorNotify {
+		if protected {
 			return nil
 		}
 		return fmt.Errorf("received %s ike_auth response without payloads", protection)
@@ -250,6 +274,7 @@ func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorN
 	var backoffMalformed bool
 	var errorNotifySeen bool
 	var networkFailureSeen bool
+	var authenticationFailureSeen bool
 	var backoffCause uint16
 	var accessRejection uint16
 	for _, payload := range payloads {
@@ -276,15 +301,21 @@ func ikeAuthNotifyError(payloads []ike.Payload, protection string, requireErrorN
 		if notify.NotifyType == notifyTypeNetworkFailure {
 			networkFailureSeen = true
 		}
+		if notify.NotifyType == notifyTypeAuthenticationFailed {
+			authenticationFailureSeen = true
+		}
 		if accessRejectedNotify(notify.NotifyType) {
 			accessRejection = notify.NotifyType
 		}
 		notifies = append(notifies, fmt.Sprintf("%s (%d)", ikeNotifyName(notify.NotifyType), notify.NotifyType))
 	}
-	if len(notifies) == 0 || requireErrorNotify && !errorNotifySeen {
+	if len(notifies) == 0 || (protected && !errorNotifySeen) {
 		return nil
 	}
 	err := fmt.Errorf("received %s ike_auth notify %s", protection, strings.Join(notifies, ", "))
+	if protected && authenticationFailureSeen {
+		err = &protectedIKEAuthenticationFailedError{err: err}
+	}
 	if networkFailureSeen {
 		err = networkFailureErrorFor(err)
 	}

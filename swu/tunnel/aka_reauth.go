@@ -8,7 +8,7 @@ import (
 )
 
 func (f *akaAuthFlow) buildReauthenticationResponse(message eapaka.AKAMessage, eapData []byte) (akaResponse, error) {
-	if !validAKAReauthState(f.currentState) {
+	if !f.currentState.HasReauth() {
 		return f.clientErrorResponse(message.Identifier, errors.New("validating reauth state: reauth state is unavailable"))
 	}
 	if f.reauthIdentity == "" {

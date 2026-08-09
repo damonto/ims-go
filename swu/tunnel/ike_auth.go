@@ -13,6 +13,9 @@ func (s *Session) exchangeIKEAuth(ctx context.Context, state *connectState) erro
 	if err != nil {
 		return err
 	}
+	if state.consumeInitialAKAReauthIdentity() {
+		s.logger.Debug("consumed one-time AKA re-authentication identity")
+	}
 	challengePayloads, err := s.readIKEAuthChallenge(ctx, state, requests)
 	if err != nil {
 		return err
@@ -54,6 +57,12 @@ func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState,
 		action:                 ikeActionOpenIKEAuthChallenge,
 	})
 	if err != nil {
+		// Some ePDGs reject a stale pseudonym with generic Notify 24 instead
+		// of requesting the permanent identity. Keep the failed IKE SA dead,
+		// but advance the next full connection to the permanent identity.
+		if state.discardRejectedAKAPseudonym(err) {
+			s.logger.Info("discarded rejected AKA pseudonym for next connection attempt")
+		}
 		return nil, err
 	}
 	state.auth.ChallengeData = marshalPayloadCopies(challengePayloads)

@@ -34,6 +34,7 @@ type connectState struct {
 	card                      Card
 	imei                      string
 	identity                  string
+	identityType              akaIdentityType
 	realm                     string
 	initialAKAState           usim.AKAIdentityState
 	crypto                    *ikeCrypto
@@ -63,15 +64,7 @@ func (s *Session) Connect(ctx context.Context, req ConnectRequest) error {
 	}
 	defer finish()
 	if err := s.connectAttempt(ctx, state); err != nil {
-		retryState, retryErr := s.retryConnectWithPermanentAKA(ctx, state, err)
-		switch {
-		case retryErr != nil:
-			return fmt.Errorf("connecting swu session: retrying permanent aka identity: %w", retryErr)
-		case retryState != nil:
-			state = retryState
-		default:
-			return fmt.Errorf("connecting swu session: %w", err)
-		}
+		return fmt.Errorf("connecting swu session: %w", err)
 	}
 	s.commitConnect(state)
 	s.startBackgroundLoops()
@@ -80,7 +73,7 @@ func (s *Session) Connect(ctx context.Context, req ConnectRequest) error {
 }
 
 func (s *Session) connectAttempt(ctx context.Context, state *connectState) error {
-	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote, "temporary_aka_identity", state.usesTemporaryAKAIdentity())
+	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote, "aka_identity_type", state.identityType.String())
 	if err := s.exchangeIKESAInit(ctx, state); err != nil {
 		return err
 	}
@@ -89,23 +82,6 @@ func (s *Session) connectAttempt(ctx context.Context, state *connectState) error
 		return err
 	}
 	return nil
-}
-
-func (s *Session) retryConnectWithPermanentAKA(ctx context.Context, state *connectState, err error) (*connectState, error) {
-	if !state.shouldRetryPermanentAKA(err) {
-		return nil, nil
-	}
-	s.logger.Info("temporary AKA identity rejected; retrying with permanent identity", "cause", ErrUserUnknown)
-	discardStoredAKATemporaryIdentity(state.card, state.initialAKAState)
-	retryState, retryErr := newConnectState(state.input)
-	if retryErr != nil {
-		return nil, retryErr
-	}
-	retryState.usePermanentAKAIdentity()
-	if err := s.connectAttempt(ctx, retryState); err != nil {
-		return nil, err
-	}
-	return retryState, nil
 }
 
 func (s *Session) prepareConnect(req ConnectRequest) (*connectState, func(), error) {
@@ -132,18 +108,18 @@ func (s *Session) prepareConnect(req ConnectRequest) (*connectState, func(), err
 	return state, finish, nil
 }
 
-func (state *connectState) usesTemporaryAKAIdentity() bool {
-	return state != nil && hasAKATemporaryIdentity(state.initialAKAState)
+func (state *connectState) consumeInitialAKAReauthIdentity() bool {
+	if state.identityType != akaIdentityFastReauth {
+		return false
+	}
+	return discardStoredAKAReauthState(state.card, state.initialAKAState)
 }
 
-func (state *connectState) shouldRetryPermanentAKA(err error) bool {
-	return state.usesTemporaryAKAIdentity() && errors.Is(err, ErrUserUnknown)
-}
-
-func (state *connectState) usePermanentAKAIdentity() {
-	state.initialAKAState = withoutAKATemporaryIdentity(state.initialAKAState)
-	state.identity = akaPermanentIdentity(state.card, state.realm, eapTypeAKA)
-	state.auth.Identity = state.identity
+func (state *connectState) discardRejectedAKAPseudonym(err error) bool {
+	if state.identityType != akaIdentityPseudonym || !isProtectedIKEAuthenticationFailed(err) {
+		return false
+	}
+	return discardStoredAKATemporaryIdentities(state.card, state.initialAKAState)
 }
 
 func (s *Session) beginConnect() (func(), error) {
@@ -173,7 +149,7 @@ func (s *Session) beginConnect() (func(), error) {
 }
 
 func newConnectState(input handshake.ConnectInput) (*connectState, error) {
-	identity, realm, initialAKAState, err := initialAKAIdentity(input.Card)
+	selectedIdentity, err := selectInitialAKAIdentity(input.Card)
 	if err != nil {
 		return nil, fmt.Errorf("building aka identity: %w", err)
 	}
@@ -188,12 +164,13 @@ func newConnectState(input handshake.ConnectInput) (*connectState, error) {
 	return &connectState{
 		input:           input,
 		saInit:          handshake.SAInitState{InitiatorSPI: initiatorSPI, DHGroup: dhGroup, NonceI: append([]byte(nil), nonceI...), ChildInitiatorSPI: espInitiatorSPI},
-		auth:            handshake.AuthState{Identity: identity, Realm: realm, CurrentMessageID: 1},
+		auth:            handshake.AuthState{Identity: selectedIdentity.identity, Realm: selectedIdentity.realm, CurrentMessageID: 1},
 		card:            input.Card,
 		imei:            input.IMEI,
-		identity:        identity,
-		realm:           realm,
-		initialAKAState: initialAKAState,
+		identity:        selectedIdentity.identity,
+		identityType:    selectedIdentity.identityType,
+		realm:           selectedIdentity.realm,
+		initialAKAState: selectedIdentity.state,
 		crypto:          crypto,
 		initiatorSPI:    initiatorSPI,
 		espInitiatorSPI: espInitiatorSPI,
