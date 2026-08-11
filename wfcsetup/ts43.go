@@ -86,16 +86,21 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 
 	tokenKey := ts43TokenKey(identity, f.wfc)
 	cachedToken := ts43CachedToken(tokenKey)
-	check, err := ts43.CheckWFCEntitlementWithToken(checkCtx, ts43.Config{
+	check, err := ts43.CheckWFCEntitlement(checkCtx, ts43.Config{
 		Logger:     req.Logger,
 		HTTPClient: req.HTTPClient,
 		Source:     ts43.Endpoint{Channel: ts43Channel{authenticate: req.AuthenticateAKA, identity: identity}},
-	}, identity, ts43.Device{
-		IMEI:            device.IMEI,
-		Vendor:          device.Vendor,
-		Model:           device.Model,
-		SoftwareVersion: device.SoftwareVersion,
-	}, f.wfc, cachedToken)
+	}, ts43.WFCEntitlementRequest{
+		Identity: identity,
+		Device: ts43.Device{
+			IMEI:            device.IMEI,
+			Vendor:          device.Vendor,
+			Model:           device.Model,
+			SoftwareVersion: device.SoftwareVersion,
+		},
+		Config:    f.wfc,
+		AuthToken: cachedToken,
+	})
 	result := Result{
 		Scheme:  SchemeTS43,
 		Carrier: f.wfc.CarrierName,
