@@ -10,36 +10,32 @@ import (
 
 var errSessionClosed = errors.New("session is closed")
 
-type InnerHandler = ipsecbase.InnerHandler
-
-type Attachment = ipsecbase.Attachment
-
 type sessionAttachment struct {
-	session *Session
-	handler InnerHandler
+	session   *Session
+	processor ipsecbase.InnerPacketProcessor
 
 	mu     sync.RWMutex
 	closed bool
 	once   sync.Once
 }
 
-func (s *Session) Attach(handler InnerHandler) (Attachment, error) {
-	if handler == nil {
-		return nil, errors.New("attaching inner handler: handler is nil")
+func (s *Session) Attach(processor ipsecbase.InnerPacketProcessor) (ipsecbase.Attachment, error) {
+	if processor == nil {
+		return nil, errors.New("attaching inner processor: processor is nil")
 	}
+	s.attachmentsMu.Lock()
+	defer s.attachmentsMu.Unlock()
 	if s.isClosed() {
-		return nil, errors.New("attaching inner handler: session is closed")
+		return nil, errors.New("attaching inner processor: session is closed")
 	}
 	s.mu.RLock()
 	connected := s.connected
 	s.mu.RUnlock()
 	if !connected {
-		return nil, errors.New("attaching inner handler: session is not connected")
+		return nil, errors.New("attaching inner processor: session is not connected")
 	}
-	attachment := &sessionAttachment{session: s, handler: handler}
-	s.attachmentsMu.Lock()
+	attachment := &sessionAttachment{session: s, processor: processor}
 	s.attachments = append(s.attachments, attachment)
-	s.attachmentsMu.Unlock()
 	return attachment, nil
 }
 
@@ -51,7 +47,7 @@ func (s *Session) dispatchInnerPacket(pkt packet.InnerPacket) bool {
 		if attachment == nil || attachment.isClosed() {
 			continue
 		}
-		if attachment.handler.HandleInnerPacket(pkt) {
+		if attachment.processor.HandleInnerPacket(pkt) {
 			return true
 		}
 	}
@@ -87,7 +83,7 @@ func (a *sessionAttachment) fail(err error) {
 	if !a.close() {
 		return
 	}
-	a.handler.HandleError(err)
+	a.processor.HandleError(err)
 }
 
 func (a *sessionAttachment) close() bool {

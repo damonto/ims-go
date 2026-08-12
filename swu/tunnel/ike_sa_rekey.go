@@ -219,20 +219,20 @@ func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 	}, nil
 }
 
-func (state ikeSARekeyState) available() bool {
-	return state.ike != nil && state.peer != nil && state.initiatorSPI != 0 && state.responderSPI != 0
+func (rs ikeSARekeyState) available() bool {
+	return rs.ike != nil && rs.peer != nil && rs.initiatorSPI != 0 && rs.responderSPI != 0
 }
 
-func (state ikeSARekeyState) informationalState() informationalState {
+func (rs ikeSARekeyState) informationalState() informationalState {
 	return informationalState{
-		ike:                       state.ike,
-		localInitiator:            state.localInitiator,
+		ike:                       rs.ike,
+		localInitiator:            rs.localInitiator,
 		retiredIKESA:              true,
-		initiatorSPI:              state.initiatorSPI,
-		responderSPI:              state.responderSPI,
-		peer:                      cloneUDPAddr(state.peer),
-		ikeFragmentationSupported: state.ikeFragmentationSupported,
-		useNATT:                   state.useNATT,
+		initiatorSPI:              rs.initiatorSPI,
+		responderSPI:              rs.responderSPI,
+		peer:                      cloneUDPAddr(rs.peer),
+		ikeFragmentationSupported: rs.ikeFragmentationSupported,
+		useNATT:                   rs.useNATT,
 	}
 }
 
@@ -247,41 +247,35 @@ func newIKESARekeyCrypto(dhGroup uint16, existingSPIs ...uint64) (*ikeCrypto, er
 	}
 	var initiatorSPI uint64
 	for {
-		initiatorSPI, err = randomIKESPI()
-		if err != nil {
-			return nil, fmt.Errorf("generating initiator spi: %w", err)
-		}
+		initiatorSPI = randomIKESPI()
 		if !ikeSPIInUse(initiatorSPI, existingSPIs...) {
 			break
 		}
 	}
-	nonceI, err := randomBytes(defaultIKENonceLength)
-	if err != nil {
-		return nil, fmt.Errorf("generating nonce: %w", err)
-	}
+	nonceI := randomBytes(defaultIKENonceLength)
 	crypto.SetSPIs(initiatorSPI, 0)
 	crypto.SetNonces(nonceI, nil)
 	return crypto, nil
 }
 
-func (state ikeSARekeyState) sealIKESARekeyRequest(messageID uint32, next *ikeCrypto) ([][]byte, error) {
-	header := ike.IKEHeader{
-		InitiatorSPI: state.initiatorSPI,
-		ResponderSPI: state.responderSPI,
+func (rs ikeSARekeyState) sealIKESARekeyRequest(messageID uint32, next *ikeCrypto) ([][]byte, error) {
+	header := ike.Header{
+		InitiatorSPI: rs.initiatorSPI,
+		ResponderSPI: rs.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeCreateChildSA,
-		Flags:        state.initiatorFlag(),
+		Flags:        rs.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wires, err := sealIKEPackets(state.ike, header, ikeSARekeyRequestPayloads(state.ike, next), state.localInitiator, state.ikeFragmentationSupported)
+	wires, err := sealIKEPackets(rs.ike, header, ikeSARekeyRequestPayloads(rs.ike, next), rs.localInitiator, rs.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
 	}
 	return wires, nil
 }
 
-func (state ikeSARekeyState) initiatorFlag() byte {
-	if state.localInitiator {
+func (rs ikeSARekeyState) initiatorFlag() byte {
+	if rs.localInitiator {
 		return flagInitiator
 	}
 	return 0
@@ -315,19 +309,19 @@ func currentIKESARekeyProposals(current *ikeCrypto, dhGroup uint16, initiatorSPI
 	}
 }
 
-func (state ikeSARekeyState) ikeSARekeyResult(payloads []ike.Payload, next *ikeCrypto) (ikeSARekeyResult, error) {
-	requestProposals := currentIKESARekeyProposals(state.ike, next.dhGroup, next.initiatorSPI)
+func (rs ikeSARekeyState) ikeSARekeyResult(payloads []ike.Payload, next *ikeCrypto) (ikeSARekeyResult, error) {
+	requestProposals := currentIKESARekeyProposals(rs.ike, next.dhGroup, next.initiatorSPI)
 	proposal, responderSPI, nonceR, responderKE, err := negotiatedIKESARekeyFromPayloadsWithRequests(payloads, next.dhGroup, requestProposals)
 	if err != nil {
 		return ikeSARekeyResult{}, err
 	}
-	if ikeSPIInUse(responderSPI, state.initiatorSPI, state.responderSPI, next.initiatorSPI) {
+	if ikeSPIInUse(responderSPI, rs.initiatorSPI, rs.responderSPI, next.initiatorSPI) {
 		return ikeSARekeyResult{}, errors.New("parsing create_child_sa response: responder ike spi conflicts with an existing ike spi")
 	}
 	next.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
 	next.SetSPIs(next.initiatorSPI, responderSPI)
 	next.SetNonces(next.nonceI, nonceR)
-	if err := next.DeriveRekeyedIKEKeys(state.ike, responderKE); err != nil {
+	if err := next.DeriveRekeyedIKEKeys(rs.ike, responderKE); err != nil {
 		return ikeSARekeyResult{}, fmt.Errorf("deriving ike keys: %w", err)
 	}
 	return ikeSARekeyResult{
@@ -404,40 +398,40 @@ func negotiatedIKESARekeyFromPayloadsWithRequests(payloads []ike.Payload, dhGrou
 	return proposal, responderSPI, append([]byte(nil), nonce.Data...), append([]byte(nil), ke.Data...), nil
 }
 
-func (state ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([][]byte, error) {
-	header := ike.IKEHeader{
-		InitiatorSPI: state.initiatorSPI,
-		ResponderSPI: state.responderSPI,
+func (rs ikeSARekeyState) sealOldIKESADelete(messageID uint32) ([][]byte, error) {
+	header := ike.Header{
+		InitiatorSPI: rs.initiatorSPI,
+		ResponderSPI: rs.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeInformational,
-		Flags:        state.initiatorFlag(),
+		Flags:        rs.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wires, err := sealIKEPackets(state.ike, header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, state.localInitiator, state.ikeFragmentationSupported)
+	wires, err := sealIKEPackets(rs.ike, header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, rs.localInitiator, rs.ikeFragmentationSupported)
 	if err != nil {
 		return nil, err
 	}
 	return wires, nil
 }
 
-func (result ikeSARekeyResult) sealSelfDelete(messageID uint32, fragmentationSupported bool) ([][]byte, error) {
-	header := ike.IKEHeader{
-		InitiatorSPI: result.initiatorSPI,
-		ResponderSPI: result.responderSPI,
+func (r ikeSARekeyResult) sealSelfDelete(messageID uint32, fragmentationSupported bool) ([][]byte, error) {
+	header := ike.Header{
+		InitiatorSPI: r.initiatorSPI,
+		ResponderSPI: r.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeInformational,
-		Flags:        result.initiatorFlag(),
+		Flags:        r.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wires, err := sealIKEPackets(result.crypto, header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, result.localInitiator, fragmentationSupported)
+	wires, err := sealIKEPackets(r.crypto, header, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}}, r.localInitiator, fragmentationSupported)
 	if err != nil {
 		return nil, err
 	}
 	return wires, nil
 }
 
-func (result ikeSARekeyResult) initiatorFlag() byte {
-	if result.localInitiator {
+func (r ikeSARekeyResult) initiatorFlag() byte {
+	if r.localInitiator {
 		return flagInitiator
 	}
 	return 0

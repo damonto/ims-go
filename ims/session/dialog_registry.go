@@ -7,13 +7,13 @@ import (
 )
 
 type dialogEntry struct {
-	session *Session
+	session *Stack
 	id      sip.DialogID
 	key     string
 	closed  bool
 }
 
-func (s *Session) RegisterDialog(id sip.DialogID, key string) (Attachment, error) {
+func (s *Stack) RegisterDialog(id sip.DialogID, key string) (Attachment, error) {
 	if id.CallID == "" {
 		return nil, errors.New("registering dialog: call id is empty")
 	}
@@ -30,7 +30,7 @@ func (s *Session) RegisterDialog(id sip.DialogID, key string) (Attachment, error
 	return entry, nil
 }
 
-func (s *Session) LookupDialogKey(msg sip.Message) (string, bool) {
+func (s *Stack) LookupDialogKey(msg sip.Message) (string, bool) {
 	callID := msg.Header("Call-ID")
 	if callID == "" {
 		return "", false

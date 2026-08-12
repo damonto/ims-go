@@ -5,9 +5,6 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-go/ims/pidf"
-	"github.com/damonto/ims-go/ims/registration"
-	"github.com/damonto/ims-go/ims/sip"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -17,6 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func mediaDescriptionFromSDP(offer sdpOffer) MediaDescription {

@@ -3,7 +3,6 @@ package wfcsetup
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -89,13 +88,20 @@ func testAKAChunk(t *testing.T, data []byte, off int, name string) ([]byte, int)
 	return append([]byte(nil), data[off:off+n]...), off + n
 }
 
+func writeHTTPResponse(t *testing.T, w io.Writer, body string) {
+	t.Helper()
+	if _, err := io.WriteString(w, body); err != nil {
+		t.Errorf("WriteString() error = %v", err)
+	}
+}
+
 func TestTelusCheckRunsEWGFlow(t *testing.T) {
 	card := testCard{mcc: "302", mnc: "220", mncLength: 3, gid1: "5455", aka: testAKAResult(t)}
 	var postBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/androidgw/entitlements/"+card.IMSI() && req.URL.RawQuery == "":
-			_, _ = io.WriteString(w, `{"eapChallengeResponse":"`+testAKAChallenge+`"}`)
+			writeHTTPResponse(t, w, `{"eapChallengeResponse":"`+testAKAChallenge+`"}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/androidgw/eap-aka/dialog":
 			data, err := io.ReadAll(req.Body)
 			if err != nil {
@@ -105,16 +111,16 @@ func TestTelusCheckRunsEWGFlow(t *testing.T) {
 			w.Header().Set("Location", "/callback?access_token=access-token")
 			w.WriteHeader(http.StatusFound)
 		case req.Method == http.MethodGet && req.URL.Path == "/androidgw/entitlements/"+card.IMSI() && req.URL.Query().Get("access_token") == "access-token":
-			_, _ = io.WriteString(w, `[{"type":"volte","status":"enabled"},{"type":"vowifi","status":"enabled"}]`)
+			writeHTTPResponse(t, w, `[{"type":"volte","status":"enabled"},{"type":"vowifi","status":"enabled"}]`)
 		case req.Method == http.MethodGet && req.URL.Path == "/androidgw/servicePolicies/"+card.IMSI() && req.URL.Query().Get("access_token") == "access-token":
-			_, _ = io.WriteString(w, `{"managementUrl":{"url":"https://telus.example/manage","access_token":"web-token"},"servicePolicies":["no-usr-def-n911-addr"]}`)
+			writeHTTPResponse(t, w, `{"managementUrl":{"url":"https://telus.example/manage","access_token":"web-token"},"servicePolicies":["no-usr-def-n911-addr"]}`)
 		default:
 			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 		}
 	}))
 	defer server.Close()
 
-	got, err := Check(context.Background(), Request{
+	got, err := Check(t.Context(), Request{
 		Card:            card,
 		AuthenticateAKA: card.AKA,
 		Purpose:         PurposeActivation,
@@ -190,7 +196,7 @@ func TestTelusCheckMapsEWGOutcomes(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				switch {
 				case req.Method == http.MethodGet && req.URL.Path == "/androidgw/entitlements/"+card.IMSI() && req.URL.RawQuery == "":
-					_, _ = io.WriteString(w, `{"eapChallengeResponse":"`+testAKAChallenge+`"}`)
+					writeHTTPResponse(t, w, `{"eapChallengeResponse":"`+testAKAChallenge+`"}`)
 				case req.Method == http.MethodPost && req.URL.Path == "/androidgw/eap-aka/dialog":
 					w.Header().Set("Location", "/callback?access_token=access-token")
 					w.WriteHeader(http.StatusFound)
@@ -198,17 +204,17 @@ func TestTelusCheckMapsEWGOutcomes(t *testing.T) {
 					if req.URL.Query().Get("access_token") != "access-token" {
 						t.Fatalf("access_token = %q, want access-token", req.URL.Query().Get("access_token"))
 					}
-					_, _ = io.WriteString(w, tt.entitlements)
+					writeHTTPResponse(t, w, tt.entitlements)
 				case req.Method == http.MethodGet && req.URL.Path == "/androidgw/servicePolicies/"+card.IMSI():
 					policyHit = true
-					_, _ = io.WriteString(w, tt.policies)
+					writeHTTPResponse(t, w, tt.policies)
 				default:
 					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 				}
 			}))
 			defer server.Close()
 
-			got, err := Check(context.Background(), Request{
+			got, err := Check(t.Context(), Request{
 				Card:            card,
 				AuthenticateAKA: card.AKA,
 				Purpose:         PurposeActivation,
@@ -242,7 +248,7 @@ func TestTelusCheckRetriesTransientEWGFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/androidgw/entitlements/"+card.IMSI() && req.URL.RawQuery == "":
-			_, _ = io.WriteString(w, `{"eapChallengeResponse":"`+testAKAChallenge+`"}`)
+			writeHTTPResponse(t, w, `{"eapChallengeResponse":"`+testAKAChallenge+`"}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/androidgw/eap-aka/dialog":
 			w.Header().Set("Location", "/callback?access_token=access-token")
 			w.WriteHeader(http.StatusFound)
@@ -252,16 +258,16 @@ func TestTelusCheckRetriesTransientEWGFailure(t *testing.T) {
 				http.Error(w, "try again", http.StatusServiceUnavailable)
 				return
 			}
-			_, _ = io.WriteString(w, `[{"type":"vowifi","status":"enabled"}]`)
+			writeHTTPResponse(t, w, `[{"type":"vowifi","status":"enabled"}]`)
 		case req.Method == http.MethodGet && req.URL.Path == "/androidgw/servicePolicies/"+card.IMSI():
-			_, _ = io.WriteString(w, `{"managementUrl":{"url":"https://telus.example/manage","access_token":"web-token"},"servicePolicies":["e911-addr-not-reqd"]}`)
+			writeHTTPResponse(t, w, `{"managementUrl":{"url":"https://telus.example/manage","access_token":"web-token"},"servicePolicies":["e911-addr-not-reqd"]}`)
 		default:
 			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 		}
 	}))
 	defer server.Close()
 
-	got, err := Check(context.Background(), Request{
+	got, err := Check(t.Context(), Request{
 		Card:            card,
 		AuthenticateAKA: card.AKA,
 		Purpose:         PurposeActivation,
@@ -351,10 +357,10 @@ func TestO2UKCheckRunsGenericDevicesFlow(t *testing.T) {
 		}
 		requests = append(requests, body)
 		if len(requests) == 1 {
-			_, _ = io.WriteString(w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
+			writeHTTPResponse(t, w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
 			return
 		}
-		_, _ = io.WriteString(w, `[
+		writeHTTPResponse(t, w, `[
 			{"message-id":1,"response-code":1000,"aka-token":"aka-token"},
 			{"message-id":2,"response-code":1000,"poll-interval":60,"service-entitlement":[
 				{"service-name":"VoLTE","entitlement-status":1000},
@@ -365,7 +371,7 @@ func TestO2UKCheckRunsGenericDevicesFlow(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := Check(context.Background(), Request{
+	got, err := Check(t.Context(), Request{
 		Card:            card,
 		AuthenticateAKA: card.AKA,
 		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
@@ -413,7 +419,7 @@ func TestO2UKCheckReusesCachedAKAToken(t *testing.T) {
 			t.Fatalf("Unmarshal() error = %v", err)
 		}
 		requests = append(requests, body)
-		_, _ = io.WriteString(w, `[
+		writeHTTPResponse(t, w, `[
 			{"message-id":1,"response-code":1000},
 			{"message-id":2,"response-code":1000,"service-entitlement":[{"service-name":"VoWiFi","entitlement-status":1000}]},
 			{"message-id":3,"response-code":1000}
@@ -421,7 +427,7 @@ func TestO2UKCheckReusesCachedAKAToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := Check(context.Background(), Request{
+	got, err := Check(t.Context(), Request{
 		Card:            card,
 		AuthenticateAKA: card.AKA,
 		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
@@ -465,10 +471,10 @@ func TestO2UKCheckContinuesWithoutInitialAKAChallenge(t *testing.T) {
 		}
 		requests = append(requests, body)
 		if len(requests) == 1 {
-			_, _ = io.WriteString(w, `[{"message-id":1,"response-code":1000}]`)
+			writeHTTPResponse(t, w, `[{"message-id":1,"response-code":1000}]`)
 			return
 		}
-		_, _ = io.WriteString(w, `[
+		writeHTTPResponse(t, w, `[
 			{"message-id":1,"response-code":1000},
 			{"message-id":2,"response-code":1000,"service-entitlement":[{"service-name":"VoWiFi","entitlement-status":1000}]},
 			{"message-id":3,"response-code":1000}
@@ -476,7 +482,7 @@ func TestO2UKCheckContinuesWithoutInitialAKAChallenge(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := Check(context.Background(), Request{
+	got, err := Check(t.Context(), Request{
 		Card:            card,
 		AuthenticateAKA: card.AKA,
 		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
@@ -613,14 +619,14 @@ func TestO2UKCheckMapsGenericDevicesOutcomes(t *testing.T) {
 					t.Fatalf("Unmarshal() error = %v", err)
 				}
 				if _, ok := body[0]["aka-challenge-rsp"]; !ok {
-					_, _ = io.WriteString(w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
+					writeHTTPResponse(t, w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
 					return
 				}
-				_, _ = io.WriteString(w, tt.response)
+				writeHTTPResponse(t, w, tt.response)
 			}))
 			defer server.Close()
 
-			got, err := Check(context.Background(), Request{
+			got, err := Check(t.Context(), Request{
 				Card:            card,
 				AuthenticateAKA: card.AKA,
 				Device:          Device{IMEI: "123456789012345", Model: "Pixel"},
@@ -663,16 +669,16 @@ func TestO2UKCheckRetriesServerAKAChallengeWithFullAuth(t *testing.T) {
 		requests = append(requests, body)
 		switch len(requests) {
 		case 1:
-			_, _ = io.WriteString(w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
+			writeHTTPResponse(t, w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
 		case 2:
 			if !strings.Contains(string(data), `"aka-challenge-rsp":"`+testO2AKAChallengeResponse+`"`) {
 				t.Fatalf("second request = %s, want challenge response", data)
 			}
-			_, _ = io.WriteString(w, `[{"message-id":1,"response-code":1003}]`)
+			writeHTTPResponse(t, w, `[{"message-id":1,"response-code":1003}]`)
 		case 3:
-			_, _ = io.WriteString(w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
+			writeHTTPResponse(t, w, `[{"message-id":1,"response-code":1000,"aka-challenge":"`+testAKAChallenge+`"}]`)
 		case 4:
-			_, _ = io.WriteString(w, `[
+			writeHTTPResponse(t, w, `[
 				{"message-id":1,"response-code":1000,"aka-token":"new-token"},
 				{"message-id":2,"response-code":1000,"service-entitlement":[{"service-name":"VoWiFi","entitlement-status":1000}]},
 				{"message-id":3,"response-code":1000}
@@ -683,7 +689,7 @@ func TestO2UKCheckRetriesServerAKAChallengeWithFullAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := Check(context.Background(), Request{
+	got, err := Check(t.Context(), Request{
 		Card:            card,
 		AuthenticateAKA: card.AKA,
 		Device:          Device{IMEI: "123456789012345", Model: "Pixel"},

@@ -25,18 +25,18 @@ func (e *sdpPreconditionFailureError) Error() string {
 }
 
 // UnmarshalText decodes an SDP body into its audio media description.
-func (description *MediaDescription) UnmarshalText(text []byte) error {
-	*description = MediaDescription{}
+func (d *MediaDescription) UnmarshalText(text []byte) error {
+	*d = MediaDescription{}
 	var offer sdpOffer
 	if err := offer.UnmarshalText(text); err != nil {
 		return err
 	}
-	*description = mediaDescriptionFromSDP(offer)
+	*d = mediaDescriptionFromSDP(offer)
 	return nil
 }
 
-func (offer *sdpOffer) UnmarshalText(text []byte) error {
-	*offer = sdpOffer{
+func (o *sdpOffer) UnmarshalText(text []byte) error {
+	*o = sdpOffer{
 		RawSDP:             append([]byte(nil), text...),
 		Codecs:             make(map[int]AudioCodecConfig),
 		FMTP:               make(map[int]string),
@@ -63,13 +63,13 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			}
 			if !seenMedia {
 				sessionIP = append(net.IP(nil), ip...)
-				offer.RemoteIP = append(net.IP(nil), ip...)
+				o.RemoteIP = append(net.IP(nil), ip...)
 			} else if inAudio {
-				offer.RemoteIP = ip
+				o.RemoteIP = ip
 			}
 		case !seenMedia && (strings.HasPrefix(line, "t=") || strings.HasPrefix(line, "r=") || strings.HasPrefix(line, "z=")):
-			offer.TimeDescriptions = append(offer.TimeDescriptions, line)
-		case strings.HasPrefix(line, "m=audio ") && offer.AudioIndex < 0:
+			o.TimeDescriptions = append(o.TimeDescriptions, line)
+		case strings.HasPrefix(line, "m=audio ") && o.AudioIndex < 0:
 			var audio sdpAudioLine
 			if err := audio.UnmarshalText([]byte(line)); err != nil {
 				return err
@@ -78,17 +78,17 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			if err != nil {
 				return err
 			}
-			offer.Media = append(offer.Media, media)
-			offer.AudioIndex = len(offer.Media) - 1
+			o.Media = append(o.Media, media)
+			o.AudioIndex = len(o.Media) - 1
 			seenMedia = true
 			inAudio = true
-			offer.Direction = sessionDirection
+			o.Direction = sessionDirection
 			if len(sessionIP) > 0 {
-				offer.RemoteIP = append(net.IP(nil), sessionIP...)
+				o.RemoteIP = append(net.IP(nil), sessionIP...)
 			}
-			offer.RemotePort = audio.Port
-			offer.Profile = audio.Protocol
-			offer.Payloads = audio.Payloads
+			o.RemotePort = audio.Port
+			o.Profile = audio.Protocol
+			o.Payloads = audio.Payloads
 			mediaPayloads = make(map[int]struct{}, len(audio.Payloads))
 			for _, payload := range audio.Payloads {
 				mediaPayloads[payload] = struct{}{}
@@ -100,7 +100,7 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			if err != nil {
 				return err
 			}
-			offer.Media = append(offer.Media, media)
+			o.Media = append(o.Media, media)
 		case strings.HasPrefix(line, "a=rtpmap:"):
 			if !inAudio {
 				continue
@@ -113,7 +113,7 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 				continue
 			}
 			if _, ok := mediaPayloads[payloadType]; ok {
-				offer.Codecs[payloadType] = codec
+				o.Codecs[payloadType] = codec
 			}
 		case strings.HasPrefix(line, "a=fmtp:"):
 			if !inAudio {
@@ -121,7 +121,7 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			}
 			payloadType, fmtp := parseFMTP(line)
 			if _, ok := mediaPayloads[payloadType]; ok {
-				offer.FMTP[payloadType] = strings.TrimSpace(fmtp)
+				o.FMTP[payloadType] = strings.TrimSpace(fmtp)
 			}
 		case strings.HasPrefix(line, "a=ptime:"):
 			if inAudio {
@@ -129,7 +129,7 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 				if err != nil {
 					return fmt.Errorf("parsing voice SDP: invalid ptime: %w", err)
 				}
-				offer.PTime = ptime
+				o.PTime = ptime
 			}
 		case strings.HasPrefix(line, "a=maxptime:"):
 			if inAudio {
@@ -137,7 +137,7 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 				if err != nil {
 					return fmt.Errorf("parsing voice SDP: invalid maxptime: %w", err)
 				}
-				offer.MaxPTime = maxptime
+				o.MaxPTime = maxptime
 			}
 		case strings.HasPrefix(line, "a=rtcp:"):
 			if !inAudio {
@@ -147,22 +147,22 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			if err != nil {
 				return err
 			}
-			offer.RemoteRTCPPort = port
-			offer.RemoteRTCPIP = ip
+			o.RemoteRTCPPort = port
+			o.RemoteRTCPIP = ip
 		case strings.EqualFold(line, "a=rtcp-mux"):
 			if inAudio {
-				offer.RTCPMux = true
+				o.RTCPMux = true
 			}
 		case isSDPDirectionLine(line):
 			direction := MediaDirection(strings.TrimPrefix(strings.ToLower(line), "a="))
 			if inAudio {
-				offer.Direction = direction
+				o.Direction = direction
 			} else if !seenMedia {
 				sessionDirection = direction
 			}
 		case isPreconditionAttribute(line):
 			if inAudio {
-				if err := offer.applyPrecondition(line); err != nil {
+				if err := o.applyPrecondition(line); err != nil {
 					return err
 				}
 			}
@@ -179,24 +179,24 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			}
 			switch modifier {
 			case "RS":
-				offer.RTCPSenderBandwidth = new(value)
+				o.RTCPSenderBandwidth = new(value)
 			case "RR":
-				offer.RTCPReceiverBandwidth = new(value)
+				o.RTCPReceiverBandwidth = new(value)
 			}
 		}
 	}
-	if offer.AudioIndex < 0 || offer.RemotePort == 0 {
+	if o.AudioIndex < 0 || o.RemotePort == 0 {
 		return errors.New("parsing voice SDP: audio media line is missing")
 	}
-	if offer.RemoteIP == nil {
+	if o.RemoteIP == nil {
 		return errors.New("parsing voice SDP: connection line is missing")
 	}
-	if offer.PTime > 0 && offer.MaxPTime > 0 && offer.PTime > offer.MaxPTime {
+	if o.PTime > 0 && o.MaxPTime > 0 && o.PTime > o.MaxPTime {
 		return errors.New("parsing voice SDP: ptime exceeds maxptime")
 	}
-	applyStaticRTPPayloads(offer)
-	for payloadType, fmtp := range offer.FMTP {
-		codec, ok := offer.Codecs[payloadType]
+	applyStaticRTPPayloads(o)
+	for payloadType, fmtp := range o.FMTP {
+		codec, ok := o.Codecs[payloadType]
 		if !ok {
 			continue
 		}
@@ -204,11 +204,11 @@ func (offer *sdpOffer) UnmarshalText(text []byte) error {
 			// A malformed optional telephone-event format must not reject the
 			// audio offer; discard only that payload instead of treating it as
 			// the RFC 4733 default event set.
-			delete(offer.Codecs, payloadType)
-			delete(offer.FMTP, payloadType)
+			delete(o.Codecs, payloadType)
+			delete(o.FMTP, payloadType)
 			continue
 		}
-		offer.Codecs[payloadType] = applyCodecFMTP(codec, fmtp)
+		o.Codecs[payloadType] = applyCodecFMTP(codec, fmtp)
 	}
 	return nil
 }
@@ -223,7 +223,7 @@ func isPreconditionAttribute(line string) bool {
 		strings.HasPrefix(fields[0], "a=conf:")
 }
 
-func (offer *sdpOffer) applyPrecondition(line string) error {
+func (o *sdpOffer) applyPrecondition(line string) error {
 	fields := strings.Fields(strings.ToLower(line))
 	if len(fields) == 0 {
 		return errors.New("parsing voice SDP: empty precondition attribute")
@@ -235,10 +235,10 @@ func (offer *sdpOffer) applyPrecondition(line string) error {
 	}
 	kind, preconditionType := parts[0], parts[1]
 	if preconditionType != "qos" {
-		return offer.applyUnknownPrecondition(kind, preconditionType, fields)
+		return o.applyUnknownPrecondition(kind, preconditionType, fields)
 	}
 
-	offer.Preconditions = true
+	o.Preconditions = true
 	switch kind {
 	case "curr":
 		scope, status, ok := parseCurrentQoS(line)
@@ -247,24 +247,24 @@ func (offer *sdpOffer) applyPrecondition(line string) error {
 		}
 		switch scope {
 		case "local":
-			offer.LocalQoSStatus = status
+			o.LocalQoSStatus = status
 		case "remote":
-			offer.RemoteQoSStatus = status
+			o.RemoteQoSStatus = status
 		}
 	case "des":
 		strength, scope, direction, ok := parseDesiredQoS(line)
 		if !ok {
 			return qosPreconditionParseError(fields)
 		}
-		offer.DesiredQoS.set(scope, direction, strength)
+		o.DesiredQoS.set(scope, direction, strength)
 	case "conf":
 		scope, direction, ok := parseQoSConfirmation(line)
 		if !ok {
 			return qosPreconditionParseError(fields)
 		}
 		if scope == "remote" {
-			offer.RemoteQoSConfirmation = true
-			offer.QoSConfirmation = direction
+			o.RemoteQoSConfirmation = true
+			o.QoSConfirmation = direction
 		}
 	default:
 		return errors.New("parsing voice SDP: invalid QoS precondition attribute")
@@ -272,14 +272,14 @@ func (offer *sdpOffer) applyPrecondition(line string) error {
 	return nil
 }
 
-func (offer *sdpOffer) applyUnknownPrecondition(kind, preconditionType string, fields []string) error {
+func (o *sdpOffer) applyUnknownPrecondition(kind, preconditionType string, fields []string) error {
 	switch kind {
 	case "curr":
 		if len(fields) != 3 || (fields[1] != "local" && fields[1] != "remote") || normalizedQoSStatus(fields[2]) != fields[2] {
 			return errors.New("parsing voice SDP: invalid unknown current-status precondition")
 		}
 		if fields[1] == "local" {
-			offer.UnknownLocalStatus[preconditionType] = fields[2]
+			o.UnknownLocalStatus[preconditionType] = fields[2]
 		}
 	case "des":
 		if len(fields) != 4 || !validQoSStrength(fields[1]) ||
@@ -297,7 +297,7 @@ func (offer *sdpOffer) applyUnknownPrecondition(kind, preconditionType string, f
 				strength:         qosStrengthUnknown,
 			}
 		}
-		offer.UnknownLocalMandatory = append(offer.UnknownLocalMandatory, sdpUnknownPrecondition{
+		o.UnknownLocalMandatory = append(o.UnknownLocalMandatory, sdpUnknownPrecondition{
 			preconditionType: preconditionType,
 			direction:        fields[3],
 		})

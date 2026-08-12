@@ -745,7 +745,9 @@ func (c *Call) endAfterMediaEvent(done <-chan struct{}, reason mediaReleaseReaso
 		close(stop)
 	}
 
-	_ = c.closeMedia()
+	if err := c.closeMedia(); err != nil {
+		c.endpoint.emitError(fmt.Errorf("closing media after inactivity: %w", err))
+	}
 	cause := reason.cause()
 	if state != CallStateActive && state != CallStateConfirmed {
 		c.endpoint.logger.Debug("call media release before confirmed dialog", "call_id", c.id, "state", state, "reason", cause)

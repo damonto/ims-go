@@ -14,12 +14,12 @@ func TestDecodePitchLag8BitFirstSubframe(t *testing.T) {
 }
 
 func TestDecodePitchLag8BitIntegerRegion(t *testing.T) {
-	index := int16((pitchFrac1_8b-pitchMin)*2 + 3)
+	index := int16((pitchFrac1At8Bits-pitchMin)*2 + 3)
 
 	t0, frac, _ := decodePitchLag(index, nBits660, 0, pitchLagState{})
 
-	if t0 != pitchFrac1_8b+3 || frac != 0 {
-		t.Fatalf("lag = %d frac %d, want %d/0", t0, frac, pitchFrac1_8b+3)
+	if t0 != pitchFrac1At8Bits+3 || frac != 0 {
+		t.Fatalf("lag = %d frac %d, want %d/0", t0, frac, pitchFrac1At8Bits+3)
 	}
 }
 

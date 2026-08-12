@@ -21,10 +21,8 @@ var (
 	ErrUSSDInProgress     = errors.New("ussd session operation in progress")
 )
 
-type USSDMessage = imsussd.Message
-
 type USSDResult struct {
-	Message    USSDMessage
+	Message    imsussd.Message
 	HasMessage bool
 	Closed     bool
 	ReceivedAt time.Time
@@ -32,7 +30,7 @@ type USSDResult struct {
 
 type IncomingUSSD struct {
 	Session    *USSDSession
-	Message    USSDMessage
+	Message    imsussd.Message
 	ReceivedAt time.Time
 }
 
@@ -82,15 +80,15 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 
 	result, err := s.awaitResult(ctx)
 	if err != nil {
-		s.cleanupLowSession(low)
+		s.cleanupLowSession(ctx, low)
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
 	}
 	s.client.logger.Info("USSD result", "closed", result.Closed, "request", result.Message.Request, "notify", result.Message.Notify, "final", result.Message.Final, "error_code", result.Message.ErrorCode)
 	return result, nil
 }
 
-func (s *USSDSession) cleanupLowSession(low *imsussd.Session) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), ussdCleanupTimeout)
+func (s *USSDSession) cleanupLowSession(ctx context.Context, low *imsussd.Session) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ussdCleanupTimeout)
 	defer cancel()
 	if err := low.End(cleanupCtx, ""); err != nil {
 		s.client.logger.Debug("cleaning up USSD session", "err", err)
@@ -350,7 +348,7 @@ func (s *USSDSession) currentLow() *imsussd.Session {
 	return s.low
 }
 
-func ussdResultFromMessage(msg USSDMessage) USSDResult {
+func ussdResultFromMessage(msg imsussd.Message) USSDResult {
 	return USSDResult{
 		Message:    msg,
 		HasMessage: hasUSSDMessage(msg),
@@ -359,7 +357,7 @@ func ussdResultFromMessage(msg USSDMessage) USSDResult {
 	}
 }
 
-func hasUSSDMessage(msg USSDMessage) bool {
+func hasUSSDMessage(msg imsussd.Message) bool {
 	return strings.TrimSpace(msg.Text) != "" ||
 		strings.TrimSpace(msg.Language) != "" ||
 		msg.ErrorCode != 0 ||

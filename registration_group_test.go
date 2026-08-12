@@ -13,32 +13,32 @@ func TestIMSConfigMultipleRegistrationValidation(t *testing.T) {
 	group := NewRegistrationGroup()
 	tests := []struct {
 		name    string
-		cfg     IMSConfig
+		cfg     ServiceConfig
 		wantErr string
 	}{
 		{
 			name:    "settings require group",
-			cfg:     IMSConfig{RegistrationID: 1, RegistrationPreference: 1000, IMEI: testIMEI},
+			cfg:     ServiceConfig{RegistrationID: 1, RegistrationPreference: 1000, IMEI: testIMEI},
 			wantErr: "registration group is required",
 		},
 		{
 			name:    "group requires registration id",
-			cfg:     IMSConfig{RegistrationGroup: group, RegistrationPreference: 1000, IMEI: testIMEI},
+			cfg:     ServiceConfig{RegistrationGroup: group, RegistrationPreference: 1000, IMEI: testIMEI},
 			wantErr: "registration id must be greater than zero",
 		},
 		{
 			name:    "group requires valid preference",
-			cfg:     IMSConfig{RegistrationGroup: group, RegistrationID: 1, RegistrationPreference: 1001, IMEI: testIMEI},
+			cfg:     ServiceConfig{RegistrationGroup: group, RegistrationID: 1, RegistrationPreference: 1001, IMEI: testIMEI},
 			wantErr: "registration preference must be between 1 and 1000",
 		},
 		{
 			name:    "group requires stable instance id",
-			cfg:     IMSConfig{RegistrationGroup: group, RegistrationID: 1, RegistrationPreference: 1000},
+			cfg:     ServiceConfig{RegistrationGroup: group, RegistrationID: 1, RegistrationPreference: 1000},
 			wantErr: "imei is required",
 		},
 		{
 			name: "valid multiple registration",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				RegistrationGroup:      group,
 				RegistrationID:         1,
 				RegistrationPreference: 1000,
@@ -90,7 +90,7 @@ func TestConfigDefaultsMultipleRegistrationByAccess(t *testing.T) {
 			cfg := withTestIPSecAlgorithms(Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   tt.access,
-				IMS:      IMSConfig{RegistrationGroup: group},
+				IMS:      ServiceConfig{RegistrationGroup: group},
 			})
 			got, err := cfg.normalizedIMS()
 			if err != nil {
@@ -109,14 +109,14 @@ func TestConfigDefaultsMultipleRegistrationByAccess(t *testing.T) {
 func TestIMSConfigCoordinatedAKA(t *testing.T) {
 	tests := []struct {
 		name string
-		cfg  IMSConfig
+		cfg  ServiceConfig
 	}{
 		{
 			name: "without registration group",
 		},
 		{
 			name: "with registration group",
-			cfg:  IMSConfig{RegistrationGroup: NewRegistrationGroup()},
+			cfg:  ServiceConfig{RegistrationGroup: NewRegistrationGroup()},
 		},
 	}
 
@@ -127,7 +127,7 @@ func TestIMSConfigCoordinatedAKA(t *testing.T) {
 				calls++
 				return usim.AKAResult{RES: []byte("response")}, nil
 			}
-			got, err := tt.cfg.coordinatedAKA(authenticate)(context.Background(), make([]byte, 16), make([]byte, 16))
+			got, err := tt.cfg.coordinatedAKA(authenticate)(t.Context(), make([]byte, 16), make([]byte, 16))
 			if err != nil {
 				t.Fatalf("coordinatedAKA() error = %v", err)
 			}

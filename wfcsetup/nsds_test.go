@@ -3,7 +3,6 @@ package wfcsetup
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -99,7 +98,7 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 			Title:      "Wi-Fi Calling",
 			ClientName: "WiFiCallingWebViewController",
 		},
-	}).Check(context.Background())
+	}).Check(t.Context())
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
@@ -120,7 +119,7 @@ func TestNSDSCheckE911UpdateUsesBatchedChallengeResponse(t *testing.T) {
 	}
 }
 
-func TestNSDSHelpers(t *testing.T) {
+func TestNSDSValueDerivation(t *testing.T) {
 	t.Run("device id", func(t *testing.T) {
 		got := nsdsDeviceID("123456789012345")
 		want := "MTIzNDU2Nzg5MDEyMzQ1"
@@ -162,7 +161,11 @@ func readNSDSRequests(t *testing.T, req *http.Request) []nsdsRequest {
 	if err != nil {
 		t.Fatalf("gzip.NewReader() error = %v", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("gzip reader Close() error = %v", err)
+		}
+	}()
 
 	var requests []nsdsRequest
 	if err := json.NewDecoder(reader).Decode(&requests); err != nil {

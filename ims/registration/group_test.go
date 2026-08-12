@@ -33,7 +33,7 @@ func TestGroupSelectsHigherPreferenceThenFIFO(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			group := &Group{}
-			release, err := tt.begin(group, context.Background(), 0)
+			release, err := tt.begin(group, t.Context(), 0)
 			if err != nil {
 				t.Fatalf("acquiring initial owner: %v", err)
 			}
@@ -41,7 +41,7 @@ func TestGroupSelectsHigherPreferenceThenFIFO(t *testing.T) {
 			order := make(chan string)
 			start := func(name string, preference int) {
 				go func() {
-					release, err := tt.begin(group, context.Background(), preference)
+					release, err := tt.begin(group, t.Context(), preference)
 					if err != nil {
 						order <- "error: " + err.Error()
 						return
@@ -98,12 +98,12 @@ func TestGroupRemovesCanceledWaiter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			group := &Group{}
-			release, err := tt.begin(group, context.Background(), 0)
+			release, err := tt.begin(group, t.Context(), 0)
 			if err != nil {
 				t.Fatalf("acquiring initial owner: %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			errCh := make(chan error, 1)
 			go func() {
 				_, err := tt.begin(group, ctx, 1000)
@@ -137,7 +137,7 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 				group := &Group{}
 				group.useSingleRegistration(2, 500)
 
-				release, err := group.beginRegistrationForFlow(context.Background(), 1, 1000)
+				release, err := group.beginRegistrationForFlow(t.Context(), 1, 1000)
 				if err != nil {
 					t.Fatalf("acquiring preferred flow: %v", err)
 				}
@@ -160,7 +160,7 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 
 				acquired := make(chan error, 1)
 				go func() {
-					acquired <- group.WaitForRegistration(context.Background(), 2, 500)
+					acquired <- group.WaitForRegistration(t.Context(), 2, 500)
 				}()
 				waitForSingleRegistrationWaiter(t, group)
 
@@ -189,7 +189,7 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 			run: func(t *testing.T) {
 				group := &Group{}
 				group.useSingleRegistration(1, 1000)
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(t.Context())
 				errCh := make(chan error, 1)
 				go func() {
 					_, err := group.beginRegistrationForFlow(ctx, 2, 500)
@@ -216,7 +216,7 @@ func TestGroupSingleRegistrationFallback(t *testing.T) {
 				stop := make(chan struct{})
 				errCh := make(chan error, 1)
 				go func() {
-					_, err := group.beginRegistrationForFlowUntil(context.Background(), 2, 500, stop)
+					_, err := group.beginRegistrationForFlowUntil(t.Context(), 2, 500, stop)
 					errCh <- err
 				}()
 				waitForSingleRegistrationWaiter(t, group)
@@ -309,7 +309,7 @@ func TestGroupDeregistersOnlySingleRegistrationOwner(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			release, send, err := group.beginDeregistrationForFlow(context.Background(), tt.registrationID, tt.preference)
+			release, send, err := group.beginDeregistrationForFlow(t.Context(), tt.registrationID, tt.preference)
 			if err != nil {
 				t.Fatalf("beginDeregistrationForFlow() error = %v", err)
 			}

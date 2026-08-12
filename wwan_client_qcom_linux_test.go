@@ -28,10 +28,10 @@ func TestQCOMIMSPDNNetworkInfo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := qcomIMSPDNNetworkInfo(tt.info)
+			got := qcomPDNNetworkInfo(tt.info)
 			if !got.LocalIPv4.Equal(tt.info.LocalIPv4) || !got.LocalIPv6.Equal(tt.info.LocalIPv6) ||
 				!got.IPv4Gateway.Equal(tt.info.IPv4Gateway) || !got.IPv6Gateway.Equal(tt.info.IPv6Gateway) {
-				t.Fatalf("qcomIMSPDNNetworkInfo() = %+v, want local addresses and gateways from %+v", got, tt.info)
+				t.Fatalf("qcomPDNNetworkInfo() = %+v, want local addresses and gateways from %+v", got, tt.info)
 			}
 		})
 	}

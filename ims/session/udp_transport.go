@@ -34,8 +34,7 @@ func OpenUDPTransport(ctx context.Context, localIP, remoteIP net.IP, remotePort 
 	}
 	transport, err := NewUDPTransport(conn, remote)
 	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("opening udp transport: %w", err)
+		return nil, errors.Join(fmt.Errorf("opening udp transport: %w", err), conn.Close())
 	}
 	return transport, nil
 }
@@ -71,7 +70,7 @@ func (t *udpTransport) WritePacket(ctx context.Context, data []byte) error {
 	return t.WritePacketTo(ctx, data, nil)
 }
 
-func (t *udpTransport) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
+func (t *udpTransport) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) (resultErr error) {
 	remote := t.remote
 	if udp, ok := addr.(*net.UDPAddr); ok && udp != nil {
 		remote = udp
@@ -86,7 +85,11 @@ func (t *udpTransport) WritePacketTo(ctx context.Context, data []byte, addr net.
 		if err := t.conn.SetWriteDeadline(deadline); err != nil {
 			return fmt.Errorf("writing udp packet: %w", err)
 		}
-		defer t.conn.SetWriteDeadline(time.Time{})
+		defer func() {
+			if err := t.conn.SetWriteDeadline(time.Time{}); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("clearing udp write deadline: %w", err))
+			}
+		}()
 	}
 	if err := ctx.Err(); err != nil {
 		return err

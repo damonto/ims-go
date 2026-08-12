@@ -33,12 +33,10 @@ const (
 	udpEncapsulatedESPKeepaliveTick    = 20 * time.Second
 )
 
-func randomUint32() (uint32, error) {
+func randomUint32() uint32 {
 	buf := make([]byte, 4)
-	if _, err := crand.Read(buf); err != nil {
-		return 0, fmt.Errorf("generating random value: %w", err)
-	}
-	return binary.BigEndian.Uint32(buf), nil
+	_, _ = crand.Read(buf)
+	return binary.BigEndian.Uint32(buf)
 }
 
 func secureEncryption(value string) (string, error) {
@@ -275,11 +273,7 @@ func udpEncTunnelKeepalivePacket(localIP, remoteIP net.IP) (packet.InnerPacket, 
 	return secureInnerPacket(localIP, remoteIP, SecureModeUDPEncTunnel, []byte{udpEncapsulatedESPKeepalivePayload})
 }
 
-type PacketSession = ipsecbase.PacketSession
-
-type Attachment = ipsecbase.Attachment
-
-func writeUDPEncTunnelKeepalive(ctx context.Context, session PacketSession, localIP, remoteIP net.IP) error {
+func writeUDPEncTunnelKeepalive(ctx context.Context, session ipsecbase.PacketSession, localIP, remoteIP net.IP) error {
 	if session == nil {
 		return errors.New("writing UDP-enc-tun keepalive: session is nil")
 	}
@@ -290,7 +284,7 @@ func writeUDPEncTunnelKeepalive(ctx context.Context, session PacketSession, loca
 	return session.WriteInnerPacket(ctx, inner)
 }
 
-func connectedUDPAddrs(s PacketSession, remoteIP net.IP) (*net.UDPAddr, *net.UDPAddr, error) {
+func connectedUDPAddrs(s ipsecbase.PacketSession, remoteIP net.IP) (*net.UDPAddr, *net.UDPAddr, error) {
 	if s == nil {
 		return nil, nil, errors.New("session is nil")
 	}

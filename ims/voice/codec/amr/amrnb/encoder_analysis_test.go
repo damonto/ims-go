@@ -51,7 +51,7 @@ func TestEncoderAnalyzeFrameMode590(t *testing.T) {
 		if !got.sub[i].hasFixed {
 			t.Fatalf("subframe %d fixed codebook search was not computed", i)
 		}
-		decoded := decode2i40_11bits(got.sub[i].fixed.sign, got.sub[i].fixed.index)
+		decoded := decode2I40At11Bits(got.sub[i].fixed.sign, got.sub[i].fixed.index)
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}
@@ -118,7 +118,7 @@ func TestEncoderAnalyzeFrameMode122(t *testing.T) {
 		if got.sub[i].fixed.paramCount != 10 {
 			t.Fatalf("subframe %d fixed param count = %d, want 10", i, got.sub[i].fixed.paramCount)
 		}
-		decoded := decode10i40_35bits(got.sub[i].fixed.params[:got.sub[i].fixed.paramCount])
+		decoded := decode10I40At35Bits(got.sub[i].fixed.params[:got.sub[i].fixed.paramCount])
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}
@@ -154,7 +154,7 @@ func TestEncoderAnalyzeFrameMode515IncludesFixedCodebook(t *testing.T) {
 		if !sub.hasFixed {
 			t.Fatalf("subframe %d fixed codebook search was not computed", i)
 		}
-		decoded := decode2i40_9bits(int16(i), sub.fixed.sign, sub.fixed.index)
+		decoded := decode2I40At9Bits(int16(i), sub.fixed.sign, sub.fixed.index)
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}
@@ -190,7 +190,7 @@ func TestEncoderAnalyzeFrameMode475RebuildsPairState(t *testing.T) {
 		if !sub.hasFixed {
 			t.Fatalf("subframe %d fixed codebook search was not computed", i)
 		}
-		decoded := decode2i40_9bits(int16(i), sub.fixed.sign, sub.fixed.index)
+		decoded := decode2I40At9Bits(int16(i), sub.fixed.sign, sub.fixed.index)
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}
@@ -244,7 +244,7 @@ func TestEncoderAnalyzeFrameMode670IncludesFixedCodebook(t *testing.T) {
 		if !sub.hasFixed {
 			t.Fatalf("subframe %d fixed codebook search was not computed", i)
 		}
-		decoded := decode3i40_14bits(sub.fixed.sign, sub.fixed.index)
+		decoded := decode3I40At14Bits(sub.fixed.sign, sub.fixed.index)
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}
@@ -280,7 +280,7 @@ func TestEncoderAnalyzeFrameMode795IncludesFixedCodebook(t *testing.T) {
 		if !sub.hasFixed {
 			t.Fatalf("subframe %d fixed codebook search was not computed", i)
 		}
-		decoded := decode4i40_17bits(sub.fixed.sign, sub.fixed.index)
+		decoded := decode4I40At17Bits(sub.fixed.sign, sub.fixed.index)
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}
@@ -327,7 +327,7 @@ func TestEncoderAnalyzeFrameMode1020IncludesFixedCodebook(t *testing.T) {
 		if sub.fixed.paramCount != 7 {
 			t.Fatalf("subframe %d fixed param count = %d, want 7", i, sub.fixed.paramCount)
 		}
-		decoded := decode8i40_31bits(sub.fixed.params[:sub.fixed.paramCount])
+		decoded := decode8I40At31Bits(sub.fixed.params[:sub.fixed.paramCount])
 		if allZero(decoded[:]) {
 			t.Fatalf("subframe %d decoded fixed codebook is all zero", i)
 		}

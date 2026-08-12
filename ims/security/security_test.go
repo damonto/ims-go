@@ -865,7 +865,7 @@ func TestBuildAKAAuthorization(t *testing.T) {
 				QOP:       "auth",
 			}
 
-			got, err := BuildAKAAuthorization(context.Background(), stubAKAProvider{}, Identity{
+			got, err := BuildAKAAuthorization(t.Context(), stubAKAProvider{}, Identity{
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				RegisterURI:     "sip:ims.mnc001.mcc001.3gppnetwork.org",
 				Realm:           "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1128,7 +1128,7 @@ func TestBuildAKAAuthorizationDoesNotRetryInvalidAKA(t *testing.T) {
 			}
 
 			provider := &fixedAKAProvider{result: tt.result, err: tt.err}
-			_, err := BuildAKAAuthorization(context.Background(), provider, Identity{
+			_, err := BuildAKAAuthorization(t.Context(), provider, Identity{
 				PrivateIdentity: "310280123456789@private.att.net",
 				RegisterURI:     "sip:one.att.net",
 				Realm:           "one.att.net",
@@ -1166,7 +1166,7 @@ func TestBuildAKAAuthorizationReportsUSIMChallengeFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := &fixedAKAProvider{result: tt.result}
-			_, err := BuildAKAAuthorization(context.Background(), provider, Identity{
+			_, err := BuildAKAAuthorization(t.Context(), provider, Identity{
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
 				RegisterURI:     "sip:ims.mnc001.mcc001.3gppnetwork.org",
 				Realm:           "ims.mnc001.mcc001.3gppnetwork.org",
@@ -1176,8 +1176,8 @@ func TestBuildAKAAuthorizationReportsUSIMChallengeFailure(t *testing.T) {
 				Algorithm: "AKAv1-MD5",
 				QOP:       "auth",
 			}, 1)
-			var failure *AKAChallengeFailure
-			if !errors.As(err, &failure) {
+			failure, ok := errors.AsType[*AKAChallengeFailure](err)
+			if !ok {
 				t.Fatalf("BuildAKAAuthorization() error = %v, want AKAChallengeFailure", err)
 			}
 			if failure.SynchronizationFailure() != tt.wantSync {

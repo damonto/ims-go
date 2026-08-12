@@ -336,8 +336,8 @@ func (s *Registrar) applyAuthenticationInfo(msg sip.Message) {
 }
 
 func (s *Registrar) exchangeAKAFailure(ctx context.Context, challenge security.Challenge, authorizationHeader string, flow Flow, cause error) (sip.Message, error) {
-	var failure *security.AKAChallengeFailure
-	if !errors.As(cause, &failure) {
+	failure, ok := errors.AsType[*security.AKAChallengeFailure](cause)
+	if !ok {
 		return sip.Message{}, cause
 	}
 	auth := s.akaFailureAuthorization(challenge, failure)

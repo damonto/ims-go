@@ -49,12 +49,12 @@ func applyN1ModeInfo(tunnel *Info, payloads []ike.Payload, cfg handshake.Config)
 		}
 		tunnel.SNSSAI = data.SNSSAI
 	}
-	if notify := ike.FindNotifyPayload(payloads, notifyTypeN1ModeSNSSAIPlmnID); notify != nil {
-		var data n1ModeSNSSAIPlmnIDNotifyData
+	if notify := ike.FindNotifyPayload(payloads, notifyTypeN1ModeSNSSAIPLMNID); notify != nil {
+		var data n1ModeSNSSAIPLMNIDNotifyData
 		if err := data.UnmarshalBinary(notify.Data); err != nil {
 			return err
 		}
-		tunnel.SNSSAIPlmnID = data.PLMNID
+		tunnel.SNSSAIPLMNID = data.PLMNID
 	}
 	return nil
 }
@@ -208,8 +208,8 @@ func pcscfCandidates(addresses tunnelAddressSet) []net.IP {
 
 type tunnelAddressSet struct {
 	internalIPv4       net.IP
-	internalIPv6       IPAddress
-	internalIPv6Prefix IPPrefix
+	internalIPv6       handshake.IPAddress
+	internalIPv6Prefix handshake.IPPrefix
 	pcscfIPv4          []net.IP
 	pcscfIPv6          []net.IP
 }
@@ -326,51 +326,51 @@ func configAttributeLengthError(name string, got, want int) error {
 	return fmt.Errorf("parsing configuration attributes: %s length %d, want %d", name, got, want)
 }
 
-func ipv6AddressAttribute(value []byte, name string) (IPAddress, error) {
+func ipv6AddressAttribute(value []byte, name string) (handshake.IPAddress, error) {
 	if len(value) != configAttrInternalIPv6AddressLen {
-		return IPAddress{}, configAttributeLengthError(name, len(value), configAttrInternalIPv6AddressLen)
+		return handshake.IPAddress{}, configAttributeLengthError(name, len(value), configAttrInternalIPv6AddressLen)
 	}
 	prefixLen := int(value[net.IPv6len])
 	if prefixLen > net.IPv6len*8 {
-		return IPAddress{}, fmt.Errorf("parsing configuration attributes: %s prefix length %d exceeds 128", name, prefixLen)
+		return handshake.IPAddress{}, fmt.Errorf("parsing configuration attributes: %s prefix length %d exceeds 128", name, prefixLen)
 	}
-	return IPAddress{
+	return handshake.IPAddress{
 		IP:        append(net.IP(nil), value[:net.IPv6len]...),
 		PrefixLen: prefixLen,
 	}, nil
 }
 
-func ipv6PrefixAttribute(value []byte, name string) (IPPrefix, error) {
+func ipv6PrefixAttribute(value []byte, name string) (handshake.IPPrefix, error) {
 	if len(value) != configAttrInternalIPv6SubnetLen {
-		return IPPrefix{}, configAttributeLengthError(name, len(value), configAttrInternalIPv6SubnetLen)
+		return handshake.IPPrefix{}, configAttributeLengthError(name, len(value), configAttrInternalIPv6SubnetLen)
 	}
 	prefixLen := int(value[net.IPv6len])
 	if prefixLen > net.IPv6len*8 {
-		return IPPrefix{}, fmt.Errorf("parsing configuration attributes: %s prefix length %d exceeds 128", name, prefixLen)
+		return handshake.IPPrefix{}, fmt.Errorf("parsing configuration attributes: %s prefix length %d exceeds 128", name, prefixLen)
 	}
 	return ipv6Prefix(value[:net.IPv6len], prefixLen), nil
 }
 
-func ipv6Prefix(ip net.IP, prefixLen int) IPPrefix {
+func ipv6Prefix(ip net.IP, prefixLen int) handshake.IPPrefix {
 	prefix := append(net.IP(nil), ip.To16()...)
 	if len(prefix) == net.IPv6len {
 		prefix = prefix.Mask(net.CIDRMask(prefixLen, net.IPv6len*8))
 	}
-	return IPPrefix{
+	return handshake.IPPrefix{
 		IP:        prefix,
 		PrefixLen: prefixLen,
 	}
 }
 
-func ipv6AddressFromPrefix(prefix IPPrefix) IPAddress {
+func ipv6AddressFromPrefix(prefix handshake.IPPrefix) handshake.IPAddress {
 	ip := append(net.IP(nil), prefix.IP.To16()...)
 	if len(ip) != net.IPv6len {
-		return IPAddress{}
+		return handshake.IPAddress{}
 	}
 	if prefix.PrefixLen < net.IPv6len*8 {
 		incrementIPv6(ip)
 	}
-	return IPAddress{IP: ip, PrefixLen: prefix.PrefixLen}
+	return handshake.IPAddress{IP: ip, PrefixLen: prefix.PrefixLen}
 }
 
 func incrementIPv6(ip net.IP) {
@@ -494,7 +494,7 @@ func defaultIKEAuthInitPayloads(cfg handshake.Config, identity string, espSPI ui
 	return payloads, nil
 }
 
-func pdnConfigRequestAttributes(pdnType PDNType) []ike.Attribute {
+func pdnConfigRequestAttributes(pdnType handshake.PDNType) []ike.Attribute {
 	attrs := make([]ike.Attribute, 0, 5)
 	if pdnType != PDNTypeIPv6 {
 		attrs = append(attrs,
@@ -512,7 +512,7 @@ func pdnConfigRequestAttributes(pdnType PDNType) []ike.Attribute {
 	return attrs
 }
 
-func pdnTypeRestriction(payloads []ike.Payload) PDNType {
+func pdnTypeRestriction(payloads []ike.Payload) handshake.PDNType {
 	for _, payload := range payloads {
 		notify, ok := payload.(*ike.NotifyPayload)
 		if !ok {

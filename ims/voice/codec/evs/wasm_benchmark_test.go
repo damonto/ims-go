@@ -6,9 +6,9 @@ import (
 )
 
 func BenchmarkEngine(b *testing.B) {
-	ctx := context.Background()
+	ctx := b.Context()
 	b.ReportAllocs()
-	for range b.N {
+	for b.Loop() {
 		engine, err := NewEngine(ctx)
 		if err != nil {
 			b.Fatal(err)
@@ -20,7 +20,7 @@ func BenchmarkEngine(b *testing.B) {
 }
 
 func BenchmarkCodec(b *testing.B) {
-	ctx := context.Background()
+	ctx := b.Context()
 	engine, err := NewEngine(ctx)
 	if err != nil {
 		b.Fatal(err)
@@ -60,12 +60,12 @@ func BenchmarkCodec(b *testing.B) {
 
 	for _, tt := range tests {
 		b.Run(tt.name, func(b *testing.B) {
-			benchmarkCodec(b, ctx, engine, tt.cfg)
+			benchmarkCodec(ctx, b, engine, tt.cfg)
 		})
 	}
 }
 
-func benchmarkCodec(b *testing.B, ctx context.Context, engine *Engine, cfg Config) {
+func benchmarkCodec(ctx context.Context, b *testing.B, engine *Engine, cfg Config) {
 	codec, err := engine.NewCodec(ctx, cfg)
 	if err != nil {
 		b.Fatal(err)

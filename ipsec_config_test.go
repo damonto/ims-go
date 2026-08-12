@@ -5,7 +5,7 @@ func withTestIPSecAlgorithms(cfg Config) Config {
 	return cfg
 }
 
-func withTestIMSIPSecAlgorithms(cfg IMSConfig) IMSConfig {
+func withTestIMSIPSecAlgorithms(cfg ServiceConfig) ServiceConfig {
 	if len(cfg.IPSecIntegrityAlgorithms) == 0 {
 		cfg.IPSecIntegrityAlgorithms = []string{"hmac-sha-1-96"}
 	}

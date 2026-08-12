@@ -1,7 +1,6 @@
 package wfcsetup
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -39,7 +38,7 @@ func TestTS43FlowUsesRequestHTTPClient(t *testing.T) {
 		wfc: ts43.WFCConfig{Server: "https://carrier.example/entitlement"},
 	}
 
-	result, err := flow.checkOnce(context.Background())
+	result, err := flow.checkOnce(t.Context())
 	if err != nil {
 		t.Fatalf("checkOnce() error = %v", err)
 	}

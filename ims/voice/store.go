@@ -23,8 +23,7 @@ func (s *Endpoint) storeCall(call *Call) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		_ = attachment.Close()
-		return errors.New("storing call: endpoint is closed")
+		return errors.Join(errors.New("storing call: endpoint is closed"), attachment.Close())
 	}
 	s.calls[call.id] = call
 	return nil
@@ -48,7 +47,9 @@ func (s *Endpoint) removeCall(callID string) {
 		call.dialogAttachment = nil
 		call.mu.Unlock()
 		if attachment != nil {
-			_ = attachment.Close()
+			if err := attachment.Close(); err != nil {
+				s.logger.Warn("closing removed call dialog failed", "err", err)
+			}
 		}
 	}
 }

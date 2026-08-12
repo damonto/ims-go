@@ -780,9 +780,7 @@ func encryptAKAAttributes(attrs []AKAAttribute, encrKey []byte) ([]AKAAttribute,
 		plain = append(plain, encoded...)
 	}
 	iv := make([]byte, aes.BlockSize)
-	if _, err := crand.Read(iv); err != nil {
-		return nil, fmt.Errorf("encrypting aka attributes: reading iv: %w", err)
-	}
+	_, _ = crand.Read(iv)
 	block, err := aes.NewCipher(encrKey)
 	if err != nil {
 		return nil, fmt.Errorf("encrypting aka attributes: %w", err)

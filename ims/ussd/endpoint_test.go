@@ -37,6 +37,30 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func closeEndpointAfterTest(t *testing.T, endpoint *Endpoint) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := endpoint.Close(); err != nil {
+			t.Errorf("Endpoint.Close() error = %v", err)
+		}
+	})
+}
+
+func closeServiceAfterTest(t *testing.T, endpoint *Endpoint, registrar *registration.Registrar, stack *session.Stack) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := endpoint.Close(); err != nil {
+			t.Errorf("Endpoint.Close() error = %v", err)
+		}
+		if err := registrar.Close(); err != nil {
+			t.Errorf("Registrar.Close() error = %v", err)
+		}
+		if err := stack.Close(); err != nil {
+			t.Errorf("Stack.Close() error = %v", err)
+		}
+	})
+}
+
 func (t *stubTransport) LocalAddr() net.Addr  { return t.local }
 func (t *stubTransport) RemoteAddr() net.Addr { return t.remote }
 func (t *stubTransport) WritePacket(ctx context.Context, data []byte) error {
@@ -666,7 +690,7 @@ func TestHandleInfoMapsPackageAndMediaErrors(t *testing.T) {
 				info.Headers.Add("Content-Type", tt.contentType)
 			}
 			info.Body = payload
-			if err := us.handleInfo(context.Background(), session.Request{Message: info, Transport: transport}); err != nil {
+			if err := us.handleInfo(t.Context(), session.Request{Message: info, Transport: transport}); err != nil {
 				t.Fatalf("handleInfo() error = %v", err)
 			}
 			resp := mustParseUSSDMessage(t, transport.lastWrite())
@@ -727,7 +751,7 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 			bye := newDialogRequest("BYE", "sip:user@example.com", "<sip:network@example.com>;tag=remote", "<sip:user@example.com>;tag=local", "bye-call", "2 BYE")
 			bye.Headers.Add("Content-Type", tt.headerContentType)
 			bye.Body = tt.body
-			if err := us.handleBye(context.Background(), session.Request{Message: bye, Transport: transport}); err != nil {
+			if err := us.handleBye(t.Context(), session.Request{Message: bye, Transport: transport}); err != nil {
 				t.Fatalf("handleBye() error = %v", err)
 			}
 			resp := mustParseUSSDMessage(t, transport.lastWrite())
@@ -859,7 +883,7 @@ func TestHandleDialogRequestRejectsCSeqMethodMismatch(t *testing.T) {
 	info.Headers.Add("Content-Type", xmlContentType)
 	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string></ussd-data>`)
 
-	if err := us.handleRequest(context.Background(), session.Request{Message: info, Transport: transport}); err != nil {
+	if err := us.handleRequest(t.Context(), session.Request{Message: info, Transport: transport}); err != nil {
 		t.Fatalf("handleRequest() error = %v", err)
 	}
 	resp := mustParseUSSDMessage(t, transport.lastWrite())
@@ -893,11 +917,11 @@ func TestUSSDExchange481ClosesSession(t *testing.T) {
 		}
 	}
 
-	us, err := svc.Start(context.Background(), "*100#")
+	us, err := svc.Start(t.Context(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := us.Reply(context.Background(), "1"); err == nil {
+	if err := us.Reply(t.Context(), "1"); err == nil {
 		t.Fatal("Reply() error = nil, want 481")
 	}
 	if !us.isClosed() {
@@ -954,11 +978,11 @@ func TestStartUSSDSessionFlow(t *testing.T) {
 		}
 	}
 
-	session, err := svc.Start(context.Background(), "*100#")
+	session, err := svc.Start(t.Context(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := session.Reply(context.Background(), "1"); err != nil {
+	if err := session.Reply(t.Context(), "1"); err != nil {
 		t.Fatalf("Reply() error = %v", err)
 	}
 	last := mustParseUSSDMessage(t, transport.lastWrite())
@@ -997,7 +1021,7 @@ func TestStartUSSDACKsInvalidInviteOK(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.Start(context.Background(), "*100#"); err == nil {
+	if _, err := svc.Start(t.Context(), "*100#"); err == nil {
 		t.Fatal("Start() error = nil, want invalid 200 OK error")
 	}
 	var acked, ended bool
@@ -1039,11 +1063,7 @@ func TestRetransmittedInviteOKIsACKed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			t.Cleanup(func() {
-				_ = svc.Close()
-				_ = reg.Close()
-				_ = sess.Close()
-			})
+			closeServiceAfterTest(t, svc, reg, sess)
 
 			ack := newDialogRequest("ACK", "sip:ussias@example.com", "<sip:user@example.com>;tag=local", "<sip:ussias@example.com>;tag=remote", "call-retransmit", "1 ACK")
 			us := &Session{
@@ -1083,7 +1103,7 @@ func TestRetransmittedInviteOKIsACKed(t *testing.T) {
 				{Name: "To", Value: "<sip:ussias@example.com>;tag=" + tt.remoteTag},
 				{Name: "Contact", Value: "<sip:" + tt.remoteTag + "@example.com>"},
 			}
-			handled, err := svc.HandleResponse(context.Background(), resp)
+			handled, err := svc.HandleResponse(t.Context(), resp)
 			if err != nil {
 				t.Fatalf("HandleResponse() error = %v", err)
 			}
@@ -1132,11 +1152,11 @@ func TestEndClosesSessionOnNon2xxResponse(t *testing.T) {
 		}
 	}
 
-	us, err := svc.Start(context.Background(), "*100#")
+	us, err := svc.Start(t.Context(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := us.End(context.Background(), ""); err == nil {
+	if err := us.End(t.Context(), ""); err == nil {
 		t.Fatal("End() error = nil, want non-2xx response error")
 	}
 	if !us.isClosed() {
@@ -1162,7 +1182,7 @@ func TestStartUSSDRejectsNonIMSDomain(t *testing.T) {
 			}
 			writesBefore := transport.writeCount()
 
-			_, err = svc.Start(context.Background(), "*100#")
+			_, err = svc.Start(t.Context(), "*100#")
 			if err == nil || !errors.Is(err, ErrIMSDomainNotAllowed) {
 				t.Fatalf("Start() error = %v, want ErrIMSDomainNotAllowed", err)
 			}
@@ -1198,7 +1218,7 @@ func TestCloseClosesUSSDLocallyWithoutBYE(t *testing.T) {
 		}
 	}
 
-	session, err := svc.Start(context.Background(), "*100#")
+	session, err := svc.Start(t.Context(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -1232,7 +1252,7 @@ func TestUSSDRejectsParallelTransactions(t *testing.T) {
 			name: "local start while active",
 			run: func(t *testing.T, svc *Endpoint, transport *stubTransport) {
 				writesBefore := transport.writeCount()
-				_, err := svc.Start(context.Background(), "*101#")
+				_, err := svc.Start(t.Context(), "*101#")
 				if !errors.Is(err, errSessionActive) {
 					t.Fatalf("Start() error = %v, want errSessionActive", err)
 				}
@@ -1246,7 +1266,7 @@ func TestUSSDRejectsParallelTransactions(t *testing.T) {
 			run: func(t *testing.T, svc *Endpoint, transport *stubTransport) {
 				transport.onWrite = nil
 				invite := buildNetworkUSSDInvite(t)
-				handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+				handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 				if err != nil {
 					t.Fatalf("HandleRequest() error = %v", err)
 				}
@@ -1284,7 +1304,7 @@ func TestUSSDRejectsParallelTransactions(t *testing.T) {
 					transport.queue(newUSSDResponse(req, 200, "OK", nil))
 				}
 			}
-			if _, err := svc.Start(context.Background(), "*100#"); err != nil {
+			if _, err := svc.Start(t.Context(), "*100#"); err != nil {
 				t.Fatalf("Start() error = %v", err)
 			}
 			tt.run(t, svc, transport)
@@ -1332,7 +1352,7 @@ func TestHandleIncomingInviteMapsUnsupportedMediaTo415(t *testing.T) {
 			invite := buildNetworkUSSDInvite(t)
 			tt.mutate(t, &invite)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -1358,7 +1378,7 @@ func TestHandleIncomingInviteDisabledReturns404(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: buildNetworkUSSDInvite(t), Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: buildNetworkUSSDInvite(t), Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -1454,7 +1474,7 @@ func TestIncomingInviteOKCopiesRecordRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	t.Cleanup(func() { _ = svc.Close() })
+	closeEndpointAfterTest(t, svc)
 
 	invite := buildNetworkUSSDInvite(t)
 	want := []string{"<sip:first.example.com;lr>", "<sip:second.example.com;lr>"}
@@ -1485,7 +1505,7 @@ func TestCancelOnlyClosesPendingIncomingInvite(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			t.Cleanup(func() { _ = svc.Close() })
+			closeEndpointAfterTest(t, svc)
 
 			invite := buildNetworkUSSDInvite(t)
 			us := svc.newIncomingSession(invite, Message{Text: "prompt", Language: "en", Request: true})
@@ -1498,7 +1518,7 @@ func TestCancelOnlyClosesPendingIncomingInvite(t *testing.T) {
 			cancel := invite
 			cancel.StartLine = "CANCEL " + sip.RequestURI(invite) + " SIP/2.0"
 			cancel.Headers = sip.UpsertHeader(cancel.Headers, "CSeq", "1 CANCEL")
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: cancel})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: cancel})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -1578,7 +1598,7 @@ func TestUSSDRegistersDialogsInSessionRegistry(t *testing.T) {
 		}
 	}
 
-	us, err := svc.Start(context.Background(), "*100#")
+	us, err := svc.Start(t.Context(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -1831,7 +1851,7 @@ func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.Start(context.Background(), "*100#"); err != nil {
+	if _, err := svc.Start(t.Context(), "*100#"); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 }
@@ -1862,14 +1882,14 @@ func TestStartUSSDSessionINFOGate(t *testing.T) {
 		}
 	}
 
-	us, err := svc.Start(context.Background(), "*100#")
+	us, err := svc.Start(t.Context(), "*100#")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := us.Reply(context.Background(), "1"); err != nil {
+	if err := us.Reply(t.Context(), "1"); err != nil {
 		t.Fatalf("Reply() error = %v", err)
 	}
-	if err := us.Reply(context.Background(), "2"); err == nil {
+	if err := us.Reply(t.Context(), "2"); err == nil {
 		t.Fatal("Reply(with pending INFO) error = nil, want non-nil")
 	}
 
@@ -1878,14 +1898,14 @@ func TestStartUSSDSessionINFOGate(t *testing.T) {
 	info.Headers.Add("Content-Disposition", "info-package")
 	info.Headers.Add("Content-Type", xmlContentType)
 	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>Next</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: info, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest(INFO) error = %v", err)
 	}
 	if !handled {
 		t.Fatal("HandleRequest(INFO) handled = false, want true")
 	}
-	if err := us.Reply(context.Background(), "3"); err != nil {
+	if err := us.Reply(t.Context(), "3"); err != nil {
 		t.Fatalf("Reply(after remote INFO) error = %v", err)
 	}
 }
@@ -1965,7 +1985,7 @@ func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
 	}
 
 	invite := buildNetworkUSSDInvite(t)
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest(INVITE) error = %v", err)
 	}
@@ -1986,21 +2006,21 @@ func TestNetworkInitiatedUSSDInviteAndACKGate(t *testing.T) {
 		t.Fatal("lookupSessionByCallID() = nil")
 	}
 
-	replyCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	replyCtx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	if err := us.Reply(replyCtx, "1"); err == nil {
 		t.Fatal("Reply(before ACK) error = nil, want non-nil")
 	}
 
 	ack := newDialogRequest("ACK", us.targetURI, invite.Header("From"), sip.WithTag(invite.Header("To"), "", us.localTag), invite.Header("Call-ID"), "1 ACK")
-	handled, err = svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: transport})
+	handled, err = svc.HandleRequest(t.Context(), session.Request{Message: ack, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest(ACK) error = %v", err)
 	}
 	if !handled {
 		t.Fatal("HandleRequest(ACK) handled = false, want true")
 	}
-	if err := us.Reply(context.Background(), "1"); err != nil {
+	if err := us.Reply(t.Context(), "1"); err != nil {
 		t.Fatalf("Reply(after ACK) error = %v", err)
 	}
 }
@@ -2020,7 +2040,7 @@ func TestNetworkInitiatedUSSDInviteOKRetransmitsUntilACK(t *testing.T) {
 	transport.onWrite = nil
 
 	invite := buildNetworkUSSDInvite(t)
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest(INVITE) error = %v", err)
 	}
@@ -2042,7 +2062,7 @@ func TestNetworkInitiatedUSSDInviteOKRetransmitsUntilACK(t *testing.T) {
 		t.Fatal("lookupSessionByCallID() = nil")
 	}
 	ack := newDialogRequest("ACK", us.targetURI, invite.Header("From"), sip.WithTag(invite.Header("To"), "", us.localTag), invite.Header("Call-ID"), "1 ACK")
-	if _, err := svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: transport}); err != nil {
+	if _, err := svc.HandleRequest(t.Context(), session.Request{Message: ack, Transport: transport}); err != nil {
 		t.Fatalf("HandleRequest(ACK) error = %v", err)
 	}
 	afterACK := countUSSDResponses(transport, sipStatusOK, "INVITE")
@@ -2077,7 +2097,7 @@ func TestNetworkInitiatedUSSDWaitsForCallbackBefore200OK(t *testing.T) {
 	var handleErr error
 	go func() {
 		defer close(done)
-		handled, handleErr = svc.HandleRequest(context.Background(), session.Request{Message: buildNetworkUSSDInvite(t), Transport: transport})
+		handled, handleErr = svc.HandleRequest(t.Context(), session.Request{Message: buildNetworkUSSDInvite(t), Transport: transport})
 	}()
 
 	select {
@@ -2126,7 +2146,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 	writeCh := make(chan sip.Message, 5)
 	svc, err := New(Config{Logger: testLogger(), NetworkInitiatedSupported: true,
 		OnIncoming: func(session *Session, msg Message) {
-			replyCtx, cancel := context.WithCancel(context.Background())
+			replyCtx, cancel := context.WithCancel(t.Context())
 			if err := session.Reply(replyCtx, "1"); err != nil {
 				t.Errorf("Reply() in callback error = %v", err)
 				cancel()
@@ -2153,7 +2173,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+		handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 		if err != nil {
 			done <- err
 			return
@@ -2214,7 +2234,7 @@ func TestNetworkInitiatedUSSDReplyFromCallbackQueuesUntilACK(t *testing.T) {
 	}
 
 	ack := newDialogRequest("ACK", us.targetURI, invite.Header("From"), sip.WithTag(invite.Header("To"), "", us.localTag), invite.Header("Call-ID"), "1 ACK")
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: ack, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest(ACK) error = %v", err)
 	}
@@ -2256,7 +2276,7 @@ func TestUnknownDialogGets481(t *testing.T) {
 	info.Headers.Add("Content-Type", xmlContentType)
 	info.Body = []byte(xml.Header + `<ussd-data><language>en</language><ussd-string>1</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`)
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: info, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -2291,7 +2311,7 @@ func countUSSDResponses(transport *stubTransport, status int, cseqMethod string)
 	return count
 }
 
-func registeredService(t *testing.T, transport *stubTransport) (*session.Session, *registration.Registrar) {
+func registeredService(t *testing.T, transport *stubTransport) (*session.Stack, *registration.Registrar) {
 	t.Helper()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
@@ -2315,13 +2335,13 @@ func registeredService(t *testing.T, transport *stubTransport) (*session.Session
 			transport.queue(newUSSDResponse(req, 200, "OK", nil, sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"}))
 		}
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg
 }
 
-func registeredServiceWithSessionConfig(t *testing.T, transport *stubTransport, cfg session.Config) (*session.Session, *registration.Registrar) {
+func registeredServiceWithSessionConfig(t *testing.T, transport *stubTransport, cfg session.Config) (*session.Stack, *registration.Registrar) {
 	t.Helper()
 	sess, err := session.Open(cfg, transport)
 	if err != nil {
@@ -2345,13 +2365,13 @@ func registeredServiceWithSessionConfig(t *testing.T, transport *stubTransport, 
 			transport.queue(newUSSDResponse(req, 200, "OK", nil, sip.Header{Name: "Service-Route", Value: "<sip:pcscf.example.com;lr>"}))
 		}
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg
 }
 
-func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport, associatedURIs ...string) (*session.Session, *registration.Registrar) {
+func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport, associatedURIs ...string) (*session.Stack, *registration.Registrar) {
 	t.Helper()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
@@ -2379,7 +2399,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *stubTransport,
 			transport.queue(newUSSDResponse(req, 200, "OK", nil, headers...))
 		}
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg

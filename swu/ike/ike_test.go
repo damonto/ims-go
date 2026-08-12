@@ -12,11 +12,11 @@ import (
 func TestIKEHeaderRoundTrip(t *testing.T) {
 	tests := []struct {
 		name   string
-		header IKEHeader
+		header Header
 	}{
 		{
 			name: "basic",
-			header: IKEHeader{
+			header: Header{
 				InitiatorSPI: 1,
 				ResponderSPI: 2,
 				NextPayload:  33,
@@ -34,7 +34,7 @@ func TestIKEHeaderRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			var got IKEHeader
+			var got Header
 			if err := got.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -48,12 +48,12 @@ func TestIKEHeaderRoundTrip(t *testing.T) {
 func TestIKEPacketRoundTrip(t *testing.T) {
 	tests := []struct {
 		name   string
-		packet IKEPacket
+		packet Packet
 	}{
 		{
 			name: "nonce payload",
-			packet: IKEPacket{
-				Header: IKEHeader{
+			packet: Packet{
+				Header: Header{
 					InitiatorSPI: 10,
 					ResponderSPI: 20,
 					Version:      ikeVersion20,
@@ -71,7 +71,7 @@ func TestIKEPacketRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			var got IKEPacket
+			var got Packet
 			if err := got.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -90,8 +90,8 @@ func TestIKEPacketRoundTrip(t *testing.T) {
 }
 
 func TestAppendBinaryPreservesPrefix(t *testing.T) {
-	packet := IKEPacket{
-		Header: IKEHeader{Version: ikeVersion20, ExchangeType: exchangeTypeIKESAInit},
+	packet := Packet{
+		Header: Header{Version: ikeVersion20, ExchangeType: exchangeTypeIKESAInit},
 		Payloads: []Payload{
 			&NoncePayload{Data: bytes.Repeat([]byte{0x01}, nonceDataMinLen)},
 		},
@@ -103,8 +103,8 @@ func TestAppendBinaryPreservesPrefix(t *testing.T) {
 	}{
 		{
 			name:      "header",
-			appender:  IKEHeader{Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Length: ikeHeaderSize},
-			marshaler: IKEHeader{Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Length: ikeHeaderSize},
+			appender:  Header{Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Length: ikeHeaderSize},
+			marshaler: Header{Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Length: ikeHeaderSize},
 		},
 		{name: "packet", appender: packet, marshaler: packet},
 		{
@@ -136,8 +136,8 @@ func TestAppendBinaryPreservesPrefix(t *testing.T) {
 }
 
 func TestIKEPacketRejectsMalformedHeader(t *testing.T) {
-	validWire, err := (IKEPacket{
-		Header: IKEHeader{
+	validWire, err := (Packet{
+		Header: Header{
 			InitiatorSPI: 1,
 			ResponderSPI: 2,
 			Version:      ikeVersion20,
@@ -190,7 +190,7 @@ func TestIKEPacketRejectsMalformedHeader(t *testing.T) {
 		{
 			name: "header only",
 			mutate: func([]byte) []byte {
-				header, err := (IKEHeader{
+				header, err := (Header{
 					InitiatorSPI: 1,
 					ResponderSPI: 2,
 					Version:      ikeVersion20,
@@ -210,7 +210,7 @@ func TestIKEPacketRejectsMalformedHeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wire := append([]byte(nil), validWire...)
 			wire = tt.mutate(wire)
-			var got IKEPacket
+			var got Packet
 			err := got.UnmarshalBinary(wire)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("UnmarshalBinary() error = %v, want %q", err, tt.wantErr)

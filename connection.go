@@ -36,13 +36,13 @@ type connectSetup struct {
 	scope     *connectionScope
 	access    accessSession
 	tunnelCfg swutunnel.Config
-	imsCfg    IMSConfig
+	imsCfg    ServiceConfig
 	tunnel    *swutunnel.Session
 	ims       imsStack
 }
 
 type imsStack struct {
-	sip   *imssession.Session
+	sip   *imssession.Stack
 	reg   *registration.Registrar
 	sms   *imssms.Endpoint
 	ussd  *imsussd.Endpoint
@@ -54,8 +54,7 @@ const defaultReconnectDelay = 3 * time.Second
 const defaultReconnectMaxDelay = time.Minute
 const defaultIMSRegistrationRetryBase = 120 * time.Second
 const defaultIMSRegistrationRetryMax = 300 * time.Second
-
-var reconnectAttemptTimeout = 30 * time.Second
+const reconnectAttemptTimeout = 30 * time.Second
 
 func newConnectionScope() *connectionScope {
 	return &connectionScope{done: make(chan struct{})}
@@ -119,7 +118,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	runDone := c.startConnectionRunner(active, done)
 	if err := active.ims.sip.WaitStarted(ctx); err != nil {
 		wrapped := fmt.Errorf("connecting client: waiting for IMS session start: %w", err)
-		c.cancelConnectStart(active, runDone)
+		wrapped = errors.Join(wrapped, c.cancelConnectStart(active, runDone))
 		c.emitConnectFailure(ctx, wrapped)
 		return wrapped
 	}
@@ -220,8 +219,8 @@ func pcscfFailoverRequired(err error, timerF time.Duration) bool {
 		imssession.TransportFailed(err) {
 		return true
 	}
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	netErr, ok := errors.AsType[net.Error](err)
+	return ok && netErr.Timeout()
 }
 
 func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSetup, context.Context, error) {
@@ -409,22 +408,21 @@ func (c *Client) emitConnectFailure(ctx context.Context, err error) {
 	c.emitStatusError(StatusFailed, err)
 }
 
-func (c *Client) cancelConnectStart(active *activeConn, runDone <-chan struct{}) {
+func (c *Client) cancelConnectStart(active *activeConn, runDone <-chan struct{}) error {
 	if active == nil || active.scope == nil {
-		return
+		return nil
 	}
 	active.scope.stop()
 	if !c.detachActive(active) {
-		return
+		return nil
 	}
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()
 	if c.waitIMSRunnerStop(closeCtx, runDone) {
-		_ = c.closeActive(active)
-		return
+		return c.closeActive(active)
 	}
-	_ = c.closeActiveConnection(active)
+	return c.closeActiveConnection(active)
 }
 
 func (c *Client) waitIMSRunnerStop(ctx context.Context, runDone <-chan struct{}) bool {
@@ -440,6 +438,10 @@ func (c *Client) waitIMSRunnerStop(ctx context.Context, runDone <-chan struct{})
 }
 
 func (c *Client) Close() error {
+	return c.close(defaultCloseTimeout)
+}
+
+func (c *Client) close(waitTimeout time.Duration) error {
 	var err error
 	c.state.doClose(func() {
 		active, ok := c.state.beginClose()
@@ -452,7 +454,7 @@ func (c *Client) Close() error {
 		if active != nil && active.scope != nil {
 			active.scope.stop()
 		}
-		if c.waitCloseTasks() {
+		if c.waitCloseTasks(waitTimeout) {
 			if c.cfg.IMS.RegistrationGroup != nil {
 				err = errors.Join(err, c.deregisterActive(active))
 			}
@@ -470,8 +472,8 @@ func (c *Client) Close() error {
 	return err
 }
 
-func (c *Client) waitCloseTasks() bool {
-	return c.state.waitCloseTasks(defaultCloseTimeout)
+func (c *Client) waitCloseTasks(timeout time.Duration) bool {
+	return c.state.waitCloseTasks(timeout)
 }
 
 func normalizeCloseError(err error) error {
@@ -789,16 +791,16 @@ func (r *connectionRunner) runOnce() bool {
 }
 
 func (r *connectionRunner) recover(cause error) bool {
-	if restored, nextCause := r.restoreIMSAfterSWUPCSCF(cause); restored {
+	restored, nextCause := r.restoreIMSAfterSWUPCSCF(cause)
+	if restored {
 		return true
-	} else {
-		cause = nextCause
 	}
-	if restored, nextCause := r.restoreIMSAfterRegistrationPCSCF(cause); restored {
+	cause = nextCause
+	restored, nextCause = r.restoreIMSAfterRegistrationPCSCF(cause)
+	if restored {
 		return true
-	} else {
-		cause = nextCause
 	}
+	cause = nextCause
 	return r.reconnectAfterIMSFailure(cause)
 }
 
@@ -881,7 +883,7 @@ func (r *connectionRunner) reconnectAfterIMSFailure(cause error) bool {
 		return false
 	}
 
-	_ = r.client.closeActiveConnection(r.active)
+	runErr = errors.Join(runErr, r.client.closeActiveConnection(r.active))
 	if r.client.cfg.usesVoWiFi() {
 		r.client.clearSWUPDNTypeRestrictionAfterDisconnect(cause)
 	}

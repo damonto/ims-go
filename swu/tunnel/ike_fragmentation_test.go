@@ -15,7 +15,7 @@ func TestIKEFragmentReassemblyRoundTrip(t *testing.T) {
 	crypto := testIKECrypto()
 	wantData := bytes.Repeat([]byte{0xab}, 1800)
 	payloads := []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeTemporaryFailure, Data: wantData}}
-	header := ike.IKEHeader{
+	header := ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -35,7 +35,7 @@ func TestIKEFragmentReassemblyRoundTrip(t *testing.T) {
 	reassembly := ikeFragmentReassembly{}
 	var firstPacket []byte
 	for i, wire := range packets {
-		var packet ike.IKEPacket
+		var packet ike.Packet
 		if err := packet.UnmarshalBinary(wire); err != nil {
 			t.Fatalf("fragment %d UnmarshalBinary() error = %v", i+1, err)
 		}
@@ -84,7 +84,7 @@ func TestDefaultIKEFragmentSizeFitsRFC7383DatagramThresholds(t *testing.T) {
 	payloads := []ike.Payload{
 		&ike.NotifyPayload{NotifyType: notifyTypeTemporaryFailure, Data: bytes.Repeat([]byte{0xab}, 1800)},
 	}
-	packets, err := crypto.SealIKEFragments(ike.IKEHeader{
+	packets, err := crypto.SealIKEFragments(ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -374,7 +374,7 @@ func TestPostAuthIKEWiresFollowNATTState(t *testing.T) {
 			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			session := mustDialSession(t, conn)
 
-			if err := tt.write(context.Background(), session, crypto, tt.peer, tt.useNATT, [][]byte{packet}); err != nil {
+			if err := tt.write(t.Context(), session, crypto, tt.peer, tt.useNATT, [][]byte{packet}); err != nil {
 				t.Fatalf("write() error = %v", err)
 			}
 
@@ -474,7 +474,7 @@ func TestPostAuthProtectedMessagesUseNegotiatedFragmentation(t *testing.T) {
 			if tt.marked {
 				wire = normalizeIKEPacket(wire, true)
 			}
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary(first fragment) error = %v", err)
 			}
@@ -522,7 +522,7 @@ func TestFragmentedRequestRetransmitFirstFragmentResendsCachedResponse(t *testin
 		name          string
 		exchangeType  byte
 		responseWires func(*testing.T, *Session, *ikeCrypto, uint32, []ike.Payload) [][]byte
-		handle        func(*testing.T, *Session, *ikeCrypto, *net.UDPAddr, ike.IKEPacket)
+		handle        func(*testing.T, *Session, *ikeCrypto, *net.UDPAddr, ike.Packet)
 	}{
 		{
 			name:         "informational",
@@ -543,7 +543,7 @@ func TestFragmentedRequestRetransmitFirstFragmentResendsCachedResponse(t *testin
 				}
 				return wires
 			},
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := informationalState{
 					ike:                       crypto,
@@ -579,7 +579,7 @@ func TestFragmentedRequestRetransmitFirstFragmentResendsCachedResponse(t *testin
 				}
 				return buildIKEWires(wires, state.useNATT)
 			},
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := createChildSARequestState{
 					ike:                       crypto,
@@ -626,7 +626,7 @@ func TestFragmentedRequestRetransmitFirstFragmentResendsCachedResponse(t *testin
 				session.outerNAT = cloneUDPAddr(peer)
 				session.nextPeerMessageID = messageID + 1
 				session.mu.Unlock()
-				var packet ike.IKEPacket
+				var packet ike.Packet
 				if err := packet.UnmarshalBinary(requests[fragment.index]); err != nil {
 					t.Fatalf("UnmarshalBinary(request fragment) error = %v", err)
 				}
@@ -648,7 +648,7 @@ func TestFragmentedRequestRetransmitFirstFragmentResendsCachedResponse(t *testin
 					}
 				}
 				conn.writes = nil
-				var nextPacket ike.IKEPacket
+				var nextPacket ike.Packet
 				if err := nextPacket.UnmarshalBinary(requests[1]); err != nil {
 					t.Fatalf("UnmarshalBinary(next request fragment) error = %v", err)
 				}
@@ -667,12 +667,12 @@ func TestFragmentedProtectedErrorResponseCachesFirstFragment(t *testing.T) {
 	tests := []struct {
 		name         string
 		exchangeType byte
-		handle       func(*testing.T, *Session, *ikeCrypto, *net.UDPAddr, ike.IKEPacket)
+		handle       func(*testing.T, *Session, *ikeCrypto, *net.UDPAddr, ike.Packet)
 	}{
 		{
 			name:         "informational",
 			exchangeType: exchangeTypeInformational,
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := informationalState{
 					ike:                       crypto,
@@ -691,7 +691,7 @@ func TestFragmentedProtectedErrorResponseCachesFirstFragment(t *testing.T) {
 		{
 			name:         "create child sa",
 			exchangeType: exchangeTypeCreateChildSA,
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := createChildSARequestState{
 					ike:                       crypto,
@@ -725,7 +725,7 @@ func TestFragmentedProtectedErrorResponseCachesFirstFragment(t *testing.T) {
 			session.mu.Unlock()
 			requests := fragmentedPeerRawPlainPackets(t, crypto, tt.exchangeType, messageID, (&ike.NotifyPayload{}).Type(), []byte{0x00, 0x00, 0x00, 0x04})
 			for i, wire := range requests {
-				var packet ike.IKEPacket
+				var packet ike.Packet
 				if err := packet.UnmarshalBinary(wire); err != nil {
 					t.Fatalf("UnmarshalBinary(fragment %d) error = %v", i+1, err)
 				}
@@ -748,7 +748,7 @@ func TestFragmentedProtectedErrorResponseCachesFirstFragment(t *testing.T) {
 				t.Fatalf("cached response = %x, want written response %x", cached, conn.writes)
 			}
 			conn.writes = nil
-			var first ike.IKEPacket
+			var first ike.Packet
 			if err := first.UnmarshalBinary(requests[0]); err != nil {
 				t.Fatalf("UnmarshalBinary(first fragment retransmit) error = %v", err)
 			}
@@ -776,7 +776,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 		messageID    uint32
 		fragment     int
 		wantWrites   bool
-		handle       func(*testing.T, *Session, *ikeCrypto, *net.UDPAddr, ike.IKEPacket)
+		handle       func(*testing.T, *Session, *ikeCrypto, *net.UDPAddr, ike.Packet)
 	}{
 		{
 			name:         "informational future first fragment",
@@ -784,7 +784,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 			messageID:    expectedMessageID + 1,
 			fragment:     0,
 			wantWrites:   true,
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := informationalState{
 					ike:                       crypto,
@@ -805,7 +805,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 			exchangeType: exchangeTypeInformational,
 			messageID:    expectedMessageID - 1,
 			fragment:     1,
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := informationalState{
 					ike:                       crypto,
@@ -827,7 +827,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 			messageID:    expectedMessageID + 1,
 			fragment:     0,
 			wantWrites:   true,
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := createChildSARequestState{
 					ike:                       crypto,
@@ -848,7 +848,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 			exchangeType: exchangeTypeCreateChildSA,
 			messageID:    expectedMessageID - 1,
 			fragment:     1,
-			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.IKEPacket) {
+			handle: func(t *testing.T, session *Session, crypto *ikeCrypto, peer *net.UDPAddr, packet ike.Packet) {
 				t.Helper()
 				state := createChildSARequestState{
 					ike:                       crypto,
@@ -867,11 +867,9 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			oldTimeout := invalidMessageIDNotifyTimeout
-			invalidMessageIDNotifyTimeout = time.Millisecond
-			t.Cleanup(func() { invalidMessageIDNotifyTimeout = oldTimeout })
 			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			session := mustDialSession(t, conn)
+			session.invalidMessageIDNotifyTimeout = time.Millisecond
 			crypto := testIKECrypto()
 			session.mu.Lock()
 			session.connected = true
@@ -884,7 +882,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 			session.nextPeerMessageID = expectedMessageID
 			session.mu.Unlock()
 			requests := fragmentedPeerRequestPackets(t, crypto, tt.exchangeType, tt.messageID)
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(requests[tt.fragment]); err != nil {
 				t.Fatalf("UnmarshalBinary(fragment) error = %v", err)
 			}
@@ -913,7 +911,7 @@ func TestNonCurrentFragmentedRequestsDoNotTouchReassembly(t *testing.T) {
 
 func fragmentedPeerRequestPackets(t *testing.T, crypto *ikeCrypto, exchangeType byte, messageID uint32) [][]byte {
 	t.Helper()
-	packets, err := crypto.SealIKEFragments(ike.IKEHeader{
+	packets, err := crypto.SealIKEFragments(ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -935,7 +933,7 @@ func fragmentedPeerRawPlainPackets(t *testing.T, crypto *ikeCrypto, exchangeType
 		t.Fatalf("plain length = %d, want at least two bytes", len(plain))
 	}
 	chunks := [][]byte{plain[:len(plain)/2], plain[len(plain)/2:]}
-	header := ike.IKEHeader{
+	header := ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -969,7 +967,7 @@ func fragmentedPeerRawPlainPackets(t *testing.T, crypto *ikeCrypto, exchangeType
 
 func TestOpenIKEFragmentSilentlyDiscardsAuthenticationFailure(t *testing.T) {
 	crypto := testIKECrypto()
-	packets, err := crypto.SealIKEFragments(ike.IKEHeader{
+	packets, err := crypto.SealIKEFragments(ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -982,7 +980,7 @@ func TestOpenIKEFragmentSilentlyDiscardsAuthenticationFailure(t *testing.T) {
 	}
 	bad := append([]byte(nil), packets[0]...)
 	bad[len(bad)-1] ^= 0xff
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(bad); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -1006,7 +1004,7 @@ func TestExchangeProtectedIKEReassemblesFragmentedResponse(t *testing.T) {
 	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 500}
 	request := protectedIKEWire(t, crypto, exchangeTypeIKEAuth, flagInitiator, 4, []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeCookie2, Data: []byte{1, 2, 3, 4}}}, true)
 	responsePayloads := []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeTemporaryFailure, Data: bytes.Repeat([]byte{0xcd}, 1600)}}
-	responses, err := crypto.SealIKEFragments(ike.IKEHeader{
+	responses, err := crypto.SealIKEFragments(ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -1028,7 +1026,7 @@ func TestExchangeProtectedIKEReassemblesFragmentedResponse(t *testing.T) {
 	session := mustDialSession(t, conn)
 	session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
 
-	gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), protectedIKEExchange{
+	gotPayloads, gotPeer, err := session.exchangeProtectedIKE(t.Context(), protectedIKEExchange{
 		peer:                   peer,
 		requests:               [][]byte{request},
 		messageID:              4,

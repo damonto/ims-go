@@ -162,15 +162,16 @@ func (c *Call) refreshDialogRegistration() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		_ = attachment.Close()
-		return errors.New("refreshing call dialog: call is closed")
+		return errors.Join(errors.New("refreshing call dialog: call is closed"), attachment.Close())
 	}
 	old := c.dialogAttachment
 	c.dialogAttachment = attachment
 	c.mu.Unlock()
 
 	if old != nil {
-		_ = old.Close()
+		if err := old.Close(); err != nil {
+			return fmt.Errorf("refreshing call dialog: closing previous registration: %w", err)
+		}
 	}
 	return nil
 }

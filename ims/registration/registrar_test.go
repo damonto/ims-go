@@ -4,38 +4,51 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
-
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-
-	"github.com/damonto/ims-go/ims/pidf"
-	usim "github.com/damonto/wwan-go/sim"
-
-	"github.com/damonto/ims-go/ims/security"
-	"github.com/damonto/ims-go/ims/session"
-
-	"github.com/damonto/ims-go/ims/sip"
 	"io"
 	"log/slog"
 	"net"
-
 	"slices"
 	"strconv"
 	"strings"
-
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/security"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 const testNonce = "AQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgI="
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func closeRegistrarAfterTest(t *testing.T, registrar *Registrar) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := registrar.Close(); err != nil {
+			t.Errorf("Registrar.Close() error = %v", err)
+		}
+	})
+}
+
+func closeSecureResourcesAfterTest(t *testing.T, registrar *Registrar) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := registrar.closeSecureResources(); err != nil {
+			t.Errorf("closeSecureResources() error = %v", err)
+		}
+	})
 }
 
 type stubTransport struct {
@@ -244,7 +257,7 @@ func registerService(t *testing.T, svc *Registrar, transport *stubTransport) {
 			t.Fatalf("unexpected write count %d", countWrites(transport))
 		}
 	}
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 }
@@ -290,7 +303,7 @@ func TestAwaitRegisterChallengeRetriesNATPortCollision(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
-			t.Cleanup(func() { _ = svc.Close() })
+			closeRegistrarAfterTest(t, svc)
 			old := svc.CurrentFlow().SecurityClient
 			var retried security.Params
 			transport.onWrite = func(data []byte) {
@@ -312,7 +325,7 @@ func TestAwaitRegisterChallengeRetriesNATPortCollision(t *testing.T) {
 				}
 			}
 
-			resp, err := svc.awaitRegisterChallenge(context.Background())
+			resp, err := svc.awaitRegisterChallenge(t.Context())
 			if err != nil {
 				t.Fatalf("awaitRegisterChallenge() error = %v", err)
 			}
@@ -343,7 +356,7 @@ func TestRefreshRegistrationRetriesNATClientPortCollision(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newUDPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
-			t.Cleanup(func() { _ = svc.Close() })
+			closeRegistrarAfterTest(t, svc)
 			flow := newFlow("198.51.100.10", 5060, ipsecAlgorithmsFromConfig(svc.cfg))
 			flow.SecurityVerify = &security.Param{Mod: tt.mode}
 			flow.SecurityClient.Mod = tt.mode
@@ -358,7 +371,7 @@ func TestRefreshRegistrationRetriesNATClientPortCollision(t *testing.T) {
 			oldClientPort := state.flow.SecurityClient.PortC
 			oldServerPort := state.flow.SecurityClient.PortS
 
-			done, err := svc.handleRefreshRegistration(context.Background(), resp, &state, nil)
+			done, err := svc.handleRefreshRegistration(t.Context(), resp, &state, nil)
 			if tt.wantRetry {
 				if err != nil || done {
 					t.Fatalf("handleRefreshRegistration() = done %v, error %v; want retry", done, err)
@@ -1177,7 +1190,7 @@ func TestSecureResponseTransportSkipsDuplicateSessionEndpoint(t *testing.T) {
 				SecurityVerify: &verify,
 			}
 
-			attachments, err := svc.startSecureResponseTransportsWithKeys(context.Background(), &verify, flow, outboundTCP, []session.Transport{newUDPTransport(28789, 32813)}, []byte("ck"), []byte("ik"))
+			attachments, err := svc.startSecureResponseTransportsWithKeys(t.Context(), &verify, flow, outboundTCP, []session.Transport{newUDPTransport(28789, 32813)}, []byte("ck"), []byte("ik"))
 			if err != nil {
 				t.Fatalf("startSecureResponseTransportsWithKeys() error = %v", err)
 			}
@@ -1318,7 +1331,7 @@ func TestRegisterRebuildsSecureTransportAfterProtectedRechallenge(t *testing.T) 
 		nextReliable.queue(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := svc.Register(ctx); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -1377,7 +1390,7 @@ func TestRegisterSuccessMaintainsSecureAssociationLifetime(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTCPTransport(5062, 4060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
-			defer svc.closeSecureResources()
+			closeSecureResourcesAfterTest(t, svc)
 			if !tt.wantZero {
 				if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 					t.Fatalf("applyRegisterChallenge() error = %v", err)
@@ -1525,7 +1538,7 @@ func TestSecureAssociationLifetimeExtensionCancelsStaleExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			defer svc.closeSecureResources()
+			closeSecureResourcesAfterTest(t, svc)
 
 			svc.setRegistered(true)
 			svc.replaceSecureServerAttachments([]session.Attachment{activeAttachment})
@@ -1694,6 +1707,7 @@ func TestEstablishUpgradesSecureTransport(t *testing.T) {
 	secure := newTCPTransport(45000, 5060)
 	serverTCP := newTCPTransport(5063, 45000)
 	serverUDP := newUDPTransport(5063, 45000)
+	responseUDP := newUDPTransport(45001, 5060)
 
 	var dialCfg session.SecureTCPConfig
 	var listenTCPCfg session.SecureTCPConfig
@@ -1712,6 +1726,9 @@ func TestEstablishUpgradesSecureTransport(t *testing.T) {
 			listenUDPCfg = cfg
 			return serverUDP, nil
 		},
+		DialSecureUDP: func(context.Context, session.SecureUDPConfig) (session.Transport, error) {
+			return responseUDP, nil
+		},
 	}, initial, stubCard{})
 
 	initial.onWrite = func(data []byte) {
@@ -1726,7 +1743,7 @@ func TestEstablishUpgradesSecureTransport(t *testing.T) {
 		secure.queue(newResponse(req, 200, "OK"))
 	}
 
-	if err := svc.Establish(context.Background()); err != nil {
+	if err := svc.Establish(t.Context()); err != nil {
 		t.Fatalf("Establish() error = %v", err)
 	}
 	if dialCfg.LocalPort == 0 || listenTCPCfg.LocalPort == 0 || listenUDPCfg.LocalPort == 0 {
@@ -1821,10 +1838,10 @@ func TestCloseAfterSessionStoppedRestoresPrimary(t *testing.T) {
 				t.Fatalf("commitRegisterSecurity() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			runErr := make(chan error, 1)
 			go func() { runErr <- sess.Run(runCtx) }()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 			runCancel()
@@ -1868,7 +1885,7 @@ func TestEstablishKeepsPlainTransportWhenSecureInboundSetupFails(t *testing.T) {
 		initial.queue(newUnauthorizedRegisterResponse(req, testNonce, 4062))
 	}
 
-	err := svc.Establish(context.Background())
+	err := svc.Establish(t.Context())
 	if err == nil {
 		t.Fatal("Establish() error = nil, want secure inbound setup error")
 	}
@@ -1908,7 +1925,7 @@ func TestRegisterFailureDeletesIncompleteSecurityAssociations(t *testing.T) {
 		outbound.queue(newResponse(req, 403, "Forbidden"))
 	}
 
-	err := svc.Register(context.Background())
+	err := svc.Register(t.Context())
 	if err == nil {
 		t.Fatal("Register() error = nil, want registration failure")
 	}
@@ -1964,7 +1981,7 @@ func TestEstablishUpgradesSecureUDPTransport(t *testing.T) {
 		reliable.queue(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := svc.Establish(ctx); err != nil {
 		t.Fatalf("Establish() error = %v", err)
@@ -2082,7 +2099,7 @@ func TestRegisterHandlesProxyAuthenticationChallenge(t *testing.T) {
 		}
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 }
@@ -2104,7 +2121,7 @@ func TestBuildRegisterAuthorizationIntegrityProtected(t *testing.T) {
 		t.Fatalf("initial Authorization = %q, want integrity-protected=no", got)
 	}
 
-	auth, err := svc.buildRegisterAuthorization(context.Background(), security.Challenge{
+	auth, err := svc.buildRegisterAuthorization(t.Context(), security.Challenge{
 		Realm:     "ims.mnc001.mcc001.3gppnetwork.org",
 		Nonce:     testNonce,
 		Algorithm: security.AlgorithmAKAv1MD5,
@@ -2156,7 +2173,7 @@ func TestRegisterUsesChallengeRealm(t *testing.T) {
 			if err != nil {
 				t.Fatalf("applyRegisterChallenge() error = %v", err)
 			}
-			auth, err := svc.buildRegisterAuthorization(context.Background(), challenge)
+			auth, err := svc.buildRegisterAuthorization(t.Context(), challenge)
 			if err != nil {
 				t.Fatalf("buildRegisterAuthorization() error = %v", err)
 			}
@@ -2403,7 +2420,7 @@ func TestRegisterRetriesInitialChallengeWithInvalidSecurityServer(t *testing.T) 
 		}
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if got := countWrites(transport); got != 3 {
@@ -2424,13 +2441,13 @@ func TestRegisterTreatsTransportFailureAsInitialRegistrationRequired(t *testing.
 			cause := errors.New("transport connection lost")
 			tt.transport.writeErr = cause
 			svc := newTestService(t, Config{}, tt.transport, stubCard{})
-			t.Cleanup(func() { _ = svc.Close() })
-			err := svc.Register(context.Background())
+			closeRegistrarAfterTest(t, svc)
+			err := svc.Register(t.Context())
 			if !errors.Is(err, cause) {
 				t.Fatalf("Register() error = %v, want %v", err, cause)
 			}
-			var initial *initialRegistrationRequired
-			if !errors.As(err, &initial) {
+			_, ok := errors.AsType[*initialRegistrationRequired](err)
+			if !ok {
 				t.Fatalf("Register() error = %v, want initial registration required", err)
 			}
 		})
@@ -2482,7 +2499,7 @@ func TestRegisterSynchronizationFailureSendsAUTSAndContinues(t *testing.T) {
 		}
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if got := countWrites(transport); got != 3 {
@@ -2532,7 +2549,7 @@ func TestRegisterAppliesChallengeAndSuccessState(t *testing.T) {
 		}
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -2576,7 +2593,7 @@ func TestRegisterRequiresInitialRegistrationOnInitialRetryStatus(t *testing.T) {
 				transport.queue(newResponse(req, tt.status, tt.reason))
 			}
 
-			err := svc.Register(context.Background())
+			err := svc.Register(t.Context())
 			if err == nil {
 				t.Fatal("Register() error = nil, want initial registration required")
 			}
@@ -2619,7 +2636,7 @@ func TestRegisterRequiresInitialRegistrationOnProtectedRetryStatus(t *testing.T)
 				}
 			}
 
-			err := svc.Register(context.Background())
+			err := svc.Register(t.Context())
 			if err == nil {
 				t.Fatal("Register() error = nil, want initial registration required")
 			}
@@ -2656,7 +2673,7 @@ func TestRegisterInitialRegistrationErrorCarriesRetryAfter(t *testing.T) {
 				transport.queue(newResponse(req, tt.status, tt.reason, sip.Header{Name: "Retry-After", Value: tt.retryAfter}))
 			}
 
-			err := svc.Register(context.Background())
+			err := svc.Register(t.Context())
 			if err == nil {
 				t.Fatal("Register() error = nil, want initial registration required")
 			}
@@ -2709,7 +2726,7 @@ func TestRegisterRejectsInvalidAuthenticationInfoRspauth(t *testing.T) {
 				}
 			}
 
-			err := svc.Register(context.Background())
+			err := svc.Register(t.Context())
 			if err == nil {
 				t.Fatal("Register() error = nil, want rspauth error")
 			}
@@ -2752,7 +2769,7 @@ func TestRegisterRequiresPCSCFReselectionOnUseProxy(t *testing.T) {
 				}
 			}
 
-			err := svc.Register(context.Background())
+			err := svc.Register(t.Context())
 			if err == nil {
 				t.Fatal("Register() error = nil, want P-CSCF reselection")
 			}
@@ -2790,7 +2807,7 @@ func TestRegisterInitialRegistrationRequiredStatusClasses(t *testing.T) {
 				transport.queue(newResponse(req, tt.status, tt.reason))
 			}
 
-			err := svc.Register(context.Background())
+			err := svc.Register(t.Context())
 			if err == nil {
 				t.Fatal("Register() error = nil, want initial registration required")
 			}
@@ -2933,7 +2950,7 @@ func TestRegisterStoresAssociatedURIsAndExpires(t *testing.T) {
 				}
 			}
 
-			if err := svc.Register(context.Background()); err != nil {
+			if err := svc.Register(t.Context()); err != nil {
 				t.Fatalf("Register() error = %v", err)
 			}
 
@@ -2961,7 +2978,7 @@ func TestRegisterRetries423MinExpires(t *testing.T) {
 		}
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 }
@@ -2992,7 +3009,7 @@ func TestRegisterHandlesRechallenge401(t *testing.T) {
 		}
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if !svc.State().Registered {
@@ -3035,7 +3052,7 @@ func TestRegisterKeepsUDPResponseTransportForTCPFlow(t *testing.T) {
 		outboundTCP.queue(newResponse(req, 200, "OK", sip.Header{Name: "Authentication-Info", Value: authenticationInfoForRequest(t, req, testNonce)}))
 	}
 
-	if err := svc.Register(context.Background()); err != nil {
+	if err := svc.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if dialUDPCount != 1 {
@@ -3064,7 +3081,7 @@ func TestRegisterKeepsUDPResponseTransportForTCPFlow(t *testing.T) {
 	msg.Headers.Add("To", "<sip:user@example.net>")
 	msg.Headers.Add("CSeq", "1 MESSAGE")
 	req := session.Request{Message: msg, Transport: inboundUDP, PeerAddr: inboundUDP.RemoteAddr()}
-	if err := svc.sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+	if err := svc.sess.WriteStatus(t.Context(), req, 200, "OK"); err != nil {
 		t.Fatalf("WriteStatus() error = %v", err)
 	}
 	if got := countWrites(inboundUDP); got != 0 {
@@ -3087,7 +3104,7 @@ func TestRefreshUsesAuthenticationInfoNextNonce(t *testing.T) {
 		transport.queue(newResponse(req, 200, "OK"))
 	}
 
-	if err := svc.Refresh(context.Background()); err != nil {
+	if err := svc.Refresh(t.Context()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 }
@@ -3114,7 +3131,7 @@ func TestRefreshRequiresInitialRegistrationOnRestartStatus(t *testing.T) {
 				transport.queue(newResponse(req, tt.status, tt.reason))
 			}
 
-			err := svc.Refresh(context.Background())
+			err := svc.Refresh(t.Context())
 			if err == nil {
 				t.Fatal("Refresh() error = nil, want initial registration required")
 			}
@@ -3150,7 +3167,7 @@ func TestRefreshReauthenticationRequiresSecureDialer(t *testing.T) {
 		transport.queue(newUnauthorizedRegisterResponse(req, testNonce, 4600))
 	}
 
-	err = svc.Refresh(context.Background())
+	err = svc.Refresh(t.Context())
 	if err == nil {
 		t.Fatal("Refresh() error = nil, want missing secure dialer")
 	}
@@ -3176,7 +3193,7 @@ func TestRefreshReauthenticationRequiresSecureInboundTransport(t *testing.T) {
 		old.queue(newUnauthorizedRegisterResponse(req, testNonce, 4600))
 	}
 
-	err := svc.Refresh(context.Background())
+	err := svc.Refresh(t.Context())
 	if err == nil {
 		t.Fatal("Refresh() error = nil, want missing secure inbound transport")
 	}
@@ -3209,13 +3226,13 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 	oldSecurityClient := svc.CurrentFlow().SecurityClient
 	var challengedSecurityClient string
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.sess.Run(runCtx)
 	}()
-	if err := svc.sess.WaitStarted(context.Background()); err != nil {
+	if err := svc.sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3271,7 +3288,7 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 		nextInbound.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"}))
 	}
 
-	if err := svc.Refresh(context.Background()); err != nil {
+	if err := svc.Refresh(t.Context()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	if dialCfg.RemotePort != 4060 || listenCfg.RemotePort != 4600 {
@@ -3289,7 +3306,7 @@ func TestRefreshReauthenticatesWithNewSecurityAssociation(t *testing.T) {
 	if got := countWrites(nextOutbound); got != 1 {
 		t.Fatalf("next outbound write count = %d, want 1", got)
 	}
-	if err := svc.sess.Send(context.Background(), svc.buildSubscribe()); err != nil {
+	if err := svc.sess.Send(t.Context(), svc.buildSubscribe()); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if got := countWrites(nextOutbound); got != 2 {
@@ -3316,7 +3333,7 @@ func TestRefreshReauthenticationCompletesBeforeSessionRun(t *testing.T) {
 			return nextInbound, nil
 		},
 	}, old, stubCard{})
-	defer svc.Close()
+	closeRegistrarAfterTest(t, svc)
 
 	if _, err := svc.applyRegisterChallenge(newUnauthorizedRegisterResponse(svc.buildRegister(nil, nil), testNonce, 4062)); err != nil {
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
@@ -3330,7 +3347,7 @@ func TestRefreshReauthenticationCompletesBeforeSessionRun(t *testing.T) {
 		nextInbound.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"}))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := svc.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
@@ -3360,13 +3377,13 @@ func TestRefreshReauthenticationAcceptsTCPResponseOnOutboundSecurityAssociation(
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.sess.Run(runCtx)
 	}()
-	if err := svc.sess.WaitStarted(context.Background()); err != nil {
+	if err := svc.sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3379,7 +3396,7 @@ func TestRefreshReauthenticationAcceptsTCPResponseOnOutboundSecurityAssociation(
 		nextOutbound.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"}))
 	}
 
-	if err := svc.Refresh(context.Background()); err != nil {
+	if err := svc.Refresh(t.Context()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	if svc.sess.LocalAddr() != nextOutbound.LocalAddr() {
@@ -3486,13 +3503,13 @@ func TestRefreshReauthenticationDrainsOldInboundSecurityAssociations(t *testing.
 	}
 	svc.replaceSecureServerAttachments([]session.Attachment{oldInboundAttachment})
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3508,7 +3525,7 @@ func TestRefreshReauthenticationDrainsOldInboundSecurityAssociations(t *testing.
 		nextInbound.queue(reauthSuccess)
 	}
 
-	if err := svc.Refresh(context.Background()); err != nil {
+	if err := svc.Refresh(t.Context()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -3576,13 +3593,13 @@ func TestRefreshReauthenticationKeepsOldSAsUntilPendingTransactionCompletes(t *t
 	}
 	svc.replaceSecureServerAttachments([]session.Attachment{oldInboundAttachment})
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3610,12 +3627,12 @@ func TestRefreshReauthenticationKeepsOldSAsUntilPendingTransactionCompletes(t *t
 	}
 	pendingErrCh := make(chan error, 1)
 	go func() {
-		_, err := sess.ExchangeWithTransport(context.Background(), oldOutbound, pending, session.ExchangeOptions{})
+		_, err := sess.ExchangeWithTransport(t.Context(), oldOutbound, pending, session.ExchangeOptions{})
 		pendingErrCh <- err
 	}()
 	waitForWriteCount(t, oldOutbound, 1)
 
-	if err := svc.Refresh(context.Background()); err != nil {
+	if err := svc.Refresh(t.Context()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	if got := closeCount(oldOutbound); got != 0 {
@@ -3658,13 +3675,13 @@ func TestRefreshReauthenticationFailureDeletesIncompleteSecurityAssociations(t *
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.sess.Run(runCtx)
 	}()
-	if err := svc.sess.WaitStarted(context.Background()); err != nil {
+	if err := svc.sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3677,7 +3694,7 @@ func TestRefreshReauthenticationFailureDeletesIncompleteSecurityAssociations(t *
 		nextInbound.queue(newResponse(req, 403, "Forbidden"))
 	}
 
-	err := svc.Refresh(context.Background())
+	err := svc.Refresh(t.Context())
 	if err == nil {
 		t.Fatal("Refresh() error = nil, want re-authentication failure")
 	}
@@ -3708,7 +3725,7 @@ func TestMaintainReturnsRegistrationEvent(t *testing.T) {
 	want := errors.New("network deregistered")
 	svc.publishRegistrationEvent(want)
 
-	if err := svc.Maintain(context.Background()); !errors.Is(err, want) {
+	if err := svc.Maintain(t.Context()); !errors.Is(err, want) {
 		t.Fatalf("Maintain() error = %v, want %v", err, want)
 	}
 }
@@ -3742,13 +3759,13 @@ func TestRefreshReauthenticationSynchronizationFailureRetriesWithAUTS(t *testing
 		t.Fatalf("applyRegisterChallenge() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.sess.Run(runCtx)
 	}()
-	if err := svc.sess.WaitStarted(context.Background()); err != nil {
+	if err := svc.sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3781,7 +3798,7 @@ func TestRefreshReauthenticationSynchronizationFailureRetriesWithAUTS(t *testing
 		nextInbound.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "600"}))
 	}
 
-	if err := svc.Refresh(context.Background()); err != nil {
+	if err := svc.Refresh(t.Context()); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	if got := countWrites(old); got != 2 {
@@ -3820,11 +3837,11 @@ func TestRegistrationRefreshRejectsConcurrentRefresh(t *testing.T) {
 
 	registerErr := make(chan error, 1)
 	go func() {
-		registerErr <- svc.Register(context.Background())
+		registerErr <- svc.Register(t.Context())
 	}()
 	<-started
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
 	err := svc.Refresh(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -3853,7 +3870,7 @@ func TestMaintainRefreshesOnInterval(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
@@ -3885,7 +3902,7 @@ func TestMaintainRefreshesRegistrationEventSubscription(t *testing.T) {
 		transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "2"}))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
@@ -3919,7 +3936,7 @@ func TestMaintainIgnoresRegistrationEventSubscriptionRefreshError(t *testing.T) 
 		transport.queue(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.Maintain(ctx)
@@ -3990,7 +4007,7 @@ func TestDeregisterRetriesAfterChallenge(t *testing.T) {
 		}
 	}
 
-	if err := svc.Deregister(context.Background()); err != nil {
+	if err := svc.Deregister(t.Context()); err != nil {
 		t.Fatalf("Deregister() error = %v", err)
 	}
 	state := svc.State()
@@ -4023,12 +4040,12 @@ func TestDeregisterAfterRunExitFallsBackToSynchronousExchange(t *testing.T) {
 	svc := newTestService(t, Config{}, transport, stubCard{})
 	registerService(t, svc, transport)
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- svc.sess.Run(runCtx)
 	}()
-	if err := svc.sess.WaitStarted(context.Background()); err != nil {
+	if err := svc.sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 	runCancel()
@@ -4048,7 +4065,7 @@ func TestDeregisterAfterRunExitFallsBackToSynchronousExchange(t *testing.T) {
 		}
 	}
 
-	if err := svc.Deregister(context.Background()); err != nil {
+	if err := svc.Deregister(t.Context()); err != nil {
 		t.Fatalf("Deregister() error = %v", err)
 	}
 	if svc.State().Registered {
@@ -4079,7 +4096,7 @@ func TestDeregisterHandlesChallenge(t *testing.T) {
 		}
 	}
 
-	if err := svc.Deregister(context.Background()); err != nil {
+	if err := svc.Deregister(t.Context()); err != nil {
 		t.Fatalf("Deregister() error = %v", err)
 	}
 	if svc.State().Registered {
@@ -4109,7 +4126,7 @@ func TestDeregisterReusesDigestCredential(t *testing.T) {
 		}
 	}
 
-	if err := svc.Deregister(context.Background()); err != nil {
+	if err := svc.Deregister(t.Context()); err != nil {
 		t.Fatalf("Deregister() error = %v", err)
 	}
 	if svc.State().Registered {
@@ -4192,7 +4209,7 @@ func TestSubscribeIgnoresUnsupportedRegistrationEventPackage(t *testing.T) {
 		transport.queue(newResponse(req, 489, "Bad Event"))
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 	if !svc.isSubscribeUnsupported() {
@@ -4212,7 +4229,7 @@ func TestSubscribeStoresExpires(t *testing.T) {
 		transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 	if got := svc.currentSubscribeExpires(); got != 2*time.Minute {
@@ -4272,7 +4289,7 @@ func TestSubscribeBeforeSessionRunReadsProtectedTCPResponseFlows(t *testing.T) {
 				responseTransport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			if err := svc.Subscribe(ctx); err != nil {
 				t.Fatalf("Subscribe() error = %v", err)
@@ -4316,7 +4333,7 @@ func TestSubscribeAndNotifyUseProtectedServerFlows(t *testing.T) {
 		}
 		serverUDP.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 	if countWrites(serverUDP) != 0 {
@@ -4333,7 +4350,7 @@ func TestSubscribeAndNotifyUseProtectedServerFlows(t *testing.T) {
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Subscription-State", "active;expires=90")
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{
+	handled, err := svc.HandleRequest(t.Context(), session.Request{
 		Message:   notify,
 		Transport: serverTCP,
 		PeerAddr:  serverTCP.RemoteAddr(),
@@ -4364,7 +4381,7 @@ func TestSubscribeServiceUnavailableCarriesRetryAfter(t *testing.T) {
 		transport.queue(newResponse(req, sipStatusServiceUnavailable, "Service Unavailable", sip.Header{Name: "Retry-After", Value: "75"}))
 	}
 
-	err := svc.Subscribe(context.Background())
+	err := svc.Subscribe(t.Context())
 	if err == nil {
 		t.Fatal("Subscribe() error = nil, want retry-after error")
 	}
@@ -4422,11 +4439,11 @@ func TestSubscribeRefreshUsesEstablishedDialog(t *testing.T) {
 		}
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(initial) error = %v", err)
 	}
 	atomic.StoreInt64(&svc.cseq, 99)
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(refresh) error = %v", err)
 	}
 }
@@ -4459,11 +4476,11 @@ func TestSubscribeRefreshUsesDialogCSeqAndEmptyRouteSet(t *testing.T) {
 		}
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(initial) error = %v", err)
 	}
 	atomic.StoreInt64(&svc.cseq, 99)
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(refresh) error = %v", err)
 	}
 }
@@ -4495,13 +4512,13 @@ func TestSubscribeRefreshFailureAdvancesDialogCSeq(t *testing.T) {
 		}
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(initial) error = %v", err)
 	}
-	if err := svc.Subscribe(context.Background()); err == nil {
+	if err := svc.Subscribe(t.Context()); err == nil {
 		t.Fatal("Subscribe(failed refresh) error = nil, want non-nil")
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(retry refresh) error = %v", err)
 	}
 }
@@ -4541,15 +4558,15 @@ func TestSubscribeRefreshExchangeErrorStartsNewInitialSubscription(t *testing.T)
 		}
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(initial) error = %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
 	if err := svc.Subscribe(ctx); err == nil {
 		t.Fatal("Subscribe(timed out refresh) error = nil, want non-nil")
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(new initial) error = %v", err)
 	}
 }
@@ -4589,10 +4606,10 @@ func TestSubscribeRefresh481StartsNewInitialSubscription(t *testing.T) {
 		}
 	}
 
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(initial) error = %v", err)
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe(refresh) error = %v", err)
 	}
 	if got := countWrites(transport); got != 3 {
@@ -4609,7 +4626,7 @@ func TestNotifyStoresSubscriptionStateExpires(t *testing.T) {
 	notify.Headers.Add("Subscription-State", "active;expires=90")
 	req := session.Request{Message: notify, Transport: transport}
 
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -4663,7 +4680,7 @@ func TestNotifyOutsideSubscriptionDialogGets481(t *testing.T) {
 			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 		}
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 
@@ -4676,7 +4693,7 @@ func TestNotifyOutsideSubscriptionDialogGets481(t *testing.T) {
 	notify.Headers.Add("CSeq", "1 NOTIFY")
 	notify.Headers.Add("Event", "reg")
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -4699,7 +4716,7 @@ func TestNotifyMissingDialogTagGets481(t *testing.T) {
 			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 		}
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 	subscription := svc.currentSubscription()
@@ -4713,7 +4730,7 @@ func TestNotifyMissingDialogTagGets481(t *testing.T) {
 	notify.Headers.Add("CSeq", "1 NOTIFY")
 	notify.Headers.Add("Event", "reg")
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -4736,7 +4753,7 @@ func TestNotifyStaleRemoteCSeqGets500(t *testing.T) {
 			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 		}
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 	subscription := svc.currentSubscription()
@@ -4754,10 +4771,10 @@ func TestNotifyStaleRemoteCSeqGets500(t *testing.T) {
 	}
 
 	transport.onWrite = nil
-	if _, err := svc.HandleRequest(context.Background(), session.Request{Message: buildNotify("2"), Transport: transport}); err != nil {
+	if _, err := svc.HandleRequest(t.Context(), session.Request{Message: buildNotify("2"), Transport: transport}); err != nil {
 		t.Fatalf("HandleRequest() first error = %v", err)
 	}
-	if _, err := svc.HandleRequest(context.Background(), session.Request{Message: buildNotify("1"), Transport: transport}); err != nil {
+	if _, err := svc.HandleRequest(t.Context(), session.Request{Message: buildNotify("1"), Transport: transport}); err != nil {
 		t.Fatalf("HandleRequest() second error = %v", err)
 	}
 	resp := lastWrite(t, transport)
@@ -4779,7 +4796,7 @@ func TestNotifySubscriptionStateTerminatedRequestsNewSubscription(t *testing.T) 
 			transport.queue(newResponse(req, 200, "OK", sip.Header{Name: "Expires", Value: "120"}))
 		}
 	}
-	if err := svc.Subscribe(context.Background()); err != nil {
+	if err := svc.Subscribe(t.Context()); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 	svc.setRegistered(true)
@@ -4795,7 +4812,7 @@ func TestNotifySubscriptionStateTerminatedRequestsNewSubscription(t *testing.T) 
 	notify.Headers.Add("Event", "reg")
 	notify.Headers.Add("Subscription-State", "terminated;reason=timeout")
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -4843,7 +4860,7 @@ func TestNotifyTerminatedSubscriptionRefreshesOnlyWhileRegistered(t *testing.T) 
   </registration>
 </reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.event, svc.currentRegisterContactURI())
 
-			if handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport}); err != nil {
+			if handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport}); err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			} else if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
@@ -4885,7 +4902,7 @@ func TestNotifyRegInfoRefreshesRegistrationExpires(t *testing.T) {
 </reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 	req := session.Request{Message: notify, Transport: transport}
 
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -4944,7 +4961,7 @@ func TestNotifyRegInfoMatchesTokenizedContactBySIPInstance(t *testing.T) {
   </registration>
 </reginfo>`, svc.State().PublicIdentity, tt.contactState, tt.contactEvent)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5040,7 +5057,7 @@ func TestNotifyRegInfoMaintainsTableAcrossPartialUpdates(t *testing.T) {
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
 			notify.Body = []byte(tt.body)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5216,7 +5233,7 @@ func TestNotifyRegInfoAcceptsContentTypeParameters(t *testing.T) {
   </registration>
 </reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -5257,7 +5274,7 @@ func TestNotifyRegInfoRejectsInvalidProtocolHeaders(t *testing.T) {
 			}
 			notify.Body = []byte(tt.body)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5311,7 +5328,7 @@ func TestNotifyRegInfoTerminatedContactPublishesRegistrationEvent(t *testing.T) 
 </reginfo>`, svc.State().PublicIdentity, tt.event, tt.attributes, svc.currentRegisterContactURI())
 			req := session.Request{Message: notify, Transport: transport}
 
-			handled, err := svc.HandleRequest(context.Background(), req)
+			handled, err := svc.HandleRequest(t.Context(), req)
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5371,7 +5388,7 @@ func TestNetworkDeregistrationStopsRegistrationMaintenance(t *testing.T) {
 			svc.setRegistered(true)
 
 			notify := networkDeregistrationNotify(t, svc, regInfoContactEventUnregistered)
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5388,7 +5405,7 @@ func TestNetworkDeregistrationStopsRegistrationMaintenance(t *testing.T) {
 			}
 			for _, operation := range operations {
 				t.Run(operation.name, func(t *testing.T) {
-					operationCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					operationCtx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 					defer cancel()
 					err := operation.run(operationCtx)
 					if !errors.Is(err, errRegistrationStopped) {
@@ -5463,7 +5480,7 @@ func TestStoppingRegistrationMaintenanceCancelsInFlightOperation(t *testing.T) {
 
 			errCh := make(chan error, 1)
 			go func() {
-				errCh <- tt.operation(svc, context.Background())
+				errCh <- tt.operation(svc, t.Context())
 			}()
 
 			select {
@@ -5558,7 +5575,7 @@ func TestStoppedRegistrationRejectsLateMaintenanceSuccess(t *testing.T) {
 			}()
 			errCh := make(chan error, 1)
 			go func() {
-				errCh <- tt.operation(svc, context.Background())
+				errCh <- tt.operation(svc, t.Context())
 			}()
 
 			select {
@@ -5640,7 +5657,7 @@ func TestNetworkDeregistrationWriteFailurePreservesReplacementError(t *testing.T
 			transport.mu.Unlock()
 
 			notify := networkDeregistrationNotify(t, svc, regInfoContactEventUnregistered)
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
@@ -5725,7 +5742,7 @@ func TestNetworkDeregistrationCleanupFailurePreservesReplacementError(t *testing
 				svc.retireSingleRegistration()
 			}
 			notify := networkDeregistrationNotify(t, svc, regInfoContactEventUnregistered)
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: secure})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: secure})
 			if !handled {
 				t.Fatal("HandleRequest() handled = false, want true")
 			}
@@ -5861,7 +5878,7 @@ func TestNotifyRegInfoTerminatedRegistrationPublishesRegistrationEvent(t *testin
   <registration aor="%s" id="reg-1" state="terminated">%s</registration>
 </reginfo>`, svc.State().PublicIdentity, contact)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5894,7 +5911,7 @@ func TestNotifyRegInfoFullStateWithoutOwnContactRequiresInitialRegistration(t *t
 </reginfo>`, svc.State().PublicIdentity)
 	req := session.Request{Message: notify, Transport: transport}
 
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -5943,7 +5960,7 @@ func TestNotifyRegInfoFullStateMatchesRegisterTransaction(t *testing.T) {
 </reginfo>`, svc.State().PublicIdentity, tt.callID, tt.cseq)
 			req := session.Request{Message: notify, Transport: transport}
 
-			handled, err := svc.HandleRequest(context.Background(), req)
+			handled, err := svc.HandleRequest(t.Context(), req)
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -5980,7 +5997,7 @@ func TestNotifyRegInfoFullStateWithoutOwnRegistrationRequiresInitialRegistration
 </reginfo>`)
 	req := session.Request{Message: notify, Transport: transport}
 
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -6025,7 +6042,7 @@ func TestNotifyRegInfoEmptyFullStateRequiresInitialRegistration(t *testing.T) {
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
 			notify.Body = []byte(tt.body)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -6056,7 +6073,7 @@ func TestNotifyRegInfoIgnoresStaleVersion(t *testing.T) {
     </contact>
   </registration>
 </reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
-	if _, err := svc.HandleRequest(context.Background(), session.Request{Message: active, Transport: transport}); err != nil {
+	if _, err := svc.HandleRequest(t.Context(), session.Request{Message: active, Transport: transport}); err != nil {
 		t.Fatalf("HandleRequest(active) error = %v", err)
 	}
 
@@ -6072,7 +6089,7 @@ func TestNotifyRegInfoIgnoresStaleVersion(t *testing.T) {
   </registration>
 </reginfo>`, svc.State().PublicIdentity, svc.currentRegisterContactURI())
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: stale, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: stale, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest(stale) error = %v", err)
 	}
@@ -6301,7 +6318,7 @@ func TestNotifyRegInfoRejectsInvalidEnvelope(t *testing.T) {
 			notify.Headers.Add("Content-Type", "application/reginfo+xml")
 			notify.Body = []byte(tt.body)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -6395,7 +6412,7 @@ func TestNotifyRegInfoVersionGapRequestsSubscriptionRefresh(t *testing.T) {
     </contact>
   </registration>
 </reginfo>`, version, svc.State().PublicIdentity, svc.currentRegisterContactURI())
-		if handled, err := svc.HandleRequest(context.Background(), session.Request{Message: notify, Transport: transport}); err != nil {
+		if handled, err := svc.HandleRequest(t.Context(), session.Request{Message: notify, Transport: transport}); err != nil {
 			t.Fatalf("HandleRequest(version %s) error = %v", version, err)
 		} else if !handled {
 			t.Fatalf("HandleRequest(version %s) handled = false, want true", version)
@@ -6447,11 +6464,9 @@ func TestRegisterSuccessStartsRFC6223KeepAlive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useRegistrationKeepAliveInterval(t, 10*time.Millisecond)
 			svc := newTestService(t, Config{}, tt.transport, stubCard{})
-			t.Cleanup(func() {
-				_ = svc.Close()
-			})
+			useRegistrationKeepAliveInterval(t, svc, 10*time.Millisecond)
+			closeRegistrarAfterTest(t, svc)
 
 			svc.applyRegisterSuccess(registerResponseWithViaKeep(svc, "30"))
 			waitForWriteCount(t, tt.transport, 1)
@@ -6469,10 +6484,10 @@ func TestRegisterSuccessSkipsKeepAliveWhenTransportDisablesIt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useRegistrationKeepAliveInterval(t, time.Millisecond)
 			transport := &keepAliveDisabledTransport{newUDPTransport(5062, 5060)}
 			svc := newTestService(t, Config{}, transport, stubCard{})
-			t.Cleanup(func() { _ = svc.Close() })
+			useRegistrationKeepAliveInterval(t, svc, time.Millisecond)
+			closeRegistrarAfterTest(t, svc)
 
 			svc.applyRegisterSuccess(registerResponseWithViaKeep(svc, "30"))
 			time.Sleep(10 * time.Millisecond)
@@ -6500,9 +6515,7 @@ func TestRegisterSuccessStopsRFC6223KeepAliveWhenNotRenegotiated(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
-			t.Cleanup(func() {
-				_ = svc.Close()
-			})
+			closeRegistrarAfterTest(t, svc)
 
 			svc.applyRegisterSuccess(registerResponseWithViaKeep(svc, "30"))
 			keepalive := currentRegistrationKeepAlive(t, svc)
@@ -6532,12 +6545,10 @@ func TestMaintainReturnsRFC6223KeepAliveFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useRegistrationKeepAliveInterval(t, 10*time.Millisecond)
 			transport := newTCPTransport(5062, 5060)
 			svc := newTestService(t, Config{}, transport, stubCard{})
-			t.Cleanup(func() {
-				_ = svc.Close()
-			})
+			useRegistrationKeepAliveInterval(t, svc, 10*time.Millisecond)
+			closeRegistrarAfterTest(t, svc)
 
 			want := errors.New("tcp connection reset")
 			transport.mu.Lock()
@@ -6546,7 +6557,7 @@ func TestMaintainReturnsRFC6223KeepAliveFailure(t *testing.T) {
 
 			errCh := make(chan error, 1)
 			go func() {
-				errCh <- svc.Maintain(context.Background())
+				errCh <- svc.Maintain(t.Context())
 			}()
 
 			svc.applyRegisterSuccess(registerResponseWithViaKeep(svc, "30"))
@@ -6592,7 +6603,7 @@ func TestDeregisterStopsRFC6223KeepAlive(t *testing.T) {
 				}
 			}
 
-			if err := svc.Deregister(context.Background()); err != nil {
+			if err := svc.Deregister(t.Context()); err != nil {
 				t.Fatalf("Deregister() error = %v", err)
 			}
 			if got := currentRegistrationKeepAlive(t, svc); got != nil {
@@ -6641,8 +6652,6 @@ func TestCloseStopsRFC6223KeepAlive(t *testing.T) {
 }
 
 func TestRegisterKeepAliveIntervalFromResponse(t *testing.T) {
-	useRegistrationKeepAliveInterval(t, 24*time.Second)
-
 	tests := []struct {
 		name string
 		via  string
@@ -6673,7 +6682,9 @@ func TestRegisterKeepAliveIntervalFromResponse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := sip.NewResponse(200, "OK")
 			resp.Headers.Set("Via", tt.via)
-			got, ok := registerKeepAliveIntervalFromResponse(resp)
+			_, got, ok := registerKeepAliveTimingFromResponse(resp, func(time.Duration) time.Duration {
+				return 24 * time.Second
+			})
 			if ok != tt.ok {
 				t.Fatalf("registerKeepAliveIntervalFromResponse() ok = %t, want %t", ok, tt.ok)
 			}
@@ -6717,15 +6728,11 @@ func TestRandomizedRegistrationKeepAliveIntervalUsesRFC6223Window(t *testing.T) 
 	}
 }
 
-func useRegistrationKeepAliveInterval(t *testing.T, interval time.Duration) {
+func useRegistrationKeepAliveInterval(t *testing.T, registrar *Registrar, interval time.Duration) {
 	t.Helper()
-	old := registrationKeepAliveInterval
-	registrationKeepAliveInterval = func(time.Duration) time.Duration {
+	registrar.keepAliveInterval = func(time.Duration) time.Duration {
 		return interval
 	}
-	t.Cleanup(func() {
-		registrationKeepAliveInterval = old
-	})
 }
 
 func registerResponseWithViaKeep(svc *Registrar, keep string) sip.Message {

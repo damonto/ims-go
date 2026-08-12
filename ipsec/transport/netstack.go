@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	ipsecbase "github.com/damonto/ims-go/ipsec"
 	"github.com/damonto/ims-go/ipsec/esp"
 	"github.com/damonto/ims-go/ipsec/packet"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/buffer"
@@ -39,14 +40,14 @@ var errNetstackClosed = errors.New("IMS netstack is closed")
 // session. ESP remains at the link boundary because its policies are negotiated
 // by IMS, not by the IP stack.
 type Netstack struct {
-	session PacketSession
+	session ipsecbase.PacketSession
 	stack   *stack.Stack
 	link    *netstackLink
 
 	mu               sync.Mutex
 	addresses        map[string]struct{}
 	policies         []*netstackSecurityPolicy
-	writeContexts    map[netstackFlowKey]netstackWriteContext
+	writeContexts    map[netstackFlowKey][]netstackWriteContext
 	writeErrors      map[netstackFlowKey]error
 	tcpListeners     map[netstackTCPListenerKey]*netstackTCPListener
 	udpKeepalives    map[netstackPeerKey]*netstackUDPEncKeepalive
@@ -54,11 +55,12 @@ type Netstack struct {
 	closed           bool
 	err              error
 
-	attachment Attachment
-	ctx        context.Context
+	attachment ipsecbase.Attachment
+	done       <-chan struct{}
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
+	closeErr   error
 }
 
 type netstackLink struct {
@@ -145,7 +147,7 @@ type netstackSecurityConfig struct {
 	inboundSalt   [4]byte
 }
 
-func NewNetstack(session PacketSession) (*Netstack, error) {
+func NewNetstack(session ipsecbase.PacketSession) (*Netstack, error) {
 	if session == nil {
 		return nil, errors.New("creating IMS netstack: packet session is nil")
 	}
@@ -162,17 +164,17 @@ func NewNetstack(session PacketSession) (*Netstack, error) {
 		{Destination: header.IPv4EmptySubnet, NIC: netstackNIC},
 		{Destination: header.IPv6EmptySubnet, NIC: netstackNIC},
 	})
-	ctx, cancel := context.WithCancel(context.Background())
+	lifetime, cancel := context.WithCancel(context.Background())
 	n := &Netstack{
 		session:       session,
 		stack:         s,
 		link:          link,
 		addresses:     make(map[string]struct{}),
-		writeContexts: make(map[netstackFlowKey]netstackWriteContext),
+		writeContexts: make(map[netstackFlowKey][]netstackWriteContext),
 		writeErrors:   make(map[netstackFlowKey]error),
 		tcpListeners:  make(map[netstackTCPListenerKey]*netstackTCPListener),
 		udpKeepalives: make(map[netstackPeerKey]*netstackUDPEncKeepalive),
-		ctx:           ctx,
+		done:          lifetime.Done(),
 		cancel:        cancel,
 	}
 	link.writePacket = n.writeLinkPacket
@@ -308,24 +310,32 @@ func netstackFlowKeyForAddresses(protocol byte, localIP, remoteIP net.IP, localP
 	}
 }
 
-func (n *Netstack) withWriteContext(key netstackFlowKey, ctx context.Context, write func() error) error {
+func (n *Netstack) withWriteContext(ctx context.Context, key netstackFlowKey, write func() error) error {
 	n.mu.Lock()
 	n.nextWriteContext++
-	current := netstackWriteContext{id: n.nextWriteContext, ctx: ctx}
-	previous, hadPrevious := n.writeContexts[key]
-	n.writeContexts[key] = current
+	current := netstackWriteContext{
+		id:  n.nextWriteContext,
+		ctx: ctx,
+	}
+	n.writeContexts[key] = append(n.writeContexts[key], current)
 	delete(n.writeErrors, key)
 	n.mu.Unlock()
 
 	err := write()
 
 	n.mu.Lock()
-	if active, ok := n.writeContexts[key]; ok && active.id == current.id {
-		if hadPrevious {
-			n.writeContexts[key] = previous
-		} else {
-			delete(n.writeContexts, key)
+	contexts := n.writeContexts[key]
+	for i := range contexts {
+		if contexts[i].id != current.id {
+			continue
 		}
+		contexts = append(contexts[:i], contexts[i+1:]...)
+		break
+	}
+	if len(contexts) == 0 {
+		delete(n.writeContexts, key)
+	} else {
+		n.writeContexts[key] = contexts
 	}
 	n.mu.Unlock()
 	return err
@@ -334,10 +344,10 @@ func (n *Netstack) withWriteContext(key netstackFlowKey, ctx context.Context, wr
 func (n *Netstack) writeContext(key netstackFlowKey) (context.Context, context.CancelFunc) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if current, ok := n.writeContexts[key]; ok {
-		return current.ctx, func() {}
+	if contexts := n.writeContexts[key]; len(contexts) != 0 {
+		return contexts[len(contexts)-1].ctx, func() {}
 	}
-	return context.WithTimeout(n.ctx, netstackWriteTimeout)
+	return contextWithDoneTimeout(n.done, netstackWriteTimeout)
 }
 
 func (n *Netstack) recordWriteError(key netstackFlowKey, err error) {
@@ -492,7 +502,7 @@ func (n *Netstack) runUDPEncKeepalive(keepalive *netstackUDPEncKeepalive) {
 	defer timer.Stop()
 	for {
 		select {
-		case <-n.ctx.Done():
+		case <-n.done:
 			return
 		case <-keepalive.stop:
 			return
@@ -506,7 +516,7 @@ func (n *Netstack) runUDPEncKeepalive(keepalive *netstackUDPEncKeepalive) {
 			timer.Reset(udpEncapsulatedESPKeepaliveTick - idle)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(n.ctx, udpEncapsulatedESPKeepaliveTimeout)
+		ctx, cancel := contextWithDoneTimeout(n.done, udpEncapsulatedESPKeepaliveTimeout)
 		err := writeUDPEncTunnelKeepalive(ctx, n.session, keepalive.localIP, keepalive.remoteIP)
 		cancel()
 		if err == nil {
@@ -515,7 +525,7 @@ func (n *Netstack) runUDPEncKeepalive(keepalive *netstackUDPEncKeepalive) {
 		keepalive.writeMu.Unlock()
 		if err != nil {
 			select {
-			case <-n.ctx.Done():
+			case <-n.done:
 				return
 			case <-keepalive.stop:
 				return
@@ -751,7 +761,7 @@ func quotedTransportFlow(icmp []byte) (byte, net.IP, net.IP, int, int, bool) {
 	}
 }
 
-func netstackDecodedPacket(policy *netstackSecurityPolicy, outer packet.InnerPacket, decoded esp.ESPPacket) (packet.InnerPacket, error) {
+func netstackDecodedPacket(policy *netstackSecurityPolicy, outer packet.InnerPacket, decoded esp.Packet) (packet.InnerPacket, error) {
 	if policy.mode == SecureModeUDPEncTunnel {
 		if decoded.NextHeader != packet.OuterIPv4 && decoded.NextHeader != packet.OuterIPv6 {
 			return packet.InnerPacket{}, errors.New("decoding IMS netstack ESP tunnel packet: unsupported next header")
@@ -843,15 +853,43 @@ func (n *Netstack) Close() error {
 		n.tcpListeners = make(map[netstackTCPListenerKey]*netstackTCPListener)
 		n.mu.Unlock()
 		if attachment != nil {
-			_ = attachment.Close()
+			n.closeErr = errors.Join(n.closeErr, attachment.Close())
 		}
 		for _, listener := range listeners {
-			listener.stop()
+			n.closeErr = errors.Join(n.closeErr, listener.stop())
 		}
 		n.cancel()
 		n.link.Close()
 		n.stack.Destroy()
 		n.wg.Wait()
 	})
-	return nil
+	return n.closeErr
+}
+
+func contextWithDone(done <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		once.Do(func() {
+			close(stop)
+			cancel()
+		})
+	}
+}
+
+func contextWithDoneTimeout(done <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, stop := contextWithDone(done)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	return ctx, func() {
+		cancel()
+		stop()
+	}
 }

@@ -9,7 +9,7 @@ import (
 	"github.com/damonto/ims-go/swu/ike"
 )
 
-func (s *Session) handleInformationalResponse(state informationalState, packet ike.IKEPacket, data []byte, addr net.Addr) (bool, error) {
+func (s *Session) handleInformationalResponse(state informationalState, packet ike.Packet, data []byte, addr net.Addr) (bool, error) {
 	key := ikeMessageKeyForHeader(packet.Header)
 	if !s.hasInformationalWaiter(key) {
 		s.logger.Debug("ignoring informational response without matching request", "message_id", packet.Header.MessageID)
@@ -47,7 +47,7 @@ func (s *Session) handleInformationalResponse(state informationalState, packet i
 	return true, nil
 }
 
-func (s *Session) handleCreateChildSAResponse(state informationalState, packet ike.IKEPacket, data []byte, addr net.Addr) (bool, error) {
+func (s *Session) handleCreateChildSAResponse(state informationalState, packet ike.Packet, data []byte, addr net.Addr) (bool, error) {
 	key := ikeMessageKeyForHeader(packet.Header)
 	if !s.hasInformationalWaiter(key) {
 		s.logger.Debug("ignoring create_child_sa response without matching request", "message_id", packet.Header.MessageID)
@@ -88,12 +88,12 @@ func (s *Session) handleCreateChildSAResponse(state informationalState, packet i
 	return true, nil
 }
 
-func informationalResponseHeader(state informationalState, messageID uint32) ike.IKEHeader {
+func informationalResponseHeader(state informationalState, messageID uint32) ike.Header {
 	flags := flagResponse
 	if state.localInitiator {
 		flags |= flagInitiator
 	}
-	return ike.IKEHeader{
+	return ike.Header{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
 		Version:      ikeVersion20,
@@ -131,7 +131,7 @@ func (s *Session) writeInformationalResponseWire(state informationalState, messa
 	return nil
 }
 
-func (s *Session) handleInformationalRequest(state informationalState, packet ike.IKEPacket, addr net.Addr) (bool, error) {
+func (s *Session) handleInformationalRequest(state informationalState, packet ike.Packet, addr net.Addr) (bool, error) {
 	relation := s.peerRequestMessageIDRelationForState(state, packet.Header.MessageID)
 	if relation != ikeMessageIDCurrent {
 		return s.handleNonCurrentInformationalRequest(state, packet, addr, relation)
@@ -244,7 +244,7 @@ func (s *Session) handleInformationalRequest(state informationalState, packet ik
 	return true, nil
 }
 
-func (s *Session) handleNonCurrentInformationalRequest(state informationalState, packet ike.IKEPacket, addr net.Addr, relation ikeMessageIDRelation) (bool, error) {
+func (s *Session) handleNonCurrentInformationalRequest(state informationalState, packet ike.Packet, addr net.Addr, relation ikeMessageIDRelation) (bool, error) {
 	switch relation {
 	case ikeMessageIDFuture:
 		s.logger.Debug("ignoring informational request outside message id window", "message_id", packet.Header.MessageID)
@@ -290,18 +290,17 @@ func (s *Session) applyPCSCFReselection(info Info) {
 }
 
 func ikeErrorNotifyResponse(err error) ([]ike.Payload, bool) {
-	var critical ike.UnsupportedCriticalPayloadError
-	if errors.As(err, &critical) {
+	critical, ok := errors.AsType[ike.UnsupportedCriticalPayloadError](err)
+	if ok {
 		return []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeUnsupportedCriticalPayload, Data: []byte{critical.PayloadType}}}, true
 	}
-	var invalidSyntax ike.InvalidSyntaxError
-	if errors.As(err, &invalidSyntax) {
+	if _, ok := errors.AsType[ike.InvalidSyntaxError](err); ok {
 		return []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeInvalidSyntax}}, true
 	}
 	return nil, false
 }
 
-func (s *Session) writeIKEErrorNotifyInformationalResponse(state informationalState, packet ike.IKEPacket, request []byte, addr net.Addr, payloads []ike.Payload) (bool, error) {
+func (s *Session) writeIKEErrorNotifyInformationalResponse(state informationalState, packet ike.Packet, request []byte, addr net.Addr, payloads []ike.Payload) (bool, error) {
 	if state.promoteIKESA {
 		s.promotePendingIKESecurityAssociation()
 	}
@@ -344,7 +343,7 @@ func (s *Session) writeIKEErrorNotifyInformationalResponse(state informationalSt
 }
 
 func (s *Session) handleIKEPacket(data []byte, addr net.Addr) (bool, error) {
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(data); err != nil {
 		return false, nil
 	}
@@ -370,10 +369,10 @@ func (s *Session) handleIKEPacket(data []byte, addr net.Addr) (bool, error) {
 	return s.handleInformationalRequest(state, packet, addr)
 }
 
-func decodeIKEHeader(data []byte) (ike.IKEHeader, bool) {
-	var header ike.IKEHeader
+func decodeIKEHeader(data []byte) (ike.Header, bool) {
+	var header ike.Header
 	if err := header.UnmarshalBinary(data); err != nil {
-		return ike.IKEHeader{}, false
+		return ike.Header{}, false
 	}
 	return header, true
 }

@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"mime"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/damonto/ims-go/ims/registration"
 	"github.com/damonto/ims-go/ims/session"
-	"mime"
-	"strings"
-	"time"
 )
 
-func New(cfg Config, sess *session.Session, reg *registration.Registrar, card Card) (*Endpoint, error) {
+func New(cfg Config, sess *session.Stack, reg *registration.Registrar, card Card) (*Endpoint, error) {
 	endpointCfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -23,17 +23,18 @@ func New(cfg Config, sess *session.Session, reg *registration.Registrar, card Ca
 		logger = slog.Default()
 	}
 	endpoint := &Endpoint{
-		cfg:       endpointCfg,
-		sess:      sess,
-		reg:       reg,
-		card:      card,
-		logger:    logger.With("component", "ims-sms"),
-		done:      make(chan struct{}),
-		rpRefs:    make(map[byte]struct{}),
-		pending:   make(map[string]pendingEntry),
-		submitted: make(map[string]submittedEntry),
-		recent:    make(map[string]time.Time),
-		concat:    make(map[string]concatState),
+		cfg:                         endpointCfg,
+		sess:                        sess,
+		reg:                         reg,
+		card:                        card,
+		logger:                      logger.With("component", "ims-sms"),
+		done:                        make(chan struct{}),
+		rpRefs:                      make(map[byte]struct{}),
+		pending:                     make(map[string]pendingEntry),
+		submitted:                   make(map[string]submittedEntry),
+		recent:                      make(map[string]time.Time),
+		concat:                      make(map[string]concatState),
+		memoryAvailableRetryTimeout: defaultTRATimeout,
 	}
 	endpoint.submitTimeout.Store(int64(endpointCfg.SubmitReportTimeout))
 	attachment, err := sess.Attach(endpoint)

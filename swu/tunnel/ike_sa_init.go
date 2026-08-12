@@ -13,44 +13,44 @@ import (
 	"github.com/damonto/ims-go/swu/ike"
 )
 
-func (state *connectState) buildIKESAInitRequest(outerLocal, outerRemote *net.UDPAddr) ([]byte, error) {
-	payloads := defaultIKESAInitPayloads(state.input.Config, state.crypto, outerLocal, outerRemote)
-	if len(state.ikeInitCookie) != 0 {
+func (cs *connectState) buildIKESAInitRequest(outerLocal, outerRemote *net.UDPAddr) ([]byte, error) {
+	payloads := defaultIKESAInitPayloads(cs.input.Config, cs.crypto, outerLocal, outerRemote)
+	if len(cs.ikeInitCookie) != 0 {
 		payloads = append([]ike.Payload{
 			&ike.NotifyPayload{
 				NotifyType: notifyTypeCookie,
-				Data:       append([]byte(nil), state.ikeInitCookie...),
+				Data:       append([]byte(nil), cs.ikeInitCookie...),
 			},
 		}, payloads...)
 	}
-	header := ike.IKEHeader{
-		InitiatorSPI: state.initiatorSPI,
+	header := ike.Header{
+		InitiatorSPI: cs.initiatorSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeIKESAInit,
 		Flags:        flagInitiator,
 		MessageID:    0,
 	}
-	request, err := (ike.IKEPacket{Header: header, Payloads: payloads}).MarshalBinary()
+	request, err := (ike.Packet{Header: header, Payloads: payloads}).MarshalBinary()
 	if err != nil {
 		return nil, fmt.Errorf("building ike_sa_init request: %w", err)
 	}
 	return request, nil
 }
 
-func decodeIKESAInitPacket(raw []byte) (ike.IKEPacket, error) {
-	var packet ike.IKEPacket
+func decodeIKESAInitPacket(raw []byte) (ike.Packet, error) {
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(raw); err != nil {
-		return ike.IKEPacket{}, fmt.Errorf("parsing ike_sa_init response: %w", err)
+		return ike.Packet{}, fmt.Errorf("parsing ike_sa_init response: %w", err)
 	}
 	return packet, nil
 }
 
-func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, request, responseRaw []byte, outerLocal, outerRemote *net.UDPAddr) error {
+func (cs *connectState) applyIKESAInitResponse(response ike.Packet, request, responseRaw []byte, outerLocal, outerRemote *net.UDPAddr) error {
 	if response.Header.ResponderSPI == 0 {
 		return errors.New("responder spi is empty")
 	}
-	requestProposals := ikeSAProposals(state.input.Config)
-	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, state.crypto.dhGroup, requestProposals)
+	requestProposals := ikeSAProposals(cs.input.Config)
+	proposal, responderNonce, responderKE, err := negotiatedIKESAFromPayloads(response.Payloads, cs.crypto.dhGroup, requestProposals)
 	if err != nil {
 		return err
 	}
@@ -58,26 +58,26 @@ func (state *connectState) applyIKESAInitResponse(response ike.IKEPacket, reques
 	if err != nil {
 		return err
 	}
-	state.crypto.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
-	state.crypto.SetSPIs(state.initiatorSPI, response.Header.ResponderSPI)
-	state.crypto.SetNonces(state.nonceI, responderNonce)
-	if err := state.crypto.DeriveIKEKeys(responderKE); err != nil {
+	cs.crypto.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
+	cs.crypto.SetSPIs(cs.initiatorSPI, response.Header.ResponderSPI)
+	cs.crypto.SetNonces(cs.nonceI, responderNonce)
+	if err := cs.crypto.DeriveIKEKeys(responderKE); err != nil {
 		return fmt.Errorf("deriving ike keys: %w", err)
 	}
-	state.responderSPI = response.Header.ResponderSPI
-	state.ikeInitRequest = append([]byte(nil), request...)
-	state.ikeInitResponse = append([]byte(nil), responseRaw...)
-	state.responderNonce = append([]byte(nil), responderNonce...)
-	state.nattSupported = nattSupported
-	state.natDetected = natDetected
-	state.useNATT = natDetected || outerRemote.Port == state.input.Config.NATTPort
-	state.ikeFragmentationSupported = hasNotifyPayload(response.Payloads, notifyTypeIKEV2FragmentationSupported)
-	state.saInit.InitiatorSPI = state.initiatorSPI
-	state.saInit.ResponderSPI = state.responderSPI
-	state.saInit.NonceI = append([]byte(nil), state.nonceI...)
-	state.saInit.ResponderNonce = append([]byte(nil), responderNonce...)
-	state.saInit.IKEInitRequest = append([]byte(nil), request...)
-	state.saInit.ChildInitiatorSPI = state.espInitiatorSPI
+	cs.responderSPI = response.Header.ResponderSPI
+	cs.ikeInitRequest = append([]byte(nil), request...)
+	cs.ikeInitResponse = append([]byte(nil), responseRaw...)
+	cs.responderNonce = append([]byte(nil), responderNonce...)
+	cs.nattSupported = nattSupported
+	cs.natDetected = natDetected
+	cs.useNATT = natDetected || outerRemote.Port == cs.input.Config.NATTPort
+	cs.ikeFragmentationSupported = hasNotifyPayload(response.Payloads, notifyTypeIKEV2FragmentationSupported)
+	cs.saInit.InitiatorSPI = cs.initiatorSPI
+	cs.saInit.ResponderSPI = cs.responderSPI
+	cs.saInit.NonceI = append([]byte(nil), cs.nonceI...)
+	cs.saInit.ResponderNonce = append([]byte(nil), responderNonce...)
+	cs.saInit.IKEInitRequest = append([]byte(nil), request...)
+	cs.saInit.ChildInitiatorSPI = cs.espInitiatorSPI
 	return nil
 }
 
@@ -392,7 +392,7 @@ func resolveOuterLocalAddr(conn net.PacketConn, remote *net.UDPAddr) (*net.UDPAd
 	return resolved, nil
 }
 
-func discoverOutboundIP(remote *net.UDPAddr) (net.IP, error) {
+func discoverOutboundIP(remote *net.UDPAddr) (_ net.IP, resultErr error) {
 	if remote == nil {
 		return nil, nil
 	}
@@ -400,7 +400,11 @@ func discoverOutboundIP(remote *net.UDPAddr) (net.IP, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("closing outbound IP discovery socket: %w", err))
+		}
+	}()
 	local, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok || local == nil {
 		return nil, nil

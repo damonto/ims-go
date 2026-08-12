@@ -25,15 +25,15 @@ const (
 const ikeHeaderSize = 28
 
 var (
-	_ encoding.BinaryAppender    = IKEHeader{}
-	_ encoding.BinaryMarshaler   = IKEHeader{}
-	_ encoding.BinaryUnmarshaler = (*IKEHeader)(nil)
-	_ encoding.BinaryAppender    = IKEPacket{}
-	_ encoding.BinaryMarshaler   = IKEPacket{}
-	_ encoding.BinaryUnmarshaler = (*IKEPacket)(nil)
+	_ encoding.BinaryAppender    = Header{}
+	_ encoding.BinaryMarshaler   = Header{}
+	_ encoding.BinaryUnmarshaler = (*Header)(nil)
+	_ encoding.BinaryAppender    = Packet{}
+	_ encoding.BinaryMarshaler   = Packet{}
+	_ encoding.BinaryUnmarshaler = (*Packet)(nil)
 )
 
-type IKEHeader struct {
+type Header struct {
 	InitiatorSPI uint64
 	ResponderSPI uint64
 	NextPayload  byte
@@ -44,11 +44,11 @@ type IKEHeader struct {
 	Length       uint32
 }
 
-func (h IKEHeader) MarshalBinary() ([]byte, error) {
+func (h Header) MarshalBinary() ([]byte, error) {
 	return h.AppendBinary(nil)
 }
 
-func (h IKEHeader) AppendBinary(dst []byte) ([]byte, error) {
+func (h Header) AppendBinary(dst []byte) ([]byte, error) {
 	start := len(dst)
 	dst = append(dst, make([]byte, ikeHeaderSize)...)
 	binary.BigEndian.PutUint64(dst[start:start+8], h.InitiatorSPI)
@@ -62,11 +62,11 @@ func (h IKEHeader) AppendBinary(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
-func (h *IKEHeader) UnmarshalBinary(data []byte) error {
+func (h *Header) UnmarshalBinary(data []byte) error {
 	if len(data) < ikeHeaderSize {
 		return errors.New("parse ike header: packet too short")
 	}
-	*h = IKEHeader{
+	*h = Header{
 		InitiatorSPI: binary.BigEndian.Uint64(data[0:8]),
 		ResponderSPI: binary.BigEndian.Uint64(data[8:16]),
 		NextPayload:  data[16],
@@ -79,17 +79,17 @@ func (h *IKEHeader) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-type IKEPacket struct {
-	Header   IKEHeader
+type Packet struct {
+	Header   Header
 	Payloads []Payload
 	Raw      []byte
 }
 
-func (p IKEPacket) MarshalBinary() ([]byte, error) {
+func (p Packet) MarshalBinary() ([]byte, error) {
 	return p.AppendBinary(nil)
 }
 
-func (p IKEPacket) AppendBinary(dst []byte) ([]byte, error) {
+func (p Packet) AppendBinary(dst []byte) ([]byte, error) {
 	firstPayload, body, err := MarshalPayloadChain(p.Payloads)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling ike packet: %w", err)
@@ -105,8 +105,8 @@ func (p IKEPacket) AppendBinary(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
-func (p *IKEPacket) UnmarshalBinary(data []byte) error {
-	var header IKEHeader
+func (p *Packet) UnmarshalBinary(data []byte) error {
+	var header Header
 	if err := header.UnmarshalBinary(data); err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func (p *IKEPacket) UnmarshalBinary(data []byte) error {
 	if err != nil {
 		return err
 	}
-	*p = IKEPacket{Header: header, Payloads: payloads, Raw: append([]byte(nil), data[:header.Length]...)}
+	*p = Packet{Header: header, Payloads: payloads, Raw: append([]byte(nil), data[:header.Length]...)}
 	return nil
 }
 

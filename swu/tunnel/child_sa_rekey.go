@@ -117,14 +117,8 @@ type childSARekeyExchange func(context.Context, childSARekeyState, uint32, []byt
 func (s *Session) initiatedChildSARekeyResult(ctx context.Context, state childSARekeyState, pfs *ikeCrypto, exchange childSARekeyExchange) (childSARekeyResult, error) {
 	triedGroups := childSARekeyTriedGroups(pfs)
 	for {
-		newInboundSPI, err := randomESPSPI()
-		if err != nil {
-			return childSARekeyResult{}, fmt.Errorf("generating child spi: %w", err)
-		}
-		nonceI, err := randomBytes(defaultIKENonceLength)
-		if err != nil {
-			return childSARekeyResult{}, fmt.Errorf("generating nonce: %w", err)
-		}
+		newInboundSPI := randomESPSPI()
+		nonceI := randomBytes(defaultIKENonceLength)
 		payloads, err := exchange(ctx, state, newInboundSPI, nonceI, pfs)
 		if err != nil {
 			return childSARekeyResult{}, err
@@ -199,14 +193,8 @@ func (s *Session) exchangeInitiatedChildSARekey(ctx context.Context, state child
 }
 
 func (s *Session) createChildSAReplacement(ctx context.Context, state childSARekeyState) error {
-	newInboundSPI, err := randomESPSPI()
-	if err != nil {
-		return fmt.Errorf("creating child sa: generating child spi: %w", err)
-	}
-	nonceI, err := randomBytes(defaultIKENonceLength)
-	if err != nil {
-		return fmt.Errorf("creating child sa: generating nonce: %w", err)
-	}
+	newInboundSPI := randomESPSPI()
+	nonceI := randomBytes(defaultIKENonceLength)
 	payloads, err := s.exchangeInitiatedChildSACreate(ctx, state, newInboundSPI, nonceI)
 	if err != nil {
 		return err
@@ -304,44 +292,44 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 	}, nil
 }
 
-func (state childSARekeyState) available() bool {
-	return state.connected && state.ike != nil && state.peer != nil && state.inboundSPI != 0 && state.outboundSPI != 0
+func (rs childSARekeyState) available() bool {
+	return rs.connected && rs.ike != nil && rs.peer != nil && rs.inboundSPI != 0 && rs.outboundSPI != 0
 }
 
-func (state childSARekeyState) sealChildSARekeyRequest(messageID, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) ([][]byte, error) {
-	header := ike.IKEHeader{
-		InitiatorSPI: state.initiatorSPI,
-		ResponderSPI: state.responderSPI,
+func (rs childSARekeyState) sealChildSARekeyRequest(messageID, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) ([][]byte, error) {
+	header := ike.Header{
+		InitiatorSPI: rs.initiatorSPI,
+		ResponderSPI: rs.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeCreateChildSA,
-		Flags:        state.initiatorFlag(),
+		Flags:        rs.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wires, err := sealIKEPackets(state.ike, header, state.childSARekeyRequestPayloads(newInboundSPI, nonceI, pfs), state.localInitiator, state.ikeFragmentationSupported)
+	wires, err := sealIKEPackets(rs.ike, header, rs.childSARekeyRequestPayloads(newInboundSPI, nonceI, pfs), rs.localInitiator, rs.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
 	}
 	return wires, nil
 }
 
-func (state childSARekeyState) sealChildSACreateRequest(messageID, newInboundSPI uint32, nonceI []byte) ([][]byte, error) {
-	header := ike.IKEHeader{
-		InitiatorSPI: state.initiatorSPI,
-		ResponderSPI: state.responderSPI,
+func (rs childSARekeyState) sealChildSACreateRequest(messageID, newInboundSPI uint32, nonceI []byte) ([][]byte, error) {
+	header := ike.Header{
+		InitiatorSPI: rs.initiatorSPI,
+		ResponderSPI: rs.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeCreateChildSA,
-		Flags:        state.initiatorFlag(),
+		Flags:        rs.initiatorFlag(),
 		MessageID:    messageID,
 	}
-	wires, err := sealIKEPackets(state.ike, header, childSACreateRequestPayloads(state.cfg, newInboundSPI, nonceI), state.localInitiator, state.ikeFragmentationSupported)
+	wires, err := sealIKEPackets(rs.ike, header, childSACreateRequestPayloads(rs.cfg, newInboundSPI, nonceI), rs.localInitiator, rs.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing create_child_sa request: %w", err)
 	}
 	return wires, nil
 }
 
-func (state childSARekeyState) initiatorFlag() byte {
-	if state.localInitiator {
+func (rs childSARekeyState) initiatorFlag() byte {
+	if rs.localInitiator {
 		return flagInitiator
 	}
 	return 0
@@ -361,14 +349,14 @@ func childSARekeyRequestPayloads(cfg handshake.Config, oldInboundSPI, newInbound
 	return childSARekeyRequestPayloadsWithProposals(oldInboundSPI, nonceI, pfs, childSAProposalsWithDH(cfg, newInboundSPI, childSARekeyDHGroup(pfs)))
 }
 
-func (state childSARekeyState) childSARekeyRequestPayloads(newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) []ike.Payload {
+func (rs childSARekeyState) childSARekeyRequestPayloads(newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto) []ike.Payload {
 	return childSARekeyRequestPayloadsWithTrafficSelectors(
-		state.inboundSPI,
+		rs.inboundSPI,
 		nonceI,
 		pfs,
-		currentChildSARekeyProposals(state.info, newInboundSPI, childSARekeyDHGroup(pfs)),
-		state.info.InitiatorTrafficSelectors,
-		state.info.ResponderTrafficSelectors,
+		currentChildSARekeyProposals(rs.info, newInboundSPI, childSARekeyDHGroup(pfs)),
+		rs.info.InitiatorTrafficSelectors,
+		rs.info.ResponderTrafficSelectors,
 	)
 }
 
@@ -427,17 +415,17 @@ func childSARekeyPFS(state childSARekeyState) (*ikeCrypto, error) {
 	return pfs, nil
 }
 
-func (state childSARekeyState) childSARekeyResult(payloads []ike.Payload, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto, requestProposals []ike.Proposal) (childSARekeyResult, error) {
+func (rs childSARekeyState) childSARekeyResult(payloads []ike.Payload, newInboundSPI uint32, nonceI []byte, pfs *ikeCrypto, requestProposals []ike.Proposal) (childSARekeyResult, error) {
 	dhGroup := childSARekeyDHGroup(pfs)
-	info, nonceR, peerPublic, err := childSAFromCreateChildResponseWithRequests(payloads, state.info, newInboundSPI, dhGroup, requestProposals)
+	info, nonceR, peerPublic, err := childSAFromCreateChildResponseWithRequests(payloads, rs.info, newInboundSPI, dhGroup, requestProposals)
 	if err != nil {
 		return childSARekeyResult{}, err
 	}
 	var keys ESPKeys
 	if pfs != nil {
-		keys, err = state.ike.DeriveESPKeysWithDH(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI, nonceR, pfs, peerPublic)
+		keys, err = rs.ike.DeriveESPKeysWithDH(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI, nonceR, pfs, peerPublic)
 	} else {
-		keys, err = state.ike.DeriveESPKeysWithNonces(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI, nonceR)
+		keys, err = rs.ike.DeriveESPKeysWithNonces(info.Encryption, info.EncryptionKeyLen, info.Integrity, nonceI, nonceR)
 	}
 	if err != nil {
 		return childSARekeyResult{}, fmt.Errorf("deriving esp keys: %w", err)
@@ -447,7 +435,7 @@ func (state childSARekeyState) childSARekeyResult(payloads []ike.Payload, newInb
 		keys:       keys,
 		outbound:   outboundESPCodec(info, keys),
 		inbound:    inboundESPCodec(info, keys),
-		oldInbound: state.inboundSPI,
+		oldInbound: rs.inboundSPI,
 		nonceI:     append([]byte(nil), nonceI...),
 		nonceR:     append([]byte(nil), nonceR...),
 	}, nil
@@ -760,7 +748,7 @@ func (s *Session) awaitProtectedResponse(ctx context.Context, exchange protected
 }
 
 func openProtectedResponse(crypto *ikeCrypto, data []byte, exchangeType byte, action ikeAction, senderInitiator bool) ([]ike.Payload, error) {
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(data); err != nil {
 		return nil, fmt.Errorf("%s: parsing response: %w", action, err)
 	}
@@ -863,7 +851,7 @@ func cloneInfo(info Info) Info {
 		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
 		PDUSessionID:              info.PDUSessionID,
 		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
-		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
+		SNSSAIPLMNID:              append([]byte(nil), info.SNSSAIPLMNID...),
 	}
 }
 

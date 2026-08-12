@@ -3,11 +3,29 @@ package wfcsetup
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
 	usim "github.com/damonto/wwan-go/sim"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type closeErrorBody struct {
+	io.Reader
+	closed *bool
+}
+
+func (b closeErrorBody) Close() error {
+	*b.closed = true
+	return errors.New("test close error")
+}
 
 type testCard struct {
 	mcc       string
@@ -26,6 +44,73 @@ func (c testCard) MNCLength() int { return c.mncLength }
 func (c testCard) GID1() string   { return c.gid1 }
 func (c testCard) AKA(context.Context, []byte, []byte) (usim.AKAResult, error) {
 	return c.aka, c.akaErr
+}
+
+func TestHTTPBodyCloseErrorDoesNotOverrideSuccessfulResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		header http.Header
+		body   string
+		run    func(*http.Client) error
+	}{
+		{
+			name:   "nsds response",
+			status: http.StatusOK,
+			body:   `[]`,
+			run: func(client *http.Client) error {
+				_, err := (nsdsClient{serverURL: "https://example.test", httpClient: client}).post(t.Context(), []nsdsRequest{})
+				return err
+			},
+		},
+		{
+			name:   "o2 uk response",
+			status: http.StatusOK,
+			body:   `[]`,
+			run: func(client *http.Client) error {
+				_, err := (o2UKClient{HTTPClient: client}).post(t.Context(), []o2Request{})
+				return err
+			},
+		},
+		{
+			name:   "telus json response",
+			status: http.StatusOK,
+			body:   `{}`,
+			run: func(client *http.Client) error {
+				var out struct{}
+				return (telusClient{HTTPClient: client}).request(t.Context(), "https://example.test", &out)
+			},
+		},
+		{
+			name:   "telus challenge response",
+			status: http.StatusFound,
+			header: http.Header{"Location": []string{"/callback?access_token=token"}},
+			run: func(client *http.Client) error {
+				_, err := (telusClient{HTTPClient: client}).exchangeChallenge(t.Context(), "response")
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			closed := false
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.status,
+					Status:     http.StatusText(tt.status),
+					Header:     tt.header.Clone(),
+					Body:       closeErrorBody{Reader: strings.NewReader(tt.body), closed: &closed},
+				}, nil
+			})}
+			if err := tt.run(client); err != nil {
+				t.Fatalf("operation error = %v, want nil", err)
+			}
+			if !closed {
+				t.Fatal("response body was not closed")
+			}
+		})
+	}
 }
 
 func TestCheckAllowsNonAKAFlowsWithoutAuthenticator(t *testing.T) {
@@ -55,7 +140,7 @@ func TestCheckAllowsNonAKAFlowsWithoutAuthenticator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Check(context.Background(), tt.req)
+			got, err := Check(t.Context(), tt.req)
 			if err != nil {
 				t.Fatalf("Check() error = %v", err)
 			}
@@ -85,7 +170,7 @@ func TestEAPAKAChallengeResponseRequiresAuthenticator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := eapAKAChallengeResponse(context.Background(), eapAKAResponseInput{})
+			_, err := eapAKAChallengeResponse(t.Context(), eapAKAResponseInput{})
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("eapAKAChallengeResponse() error = %v, want %v", err, tt.wantErr)
 			}
@@ -159,7 +244,7 @@ func TestCheckE911UpdateSupport(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := CheckE911UpdateSupport(context.Background(), tt.req)
+			got, err := CheckE911UpdateSupport(t.Context(), tt.req)
 			if err != nil {
 				t.Fatalf("CheckE911UpdateSupport() error = %v", err)
 			}
@@ -247,7 +332,7 @@ func TestVZWCheckReturnsUnsupported(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Check(context.Background(), tt.req)
+			got, err := Check(t.Context(), tt.req)
 			if err == nil {
 				t.Fatal("Check() error is nil")
 			}
@@ -293,7 +378,7 @@ func TestCanadaCheckReturnsWebsheet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Check(context.Background(), Request{
+			got, err := Check(t.Context(), Request{
 				Card:    tt.card,
 				Purpose: PurposeEmergencyAddressUpdate,
 			})

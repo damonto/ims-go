@@ -111,7 +111,7 @@ type MediaEvent struct {
 
 type Endpoint struct {
 	cfg                    Config
-	sess                   *session.Session
+	sess                   *session.Stack
 	reg                    *registration.Registrar
 	logger                 *slog.Logger
 	attachment             session.Attachment

@@ -96,7 +96,7 @@ func (s *dtxDecState) reset() {
 	s.dataUpdated = 0
 }
 
-func (s *dtxDecState) rxHandler(frameType RXFrameType) dtxStateType {
+func (s *dtxDecState) nextRXState(frameType RXFrameType) dtxStateType {
 	newState := dtxStateSpeech
 	if frameType == RXSIDFirst ||
 		frameType == RXSIDUpdate ||

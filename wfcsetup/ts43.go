@@ -230,8 +230,8 @@ func ts43StoreToken(key string, token ts43.AuthToken) {
 }
 
 func ts43RetryAfter(err error) (time.Duration, bool) {
-	var httpErr *ts43.HTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusServiceUnavailable {
+	httpErr, ok := errors.AsType[*ts43.HTTPError](err)
+	if !ok || httpErr.StatusCode != http.StatusServiceUnavailable {
 		return 0, false
 	}
 	return retryAfterDuration(httpErr.Header), true

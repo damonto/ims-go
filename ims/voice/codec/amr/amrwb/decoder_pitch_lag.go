@@ -8,19 +8,19 @@
 package amrwb
 
 const (
-	pitchMin      int16 = 34
-	pitchFrac2    int16 = 128
-	pitchFrac1_9b int16 = 160
-	pitchFrac1_8b int16 = 92
-	nBits660      int16 = 132
-	nBits885      int16 = 177
-	nBits1265     int16 = 253
-	nBits1425     int16 = 285
-	nBits1585     int16 = 317
-	nBits1825     int16 = 365
-	nBits1985     int16 = 397
-	nBits2305     int16 = 461
-	nBits2385     int16 = 477
+	pitchMin          int16 = 34
+	pitchFrac2        int16 = 128
+	pitchFrac1At9Bits int16 = 160
+	pitchFrac1At8Bits int16 = 92
+	nBits660          int16 = 132
+	nBits885          int16 = 177
+	nBits1265         int16 = 253
+	nBits1425         int16 = 285
+	nBits1585         int16 = 317
+	nBits1825         int16 = 365
+	nBits1985         int16 = 397
+	nBits2305         int16 = 461
+	nBits2385         int16 = 477
 )
 
 type pitchLagState struct {
@@ -33,26 +33,26 @@ func decodePitchLag(index int16, nbits int16, pitFlag int16, state pitchLagState
 	var t0Frac int16
 	if pitFlag == 0 {
 		if nbits <= nBits885 {
-			if index < (pitchFrac1_8b-pitchMin)*2 {
+			if index < (pitchFrac1At8Bits-pitchMin)*2 {
 				t0 = pitchMin + (index >> 1)
 				t0Frac = index - ((t0 - pitchMin) << 1)
 				t0Frac <<= 1
 			} else {
-				t0 = index + pitchFrac1_8b - ((pitchFrac1_8b - pitchMin) * 2)
+				t0 = index + pitchFrac1At8Bits - ((pitchFrac1At8Bits - pitchMin) * 2)
 				t0Frac = 0
 			}
 		} else if index < (pitchFrac2-pitchMin)*4 {
 			t0 = pitchMin + (index >> 2)
 			t0Frac = index - ((t0 - pitchMin) << 2)
-		} else if index < (((pitchFrac2 - pitchMin) << 2) + ((pitchFrac1_9b - pitchFrac2) << 1)) {
+		} else if index < (((pitchFrac2 - pitchMin) << 2) + ((pitchFrac1At9Bits - pitchFrac2) << 1)) {
 			adjusted := index - ((pitchFrac2 - pitchMin) << 2)
 			t0 = pitchFrac2 + (adjusted >> 1)
 			t0Frac = adjusted - ((t0 - pitchFrac2) << 1)
 			t0Frac <<= 1
 		} else {
-			t0 = index + pitchFrac1_9b -
+			t0 = index + pitchFrac1At9Bits -
 				((pitchFrac2 - pitchMin) * 4) -
-				((pitchFrac1_9b - pitchFrac2) * 2)
+				((pitchFrac1At9Bits - pitchFrac2) * 2)
 			t0Frac = 0
 		}
 

@@ -403,7 +403,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 					EPDG:   "epdg.example.com",
 					Tunnel: tunnelConfigForWFCOverride(),
 				}),
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					Transport:             "udp",
 					HomeDomain:            "ims.example.com",
 					PrivateIdentity:       "private@example.com",
@@ -707,7 +707,7 @@ func TestIMSProfileMapsO2SecurityModes(t *testing.T) {
 			got := Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoLTE(lte.Config{}),
-				IMS:      IMSConfig{IPSecModes: []string{"UDP-enc-tun"}},
+				IMS:      ServiceConfig{IPSecModes: []string{"UDP-enc-tun"}},
 			}.withIMSProfile(profile, tt.card)
 			if got.IMS.Transport != "tcp" {
 				t.Fatalf("IMS transport = %q, want tcp", got.IMS.Transport)
@@ -730,7 +730,7 @@ func TestIMSProfileDoesNotTieMD5ToTransportMode(t *testing.T) {
 	}
 	cfg := Config{
 		Terminal: TerminalInfo{ID: testIMEI},
-		IMS:      IMSConfig{IPSecModes: []string{"trans"}},
+		IMS:      ServiceConfig{IPSecModes: []string{"trans"}},
 	}.withIMSProfile(profile, card)
 	normalized, err := cfg.IMS.Normalized()
 	if err != nil {
@@ -760,7 +760,7 @@ func TestEmbeddedIMSProfilesHaveIPSecAlgorithms(t *testing.T) {
 			if len(profile.IMSIPSecModes) == 0 {
 				t.Fatalf("profile[%d] IPsec modes are empty", i)
 			}
-			normalized, err := (IMSConfig{
+			normalized, err := (ServiceConfig{
 				IPSecIntegrityAlgorithms:  profile.IMSIPSecIntegrityAlgorithms,
 				IPSecEncryptionAlgorithms: profile.IMSIPSecEncryptionAlgorithms,
 				IPSecModes:                profile.IMSIPSecModes,
@@ -1713,7 +1713,7 @@ func TestIMSVoiceProfileOwnsCarrierCapabilities(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{IMS: IMSConfig{Voice: imsvoice.Config{Preconditions: true, ReliableProvisional: true, SessionTimer: true}}}
+			cfg := Config{IMS: ServiceConfig{Voice: imsvoice.Config{Preconditions: true, ReliableProvisional: true, SessionTimer: true}}}
 			got := cfg.withIMSVoiceProfile(tt.profile).IMS.Voice
 			if got.Preconditions != tt.profile.QoSPreconditionsSupported || got.ReliableProvisional != tt.profile.ReliableProvisionalSupported || got.SessionTimer != tt.profile.SessionTimer {
 				t.Fatalf("carrier capabilities = %t/%t/%t, want %t/%t/%t", got.Preconditions, got.ReliableProvisional, got.SessionTimer, tt.profile.QoSPreconditionsSupported, tt.profile.ReliableProvisionalSupported, tt.profile.SessionTimer)
@@ -1762,7 +1762,7 @@ func TestWFCProfileUsesJSONVoiceCodecs(t *testing.T) {
 
 	cfg := Config{
 		Terminal: TerminalInfo{ID: testIMEI},
-		IMS: IMSConfig{
+		IMS: ServiceConfig{
 			Voice: imsvoice.Config{
 				Codecs: []imsvoice.AudioCodecConfig{
 					{Name: imsvoice.CodecAMR, PayloadTypes: []int{102}, ClockRate: 8000},

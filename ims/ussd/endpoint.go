@@ -18,7 +18,7 @@ import (
 
 var ErrIMSDomainNotAllowed = errors.New("ims ussd is not allowed by domain policy")
 
-func New(cfg Config, sess *session.Session, reg *registration.Registrar) (*Endpoint, error) {
+func New(cfg Config, sess *session.Stack, reg *registration.Registrar) (*Endpoint, error) {
 	endpointCfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -76,9 +76,11 @@ func (s *Endpoint) Start(ctx context.Context, code string) (*Session, error) {
 		}
 		return nil, fmt.Errorf("starting USSD: %w", err)
 	}
-	if status := resp.StatusCode(); status == sipStatusNotFound {
+	status := resp.StatusCode()
+	if status == sipStatusNotFound {
 		return nil, errors.New("starting USSD: missing network support")
-	} else if status != sipStatusOK {
+	}
+	if status != sipStatusOK {
 		return nil, fmt.Errorf("starting USSD: unexpected response: %w", sip.NewResponseError(resp))
 	}
 	return s.startSession(ctx, start, invite, resp)
@@ -108,7 +110,7 @@ func (s *Endpoint) Close() error {
 	}
 
 	for _, session := range sessions {
-		session.finish(false)
+		err = errors.Join(err, session.finishError(false))
 	}
 	s.bgWG.Wait()
 	return err
@@ -493,7 +495,9 @@ func (s *Endpoint) startSession(ctx context.Context, start startRequest, invite,
 func (s *Endpoint) cancelInvite(invite sip.Message) {
 	ctx, cancel := s.timeoutContext(2 * time.Second)
 	defer cancel()
-	_ = s.sess.Send(ctx, buildCancel(invite))
+	if err := s.sess.Send(ctx, buildCancel(invite)); err != nil {
+		s.logger.Debug("sending USSD CANCEL failed", "err", err)
+	}
 }
 
 func (s *Session) startInviteOKRetransmit(req session.Request, resp sip.Message) {

@@ -184,8 +184,8 @@ func (s *SMSClient) Send(ctx context.Context, to, text string) (SMSSubmission, e
 	submittedAt := time.Now()
 	lowSubmission, err := low.Send(ctx, to, text)
 	if err != nil {
-		var partial *imssms.PartialSubmissionError
-		if !errors.As(err, &partial) || len(partial.Submission.Segments) == 0 {
+		partial, ok := errors.AsType[*imssms.PartialSubmissionError](err)
+		if !ok || len(partial.Submission.Segments) == 0 {
 			return SMSSubmission{}, err
 		}
 		lowSubmission = partial.Submission

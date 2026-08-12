@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/ims-go/swu/handshake"
 	"github.com/damonto/ims-go/swu/ike"
 )
 
@@ -79,7 +80,7 @@ func TestEstablishedIKEExchangesUseConfiguredRetransmitSchedule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
-			session, err := Dial(context.Background(), Config{
+			session, err := Dial(t.Context(), Config{
 				RemoteAddr:           "127.0.0.1:4500",
 				PacketConn:           conn,
 				Logger:               testLogger(),
@@ -89,9 +90,13 @@ func TestEstablishedIKEExchangesUseConfiguredRetransmitSchedule(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			defer session.Close()
+			defer func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			}()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 700*time.Millisecond)
 			defer cancel()
 
 			err = tt.exchange(ctx, session)
@@ -137,7 +142,7 @@ func TestSendDeleteRequestWaitsForIKEDeleteResponse(t *testing.T) {
 			session.nextMessageID = messageID
 			session.mu.Unlock()
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			errCh := make(chan error, 1)
 			go func() {
@@ -200,8 +205,8 @@ func TestHandleNonESPPacketLogsUnmatchedInformationalResponse(t *testing.T) {
 	session := &Session{
 		logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
-	wire, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	wire, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: 0x0102030405060708,
 			ResponderSPI: 0x1112131415161718,
 			Version:      ikeVersion20,
@@ -390,11 +395,15 @@ func TestOldInformationalRequestWithoutCachedResponseIsIgnored(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			session := mustDialSession(t, conn)
-			defer session.Close()
+			defer func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			}()
 			crypto := testIKECrypto()
 			peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
 			wire := protectedIKEWire(t, crypto, exchangeTypeInformational, 0, tt.messageID, nil, false)
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -435,12 +444,9 @@ func TestInvalidMessageIDNotificationIsRateLimited(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			oldTimeout := invalidMessageIDNotifyTimeout
-			invalidMessageIDNotifyTimeout = time.Millisecond
-			t.Cleanup(func() { invalidMessageIDNotifyTimeout = oldTimeout })
-
 			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}}
 			session := mustDialSession(t, conn)
+			session.invalidMessageIDNotifyTimeout = time.Millisecond
 			crypto := testIKECrypto()
 			state := informationalState{
 				ike:            crypto,
@@ -458,7 +464,7 @@ func TestInvalidMessageIDNotificationIsRateLimited(t *testing.T) {
 				t.Fatalf("writes = %d, want 1", got)
 			}
 
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(conn.writes[0][4:]); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -525,7 +531,7 @@ func TestBuildInformationalConfigReply(t *testing.T) {
 			state: informationalState{
 				info: Info{
 					InnerIPv4: net.IPv4(10, 0, 0, 1),
-					InnerIPv6: IPAddress{IP: net.ParseIP("2001:db8::1").To16(), PrefixLen: 64},
+					InnerIPv6: handshake.IPAddress{IP: net.ParseIP("2001:db8::1").To16(), PrefixLen: 64},
 				},
 			},
 			attrs: []ike.Attribute{
@@ -694,19 +700,19 @@ func TestAcquireIKERequestSerializesOutboundWindow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
-			release, err := session.acquireIKERequest(context.Background(), ikeActionFirstRequest)
+			release, err := session.acquireIKERequest(t.Context(), ikeActionFirstRequest)
 			if err != nil {
 				t.Fatalf("first acquireIKERequest() error = %v", err)
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
 			defer cancel()
 			if _, err := session.acquireIKERequest(ctx, ikeActionSecondRequest); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("second acquireIKERequest() error = %v, want context deadline exceeded", err)
 			}
 
 			release()
-			release, err = session.acquireIKERequest(context.Background(), ikeActionSecondRequest)
+			release, err = session.acquireIKERequest(t.Context(), ikeActionSecondRequest)
 			if err != nil {
 				t.Fatalf("second acquireIKERequest() after release error = %v", err)
 			}
@@ -757,7 +763,11 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
-			defer session.Close()
+			defer func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("Session.Close() error = %v", err)
+				}
+			}()
 
 			session.mu.Lock()
 			session.ike = testIKECrypto()
@@ -770,13 +780,13 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 			}
 			session.mu.Unlock()
 
-			release, err := session.acquireIKERequest(context.Background(), ikeActionHoldingRequestWindow)
+			release, err := session.acquireIKERequest(t.Context(), ikeActionHoldingRequestWindow)
 			if err != nil {
 				t.Fatalf("acquireIKERequest() error = %v", err)
 			}
 			defer release()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 			defer cancel()
 			if err := tt.rekey(ctx, session); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("rekey error = %v, want context deadline exceeded", err)
@@ -978,7 +988,7 @@ func TestHandleProtectedResponseWithoutWaiterDoesNotCountAsTraffic(t *testing.T)
 	tests := []struct {
 		name         string
 		exchangeType byte
-		handle       func(*Session, informationalState, ike.IKEPacket, []byte, net.Addr) (bool, error)
+		handle       func(*Session, informationalState, ike.Packet, []byte, net.Addr) (bool, error)
 	}{
 		{
 			name:         "informational",
@@ -996,7 +1006,7 @@ func TestHandleProtectedResponseWithoutWaiterDoesNotCountAsTraffic(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			crypto := testIKECrypto()
 			wire := protectedIKEWire(t, crypto, tt.exchangeType, flagResponse, 4, nil, false)
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}

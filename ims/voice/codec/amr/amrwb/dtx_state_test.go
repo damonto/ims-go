@@ -40,7 +40,7 @@ func TestWBDecoderDTXRXHandlerSIDUpdate(t *testing.T) {
 	var state dtxDecState
 	state.reset()
 
-	newState := state.rxHandler(rxSIDUpdate)
+	newState := state.nextRXState(rxSIDUpdate)
 
 	if newState != dtxStateDTX {
 		t.Fatalf("newState = %d, want DTX", newState)
@@ -61,7 +61,7 @@ func TestWBDecoderDTXRXHandlerSpeechGood(t *testing.T) {
 	state.reset()
 	state.sinceLastSID = 12
 
-	newState := state.rxHandler(rxSpeechGood)
+	newState := state.nextRXState(rxSpeechGood)
 
 	if newState != dtxStateSpeech {
 		t.Fatalf("newState = %d, want speech", newState)
@@ -80,7 +80,7 @@ func TestWBDecoderDTXRXHandlerEmptyThresholdMutes(t *testing.T) {
 	state.globalState = dtxStateDTX
 	state.sinceLastSID = dtxMaxEmptyThreshold
 
-	newState := state.rxHandler(rxNoData)
+	newState := state.nextRXState(rxNoData)
 
 	if newState != dtxStateMute {
 		t.Fatalf("newState = %d, want mute", newState)

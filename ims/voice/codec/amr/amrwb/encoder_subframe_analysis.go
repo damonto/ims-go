@@ -282,9 +282,9 @@ func (e *Encoder) analyzeSubframePitch(
 	scaleSignalRound(hSearch[:], ctx.analysis.weighted.shift+1)
 
 	pitFlag, searchState := subframePitchSearchState(e.mode, ctx.subframe, ctx.analysis.tOp2, lagState)
-	t0Frac2, t0Frac1 := pitchMin, pitchFrac1_8b
+	t0Frac2, t0Frac1 := pitchMin, pitchFrac1At8Bits
 	if e.mode > Mode885 {
-		t0Frac2, t0Frac1 = pitchFrac2, pitchFrac1_9b
+		t0Frac2, t0Frac1 = pitchFrac2, pitchFrac1At9Bits
 	}
 	t0, t0Frac, err := pitchFR4(
 		ctx.excitation,

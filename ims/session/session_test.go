@@ -33,6 +33,15 @@ type basicTransport struct{ stub *stubTransport }
 
 type keepAliveDisabledTransport struct{ *stubTransport }
 
+func closeStackAfterTest(t *testing.T, stack *Stack) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := stack.Close(); err != nil {
+			t.Errorf("Stack.Close() error = %v", err)
+		}
+	})
+}
+
 type secureStubTransport struct {
 	*stubTransport
 	associationID string
@@ -81,22 +90,29 @@ type blockingWriteTransport struct {
 	maxActive  atomic.Int32
 }
 
-type requestHandler struct {
+type blockingReadTransport struct {
+	local   net.Addr
+	remote  net.Addr
+	entered chan struct{}
+	release chan struct{}
+}
+
+type requestProcessor struct {
 	mu       sync.Mutex
 	requests []string
 	errs     []error
 	handle   func(context.Context, Request) (bool, error)
 }
 
-type responseCaptureHandler struct {
+type responseCaptureProcessor struct {
 	responses chan sip.Message
 }
 
-func (h *responseCaptureHandler) HandleRequest(context.Context, Request) (bool, error) {
+func (h *responseCaptureProcessor) HandleRequest(context.Context, Request) (bool, error) {
 	return false, nil
 }
 
-func (h *responseCaptureHandler) HandleResponse(_ context.Context, msg sip.Message) (bool, error) {
+func (h *responseCaptureProcessor) HandleResponse(_ context.Context, msg sip.Message) (bool, error) {
 	h.responses <- msg
 	return true, nil
 }
@@ -115,6 +131,15 @@ func newBlockingWriteTransport() *blockingWriteTransport {
 		local:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
 		remote:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
 		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+}
+
+func newBlockingReadTransport() *blockingReadTransport {
+	return &blockingReadTransport{
+		local:   &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5062},
+		remote:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060},
+		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
 }
@@ -247,6 +272,18 @@ func (t *blockingWriteTransport) waitWrite(ctx context.Context) error {
 
 func (t *blockingWriteTransport) Close() error { return nil }
 
+func (t *blockingReadTransport) LocalAddr() net.Addr  { return t.local }
+func (t *blockingReadTransport) RemoteAddr() net.Addr { return t.remote }
+
+func (t *blockingReadTransport) ReadPacket(context.Context) ([]byte, net.Addr, error) {
+	close(t.entered)
+	<-t.release
+	return nil, nil, net.ErrClosed
+}
+
+func (t *blockingReadTransport) WritePacket(context.Context, []byte) error { return nil }
+func (t *blockingReadTransport) Close() error                              { return nil }
+
 func (t *basicTransport) LocalAddr() net.Addr  { return t.stub.LocalAddr() }
 func (t *basicTransport) RemoteAddr() net.Addr { return t.stub.RemoteAddr() }
 func (t *basicTransport) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
@@ -287,7 +324,7 @@ func (t *failAfterWritesTransport) WritePacket(ctx context.Context, data []byte)
 	return t.stubTransport.WritePacket(ctx, data)
 }
 
-func (h *requestHandler) HandleRequest(ctx context.Context, req Request) (bool, error) {
+func (h *requestProcessor) HandleRequest(ctx context.Context, req Request) (bool, error) {
 	h.mu.Lock()
 	h.requests = append(h.requests, req.Message.Method())
 	h.mu.Unlock()
@@ -297,19 +334,19 @@ func (h *requestHandler) HandleRequest(ctx context.Context, req Request) (bool, 
 	return false, nil
 }
 
-func (h *requestHandler) HandleError(err error) {
+func (h *requestProcessor) HandleError(err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.errs = append(h.errs, err)
 }
 
-func (h *requestHandler) requestCount() int {
+func (h *requestProcessor) requestCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.requests)
 }
 
-func (h *requestHandler) requestList() string {
+func (h *requestProcessor) requestList() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return strings.Join(h.requests, ",")
@@ -382,14 +419,14 @@ func TestSendKeepAliveWritesTransportSpecificPacket(t *testing.T) {
 					}
 				}
 			}
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			errCh := make(chan error, 1)
 			go func() { errCh <- sess.Run(runCtx) }()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
-			if err := sess.SendKeepAlive(context.Background()); err != nil {
+			if err := sess.SendKeepAlive(t.Context()); err != nil {
 				t.Fatalf("SendKeepAlive() error = %v", err)
 			}
 			writes := transport.snapshotWrites()
@@ -425,7 +462,7 @@ func TestSessionSupportsKeepAlive(t *testing.T) {
 				t.Fatalf("SupportsKeepAlive() = %t, want %t", got, tt.want)
 			}
 			if !tt.want {
-				if err := sess.SendKeepAlive(context.Background()); err == nil {
+				if err := sess.SendKeepAlive(t.Context()); err == nil {
 					t.Fatal("SendKeepAlive() error = nil, want disabled transport error")
 				}
 				if transport := extractStubTransport(tt.transport); transport != nil && transport.writeCount() != 0 {
@@ -445,10 +482,7 @@ func TestRunTransportReadLoopStagesKeepAlivePackets(t *testing.T) {
 			name: "crlf and stun",
 			packets: func(t *testing.T) [][]byte {
 				t.Helper()
-				stunPacket, _, err := newSTUNBindingRequest()
-				if err != nil {
-					t.Fatalf("newSTUNBindingRequest() error = %v", err)
-				}
+				stunPacket, _ := newSTUNBindingRequest()
 				return [][]byte{[]byte("\r\n\r\n"), stunPacket}
 			},
 		},
@@ -457,7 +491,7 @@ func TestRunTransportReadLoopStagesKeepAlivePackets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newStubTransport(5062, 5060)
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			out := make(chan inboundMessage, 1)
 			go runTransportReadLoop(ctx, transport, out, false)
@@ -487,12 +521,12 @@ func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(context.Context, Request) (bool, error) {
 			return true, nil
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
@@ -501,7 +535,7 @@ func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing
 	transport.queueRead(newResponse(req, 100, "Trying"))
 	transport.queueRead(newResponse(req, 200, "OK"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
 	resp, err := sess.Exchange(ctx, req)
@@ -514,8 +548,8 @@ func TestExchangeBeforeRunHandlesRequestsAndSkipsProvisionalResponses(t *testing
 	if got := transport.writeCount(); got != 1 {
 		t.Fatalf("len(writes) = %d, want 1", got)
 	}
-	if got := handler.requestCount(); got != 1 {
-		t.Fatalf("len(handler.requests) = %d, want 1", got)
+	if got := processor.requestCount(); got != 1 {
+		t.Fatalf("len(processor.requests) = %d, want 1", got)
 	}
 }
 
@@ -553,7 +587,7 @@ func TestExchangeBeforeRunIgnoresMismatchedResponses(t *testing.T) {
 			transport.queueRead(tt.resp)
 			transport.queueRead(newResponse(req, 200, "OK"))
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			resp, err := sess.Exchange(ctx, req)
 			if err != nil {
@@ -582,7 +616,7 @@ func TestExchangeBeforeRunCanReceiveFromResponseTransport(t *testing.T) {
 		inbound.queueRead(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.ExchangeWithTransport(ctx, outbound, req, ExchangeOptions{
 		AcceptResponseTransport: func(transport Transport) bool {
@@ -598,6 +632,262 @@ func TestExchangeBeforeRunCanReceiveFromResponseTransport(t *testing.T) {
 	}
 	if got := outbound.writeCount(); got != 1 {
 		t.Fatalf("outbound write count = %d, want 1", got)
+	}
+}
+
+func TestExchangeBeforeRunRestartsReaderAfterRecoverableError(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "primary reader recovers"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newReadErrorTransport(5062, 5060)
+			sess, err := Open(Config{}, transport)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			closeStackAfterTest(t, sess)
+
+			cause := errors.New("peer reset connection")
+			transport.fail(&usableReadError{err: cause})
+			waitForInboundCount(t, sess, 1)
+
+			first := newRequest("REGISTER", "recoverable-bootstrap-1", "1 REGISTER")
+			if _, err := sess.Exchange(t.Context(), first); !errors.Is(err, cause) {
+				t.Fatalf("first Exchange() error = %v, want %v", err, cause)
+			}
+			if !stackHasReader(sess, transport) {
+				t.Fatal("primary transport reader was not restarted")
+			}
+
+			second := newRequest("REGISTER", "recoverable-bootstrap-2", "2 REGISTER")
+			transport.onWrite = func(_ []byte) {
+				transport.queueRead(newResponse(second, 200, "OK"))
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			resp, err := sess.Exchange(ctx, second)
+			if err != nil {
+				t.Fatalf("second Exchange() error = %v", err)
+			}
+			if resp.StatusCode() != 200 {
+				t.Fatalf("second response status = %d, want 200", resp.StatusCode())
+			}
+		})
+	}
+}
+
+func TestExchangeBeforeRunIgnoresUnrelatedTransportError(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "auxiliary failure does not abort primary exchange"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			aux := newReadErrorTransport(15062, 15060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			closeStackAfterTest(t, sess)
+			if _, err := sess.AddTransport(aux); err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+
+			aux.fail(errors.New("auxiliary connection lost"))
+			waitForInboundCount(t, sess, 1)
+
+			req := newRequest("REGISTER", "unrelated-bootstrap-error", "1 REGISTER")
+			primary.onWrite = func(_ []byte) {
+				primary.queueRead(newResponse(req, 200, "OK"))
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			resp, err := sess.Exchange(ctx, req)
+			if err != nil {
+				t.Fatalf("Exchange() error = %v", err)
+			}
+			if resp.StatusCode() != 200 {
+				t.Fatalf("response status = %d, want 200", resp.StatusCode())
+			}
+			if sess.isTransportActive(aux) {
+				t.Fatal("failed auxiliary transport is still active")
+			}
+		})
+	}
+}
+
+func TestExchangeBeforeRunIgnoresUnrelatedDispatchError(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "auxiliary request processor error does not abort primary exchange"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			aux := newStubTransport(15062, 15060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			closeStackAfterTest(t, sess)
+			if _, err := sess.AddTransport(aux); err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+
+			cause := errors.New("processing unrelated request")
+			processed := make(chan struct{}, 1)
+			processor := &requestProcessor{handle: func(_ context.Context, req Request) (bool, error) {
+				if req.Transport != aux {
+					return false, nil
+				}
+				processed <- struct{}{}
+				return false, cause
+			}}
+			if _, err := sess.Attach(processor); err != nil {
+				t.Fatalf("Attach() error = %v", err)
+			}
+
+			req := newRequest("REGISTER", "unrelated-bootstrap-dispatch", "1 REGISTER")
+			primary.onWrite = func(_ []byte) {
+				aux.queueRead(newInboundRequest("MESSAGE", "unrelated-request", "1 MESSAGE"))
+				go func() {
+					<-processed
+					primary.queueRead(newResponse(req, 200, "OK"))
+				}()
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			resp, err := sess.Exchange(ctx, req)
+			if err != nil {
+				t.Fatalf("Exchange() error = %v", err)
+			}
+			if resp.StatusCode() != 200 {
+				t.Fatalf("response status = %d, want 200", resp.StatusCode())
+			}
+			processor.mu.Lock()
+			errs := append([]error(nil), processor.errs...)
+			processor.mu.Unlock()
+			if len(errs) != 1 || !errors.Is(errs[0], cause) {
+				t.Fatalf("processor errors = %v, want [%v]", errs, cause)
+			}
+		})
+	}
+}
+
+func TestExchangeBeforeRunInvalidatesFatalPrimary(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace bool
+	}{
+		{name: "run reports stored failure"},
+		{name: "replacement primary clears stored failure", replace: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newReadErrorTransport(5062, 5060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			cause := errors.New("primary transport lost")
+			primary.fail(cause)
+			waitForInboundCount(t, sess, 1)
+			if _, err := sess.Exchange(t.Context(), newRequest("REGISTER", "fatal-primary", "1 REGISTER")); !errors.Is(err, cause) {
+				t.Fatalf("first Exchange() error = %v, want %v", err, cause)
+			}
+			if sess.isTransportActive(primary) {
+				t.Fatal("primary transport remains active after fatal read failure")
+			}
+			if _, err := sess.Exchange(t.Context(), newRequest("REGISTER", "fatal-primary-next", "2 REGISTER")); err == nil {
+				t.Fatal("second Exchange() error = nil, want inactive transport error")
+			}
+			var replacement *stubTransport
+			if tt.replace {
+				replacement = newStubTransport(15062, 15060)
+				if err := sess.ReplacePrimary(replacement); err != nil {
+					t.Fatalf("ReplacePrimary() error = %v", err)
+				}
+				if !sess.isTransportActive(replacement) {
+					t.Fatal("replacement primary transport is not active")
+				}
+				runCtx, runCancel := context.WithCancel(t.Context())
+				errCh := make(chan error, 1)
+				go func() {
+					errCh <- sess.Run(runCtx)
+				}()
+				if err := sess.WaitStarted(t.Context()); err != nil {
+					t.Fatalf("WaitStarted() error = %v", err)
+				}
+				runCancel()
+				if err := <-errCh; !errors.Is(err, context.Canceled) {
+					t.Fatalf("Run() error = %v, want context.Canceled", err)
+				}
+			} else if err := sess.Run(t.Context()); !errors.Is(err, cause) {
+				t.Fatalf("Run() error = %v, want %v", err, cause)
+			}
+			if err := sess.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			primary.mu.Lock()
+			closeCount := primary.closeCount
+			primary.mu.Unlock()
+			if closeCount != 1 {
+				t.Fatalf("primary close count = %d, want 1", closeCount)
+			}
+			if replacement != nil {
+				replacement.mu.Lock()
+				replacementCloseCount := replacement.closeCount
+				replacement.mu.Unlock()
+				if replacementCloseCount != 1 {
+					t.Fatalf("replacement close count = %d, want 1", replacementCloseCount)
+				}
+			}
+		})
+	}
+}
+
+func waitForInboundCount(t *testing.T, sess *Stack, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for len(sess.inbound) < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("inbound count = %d, want at least %d", len(sess.inbound), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func stackHasReader(sess *Stack, transport Transport) bool {
+	sess.readMu.Lock()
+	defer sess.readMu.Unlock()
+	_, ok := sess.readers[transport]
+	return ok
+}
+
+func waitForReaderCount(t *testing.T, sess *Stack, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		sess.readMu.Lock()
+		got := len(sess.readers)
+		sess.readMu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reader count = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -651,7 +941,7 @@ func TestExchangeBeforeRunUsesClientTransactionRetransmission(t *testing.T) {
 				}
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			resp, err := sess.Exchange(ctx, req)
 			if err != nil {
@@ -680,18 +970,18 @@ func TestExchangeAfterRunUsesPendingCorrelation(t *testing.T) {
 		transport.queueRead(newResponse(req, 200, "OK"))
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
 	provisional := make(chan sip.Message, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.ExchangeWithOptions(ctx, req, ExchangeOptions{
 		OnProvisional: func(msg sip.Message) {
@@ -725,14 +1015,14 @@ func TestWaitStartedReturnsWhenRunBegins(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := sess.WaitStarted(ctx); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
@@ -754,12 +1044,12 @@ func TestExchangeAfterRunExitFallsBackToSynchronousTransport(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 	runCancel()
@@ -772,7 +1062,7 @@ func TestExchangeAfterRunExitFallsBackToSynchronousTransport(t *testing.T) {
 		transport.queueRead(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.Exchange(ctx, req)
 	if err != nil {
@@ -795,17 +1085,17 @@ func TestRunFansInMultipleTransports(t *testing.T) {
 	}
 
 	handledCh := make(chan string, 1)
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(ctx context.Context, req Request) (bool, error) {
 			handledCh <- req.Transport.LocalAddr().String()
 			return true, nil
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
@@ -847,30 +1137,30 @@ func TestRunRemovesFailedAuxTransportWithoutStoppingSession(t *testing.T) {
 			}
 
 			handledCh := make(chan string, 1)
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					handledCh <- req.Transport.LocalAddr().String()
 					return true, nil
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
 			auxReq := newRequest("MESSAGE", "aux-pending", "1 MESSAGE")
 			auxErrCh := make(chan error, 1)
 			go func() {
-				_, err := sess.ExchangeWithTransport(context.Background(), aux, auxReq, ExchangeOptions{})
+				_, err := sess.ExchangeWithTransport(t.Context(), aux, auxReq, ExchangeOptions{})
 				auxErrCh <- err
 			}()
 			waitForWriteCount(t, aux.stubTransport, 1)
@@ -925,30 +1215,30 @@ func TestRunRestartsReadLoopForUsableTransport(t *testing.T) {
 			}
 
 			handledCh := make(chan string, 1)
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					handledCh <- req.Transport.LocalAddr().String()
 					return true, nil
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
 			req := newRequest("MESSAGE", "pending-on-reset", "1 MESSAGE")
 			exchangeErrCh := make(chan error, 1)
 			go func() {
-				_, err := sess.ExchangeWithTransport(context.Background(), aux, req, ExchangeOptions{})
+				_, err := sess.ExchangeWithTransport(t.Context(), aux, req, ExchangeOptions{})
 				exchangeErrCh <- err
 			}()
 			waitForWriteCount(t, aux.stubTransport, 1)
@@ -1001,13 +1291,13 @@ func TestRunReturnsPrimaryTransportReadError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -1019,6 +1309,18 @@ func TestRunReturnsPrimaryTransportReadError(t *testing.T) {
 			}
 			if !TransportFailed(err) {
 				t.Fatalf("TransportFailed() = false for %v", err)
+			}
+			if sess.isTransportActive(primary) {
+				t.Fatal("primary transport remains active after fatal read failure")
+			}
+			if err := sess.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			primary.mu.Lock()
+			closeCount := primary.closeCount
+			primary.mu.Unlock()
+			if closeCount != 1 {
+				t.Fatalf("primary close count = %d, want 1", closeCount)
 			}
 		})
 	}
@@ -1034,7 +1336,7 @@ func TestSessionSerializesWrites(t *testing.T) {
 	req := newRequest("MESSAGE", "call-1", "1 MESSAGE")
 	inbound := Request{Message: newInboundRequest("NOTIFY", "call-2", "1 NOTIFY"), Transport: transport}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
 	sendErrCh := make(chan error, 1)
@@ -1091,7 +1393,7 @@ func TestWriteResponseTargetsUDPSourceAndFallsBack(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 			req := Request{Message: newInboundRequest("MESSAGE", "call-1", "1 MESSAGE"), Transport: tt.transport}
-			if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+			if err := sess.WriteStatus(t.Context(), req, 200, "OK"); err != nil {
 				t.Fatalf("WriteStatus() error = %v", err)
 			}
 
@@ -1119,7 +1421,7 @@ func TestWriteResponseUsesRequestPeerForBareRPort(t *testing.T) {
 	}
 	req.Message.Headers.Set("Via", "SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-1;received=198.51.100.10;rport")
 
-	if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+	if err := sess.WriteStatus(t.Context(), req, 200, "OK"); err != nil {
 		t.Fatalf("WriteStatus() error = %v", err)
 	}
 
@@ -1163,7 +1465,7 @@ func TestWriteResponseUsesTransportMatchingResponseTarget(t *testing.T) {
 	}
 	req.Message.Headers.Set("Via", "SIP/2.0/UDP 198.51.100.10:6000;branch=z9hG4bK-1")
 
-	if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+	if err := sess.WriteStatus(t.Context(), req, 200, "OK"); err != nil {
 		t.Fatalf("WriteStatus() error = %v", err)
 	}
 
@@ -1223,7 +1525,7 @@ func TestWriteResponseUsesExplicitResponseRoute(t *testing.T) {
 	}
 	req.Message.Headers.Set("Via", "SIP/2.0/UDP 198.51.100.10:6000;branch=z9hG4bK-1")
 
-	if err := sess.WriteStatus(context.Background(), req, 200, "OK"); err != nil {
+	if err := sess.WriteStatus(t.Context(), req, 200, "OK"); err != nil {
 		t.Fatalf("WriteStatus() error = %v", err)
 	}
 
@@ -1315,8 +1617,8 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 
-			first := &requestHandler{}
-			second := &requestHandler{
+			first := &requestProcessor{}
+			second := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					return req.Message.Method() == "NOTIFY", nil
 				},
@@ -1328,7 +1630,7 @@ func TestAttachmentOrderAndUnhandledBehavior(t *testing.T) {
 				t.Fatalf("Attach(second) error = %v", err)
 			}
 
-			err = sess.handleRequest(context.Background(), Request{Message: tt.msg, Transport: transport})
+			err = sess.handleRequest(t.Context(), Request{Message: tt.msg, Transport: transport})
 			if err != nil {
 				t.Fatalf("handleRequest() error = %v", err)
 			}
@@ -1407,14 +1709,14 @@ func TestHandleInboundRequestRejectsMalformedMessages(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			handler := &requestHandler{}
-			if _, err := sess.Attach(handler); err != nil {
+			processor := &requestProcessor{}
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 			msg := newInboundRequest(tt.method, "malformed-call", "1 "+tt.method)
 			tt.mutate(&msg)
 			req := Request{Message: msg, Transport: transport, PeerAddr: transport.remote}
-			if err := sess.handleInboundRequest(context.Background(), req); err != nil {
+			if err := sess.handleInboundRequest(t.Context(), req); err != nil {
 				t.Fatalf("handleInboundRequest() error = %v", err)
 			}
 			writes := transport.snapshotWrites()
@@ -1430,11 +1732,11 @@ func TestHandleInboundRequestRejectsMalformedMessages(t *testing.T) {
 					t.Fatalf("status = %d, want %d", resp.StatusCode(), sipStatusBadRequest)
 				}
 			}
-			handler.mu.Lock()
-			requestCount := len(handler.requests)
-			handler.mu.Unlock()
+			processor.mu.Lock()
+			requestCount := len(processor.requests)
+			processor.mu.Unlock()
 			if requestCount != 0 {
-				t.Fatalf("handler request count = %d, want 0", requestCount)
+				t.Fatalf("processor request count = %d, want 0", requestCount)
 			}
 		})
 	}
@@ -1461,8 +1763,8 @@ func TestHandleInboundRequestDetectsMergedRequests(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 			defer sess.clearServerTransactions()
-			handler := &requestHandler{handle: func(context.Context, Request) (bool, error) { return true, nil }}
-			if _, err := sess.Attach(handler); err != nil {
+			processor := &requestProcessor{handle: func(context.Context, Request) (bool, error) { return true, nil }}
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
@@ -1481,7 +1783,7 @@ func TestHandleInboundRequestDetectsMergedRequests(t *testing.T) {
 			}
 			for _, msg := range messages {
 				req := Request{Message: msg, Transport: transport, PeerAddr: transport.remote}
-				if err := sess.handleInboundRequest(context.Background(), req); err != nil {
+				if err := sess.handleInboundRequest(t.Context(), req); err != nil {
 					t.Fatalf("handleInboundRequest() error = %v", err)
 				}
 			}
@@ -1499,11 +1801,11 @@ func TestHandleInboundRequestDetectsMergedRequests(t *testing.T) {
 					t.Fatalf("status = %d, want %d", resp.StatusCode(), sipStatusLoopDetected)
 				}
 			}
-			handler.mu.Lock()
-			requestCount := len(handler.requests)
-			handler.mu.Unlock()
+			processor.mu.Lock()
+			requestCount := len(processor.requests)
+			processor.mu.Unlock()
 			if requestCount != tt.wantRequests {
-				t.Fatalf("handler request count = %d, want %d", requestCount, tt.wantRequests)
+				t.Fatalf("processor request count = %d, want %d", requestCount, tt.wantRequests)
 			}
 		})
 	}
@@ -1527,7 +1829,7 @@ func TestServerTransactionMatchesEquivalentSentBy(t *testing.T) {
 			retransmit.Headers.Set("Via", "SIP/2.0/UDP "+tt.retransmit+";branch=z9hG4bK-sent-by")
 
 			transport := newStubTransport(5062, 5060)
-			tx := newServerTransaction(&Session{}, Request{Message: original, Transport: transport, PeerAddr: transport.remote})
+			tx := newServerTransaction(&Stack{}, Request{Message: original, Transport: transport, PeerAddr: transport.remote})
 			if got, want := serverTransactionKey(retransmit), tx.key; got != want {
 				t.Fatalf("serverTransactionKey() = %q, want %q", got, want)
 			}
@@ -1576,7 +1878,7 @@ func TestLegacyServerTransactionMatching(t *testing.T) {
 			candidate := cloneSIPMessage(original)
 			tt.change(&original, &candidate)
 			transport := newStubTransport(5062, 5060)
-			tx := newServerTransaction(&Session{}, Request{Message: original, Transport: transport, PeerAddr: transport.remote})
+			tx := newServerTransaction(&Stack{}, Request{Message: original, Transport: transport, PeerAddr: transport.remote})
 			if got := serverTransactionKey(candidate) == tx.key; got != tt.wantKeyMatch {
 				t.Fatalf("server transaction key match = %v, want %v", got, tt.wantKeyMatch)
 			}
@@ -1599,7 +1901,7 @@ func TestHandleInboundRequestRejectsUnsupportedRequire(t *testing.T) {
 		wantRequests int
 		wantHeader   string
 	}{
-		{"supported option reaches handler", "MESSAGE", "sec-agree", 0, 1, ""},
+		{"supported option reaches processor", "MESSAGE", "sec-agree", 0, 1, ""},
 		{"unknown option gets 420", "MESSAGE", "sec-agree,unknown-extension", sipStatusBadExtension, 0, "unknown-extension"},
 		{"duplicates are reported once", "MESSAGE", "unknown,UNKNOWN", sipStatusBadExtension, 0, "unknown"},
 		{"ACK ignores Require", "ACK", "unknown-extension", 0, 1, ""},
@@ -1613,18 +1915,18 @@ func TestHandleInboundRequestRejectsUnsupportedRequire(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			handler := &requestHandler{handle: func(context.Context, Request) (bool, error) { return true, nil }}
-			if _, err := sess.Attach(handler); err != nil {
+			processor := &requestProcessor{handle: func(context.Context, Request) (bool, error) { return true, nil }}
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 			msg := newInboundRequest(tt.method, "require-call", "1 "+tt.method)
 			msg.Headers.Add("Require", tt.require)
 			req := Request{Message: msg, Transport: transport, PeerAddr: transport.remote}
-			if err := sess.handleInboundRequest(context.Background(), req); err != nil {
+			if err := sess.handleInboundRequest(t.Context(), req); err != nil {
 				t.Fatalf("handleInboundRequest() error = %v", err)
 			}
-			if got := handler.requestCount(); got != tt.wantRequests {
-				t.Fatalf("handler request count = %d, want %d", got, tt.wantRequests)
+			if got := processor.requestCount(); got != tt.wantRequests {
+				t.Fatalf("processor request count = %d, want %d", got, tt.wantRequests)
 			}
 			writes := transport.snapshotWrites()
 			if tt.wantStatus == 0 {
@@ -1672,24 +1974,24 @@ func TestRunDiscardsMalformedUDPDatagram(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			handler := &requestHandler{handle: func(context.Context, Request) (bool, error) { return true, nil }}
-			if _, err := sess.Attach(handler); err != nil {
+			processor := &requestProcessor{handle: func(context.Context, Request) (bool, error) { return true, nil }}
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			errCh := make(chan error, 1)
 			go func() { errCh <- sess.Run(ctx) }()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
 			transport.readCh <- tt.malformed()
 			transport.queueRead(newInboundRequest("MESSAGE", "after-malformed", "1 MESSAGE"))
 			deadline := time.Now().Add(time.Second)
-			for handler.requestCount() == 0 && time.Now().Before(deadline) {
+			for processor.requestCount() == 0 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
-			if got := handler.requestCount(); got != 1 {
+			if got := processor.requestCount(); got != 1 {
 				t.Fatalf("handled request count = %d, want 1 after malformed datagram", got)
 			}
 			if got := transport.writeCount(); got != tt.wantWrites {
@@ -1769,23 +2071,23 @@ func TestAddTransportCanJoinRunningSession(t *testing.T) {
 	}
 
 	handledCh := make(chan string, 1)
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(ctx context.Context, req Request) (bool, error) {
 			handledCh <- req.Transport.LocalAddr().String()
 			return true, nil
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -1840,23 +2142,23 @@ func TestPromotePrimaryUsesNewTransportAndKeepsOldTransportActive(t *testing.T) 
 	}
 
 	handledCh := make(chan string, 1)
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(ctx context.Context, req Request) (bool, error) {
 			handledCh <- req.Transport.LocalAddr().String()
 			return true, nil
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -1864,7 +2166,7 @@ func TestPromotePrimaryUsesNewTransportAndKeepsOldTransportActive(t *testing.T) 
 	respCh := make(chan sip.Message, 1)
 	exchangeErrCh := make(chan error, 1)
 	go func() {
-		resp, err := sess.Exchange(context.Background(), pending)
+		resp, err := sess.Exchange(t.Context(), pending)
 		if err != nil {
 			exchangeErrCh <- err
 			return
@@ -1885,7 +2187,7 @@ func TestPromotePrimaryUsesNewTransportAndKeepsOldTransportActive(t *testing.T) 
 		t.Fatal("PromotePrimary() old attachment = nil, want non-nil")
 	}
 
-	if err := sess.Send(context.Background(), newRequest("MESSAGE", "new-outbound", "1 MESSAGE")); err != nil {
+	if err := sess.Send(t.Context(), newRequest("MESSAGE", "new-outbound", "1 MESSAGE")); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if got := old.writeCount(); got != 1 {
@@ -1954,25 +2256,25 @@ func TestWaitTransportsIdleWaitsForClientTransactions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
 			req := newRequest("MESSAGE", "wait-idle", "1 MESSAGE")
 			respCh := make(chan error, 1)
 			go func() {
-				_, err := sess.Exchange(context.Background(), req)
+				_, err := sess.Exchange(t.Context(), req)
 				respCh <- err
 			}()
 			waitForWriteCount(t, old, 1)
 
-			idleCtx, idleCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			idleCtx, idleCancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 			if err := sess.WaitTransportsIdle(idleCtx, old); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("WaitTransportsIdle() before response error = %v, want deadline", err)
 			}
@@ -1982,7 +2284,7 @@ func TestWaitTransportsIdleWaitsForClientTransactions(t *testing.T) {
 			if err := <-respCh; err != nil {
 				t.Fatalf("Exchange() error = %v", err)
 			}
-			if err := sess.WaitTransportsIdle(context.Background(), old); err != nil {
+			if err := sess.WaitTransportsIdle(t.Context(), old); err != nil {
 				t.Fatalf("WaitTransportsIdle() after response error = %v", err)
 			}
 
@@ -2045,8 +2347,8 @@ func TestCloseClosesTransportsAndFansOutErrorOnce(t *testing.T) {
 		t.Fatalf("AddTransport() error = %v", err)
 	}
 
-	first := &requestHandler{}
-	second := &requestHandler{}
+	first := &requestProcessor{}
+	second := &requestProcessor{}
 	if _, err := sess.Attach(first); err != nil {
 		t.Fatalf("Attach(first) error = %v", err)
 	}
@@ -2068,6 +2370,22 @@ func TestCloseClosesTransportsAndFansOutErrorOnce(t *testing.T) {
 	}
 }
 
+func TestCloseTimesOutWhenTransportReadIgnoresCancellation(t *testing.T) {
+	transport := newBlockingReadTransport()
+	stack, err := Open(Config{}, transport)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	<-transport.entered
+
+	err = stack.close(10 * time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close() error = %v, want context.DeadlineExceeded", err)
+	}
+	close(transport.release)
+	stack.readWG.Wait()
+}
+
 func TestRunRetransmitsFinalResponseForRepeatedInboundRequest(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
 	sess, err := Open(Config{}, transport)
@@ -2076,7 +2394,7 @@ func TestRunRetransmitsFinalResponseForRepeatedInboundRequest(t *testing.T) {
 	}
 
 	handled := make(chan struct{}, 2)
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(ctx context.Context, req Request) (bool, error) {
 			if req.Message.Method() != "MESSAGE" {
 				return false, nil
@@ -2085,17 +2403,17 @@ func TestRunRetransmitsFinalResponseForRepeatedInboundRequest(t *testing.T) {
 			return true, sess.WriteStatus(ctx, req, 200, "OK")
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -2105,7 +2423,7 @@ func TestRunRetransmitsFinalResponseForRepeatedInboundRequest(t *testing.T) {
 	waitForWriteCount(t, transport, 2)
 
 	if got := len(handled); got != 1 {
-		t.Fatalf("handler count = %d, want 1", got)
+		t.Fatalf("processor count = %d, want 1", got)
 	}
 	for _, data := range transport.snapshotWrites() {
 		resp, err := sip.ParseMessage(data)
@@ -2135,7 +2453,7 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 	}
 
 	handled := make(chan string, 2)
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(ctx context.Context, req Request) (bool, error) {
 			if req.Message.Method() != "INVITE" {
 				return false, nil
@@ -2144,17 +2462,17 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 			return true, sess.WriteStatus(ctx, req, 100, "Trying")
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -2166,10 +2484,10 @@ func TestRunMatchesCancelToInboundInviteTransaction(t *testing.T) {
 	waitForWriteCount(t, transport, 3)
 
 	if got := len(handled); got != 1 {
-		t.Fatalf("handler count = %d, want 1", got)
+		t.Fatalf("processor count = %d, want 1", got)
 	}
-	if got, want := handler.requestList(), "INVITE,CANCEL"; got != want {
-		t.Fatalf("handler requests = %q, want %q", got, want)
+	if got, want := processor.requestList(), "INVITE,CANCEL"; got != want {
+		t.Fatalf("processor requests = %q, want %q", got, want)
 	}
 	writes := transport.snapshotWrites()
 	if len(writes) != 3 {
@@ -2240,7 +2558,7 @@ func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
 
 			handled := make(chan Request, 1)
 			release := make(chan struct{})
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					if req.Message.Method() != "INVITE" {
 						return false, nil
@@ -2250,17 +2568,17 @@ func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
 					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -2270,7 +2588,7 @@ func TestInviteServerTransactionSendsAutomaticTryingWhenTUIsSlow(t *testing.T) {
 			select {
 			case <-handled:
 			case <-time.After(time.Second):
-				t.Fatal("handler did not receive INVITE")
+				t.Fatal("processor did not receive INVITE")
 			}
 			waitForWriteCount(t, transport, 1)
 
@@ -2334,7 +2652,7 @@ func TestInviteServerTransactionDoesNotSendAutomaticTryingWhileResponseIsWriting
 
 			errCh := make(chan error, 1)
 			go func() {
-				errCh <- sess.WriteStatus(context.Background(), req, 100, "Trying")
+				errCh <- sess.WriteStatus(t.Context(), req, 100, "Trying")
 			}()
 
 			select {
@@ -2397,7 +2715,7 @@ func TestWriteResponseTerminatesServerTransactionOnTransportError(t *testing.T) 
 			tx := newServerTransaction(sess, req)
 			sess.registerServerTransaction(tx)
 
-			err = sess.WriteStatus(context.Background(), req, tt.status, tt.reason)
+			err = sess.WriteStatus(t.Context(), req, tt.status, tt.reason)
 			if !errors.Is(err, cause) {
 				t.Fatalf("WriteStatus() error = %v, want %v", err, cause)
 			}
@@ -2424,7 +2742,7 @@ func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	handler := &requestHandler{
+	processor := &requestProcessor{
 		handle: func(ctx context.Context, req Request) (bool, error) {
 			if req.Message.Method() != "INVITE" {
 				return false, nil
@@ -2432,17 +2750,17 @@ func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
 			return true, sess.WriteStatus(ctx, req, 100, "Trying")
 		},
 	}
-	if _, err := sess.Attach(handler); err != nil {
+	if _, err := sess.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -2458,8 +2776,8 @@ func TestReliableInviteErrorACKIsConsumedByServerTransaction(t *testing.T) {
 	transport.queueRead(options)
 	waitForWriteCount(t, transport, 4)
 
-	if got, want := handler.requestList(), "INVITE,CANCEL,OPTIONS"; got != want {
-		t.Fatalf("handler requests = %q, want %q", got, want)
+	if got, want := processor.requestList(), "INVITE,CANCEL,OPTIONS"; got != want {
+		t.Fatalf("processor requests = %q, want %q", got, want)
 	}
 	if writes := transport.snapshotWrites(); len(writes) != 4 {
 		t.Fatalf("len(writes) = %d, want 4", len(writes))
@@ -2494,7 +2812,7 @@ func TestInviteServerTransactionRetransmitsFinalResponseOverUDP(t *testing.T) {
 			}
 
 			handled := make(chan string, 2)
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					handled <- req.Message.Method()
 					if req.Message.Method() != "INVITE" {
@@ -2503,17 +2821,17 @@ func TestInviteServerTransactionRetransmitsFinalResponseOverUDP(t *testing.T) {
 					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -2567,7 +2885,7 @@ func TestInviteServerTransactionAbsorbsDuplicateACKDuringTimerI(t *testing.T) {
 			}
 
 			handled := make(chan string, 4)
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					handled <- req.Message.Method()
 					if req.Message.Method() != "INVITE" {
@@ -2576,17 +2894,17 @@ func TestInviteServerTransactionAbsorbsDuplicateACKDuringTimerI(t *testing.T) {
 					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -2627,7 +2945,7 @@ func TestInviteServerTransactionMatchesLegacyACK(t *testing.T) {
 			}
 
 			handled := make(chan string, 4)
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					handled <- req.Message.Method()
 					if req.Message.Method() != "INVITE" {
@@ -2636,17 +2954,17 @@ func TestInviteServerTransactionMatchesLegacyACK(t *testing.T) {
 					return true, sess.WriteStatus(ctx, req, 486, "Busy Here")
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -2692,7 +3010,7 @@ func TestInviteServerTransactionRetains2xxUntilTimerL(t *testing.T) {
 			}
 
 			handled := make(chan string, 2)
-			handler := &requestHandler{
+			processor := &requestProcessor{
 				handle: func(ctx context.Context, req Request) (bool, error) {
 					handled <- req.Message.Method()
 					if req.Message.Method() != "INVITE" {
@@ -2701,17 +3019,17 @@ func TestInviteServerTransactionRetains2xxUntilTimerL(t *testing.T) {
 					return true, sess.WriteStatus(ctx, req, 200, "OK")
 				},
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -2764,8 +3082,8 @@ func TestInviteServerTransactionReportsTimerH(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			handler := &requestHandler{}
-			if _, err := sess.Attach(handler); err != nil {
+			processor := &requestProcessor{}
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 			req := Request{Message: newInboundRequest("INVITE", "call-timer-h", "1 INVITE"), Transport: transport, PeerAddr: transport.remote}
@@ -2777,9 +3095,9 @@ func TestInviteServerTransactionReportsTimerH(t *testing.T) {
 
 			deadline := time.Now().Add(time.Second)
 			for {
-				handler.mu.Lock()
-				errs := append([]error(nil), handler.errs...)
-				handler.mu.Unlock()
+				processor.mu.Lock()
+				errs := append([]error(nil), processor.errs...)
+				processor.mu.Unlock()
 				if len(errs) != 0 {
 					if !TransactionTimerExpired(errs[0], "H") {
 						t.Fatalf("HandleError() error = %v, want Timer H timeout", errs[0])
@@ -2838,12 +3156,12 @@ func TestPrepareRequestTransportRejectsOversizedUDPWithoutReliableFlow(t *testin
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			defer sess.Close()
+			closeStackAfterTest(t, sess)
 
 			req := newRequest("MESSAGE", "call-large", "1 MESSAGE")
 			req.Body = make([]byte, sipDatagramRequestLimit)
 			req.Headers.Set("Content-Length", fmt.Sprint(len(req.Body)))
-			if err := sess.Send(context.Background(), req); err == nil {
+			if err := sess.Send(t.Context(), req); err == nil {
 				t.Fatal("Send() error = nil, want reliable transport error")
 			}
 			if got := transport.writeCount(); got != 0 {
@@ -2878,12 +3196,12 @@ func TestPrepareRequestTransportPrefersTCPForOversizedUDP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			defer sess.Close()
+			closeStackAfterTest(t, sess)
 
 			req := newRequest("REGISTER", "call-large-tcp", "1 REGISTER")
 			req.Body = make([]byte, tt.bodySize)
 			req.Headers.Set("Content-Length", fmt.Sprint(len(req.Body)))
-			if err := sess.Send(context.Background(), req); err != nil {
+			if err := sess.Send(t.Context(), req); err != nil {
 				t.Fatalf("Send() error = %v", err)
 			}
 			if openCalls != 1 {
@@ -2908,7 +3226,7 @@ func TestPrepareRequestTransportPrefersTCPForOversizedUDP(t *testing.T) {
 			}
 
 			small := newRequest("OPTIONS", "call-small-udp", "1 OPTIONS")
-			if err := sess.Send(context.Background(), small); err != nil {
+			if err := sess.Send(t.Context(), small); err != nil {
 				t.Fatalf("Send() small request error = %v", err)
 			}
 			if got := udpTransport.writeCount(); got != 0 {
@@ -2947,7 +3265,7 @@ func TestActiveReliableTransportMatchesSecurityAssociation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			defer sess.Close()
+			closeStackAfterTest(t, sess)
 
 			candidates := make([]*secureStubTransport, 0, len(tt.candidateIDs))
 			for _, associationID := range tt.candidateIDs {
@@ -3059,7 +3377,7 @@ func waitForWriteCount(t *testing.T, transport *stubTransport, want int) {
 	}
 }
 
-func waitForTransportInactive(t *testing.T, sess *Session, transport Transport) {
+func waitForTransportInactive(t *testing.T, sess *Stack, transport Transport) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -3167,13 +3485,13 @@ func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3185,7 +3503,7 @@ func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
 		transport.queueRead(newResponse(req, 200, "OK"))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.Exchange(ctx, req)
 	if err != nil {
@@ -3217,17 +3535,17 @@ func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	_, err = sess.Exchange(ctx, newRequest("MESSAGE", "call-timeout", "1 MESSAGE"))
 	if err == nil {
@@ -3262,13 +3580,13 @@ func TestTimerFInProceedingDoesNotFailSession(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			runErrCh := make(chan error, 1)
 			go func() {
 				runErrCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
@@ -3279,7 +3597,7 @@ func TestTimerFInProceedingDoesNotFailSession(t *testing.T) {
 			provisional := make(chan struct{}, 1)
 			exchangeErrCh := make(chan error, 1)
 			go func() {
-				_, err := sess.ExchangeWithOptions(context.Background(), req, ExchangeOptions{
+				_, err := sess.ExchangeWithOptions(t.Context(), req, ExchangeOptions{
 					OnProvisional: func(sip.Message) {
 						provisional <- struct{}{}
 					},
@@ -3335,7 +3653,7 @@ func TestReportedTransportFailuresAreNotDropped(t *testing.T) {
 			cause := errors.New("primary transaction failed")
 			sess.reportTransportFailure(primary, cause)
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
@@ -3377,20 +3695,20 @@ func TestExchangeTimerStartsBeforeTransportSend(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 
-			runCtx, runCancel := context.WithCancel(context.Background())
+			runCtx, runCancel := context.WithCancel(t.Context())
 			defer runCancel()
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- sess.Run(runCtx)
 			}()
-			if err := sess.WaitStarted(context.Background()); err != nil {
+			if err := sess.WaitStarted(t.Context()); err != nil {
 				t.Fatalf("WaitStarted() error = %v", err)
 			}
 
 			firstSendErr := make(chan error, 1)
 			if tt.occupy {
 				go func() {
-					firstSendErr <- sess.Send(context.Background(), newRequest("MESSAGE", "blocking-send", "1 MESSAGE"))
+					firstSendErr <- sess.Send(t.Context(), newRequest("MESSAGE", "blocking-send", "1 MESSAGE"))
 				}()
 				select {
 				case <-transport.entered:
@@ -3401,7 +3719,7 @@ func TestExchangeTimerStartsBeforeTransportSend(t *testing.T) {
 
 			exchangeErr := make(chan error, 1)
 			go func() {
-				_, err := sess.Exchange(context.Background(), newRequest(tt.method, "timer-start", "1 "+tt.method))
+				_, err := sess.Exchange(t.Context(), newRequest(tt.method, "timer-start", "1 "+tt.method))
 				exchangeErr <- err
 			}()
 
@@ -3442,7 +3760,7 @@ func TestExchangeReturnsReliableTransportSendError(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	resp, err := sess.Exchange(context.Background(), newRequest("INVITE", "call-transport-failure", "1 INVITE"))
+	resp, err := sess.Exchange(t.Context(), newRequest("INVITE", "call-transport-failure", "1 INVITE"))
 	if !errors.Is(err, cause) {
 		t.Fatalf("Exchange() error = %v, want %v", err, cause)
 	}
@@ -3462,7 +3780,7 @@ func TestExchangeReturnsUnreliableTransportSendError(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	resp, err := sess.Exchange(context.Background(), newRequest("INVITE", "udp-transport-failure", "1 INVITE"))
+	resp, err := sess.Exchange(t.Context(), newRequest("INVITE", "udp-transport-failure", "1 INVITE"))
 	if !errors.Is(err, cause) {
 		t.Fatalf("Exchange() error = %v, want %v", err, cause)
 	}
@@ -3488,13 +3806,13 @@ func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3509,7 +3827,7 @@ func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.Exchange(ctx, req)
 	if err != nil {
@@ -3555,17 +3873,17 @@ func TestInviteTransactionReportsACKTransportFailure(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			handler := &requestHandler{}
-			if _, err := sess.Attach(handler); err != nil {
+			processor := &requestProcessor{}
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 			req := newRequest("INVITE", "ack-write-failure", "1 INVITE")
 			tx := newClientTransaction(sess, transport, req, ExchangeOptions{})
-			if err := tx.start(context.Background()); err != nil {
+			if err := tx.start(t.Context()); err != nil {
 				t.Fatalf("start() error = %v", err)
 			}
 			tx.handleResponse(inboundMessage{msg: newResponse(req, 486, "Busy Here"), transport: transport})
-			resp, err := tx.await(context.Background())
+			resp, err := tx.await(t.Context())
 			if err != nil {
 				t.Fatalf("await() error = %v", err)
 			}
@@ -3574,9 +3892,9 @@ func TestInviteTransactionReportsACKTransportFailure(t *testing.T) {
 			}
 			deadline := time.Now().Add(time.Second)
 			for {
-				handler.mu.Lock()
-				errs := append([]error(nil), handler.errs...)
-				handler.mu.Unlock()
+				processor.mu.Lock()
+				errs := append([]error(nil), processor.errs...)
+				processor.mu.Unlock()
 				if len(errs) != 0 {
 					if !errors.Is(errs[0], cause) {
 						t.Fatalf("HandleError() error = %v, want %v", errs[0], cause)
@@ -3612,13 +3930,13 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3638,7 +3956,7 @@ func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.Exchange(ctx, req)
 	if err != nil {
@@ -3688,7 +4006,7 @@ func TestInviteTransactionPassesLate2xxToCore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			capture := &responseCaptureHandler{responses: make(chan sip.Message, 1)}
+			capture := &responseCaptureProcessor{responses: make(chan sip.Message, 1)}
 			if _, err := sess.Attach(capture); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
@@ -3696,11 +4014,11 @@ func TestInviteTransactionPassesLate2xxToCore(t *testing.T) {
 			tx := newClientTransaction(sess, transport, req, ExchangeOptions{
 				AcceptResponseTransport: func(got Transport) bool { return got == transport },
 			})
-			if err := tx.start(context.Background()); err != nil {
+			if err := tx.start(t.Context()); err != nil {
 				t.Fatalf("start() error = %v", err)
 			}
 			tx.handleResponse(inboundMessage{msg: newResponse(req, 486, "Busy Here"), transport: transport})
-			resp, err := tx.await(context.Background())
+			resp, err := tx.await(t.Context())
 			if err != nil {
 				t.Fatalf("await() error = %v", err)
 			}
@@ -3759,7 +4077,7 @@ func TestInviteTransactionRetainsAcceptedResponsesUntilTimerM(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			capture := &responseCaptureHandler{responses: make(chan sip.Message, 1)}
+			capture := &responseCaptureProcessor{responses: make(chan sip.Message, 1)}
 			if _, err := sess.Attach(capture); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
@@ -3767,11 +4085,11 @@ func TestInviteTransactionRetainsAcceptedResponsesUntilTimerM(t *testing.T) {
 			tx := newClientTransaction(sess, transport, req, ExchangeOptions{
 				AcceptResponseTransport: func(got Transport) bool { return got == transport },
 			})
-			if err := tx.start(context.Background()); err != nil {
+			if err := tx.start(t.Context()); err != nil {
 				t.Fatalf("start() error = %v", err)
 			}
 			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: transport})
-			resp, err := tx.await(context.Background())
+			resp, err := tx.await(t.Context())
 			if err != nil {
 				t.Fatalf("await() error = %v", err)
 			}
@@ -3833,17 +4151,17 @@ func TestInviteTransactionDoesNotDropForked2xxBurst(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			capture := &responseCaptureHandler{responses: make(chan sip.Message, tt.count)}
+			capture := &responseCaptureProcessor{responses: make(chan sip.Message, tt.count)}
 			if _, err := sess.Attach(capture); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 			req := newRequest("INVITE", "forked-2xx-burst", "1 INVITE")
 			tx := newClientTransaction(sess, transport, req, ExchangeOptions{})
-			if err := tx.start(context.Background()); err != nil {
+			if err := tx.start(t.Context()); err != nil {
 				t.Fatalf("start() error = %v", err)
 			}
 			tx.handleResponse(inboundMessage{msg: newResponse(req, 200, "OK"), transport: transport})
-			if _, err := tx.await(context.Background()); err != nil {
+			if _, err := tx.await(t.Context()); err != nil {
 				t.Fatalf("await() error = %v", err)
 			}
 
@@ -3879,13 +4197,13 @@ func TestInviteTransactionTimerBStopsAfterProvisional(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	runCtx, runCancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(t.Context())
 	defer runCancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- sess.Run(runCtx)
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -3904,7 +4222,7 @@ func TestInviteTransactionTimerBStopsAfterProvisional(t *testing.T) {
 		})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	resp, err := sess.Exchange(ctx, req)
 	if err != nil {

@@ -1,9 +1,10 @@
 package sms
 
 import (
-	"github.com/damonto/ims-go/ims/sip"
 	"strings"
 	"time"
+
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) markRecentKey(key string, ttl time.Duration) bool {

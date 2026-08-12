@@ -12,9 +12,9 @@ import (
 type Info struct {
 	APN                       string
 	InnerIPv4                 net.IP
-	InnerIPv6                 IPAddress
-	InnerIPv6Prefix           IPPrefix
-	PDNTypeRestriction        PDNType
+	InnerIPv6                 handshake.IPAddress
+	InnerIPv6Prefix           handshake.IPPrefix
+	PDNTypeRestriction        handshake.PDNType
 	PCSCFIPs                  []net.IP
 	ESPInitiatorSPI           uint32
 	ESPResponderSPI           uint32
@@ -25,7 +25,7 @@ type Info struct {
 	ResponderTrafficSelectors []ike.TrafficSelector
 	PDUSessionID              byte
 	SNSSAI                    []byte
-	SNSSAIPlmnID              []byte
+	SNSSAIPLMNID              []byte
 }
 
 func (s *Session) Tunnel() Info {
@@ -79,43 +79,43 @@ func (s *Session) InnerIPsForRemote(remoteIP net.IP) (net.IP, net.IP, error) {
 	return local, remote, nil
 }
 
-func (info Info) HasInnerAddress() bool {
-	return len(info.InnerIPv4) != 0 || !info.InnerIPv6.IsZero()
+func (i Info) HasInnerAddress() bool {
+	return len(i.InnerIPv4) != 0 || !i.InnerIPv6.IsZero()
 }
 
-func (info Info) DefaultInnerIP() net.IP {
-	if pcscf := info.DefaultPCSCFIP(); len(pcscf) != 0 {
-		return info.InnerIPForRemote(pcscf)
+func (i Info) DefaultInnerIP() net.IP {
+	if pcscf := i.DefaultPCSCFIP(); len(pcscf) != 0 {
+		return i.InnerIPForRemote(pcscf)
 	}
-	if !info.InnerIPv6.IsZero() {
-		return append(net.IP(nil), info.InnerIPv6.IP...)
+	if !i.InnerIPv6.IsZero() {
+		return append(net.IP(nil), i.InnerIPv6.IP...)
 	}
-	return append(net.IP(nil), info.InnerIPv4...)
+	return append(net.IP(nil), i.InnerIPv4...)
 }
 
-func (info Info) InnerIPForRemote(remoteIP net.IP) net.IP {
+func (i Info) InnerIPForRemote(remoteIP net.IP) net.IP {
 	if len(remoteIP) == 0 {
-		return info.DefaultInnerIP()
+		return i.DefaultInnerIP()
 	}
 	if remoteIP.To4() != nil {
-		return append(net.IP(nil), info.InnerIPv4...)
+		return append(net.IP(nil), i.InnerIPv4...)
 	}
-	if remoteIP.To16() != nil && !info.InnerIPv6.IsZero() {
-		return append(net.IP(nil), info.InnerIPv6.IP...)
+	if remoteIP.To16() != nil && !i.InnerIPv6.IsZero() {
+		return append(net.IP(nil), i.InnerIPv6.IP...)
 	}
 	return nil
 }
 
-func (info Info) DefaultPCSCFIP() net.IP {
-	ips := info.PCSCFAddresses()
+func (i Info) DefaultPCSCFIP() net.IP {
+	ips := i.PCSCFAddresses()
 	if len(ips) == 0 {
 		return nil
 	}
 	return append(net.IP(nil), ips[0]...)
 }
 
-func (info Info) PCSCFAddresses() []net.IP {
-	return cloneIPList(info.PCSCFIPs)
+func (i Info) PCSCFAddresses() []net.IP {
+	return cloneIPList(i.PCSCFIPs)
 }
 
 func innerIPsForInfo(info Info, remoteIP net.IP) (net.IP, net.IP) {
@@ -147,7 +147,7 @@ func handshakeInfo(info Info) handshake.Info {
 		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
 		PDUSessionID:              info.PDUSessionID,
 		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
-		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
+		SNSSAIPLMNID:              append([]byte(nil), info.SNSSAIPLMNID...),
 	}
 }
 
@@ -168,19 +168,19 @@ func infoFromHandshake(info handshake.Info) Info {
 		ResponderTrafficSelectors: cloneTrafficSelectors(info.ResponderTrafficSelectors),
 		PDUSessionID:              info.PDUSessionID,
 		SNSSAI:                    append([]byte(nil), info.SNSSAI...),
-		SNSSAIPlmnID:              append([]byte(nil), info.SNSSAIPlmnID...),
+		SNSSAIPLMNID:              append([]byte(nil), info.SNSSAIPLMNID...),
 	}
 }
 
-func cloneIPAddress(address IPAddress) IPAddress {
-	return IPAddress{
+func cloneIPAddress(address handshake.IPAddress) handshake.IPAddress {
+	return handshake.IPAddress{
 		IP:        append(net.IP(nil), address.IP...),
 		PrefixLen: address.PrefixLen,
 	}
 }
 
-func cloneIPPrefix(prefix IPPrefix) IPPrefix {
-	return IPPrefix{
+func cloneIPPrefix(prefix handshake.IPPrefix) handshake.IPPrefix {
+	return handshake.IPPrefix{
 		IP:        append(net.IP(nil), prefix.IP...),
 		PrefixLen: prefix.PrefixLen,
 	}

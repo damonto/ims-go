@@ -85,7 +85,7 @@ func retiredChildSAStates(children []retiredChildSA) []retiredChildSAState {
 	return states
 }
 
-func (s *Session) informationalStateForPacket(packet ike.IKEPacket) (informationalState, bool) {
+func (s *Session) informationalStateForPacket(packet ike.Packet) (informationalState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -132,26 +132,26 @@ func (s *Session) informationalStateForPacket(packet ike.IKEPacket) (information
 	return informationalState{}, false
 }
 
-func (state informationalState) matches(packet ike.IKEPacket) bool {
-	if state.ike == nil {
+func (s informationalState) matches(packet ike.Packet) bool {
+	if s.ike == nil {
 		return false
 	}
-	return packet.Header.InitiatorSPI == state.initiatorSPI && packet.Header.ResponderSPI == state.responderSPI
+	return packet.Header.InitiatorSPI == s.initiatorSPI && packet.Header.ResponderSPI == s.responderSPI
 }
 
-func (state informationalState) canSendDelete() bool {
-	return state.available()
+func (s informationalState) canSendDelete() bool {
+	return s.available()
 }
 
-func (state informationalState) available() bool {
-	return state.ike != nil && state.peer != nil
+func (s informationalState) available() bool {
+	return s.ike != nil && s.peer != nil
 }
 
-func (state informationalState) responseMessageKey(messageID uint32, exchangeType byte) ikeMessageKey {
-	return ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, exchangeType, ikeMessageFlags(state.peerInitiator(), true), messageID)
+func (s informationalState) responseMessageKey(messageID uint32, exchangeType byte) ikeMessageKey {
+	return ikeMessageKeyForSPIs(s.initiatorSPI, s.responderSPI, exchangeType, ikeMessageFlags(s.peerInitiator(), true), messageID)
 }
 
-func ikeMessageKeyForHeader(header ike.IKEHeader) ikeMessageKey {
+func ikeMessageKeyForHeader(header ike.Header) ikeMessageKey {
 	return ikeMessageKeyForSPIs(header.InitiatorSPI, header.ResponderSPI, header.ExchangeType, header.Flags, header.MessageID)
 }
 
@@ -180,14 +180,14 @@ func ikeMessageDirectionFlags(flags byte) byte {
 	return flags & (flagInitiator | flagResponse)
 }
 
-func (state informationalState) initiatorHeader(messageID uint32) ike.IKEHeader {
+func (s informationalState) initiatorHeader(messageID uint32) ike.Header {
 	flags := byte(0)
-	if state.localInitiator {
+	if s.localInitiator {
 		flags = flagInitiator
 	}
-	return ike.IKEHeader{
-		InitiatorSPI: state.initiatorSPI,
-		ResponderSPI: state.responderSPI,
+	return ike.Header{
+		InitiatorSPI: s.initiatorSPI,
+		ResponderSPI: s.responderSPI,
 		Version:      ikeVersion20,
 		ExchangeType: exchangeTypeInformational,
 		Flags:        flags,
@@ -195,34 +195,34 @@ func (state informationalState) initiatorHeader(messageID uint32) ike.IKEHeader 
 	}
 }
 
-func (state informationalState) sealInitiatorRequest(messageID uint32, payloads []ike.Payload) ([][]byte, error) {
-	return sealIKEPackets(state.ike, state.initiatorHeader(messageID), payloads, state.localInitiator, state.ikeFragmentationSupported)
+func (s informationalState) sealInitiatorRequest(messageID uint32, payloads []ike.Payload) ([][]byte, error) {
+	return sealIKEPackets(s.ike, s.initiatorHeader(messageID), payloads, s.localInitiator, s.ikeFragmentationSupported)
 }
 
-func (state informationalState) peerInitiator() bool {
-	return !state.localInitiator
+func (s informationalState) peerInitiator() bool {
+	return !s.localInitiator
 }
 
-func (state informationalState) createChildSARequestState() createChildSARequestState {
+func (s informationalState) createChildSARequestState() createChildSARequestState {
 	return createChildSARequestState{
-		ike:                       state.ike,
-		localInitiator:            state.localInitiator,
-		ikeRekeying:               state.ikeRekeying,
-		pendingIKESA:              state.pendingIKESA,
-		retiredIKESA:              state.retiredIKESA,
-		ikeFragmentationSupported: state.ikeFragmentationSupported,
-		useNATT:                   state.useNATT,
-		childRekeying:             state.childRekeying,
-		cfg:                       state.cfg,
-		info:                      cloneInfo(state.info),
-		initiatorSPI:              state.initiatorSPI,
-		responderSPI:              state.responderSPI,
-		peer:                      cloneUDPAddr(state.peer),
-		inboundSPI:                state.inboundSPI,
-		outboundSPI:               state.outboundSPI,
-		promoteIKESA:              state.promoteIKESA,
-		nextPeerMessageID:         state.nextPeerMessageID,
-		responses:                 cloneIKEMessageResponses(state.responses),
-		responseReqs:              cloneIKEMessageRequests(state.responseReqs),
+		ike:                       s.ike,
+		localInitiator:            s.localInitiator,
+		ikeRekeying:               s.ikeRekeying,
+		pendingIKESA:              s.pendingIKESA,
+		retiredIKESA:              s.retiredIKESA,
+		ikeFragmentationSupported: s.ikeFragmentationSupported,
+		useNATT:                   s.useNATT,
+		childRekeying:             s.childRekeying,
+		cfg:                       s.cfg,
+		info:                      cloneInfo(s.info),
+		initiatorSPI:              s.initiatorSPI,
+		responderSPI:              s.responderSPI,
+		peer:                      cloneUDPAddr(s.peer),
+		inboundSPI:                s.inboundSPI,
+		outboundSPI:               s.outboundSPI,
+		promoteIKESA:              s.promoteIKESA,
+		nextPeerMessageID:         s.nextPeerMessageID,
+		responses:                 cloneIKEMessageResponses(s.responses),
+		responseReqs:              cloneIKEMessageRequests(s.responseReqs),
 	}
 }

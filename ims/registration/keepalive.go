@@ -17,8 +17,6 @@ const (
 	registrationKeepAliveMaxPercent   = 100
 )
 
-var registrationKeepAliveInterval = randomizedRegistrationKeepAliveInterval
-
 type registrationKeepAlive struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -43,7 +41,7 @@ func (s *Registrar) applyRegisterKeepAlive(resp sip.Message) {
 		s.stopRegistrationKeepAlive("transport_not_supported")
 		return
 	}
-	recommended, interval, ok := registerKeepAliveTimingFromResponse(resp)
+	recommended, interval, ok := registerKeepAliveTimingFromResponse(resp, s.keepAliveInterval)
 	if !ok {
 		s.stopRegistrationKeepAlive("not_negotiated")
 		return
@@ -52,16 +50,16 @@ func (s *Registrar) applyRegisterKeepAlive(resp sip.Message) {
 }
 
 func registerKeepAliveIntervalFromResponse(resp sip.Message) (time.Duration, bool) {
-	_, interval, ok := registerKeepAliveTimingFromResponse(resp)
+	_, interval, ok := registerKeepAliveTimingFromResponse(resp, randomizedRegistrationKeepAliveInterval)
 	return interval, ok
 }
 
-func registerKeepAliveTimingFromResponse(resp sip.Message) (time.Duration, time.Duration, bool) {
+func registerKeepAliveTimingFromResponse(resp sip.Message, intervalFor func(time.Duration) time.Duration) (time.Duration, time.Duration, bool) {
 	recommended, ok := parsePositiveSeconds(sip.TopViaKeep(resp.Header("Via")))
 	if !ok {
 		return 0, 0, false
 	}
-	interval := registrationKeepAliveInterval(recommended)
+	interval := intervalFor(recommended)
 	if interval <= 0 {
 		return 0, 0, false
 	}

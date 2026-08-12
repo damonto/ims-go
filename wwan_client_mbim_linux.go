@@ -14,12 +14,12 @@ import (
 type MBIMClient struct {
 	*sim.MBIM
 	client  *mbim.Client
-	network IMSPDNNetwork
+	network PDNNetwork
 }
 
 // MBIMClientConfig configures MBIM-specific IMS PDN access.
 type MBIMClientConfig struct {
-	Network IMSPDNNetwork
+	Network PDNNetwork
 }
 
 // NewMBIMClient adapts a wwan-go MBIM client for SIM access and VoLTE IMS PDN setup.
@@ -49,7 +49,7 @@ func (c *MBIMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 	}
 	adapted := mbimIMSPDNSession{session}
 	info := session.Info()
-	return configureIMSPDNNetwork(ctx, adapted, c.network, IMSPDNNetworkInfo{
+	return configurePDNNetwork(ctx, adapted, c.network, PDNNetworkInfo{
 		SessionID: uint32(info.SessionID),
 		LocalIPv4: info.LocalIPv4,
 		LocalIPv6: info.LocalIPv6,

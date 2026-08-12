@@ -137,7 +137,7 @@ func ipLabel(ip net.IP) string {
 	return ip.String()
 }
 
-func (c *Client) buildRegistrationConfig(cfg IMSConfig, security imsSecurity) registration.Config {
+func (c *Client) buildRegistrationConfig(cfg ServiceConfig, security imsSecurity) registration.Config {
 	return registration.Config{
 		PrivateIdentity:           cfg.PrivateIdentity,
 		PublicIdentity:            cfg.PublicIdentity,

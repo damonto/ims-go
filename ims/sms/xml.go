@@ -51,17 +51,17 @@ func decodeXMLInfo(data []byte) (xmlInfo, error) {
 	return info, nil
 }
 
-func (info xmlInfo) MarshalText() ([]byte, error) {
-	return info.AppendText(nil)
+func (xi xmlInfo) MarshalText() ([]byte, error) {
+	return xi.AppendText(nil)
 }
 
-func (info xmlInfo) AppendText(dst []byte) ([]byte, error) {
-	if err := info.validate(); err != nil {
+func (xi xmlInfo) AppendText(dst []byte) ([]byte, error) {
+	if err := xi.validate(); err != nil {
 		return nil, err
 	}
 	buf := bytes.NewBuffer(dst)
 	encoder := xml.NewEncoder(buf)
-	if err := info.marshalXML(encoder); err != nil {
+	if err := xi.marshalXML(encoder); err != nil {
 		return nil, err
 	}
 	if err := encoder.Flush(); err != nil {
@@ -70,27 +70,27 @@ func (info xmlInfo) AppendText(dst []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (info xmlInfo) marshalXML(encoder *xml.Encoder) error {
+func (xi xmlInfo) marshalXML(encoder *xml.Encoder) error {
 	start := xml.StartElement{Name: xml.Name{Local: "short-message-info"}}
 	if err := encoder.EncodeToken(start); err != nil {
 		return fmt.Errorf("marshaling sms xml info: %w", err)
 	}
-	if to := strings.TrimSpace(info.To); to != "" {
+	if to := strings.TrimSpace(xi.To); to != "" {
 		if err := encoder.EncodeElement(to, xml.StartElement{Name: xml.Name{Local: "To"}}); err != nil {
 			return fmt.Errorf("marshaling sms xml To: %w", err)
 		}
 	}
-	if from := strings.TrimSpace(info.From); from != "" {
+	if from := strings.TrimSpace(xi.From); from != "" {
 		if err := encoder.EncodeElement(from, xml.StartElement{Name: xml.Name{Local: "From"}}); err != nil {
 			return fmt.Errorf("marshaling sms xml From: %w", err)
 		}
 	}
-	if info.HasCorrelationID || info.CorrelationID != (xmlCorrelationID{}) {
-		if err := info.CorrelationID.marshalXML(encoder); err != nil {
+	if xi.HasCorrelationID || xi.CorrelationID != (xmlCorrelationID{}) {
+		if err := xi.CorrelationID.marshalXML(encoder); err != nil {
 			return err
 		}
 	}
-	if outcome := strings.TrimSpace(info.DeliveryOutcome); outcome != "" {
+	if outcome := strings.TrimSpace(xi.DeliveryOutcome); outcome != "" {
 		if err := encoder.EncodeElement(outcome, xml.StartElement{Name: xml.Name{Local: "Delivery-Outcome"}}); err != nil {
 			return fmt.Errorf("marshaling sms xml Delivery-Outcome: %w", err)
 		}
@@ -133,7 +133,7 @@ func (id xmlCorrelationID) marshalXML(encoder *xml.Encoder) error {
 	return nil
 }
 
-func (info *xmlInfo) UnmarshalText(data []byte) error {
+func (xi *xmlInfo) UnmarshalText(data []byte) error {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var out xmlInfo
 	var rootSeen bool
@@ -225,23 +225,23 @@ func (info *xmlInfo) UnmarshalText(data []byte) error {
 	if !rootSeen {
 		return errors.New("sms xml info is empty")
 	}
-	*info = out
+	*xi = out
 	return nil
 }
 
-func (info *xmlInfo) ReadFrom(r io.Reader) (int64, error) {
+func (xi *xmlInfo) ReadFrom(r io.Reader) (int64, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return 0, fmt.Errorf("reading sms xml info: %w", err)
 	}
-	if err := info.UnmarshalText(data); err != nil {
+	if err := xi.UnmarshalText(data); err != nil {
 		return int64(len(data)), err
 	}
 	return int64(len(data)), nil
 }
 
-func (info xmlInfo) WriteTo(w io.Writer) (int64, error) {
-	data, err := info.MarshalText()
+func (xi xmlInfo) WriteTo(w io.Writer) (int64, error) {
+	data, err := xi.MarshalText()
 	if err != nil {
 		return 0, err
 	}
@@ -337,14 +337,14 @@ func xmlElementInDocumentNamespace(name xml.Name, documentNamespace string) bool
 	return name.Space == "" || name.Space == documentNamespace
 }
 
-func (info xmlInfo) validate() error {
-	if err := validateXMLSIPURI("To", info.To); err != nil {
+func (xi xmlInfo) validate() error {
+	if err := validateXMLSIPURI("To", xi.To); err != nil {
 		return fmt.Errorf("marshaling sms xml To: %w", err)
 	}
-	if err := validateXMLSIPURI("From", info.From); err != nil {
+	if err := validateXMLSIPURI("From", xi.From); err != nil {
 		return fmt.Errorf("marshaling sms xml From: %w", err)
 	}
-	if outcome := strings.TrimSpace(info.DeliveryOutcome); outcome != "" && !validDeliveryOutcome(outcome) {
+	if outcome := strings.TrimSpace(xi.DeliveryOutcome); outcome != "" && !validDeliveryOutcome(outcome) {
 		return fmt.Errorf("marshaling sms xml Delivery-Outcome: unsupported value %q", outcome)
 	}
 	return nil

@@ -3,7 +3,6 @@
 package ims
 
 import (
-	"context"
 	"errors"
 	"net"
 	"syscall"
@@ -24,14 +23,16 @@ func TestOpenVoLTEMediaTransportBindsIMSInterface(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			network, err := newVoLTENetwork(tt.interfaceName)
+			network, err := newVoLTENetwork(net.InterfaceByName, tt.interfaceName)
 			var conn *net.UDPConn
 			if err == nil {
-				conn, err = network.ListenUDP(context.Background(), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+				conn, err = network.ListenUDP(t.Context(), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 			}
 			if tt.wantErr {
 				if err == nil {
-					_ = conn.Close()
+					if closeErr := conn.Close(); closeErr != nil {
+						t.Errorf("Close() error = %v", closeErr)
+					}
 					t.Fatal("opening VoLTE UDP listener error = nil, want error")
 				}
 				return
@@ -42,7 +43,11 @@ func TestOpenVoLTEMediaTransportBindsIMSInterface(t *testing.T) {
 				}
 				t.Fatalf("opening VoLTE UDP listener: %v", err)
 			}
-			defer conn.Close()
+			t.Cleanup(func() {
+				if err := conn.Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			})
 			raw, err := conn.SyscallConn()
 			if err != nil {
 				t.Fatalf("SyscallConn() error = %v", err)

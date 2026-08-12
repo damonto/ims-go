@@ -87,7 +87,7 @@ func (s *Endpoint) NotifyMemoryAvailable(ctx context.Context, target string) err
 		if !retry || attempt == 1 {
 			return err
 		}
-		timer := time.NewTimer(currentMemoryAvailableRetryTimeout())
+		timer := time.NewTimer(s.memoryAvailableRetryTimeout)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

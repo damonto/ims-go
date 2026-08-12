@@ -106,6 +106,7 @@ type NetstackTCPConn struct {
 	accept    chan net.Conn
 	errCh     chan error
 	closeOnce sync.Once
+	closeErr  error
 }
 
 type netstackTCPListener struct {
@@ -114,7 +115,9 @@ type netstackTCPListener struct {
 	listener   net.Listener
 	transports map[*NetstackTCPConn]struct{}
 	done       chan struct{}
+	exited     chan struct{}
 	closeOnce  sync.Once
+	closeErr   error
 }
 
 type NetstackUDPConn struct {
@@ -127,6 +130,7 @@ type NetstackUDPConn struct {
 
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+	closeErr  error
 }
 
 func (n *Netstack) DialTCP(ctx context.Context, cfg TCPConfig) (*NetstackTCPConn, error) {
@@ -185,7 +189,7 @@ func (n *Netstack) registerTCPListener(conn *NetstackTCPConn, network tcpip.Netw
 		}
 		listener = &netstackTCPListener{
 			netstack: n, key: key, listener: opened,
-			transports: make(map[*NetstackTCPConn]struct{}), done: make(chan struct{}),
+			transports: make(map[*NetstackTCPConn]struct{}), done: make(chan struct{}), exited: make(chan struct{}),
 		}
 		n.tcpListeners[key] = listener
 		start = true
@@ -200,6 +204,7 @@ func (n *Netstack) registerTCPListener(conn *NetstackTCPConn, network tcpip.Netw
 }
 
 func (l *netstackTCPListener) acceptLoop() {
+	defer close(l.exited)
 	for {
 		conn, err := l.listener.Accept()
 		if err != nil {
@@ -233,23 +238,30 @@ func (l *netstackTCPListener) acceptLoop() {
 		}
 		l.netstack.mu.Unlock()
 		if target == nil {
-			_ = conn.Close()
+			l.reportCloseError(conn.Close())
 			continue
 		}
 		select {
 		case target.accept <- conn:
 		case <-target.done:
-			_ = conn.Close()
+			l.reportCloseError(conn.Close())
 		case <-l.done:
-			_ = conn.Close()
+			l.reportCloseError(conn.Close())
 			return
 		}
 	}
 }
 
-func (n *Netstack) releaseTCPListener(listener *netstackTCPListener, conn *NetstackTCPConn) {
-	if listener == nil {
+func (l *netstackTCPListener) reportCloseError(err error) {
+	if err == nil || errors.Is(err, net.ErrClosed) {
 		return
+	}
+	l.netstack.session.Logger().Debug("closing unmatched IMS netstack TCP connection failed", "err", err)
+}
+
+func (n *Netstack) releaseTCPListener(listener *netstackTCPListener, conn *NetstackTCPConn) error {
+	if listener == nil {
+		return nil
 	}
 	n.mu.Lock()
 	delete(listener.transports, conn)
@@ -259,8 +271,9 @@ func (n *Netstack) releaseTCPListener(listener *netstackTCPListener, conn *Netst
 	}
 	n.mu.Unlock()
 	if stop {
-		listener.stop()
+		return listener.stop()
 	}
+	return nil
 }
 
 func (n *Netstack) retireTCPPolicy(conn net.Conn, policy *netstackSecurityPolicy, key netstackFlowKey) {
@@ -278,17 +291,23 @@ func (n *Netstack) retireTCPPolicy(conn net.Conn, policy *netstackSecurityPolicy
 	}
 	go func() {
 		defer n.wg.Done()
-		_ = tcpConn.WaitClosed(n.ctx)
+		ctx, cancel := contextWithDone(n.done)
+		defer cancel()
+		if err := tcpConn.WaitClosed(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			n.session.Logger().Debug("waiting for IMS netstack TCP connection close failed", "err", err)
+		}
 		n.removeSecurity(policy)
 		n.clearFlow(key)
 	}()
 }
 
-func (l *netstackTCPListener) stop() {
+func (l *netstackTCPListener) stop() error {
 	l.closeOnce.Do(func() {
 		close(l.done)
-		_ = l.listener.Close()
+		l.closeErr = netstackCloseError(l.listener.Close())
+		<-l.exited
 	})
+	return l.closeErr
 }
 
 func (n *Netstack) dialTCP(ctx context.Context, cfg TCPConfig, secure *SecureTCPConfig) (*NetstackTCPConn, error) {
@@ -311,7 +330,7 @@ func (n *Netstack) dialTCP(ctx context.Context, cfg TCPConfig, secure *SecureTCP
 	}
 	key := netstackFlowKeyForAddresses(packet.ProtocolTCP, endpoints.local.IP, endpoints.remote.IP, endpoints.local.Port, endpoints.remote.Port)
 	var conn net.Conn
-	err = n.withWriteContext(key, ctx, func() error {
+	err = n.withWriteContext(ctx, key, func() error {
 		opened, dialErr := gonet.DialTCPWithBindAndMaxSeg(ctx, n.stack, netstackFullAddress(endpoints.local.IP, endpoints.local.Port), netstackFullAddress(endpoints.remote.IP, endpoints.remote.Port), endpoints.network, netstackTCPMSS)
 		conn = opened
 		return dialErr
@@ -348,19 +367,18 @@ func (n *Netstack) tcpEndpoints(cfg TCPConfig, configuredInnerLocalIP net.IP, mo
 	}
 	localPort := cfg.LocalPort
 	if localPort == 0 {
-		random, err := randomUint32()
-		if err != nil {
-			return tcpEndpointSet{}, err
-		}
+		random := randomUint32()
 		localPort = netstackEphemeralBase + int(random%netstackEphemeralRange)
 	}
 	network, err := n.ensureAddress(innerLocalIP)
 	if err != nil {
 		return tcpEndpointSet{}, err
 	}
-	if _, remoteNetwork, _, err := netstackIP(outerRemote.IP); err != nil {
+	_, remoteNetwork, _, err := netstackIP(outerRemote.IP)
+	if err != nil {
 		return tcpEndpointSet{}, err
-	} else if remoteNetwork != network {
+	}
+	if remoteNetwork != network {
 		return tcpEndpointSet{}, errors.New("local and remote TCP address families differ")
 	}
 	return tcpEndpointSet{
@@ -486,29 +504,17 @@ func (t *NetstackTCPConn) flowKey() netstackFlowKey {
 func (t *NetstackTCPConn) WritePacket(ctx context.Context, data []byte) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	conn, err := t.awaitConn(ctx)
+	opCtx, cancel := t.operationContext(ctx)
+	defer cancel()
+	conn, err := t.awaitConn(opCtx)
 	if err != nil {
 		return err
 	}
-	if err := setConnDeadline(conn, ctx, true); err != nil {
-		return fmt.Errorf("writing IMS netstack TCP packet: %w", err)
-	}
-	defer conn.SetWriteDeadline(time.Time{})
-	err = t.netstack.withWriteContext(t.flowKey(), ctx, func() error {
-		for written := 0; written < len(data); {
-			n, writeErr := conn.Write(data[written:])
-			if writeErr != nil {
-				return writeErr
-			}
-			if n == 0 {
-				return errors.New("zero bytes written")
-			}
-			written += n
-		}
-		return nil
+	err = t.netstack.withWriteContext(opCtx, t.flowKey(), func() error {
+		return writeTCPConn(opCtx, conn, data)
 	})
 	if err != nil {
-		return t.connectionError("writing IMS netstack TCP packet", conn, err)
+		return t.connectionErrorLocked("writing IMS netstack TCP packet", conn, err)
 	}
 	return nil
 }
@@ -516,8 +522,10 @@ func (t *NetstackTCPConn) WritePacket(ctx context.Context, data []byte) error {
 func (t *NetstackTCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
+	opCtx, cancel := t.operationContext(ctx)
+	defer cancel()
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := opCtx.Err(); err != nil {
 			return nil, nil, fmt.Errorf("reading IMS netstack TCP packet: %w", err)
 		}
 		t.streamMu.Lock()
@@ -526,12 +534,12 @@ func (t *NetstackTCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, err
 			return msg, t.RemoteAddr(), nil
 		}
 		t.streamMu.Unlock()
-		conn, err := t.awaitConn(ctx)
+		conn, err := t.awaitConn(opCtx)
 		if err != nil {
 			return nil, nil, err
 		}
 		buf := make([]byte, 64*1024)
-		n, err := readTCPConn(ctx, conn, buf)
+		n, err := readTCPConn(opCtx, conn, buf)
 		if n > 0 {
 			t.streamMu.Lock()
 			t.stream = append(t.stream, buf[:n]...)
@@ -551,7 +559,7 @@ func (t *NetstackTCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, err
 			t.stream = append([]byte(nil), rest...)
 			t.queued = append(t.queued, messages...)
 			t.streamMu.Unlock()
-			if ctxErr := ctx.Err(); ctxErr != nil {
+			if ctxErr := opCtx.Err(); ctxErr != nil {
 				return nil, nil, fmt.Errorf("reading IMS netstack TCP packet: %w", ctxErr)
 			}
 			continue
@@ -559,23 +567,78 @@ func (t *NetstackTCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, err
 		if err == nil {
 			continue
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := opCtx.Err(); ctxErr != nil {
 			return nil, nil, fmt.Errorf("reading IMS netstack TCP packet: %w", ctxErr)
 		}
 		return nil, nil, t.connectionError("reading IMS netstack TCP packet", conn, netstackReadError(err))
 	}
 }
 
+func (t *NetstackTCPConn) operationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-t.done:
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		once.Do(func() {
+			close(stop)
+			cancel()
+		})
+	}
+}
+
+func writeTCPConn(ctx context.Context, conn net.Conn, data []byte) (resultErr error) {
+	if err := setConnDeadline(ctx, conn, true); err != nil {
+		return fmt.Errorf("setting IMS netstack TCP write deadline: %w", err)
+	}
+	interrupted := make(chan struct{})
+	var interruptErr error
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		interruptErr = conn.SetWriteDeadline(time.Now())
+		close(interrupted)
+	})
+	defer func() {
+		if !stopInterrupt() {
+			<-interrupted
+		}
+		if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("clearing IMS netstack TCP write deadline: %w", err))
+		}
+		resultErr = errors.Join(resultErr, interruptErr)
+	}()
+	for written := 0; written < len(data); {
+		n, err := conn.Write(data[written:])
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("zero bytes written")
+		}
+		written += n
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func readTCPConn(ctx context.Context, conn net.Conn, buf []byte) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := setConnDeadline(conn, ctx, false); err != nil {
+	if err := setConnDeadline(ctx, conn, false); err != nil {
 		return 0, err
 	}
 	interrupted := make(chan struct{})
+	var interruptErr error
 	stopInterrupt := context.AfterFunc(ctx, func() {
-		_ = conn.SetReadDeadline(time.Now())
+		interruptErr = conn.SetReadDeadline(time.Now())
 		close(interrupted)
 	})
 	n, err := conn.Read(buf)
@@ -585,6 +648,7 @@ func readTCPConn(ctx context.Context, conn net.Conn, buf []byte) (int, error) {
 	if clearErr := conn.SetReadDeadline(time.Time{}); err == nil {
 		err = clearErr
 	}
+	err = errors.Join(err, interruptErr)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return n, ctxErr
 	}
@@ -614,8 +678,7 @@ func (t *NetstackTCPConn) awaitConn(ctx context.Context) (net.Conn, error) {
 		t.mu.Lock()
 		if t.closed {
 			t.mu.Unlock()
-			_ = conn.Close()
-			return nil, errors.New("using IMS netstack TCP connection: transport is closed")
+			return nil, errors.Join(errors.New("using IMS netstack TCP connection: transport is closed"), netstackCloseError(conn.Close()))
 		}
 		t.conn = conn
 		t.mu.Unlock()
@@ -624,6 +687,12 @@ func (t *NetstackTCPConn) awaitConn(ctx context.Context) (net.Conn, error) {
 }
 
 func (t *NetstackTCPConn) connectionError(action string, conn net.Conn, err error) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	return t.connectionErrorLocked(action, conn, err)
+}
+
+func (t *NetstackTCPConn) connectionErrorLocked(action string, conn net.Conn, err error) error {
 	err = t.netstack.transportError(t.flowKey(), err)
 	if t.netstack.terminalErr() != nil {
 		return fmt.Errorf("%s: %w", action, err)
@@ -641,9 +710,9 @@ func (t *NetstackTCPConn) connectionError(action string, conn net.Conn, err erro
 	}
 	t.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), netstackTCPCloseTimeout)
-	_ = t.netstack.withWriteContext(t.flowKey(), ctx, conn.Close)
+	closeErr := t.netstack.withWriteContext(ctx, t.flowKey(), conn.Close)
 	cancel()
-	return &recoverableTCPConnectionError{err: fmt.Errorf("%s: %w", action, err)}
+	return &recoverableTCPConnectionError{err: errors.Join(fmt.Errorf("%s: %w", action, err), netstackCloseError(closeErr))}
 }
 
 func (t *NetstackTCPConn) dequeue() ([]byte, bool) {
@@ -675,12 +744,14 @@ func (t *NetstackTCPConn) Close() error {
 		t.conn = nil
 		t.mu.Unlock()
 		close(t.done)
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
 		if conn != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), netstackTCPCloseTimeout)
-			_ = t.netstack.withWriteContext(t.flowKey(), ctx, conn.Close)
+			t.closeErr = errors.Join(t.closeErr, netstackCloseError(t.netstack.withWriteContext(ctx, t.flowKey(), conn.Close)))
 			cancel()
 		}
-		t.netstack.releaseTCPListener(server, t)
+		t.closeErr = errors.Join(t.closeErr, t.netstack.releaseTCPListener(server, t))
 		if conn != nil {
 			t.netstack.retireTCPPolicy(conn, t.policy, t.flowKey())
 		} else {
@@ -688,7 +759,7 @@ func (t *NetstackTCPConn) Close() error {
 			t.netstack.clearFlow(t.flowKey())
 		}
 	})
-	return nil
+	return t.closeErr
 }
 
 func (t *NetstackUDPConn) LocalAddr() net.Addr  { return cloneUDPAddr(t.local) }
@@ -713,7 +784,7 @@ func (t *NetstackUDPConn) WritePacket(ctx context.Context, data []byte) error {
 	return t.WritePacketTo(ctx, data, nil)
 }
 
-func (t *NetstackUDPConn) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error {
+func (t *NetstackUDPConn) WritePacketTo(ctx context.Context, data []byte, addr net.Addr) (resultErr error) {
 	remote := net.Addr(t.remote)
 	if t.policy == nil && addr != nil {
 		remote = addr
@@ -723,16 +794,20 @@ func (t *NetstackUDPConn) WritePacketTo(ctx context.Context, data []byte, addr n
 	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	if err := setPacketDeadline(t.conn, ctx, true); err != nil {
+	if err := setPacketDeadline(ctx, t.conn, true); err != nil {
 		return fmt.Errorf("writing IMS netstack UDP packet: %w", err)
 	}
-	defer t.conn.SetWriteDeadline(time.Time{})
+	defer func() {
+		if err := t.conn.SetWriteDeadline(time.Time{}); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("clearing IMS netstack UDP write deadline: %w", err))
+		}
+	}()
 	remoteUDP, ok := remote.(*net.UDPAddr)
 	if !ok || remoteUDP == nil {
 		return errors.New("writing IMS netstack UDP packet: remote address is invalid")
 	}
 	key := t.flowKey(remoteUDP)
-	err := t.netstack.withWriteContext(key, ctx, func() error {
+	err := t.netstack.withWriteContext(ctx, key, func() error {
 		_, writeErr := t.conn.WriteTo(data, remote)
 		return writeErr
 	})
@@ -742,11 +817,15 @@ func (t *NetstackUDPConn) WritePacketTo(ctx context.Context, data []byte, addr n
 	return nil
 }
 
-func (t *NetstackUDPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	if err := setPacketDeadline(t.conn, ctx, false); err != nil {
+func (t *NetstackUDPConn) ReadPacket(ctx context.Context) (data []byte, addr net.Addr, resultErr error) {
+	if err := setPacketDeadline(ctx, t.conn, false); err != nil {
 		return nil, nil, t.readError(ctx, err)
 	}
-	defer t.conn.SetReadDeadline(time.Time{})
+	defer func() {
+		if err := t.conn.SetReadDeadline(time.Time{}); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("clearing IMS netstack UDP read deadline: %w", err))
+		}
+	}()
 	buf := make([]byte, 65535)
 	n, addr, err := t.conn.ReadFrom(buf)
 	if err != nil {
@@ -768,17 +847,24 @@ func (t *NetstackUDPConn) readError(ctx context.Context, err error) error {
 
 func (t *NetstackUDPConn) Close() error {
 	t.closeOnce.Do(func() {
-		_ = t.conn.Close()
+		t.closeErr = netstackCloseError(t.conn.Close())
 		t.netstack.removeSecurity(t.policy)
 		if t.remote != nil {
 			t.netstack.clearFlow(t.flowKey(t.remote))
 		}
 		close(t.done)
 	})
-	return nil
+	return t.closeErr
 }
 
-func setConnDeadline(conn net.Conn, ctx context.Context, write bool) error {
+func netstackCloseError(err error) error {
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+func setConnDeadline(ctx context.Context, conn net.Conn, write bool) error {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Time{}
@@ -789,7 +875,7 @@ func setConnDeadline(conn net.Conn, ctx context.Context, write bool) error {
 	return conn.SetReadDeadline(deadline)
 }
 
-func setPacketDeadline(conn net.PacketConn, ctx context.Context, write bool) error {
+func setPacketDeadline(ctx context.Context, conn net.PacketConn, write bool) error {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Time{}

@@ -165,7 +165,7 @@ func (s *Session) readProtectedIKEMessage(ctx context.Context, read protectedIKE
 		if !matchesIKEMessage(data, udpAddr, read.expected) {
 			continue
 		}
-		var packet ike.IKEPacket
+		var packet ike.Packet
 		if err := packet.UnmarshalBinary(data); err != nil {
 			if isIKEFragmentPacket(data) {
 				continue
@@ -190,7 +190,7 @@ func (s *Session) readProtectedIKEMessage(ctx context.Context, read protectedIKE
 	}
 }
 
-func openIKEPacketMaybeFragmented(crypto *ikeCrypto, packet ike.IKEPacket, senderInitiator bool, fragmentationSupported bool, reassembly *ikeFragmentReassembly) ([]ike.Payload, bool, error) {
+func openIKEPacketMaybeFragmented(crypto *ikeCrypto, packet ike.Packet, senderInitiator bool, fragmentationSupported bool, reassembly *ikeFragmentReassembly) ([]ike.Payload, bool, error) {
 	if len(packet.Payloads) != 1 {
 		return nil, false, errors.New("expected encrypted payload container")
 	}
@@ -216,7 +216,7 @@ func openIKEPacketMaybeFragmented(crypto *ikeCrypto, packet ike.IKEPacket, sende
 }
 
 func isIKEFragmentPacket(data []byte) bool {
-	var header ike.IKEHeader
+	var header ike.Header
 	if err := header.UnmarshalBinary(data); err != nil {
 		return false
 	}
@@ -311,7 +311,7 @@ type ikeResponseMatch struct {
 }
 
 func newIKEResponseMatch(request []byte, peer *net.UDPAddr) (ikeResponseMatch, error) {
-	var header ike.IKEHeader
+	var header ike.Header
 	if err := header.UnmarshalBinary(request); err != nil {
 		return ikeResponseMatch{}, fmt.Errorf("parsing outbound ike header: %w", err)
 	}
@@ -325,7 +325,7 @@ func newIKEResponseMatch(request []byte, peer *net.UDPAddr) (ikeResponseMatch, e
 }
 
 func matchesIKEMessage(packet []byte, peer *net.UDPAddr, expected ikeResponseMatch) bool {
-	var header ike.IKEHeader
+	var header ike.Header
 	if err := header.UnmarshalBinary(packet); err != nil {
 		return false
 	}
@@ -357,7 +357,7 @@ func sameUDPAddr(a, b *net.UDPAddr) bool {
 	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
 }
 
-func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) error {
+func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) (resultErr error) {
 	s.outerWriteMu.Lock()
 	defer s.outerWriteMu.Unlock()
 
@@ -365,8 +365,15 @@ func (s *Session) writeOuter(ctx context.Context, data []byte, addr net.Addr) er
 		if err := s.conn.SetWriteDeadline(deadline); err != nil {
 			return fmt.Errorf("setting write deadline: %w", err)
 		}
+		defer func() {
+			if err := s.conn.SetWriteDeadline(time.Time{}); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("clearing write deadline: %w", err))
+			}
+		}()
 	} else {
-		_ = s.conn.SetWriteDeadline(time.Time{})
+		if err := s.conn.SetWriteDeadline(time.Time{}); err != nil {
+			return fmt.Errorf("clearing write deadline: %w", err)
+		}
 	}
 	if _, err := s.conn.WriteTo(data, addr); err != nil {
 		return fmt.Errorf("writing packet: %w", err)

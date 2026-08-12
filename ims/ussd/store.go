@@ -3,6 +3,7 @@ package ussd
 import (
 	"errors"
 	"fmt"
+
 	"github.com/damonto/ims-go/ims/sip"
 )
 
@@ -25,9 +26,8 @@ func (s *Endpoint) storeSession(session *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sessions) > 0 {
-		_ = attachment.Close()
 		session.dialogAttachment = nil
-		return fmt.Errorf("storing USSD session: %w", errSessionActive)
+		return errors.Join(fmt.Errorf("storing USSD session: %w", errSessionActive), attachment.Close())
 	}
 	s.sessions[key] = session
 	if inviteKey := session.inviteRequestKey(); inviteKey != "" {
@@ -95,7 +95,9 @@ func (s *Endpoint) removeSession(key string) {
 	}
 	s.mu.Unlock()
 	if session != nil && session.dialogAttachment != nil {
-		_ = session.dialogAttachment.Close()
+		if err := session.dialogAttachment.Close(); err != nil {
+			s.logger.Warn("closing removed USSD dialog failed", "err", err)
+		}
 		session.dialogAttachment = nil
 	}
 }

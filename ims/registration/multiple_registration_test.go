@@ -1,7 +1,6 @@
 package registration
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -228,7 +227,7 @@ func TestPreferredFlowReplacesSingleRegistrationOwnerAfterSuccess(t *testing.T) 
 				}
 			}
 
-			if err := old.Register(context.Background()); err != nil {
+			if err := old.Register(t.Context()); err != nil {
 				t.Fatalf("registering old flow: %v", err)
 			}
 
@@ -258,7 +257,7 @@ func TestPreferredFlowReplacesSingleRegistrationOwnerAfterSuccess(t *testing.T) 
 				}
 			}
 
-			err := preferred.Register(context.Background())
+			err := preferred.Register(t.Context())
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("preferred Register() error = %v, want error %t", err, tt.wantErr)
 			}
@@ -295,7 +294,7 @@ func TestPreferredFlowReplacesSingleRegistrationOwnerAfterSuccess(t *testing.T) 
     </contact>
   </registration>
 </reginfo>`, old.State().PublicIdentity, old.currentRegisterContactURI())
-			if handled, err := old.HandleRequest(context.Background(), session.Request{Message: notify, Transport: oldTransport}); err != nil {
+			if handled, err := old.HandleRequest(t.Context(), session.Request{Message: notify, Transport: oldTransport}); err != nil {
 				t.Fatalf("handling replacement NOTIFY: %v", err)
 			} else if !handled {
 				t.Fatal("replacement NOTIFY was not handled")

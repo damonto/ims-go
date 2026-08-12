@@ -27,8 +27,8 @@ var trackTable2i40 = [...]int16{
 	0, 1, -1, 0, 1,
 }
 
-var startPos2i40_11First = [...]int16{1, 3}
-var startPos2i40_11Second = [...]int16{0, 1, 2, 4}
+var startPos2I40At11BitsFirst = [...]int16{1, 3}
+var startPos2I40At11BitsSecond = [...]int16{0, 1, 2, 4}
 var gray = [...]int16{0, 1, 3, 2, 6, 4, 5, 7}
 
 type code2i40Result struct {
@@ -70,7 +70,7 @@ type highRateSearch struct {
 	rr     [subframeSamples][subframeSamples]int16
 }
 
-func code2i40_9bits(
+func code2I40At9Bits(
 	subframeNumber int16,
 	x []int16,
 	h []int16,
@@ -89,7 +89,7 @@ func code2i40_9bits(
 	return result
 }
 
-func code2i40_11bits(
+func code2I40At11Bits(
 	x []int16,
 	h []int16,
 	t0 int16,
@@ -100,14 +100,14 @@ func code2i40_11bits(
 	addPitchSharpness(h, t0, pitchSharp)
 	search := lowRateCodebookSearch(h, x, 8)
 
-	codvec := search2i40_11(search.dn[:], &search.rr)
-	result := buildCode2i40_11(codvec, search.sign[:], code, h, y)
+	codvec := search2I40At11Bits(search.dn[:], &search.rr)
+	result := buildCode2I40At11Bits(codvec, search.sign[:], code, h, y)
 	copy(result.codeNoSharp[:], code)
 	addPitchSharpness(code, t0, pitchSharp)
 	return result
 }
 
-func code3i40_14bits(
+func code3I40At14Bits(
 	x []int16,
 	h []int16,
 	t0 int16,
@@ -124,7 +124,7 @@ func code3i40_14bits(
 	return result
 }
 
-func code4i40_17bits(
+func code4I40At17Bits(
 	x []int16,
 	h []int16,
 	t0 int16,
@@ -141,7 +141,7 @@ func code4i40_17bits(
 	return result
 }
 
-func code8i40_31bits(
+func code8I40At31Bits(
 	x []int16,
 	cn []int16,
 	h []int16,
@@ -153,7 +153,7 @@ func code8i40_31bits(
 	return buildCode8i40(codvec, search.sign[:], code, h, y)
 }
 
-func code10i40_35bits(
+func code10I40At35Bits(
 	x []int16,
 	cn []int16,
 	h []int16,
@@ -473,17 +473,17 @@ func search2i40(
 	return codvec
 }
 
-func search2i40_11(
+func search2I40At11Bits(
 	dn []int16,
 	rr *[subframeSamples][subframeSamples]int16,
 ) [pulseCount2]int16 {
 	codvec := [pulseCount2]int16{0, 1}
 	psk := int16(-1)
 	alpk := int16(1)
-	for track1 := range len(startPos2i40_11First) {
-		for track2 := range len(startPos2i40_11Second) {
-			ipos0 := startPos2i40_11First[track1]
-			ipos1 := startPos2i40_11Second[track2]
+	for track1 := range len(startPos2I40At11BitsFirst) {
+		for track2 := range len(startPos2I40At11BitsSecond) {
+			ipos0 := startPos2I40At11BitsFirst[track1]
+			ipos1 := startPos2I40At11BitsSecond[track2]
 			for i0 := ipos0; i0 < subframeSamples; i0 += codebookStep {
 				ps0 := dn[i0]
 				alp0 := int32(rr[i0][i0]) << 14
@@ -1027,7 +1027,7 @@ func buildCode2i40(
 	return code2i40Result{index: index, sign: rsign}
 }
 
-func buildCode2i40_11(
+func buildCode2I40At11Bits(
 	codvec [pulseCount2]int16,
 	dnSign []int16,
 	code []int16,

@@ -144,7 +144,7 @@ const (
 	notifyTypePCSCFReselectionSupport      uint16 = 41304
 	notifyTypeN1ModeCapability             uint16 = 51015
 	notifyTypeN1ModeInformation            uint16 = 51115
-	notifyTypeN1ModeSNSSAIPlmnID           uint16 = 52216
+	notifyTypeN1ModeSNSSAIPLMNID           uint16 = 52216
 
 	notifyTypeStatusMin uint16 = 16384
 )

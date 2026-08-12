@@ -21,7 +21,7 @@ var startPos2i40 = [...]int16{
 
 var dgray = [...]int16{0, 1, 3, 2, 5, 6, 4, 7}
 
-func decode2i40_9bits(subframeNumber, sign, index int16) [subframeSamples]int16 {
+func decode2I40At9Bits(subframeNumber, sign, index int16) [subframeSamples]int16 {
 	var code [subframeSamples]int16
 	track := (index & 64) >> 3
 	first := index & 7
@@ -38,7 +38,7 @@ func decode2i40_9bits(subframeNumber, sign, index int16) [subframeSamples]int16 
 	return code
 }
 
-func decode2i40_11bits(sign, index int16) [subframeSamples]int16 {
+func decode2I40At11Bits(sign, index int16) [subframeSamples]int16 {
 	var code [subframeSamples]int16
 	track0 := index & 1
 	index >>= 1
@@ -62,7 +62,7 @@ func decode2i40_11bits(sign, index int16) [subframeSamples]int16 {
 	return code
 }
 
-func decode3i40_14bits(sign, index int16) [subframeSamples]int16 {
+func decode3I40At14Bits(sign, index int16) [subframeSamples]int16 {
 	var code [subframeSamples]int16
 	pos0 := (index & 7) * 5
 
@@ -84,7 +84,7 @@ func decode3i40_14bits(sign, index int16) [subframeSamples]int16 {
 	return code
 }
 
-func decode4i40_17bits(sign, index int16) [subframeSamples]int16 {
+func decode4I40At17Bits(sign, index int16) [subframeSamples]int16 {
 	var code [subframeSamples]int16
 	pos0 := dgray[index&7] * 5
 
@@ -109,7 +109,7 @@ func decode4i40_17bits(sign, index int16) [subframeSamples]int16 {
 	return code
 }
 
-func decode8i40_31bits(index []int16) [subframeSamples]int16 {
+func decode8I40At31Bits(index []int16) [subframeSamples]int16 {
 	var code [subframeSamples]int16
 	signs, positions := decompressCode31(index)
 
@@ -130,7 +130,7 @@ func decode8i40_31bits(index []int16) [subframeSamples]int16 {
 	return code
 }
 
-func decode10i40_35bits(index []int16) [subframeSamples]int16 {
+func decode10I40At35Bits(index []int16) [subframeSamples]int16 {
 	var code [subframeSamples]int16
 	for track := range int16(5) {
 		tmp := index[track]
@@ -167,9 +167,9 @@ func decompressCode31(index []int16) ([4]int16, [8]int16) {
 
 	msbs = index[6] >> 2
 	lsbs = index[6] & 3
-	msbs0_24 := (msbs*25 + 12) >> 5
-	div5 := msbs0_24 / 5
-	rem5 := msbs0_24 - div5*5
+	msbs0To24 := (msbs*25 + 12) >> 5
+	div5 := msbs0To24 / 5
+	rem5 := msbs0To24 - div5*5
 	if div5&1 == 1 {
 		rem5 = 4 - rem5
 	}

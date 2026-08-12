@@ -165,9 +165,7 @@ func RandomHex(length int) string {
 
 func RandomUint32() uint32 {
 	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		panic(err)
-	}
+	_, _ = rand.Read(buf[:])
 	return binary.BigEndian.Uint32(buf[:])
 }
 
@@ -176,9 +174,7 @@ func randomString(length int, alphabet string) string {
 	limit := 256 - 256%len(alphabet)
 	var rnd [32]byte
 	for written := 0; written < len(buf); {
-		if _, err := rand.Read(rnd[:]); err != nil {
-			panic(err)
-		}
+		_, _ = rand.Read(rnd[:])
 		for _, b := range rnd {
 			if int(b) >= limit {
 				continue

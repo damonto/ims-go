@@ -103,7 +103,7 @@ func TestInnerPacketRoundTrip(t *testing.T) {
 					SrcIP:   net.IPv4(10, 0, 0, 1),
 					DstIP:   net.IPv4(10, 0, 0, 2),
 				},
-				ESP: &esp.ESPPacket{
+				ESP: &esp.Packet{
 					SPI:      0x01020304,
 					Sequence: 0x05060708,
 					Payload:  []byte{0xaa, 0xbb},
@@ -143,11 +143,14 @@ func TestDecodePayload(t *testing.T) {
 			name:  "udp dispatch",
 			proto: ProtocolUDP,
 			payload: func() []byte {
-				wire, _ := (UDPSegment{
+				wire, err := (UDPSegment{
 					Src:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
 					Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},
 					Payload: []byte("ok"),
 				}).MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
 				return wire
 			}(),
 			check: func(t *testing.T, pkt InnerPacket) {

@@ -20,10 +20,7 @@ func TestSTUNBindingResponseRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, transactionID, err := newSTUNBindingRequest()
-			if err != nil {
-				t.Fatalf("newSTUNBindingRequest() error = %v", err)
-			}
+			_, transactionID := newSTUNBindingRequest()
 			packet, err := stunBindingResponse(transactionID, tt.peer)
 			if err != nil {
 				t.Fatalf("stunBindingResponse() error = %v", err)
@@ -71,7 +68,7 @@ func TestAwaitSTUNBindingRetransmits(t *testing.T) {
 					resultCh <- stunResult{mapped: "192.0.2.10:5060"}
 				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			if _, err := sess.awaitSTUNBinding(ctx, transport, []byte("request"), resultCh, time.Millisecond); err != nil {
 				t.Fatalf("awaitSTUNBinding() error = %v", err)
@@ -98,7 +95,7 @@ func TestAwaitSTUNBindingTimesOutAfterRequestLimit(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			_, err = sess.awaitSTUNBinding(context.Background(), transport, []byte("request"), make(chan stunResult), time.Millisecond)
+			_, err = sess.awaitSTUNBinding(t.Context(), transport, []byte("request"), make(chan stunResult), time.Millisecond)
 			if err == nil {
 				t.Fatal("awaitSTUNBinding() error = nil, want timeout")
 			}
@@ -130,7 +127,7 @@ func TestHandleSTUNBindingResponseValidation(t *testing.T) {
 			resultCh := make(chan stunResult, 1)
 			sess.stunPending[transactionID] = stunPendingTransaction{transport: transport, resultCh: resultCh}
 			packet := append(stunHeader(stunBindingSuccessResponse, transactionID, len(tt.attribute)), tt.attribute...)
-			if err := sess.handleKeepAlivePacket(context.Background(), inboundMessage{packet: packet, transport: transport, peer: transport.remote}); err != nil {
+			if err := sess.handleKeepAlivePacket(t.Context(), inboundMessage{packet: packet, transport: transport, peer: transport.remote}); err != nil {
 				t.Fatalf("handleKeepAlivePacket() error = %v", err)
 			}
 			select {
@@ -191,7 +188,7 @@ func TestSessionCloseUnblocksKeepAlive(t *testing.T) {
 			}
 			errCh := make(chan error, 1)
 			go func() {
-				errCh <- sess.SendKeepAlive(context.Background())
+				errCh <- sess.SendKeepAlive(t.Context())
 			}()
 			waitForWriteCount(t, transport, 1)
 			if err := sess.Close(); err != nil {
@@ -228,7 +225,7 @@ func TestTransportDetachUnblocksKeepAlive(t *testing.T) {
 				t.Fatalf("AddTransport() error = %v", err)
 			}
 			errCh := make(chan error, 1)
-			go func() { errCh <- sess.SendKeepAlive(context.Background()) }()
+			go func() { errCh <- sess.SendKeepAlive(t.Context()) }()
 			waitForWriteCount(t, oldTransport, 1)
 			oldAttachment, err := sess.PromotePrimary(newTransport)
 			if err != nil {

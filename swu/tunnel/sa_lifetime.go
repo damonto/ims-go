@@ -30,13 +30,15 @@ func childSAExpiry(now time.Time, lifetime time.Duration) time.Time {
 	return now.Add(lifetime)
 }
 
-var saRekeyJitter = randomSARekeyJitter
-
 func childSARekeyTime(now time.Time, lifetime, margin time.Duration) time.Time {
+	return childSARekeyTimeWithJitter(now, lifetime, margin, randomSARekeyJitter)
+}
+
+func childSARekeyTimeWithJitter(now time.Time, lifetime, margin time.Duration, jitter func(time.Duration) time.Duration) time.Time {
 	if lifetime <= 0 || margin <= 0 {
 		return time.Time{}
 	}
-	return now.Add(lifetime - margin + saRekeyJitter(margin/2))
+	return now.Add(lifetime - margin + jitter(margin/2))
 }
 
 func saByteExpiry(lifetime uint64) uint64 {

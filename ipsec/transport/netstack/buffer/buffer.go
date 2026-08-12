@@ -423,7 +423,7 @@ func (b *Buffer) Clone() Buffer {
 func (b *Buffer) DeepClone() Buffer {
 	newBuf := Buffer{}
 	buf := b.Clone()
-	reader := buf.AsBufferReader()
+	reader := buf.AsReader()
 	newBuf.WriteFromReader(&reader, b.size)
 	return newBuf
 }
@@ -589,35 +589,35 @@ func (b *Buffer) readByte() (byte, error) {
 	return bt, nil
 }
 
-// AsBufferReader returns the Buffer as a BufferReader capable of io methods.
+// AsReader returns the Buffer as a BufferReader capable of io methods.
 // The new BufferReader takes ownership of b.
-func (b *Buffer) AsBufferReader() BufferReader {
-	return BufferReader{b}
+func (b *Buffer) AsReader() Reader {
+	return Reader{b}
 }
 
-// BufferReader implements io methods on Buffer. Users must call Close()
+// Reader implements io methods on Buffer. Users must call Close()
 // when finished with the buffer to free the underlying memory.
-type BufferReader struct {
+type Reader struct {
 	b *Buffer
 }
 
 // Read implements the io.Reader interface.
-func (br *BufferReader) Read(p []byte) (int, error) {
+func (br *Reader) Read(p []byte) (int, error) {
 	return br.b.read(p)
 }
 
 // ReadByte implements the io.ByteReader interface.
-func (br *BufferReader) ReadByte() (byte, error) {
+func (br *Reader) ReadByte() (byte, error) {
 	return br.b.readByte()
 }
 
 // Close implements the io.Closer interface.
-func (br *BufferReader) Close() {
+func (br *Reader) Close() {
 	br.b.Release()
 }
 
 // Len returns the number of bytes in the unread portion of the buffer.
-func (br *BufferReader) Len() int {
+func (br *Reader) Len() int {
 	return int(br.b.Size())
 }
 

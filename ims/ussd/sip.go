@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-go/ims/registration"
-	"github.com/damonto/ims-go/ims/sip"
 	"net"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Endpoint) targetURI(code string) string {

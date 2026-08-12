@@ -115,7 +115,7 @@ func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Pa
 	if err != nil {
 		return nil, 0, fmt.Errorf("building final auth device identity: %w", err)
 	}
-	header := ike.IKEHeader{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
+	header := ike.Header{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
 	requests, err := sealIKEPackets(f.crypto, header, finalAuthPayloads, true, f.ikeFragmentationSupported)
 	if err != nil {
 		return nil, 0, fmt.Errorf("sealing final ike_auth: %w", err)
@@ -173,7 +173,7 @@ func (f *akaAuthFlow) exchangeResponse(ctx context.Context, serverPayloads []ike
 		return nil, fmt.Errorf("building device identity response: %w", err)
 	}
 	logEAPPacket(f.logger(), "sending EAP packet", "outbound", f.nextRequestID, responseData)
-	header := ike.IKEHeader{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
+	header := ike.Header{InitiatorSPI: f.initiatorSPI, ResponderSPI: f.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: f.nextRequestID}
 	requests, err := sealIKEPackets(f.crypto, header, requestPayloads, true, f.ikeFragmentationSupported)
 	if err != nil {
 		return nil, fmt.Errorf("sealing aka response: %w", err)
@@ -207,7 +207,7 @@ func appendDeviceIdentityResponsePayload(payloads []ike.Payload, serverPayloads 
 	return payloads, nil
 }
 
-func openIKEAuthResponse(packet ike.IKEPacket, crypto *ikeCrypto, action ikeAction) ([]ike.Payload, error) {
+func openIKEAuthResponse(packet ike.Packet, crypto *ikeCrypto, action ikeAction) ([]ike.Payload, error) {
 	payloads, err := crypto.OpenIKE(packet, false)
 	if err == nil {
 		if notifyErr := protectedIKENotifyError(payloads); notifyErr != nil {

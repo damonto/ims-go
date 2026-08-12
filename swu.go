@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/damonto/ims-go/swu/handshake"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 )
 
@@ -242,7 +243,7 @@ func normalizedBackoffPLMN(card Card) (string, string, bool) {
 }
 
 type swuPDNTypeRestrictionGate struct {
-	entries map[swuPDNTypeRestrictionKey]swutunnel.PDNType
+	entries map[swuPDNTypeRestrictionKey]handshake.PDNType
 }
 
 type swuPDNTypeRestrictionKey struct {
@@ -262,14 +263,14 @@ func (c *Client) recordSWUPDNTypeRestriction(info swutunnel.Info) {
 			return
 		}
 		if s.swuPDNTypes.entries == nil {
-			s.swuPDNTypes.entries = make(map[swuPDNTypeRestrictionKey]swutunnel.PDNType)
+			s.swuPDNTypes.entries = make(map[swuPDNTypeRestrictionKey]handshake.PDNType)
 		}
 		s.swuPDNTypes.entries[key] = restriction
 	})
 }
 
 func (c *Client) applySWUPDNTypeRestriction(cfg *swutunnel.Config) {
-	var restriction swutunnel.PDNType
+	var restriction handshake.PDNType
 	c.withStateLock(func(s *clientState) {
 		key, ok := swuPDNTypeRestrictionKeyFor(c.card, *cfg)
 		if !ok {

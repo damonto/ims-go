@@ -34,13 +34,11 @@ func OpenTCPTransport(ctx context.Context, localIP, remoteIP net.IP, remotePort 
 	}
 	tcp, ok := conn.(*net.TCPConn)
 	if !ok {
-		_ = conn.Close()
-		return nil, errors.New("opening tcp transport: connection is not TCP")
+		return nil, errors.Join(errors.New("opening tcp transport: connection is not TCP"), conn.Close())
 	}
 	transport, err := NewTCPTransport(tcp)
 	if err != nil {
-		_ = tcp.Close()
-		return nil, fmt.Errorf("opening tcp transport: %w", err)
+		return nil, errors.Join(fmt.Errorf("opening tcp transport: %w", err), tcp.Close())
 	}
 	return transport, nil
 }
@@ -73,7 +71,7 @@ func (t *tcpTransport) RemoteAddr() net.Addr {
 	return cloneTCPAddr(t.remote)
 }
 
-func (t *tcpTransport) WritePacket(ctx context.Context, data []byte) error {
+func (t *tcpTransport) WritePacket(ctx context.Context, data []byte) (resultErr error) {
 	deadline, hasDeadline := contextDeadline(ctx)
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
@@ -81,7 +79,11 @@ func (t *tcpTransport) WritePacket(ctx context.Context, data []byte) error {
 		if err := t.conn.SetWriteDeadline(deadline); err != nil {
 			return fmt.Errorf("writing tcp packet: %w", err)
 		}
-		defer t.conn.SetWriteDeadline(time.Time{})
+		defer func() {
+			if err := t.conn.SetWriteDeadline(time.Time{}); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("clearing tcp write deadline: %w", err))
+			}
+		}()
 	}
 	if err := ctx.Err(); err != nil {
 		return err

@@ -54,51 +54,51 @@ type Route struct {
 }
 
 // Normalized trims text fields, fills LTE IMS defaults, and validates configured IP families.
-func (cfg Config) Normalized() (Config, error) {
-	cfg.InterfaceName = strings.TrimSpace(cfg.InterfaceName)
+func (c Config) Normalized() (Config, error) {
+	c.InterfaceName = strings.TrimSpace(c.InterfaceName)
 	var err error
-	cfg.AccessNetworkInfo, err = NormalizeAccessNetworkInfo(cfg.AccessNetworkInfo)
+	c.AccessNetworkInfo, err = NormalizeAccessNetworkInfo(c.AccessNetworkInfo)
 	if err != nil {
 		return Config{}, fmt.Errorf("normalizing LTE config: %w", err)
 	}
-	cfg.APN = strings.TrimSpace(cfg.APN)
-	if cfg.APN == "" {
-		cfg.APN = DefaultAPN
+	c.APN = strings.TrimSpace(c.APN)
+	if c.APN == "" {
+		c.APN = DefaultAPN
 	}
-	cfg.PDNType = strings.ToLower(strings.TrimSpace(cfg.PDNType))
-	if cfg.PDNType == "" {
-		cfg.PDNType = DefaultPDNType
+	c.PDNType = strings.ToLower(strings.TrimSpace(c.PDNType))
+	if c.PDNType == "" {
+		c.PDNType = DefaultPDNType
 	}
-	switch cfg.PDNType {
+	switch c.PDNType {
 	case "ipv4", "ipv6", "ipv4v6":
 	default:
-		return Config{}, fmt.Errorf("normalizing LTE config: unsupported pdn type %q", cfg.PDNType)
+		return Config{}, fmt.Errorf("normalizing LTE config: unsupported pdn type %q", c.PDNType)
 	}
-	cfg.LocalIPv4, err = normalizeConfigIP(cfg.LocalIPv4)
+	c.LocalIPv4, err = normalizeConfigIP(c.LocalIPv4)
 	if err != nil {
 		return Config{}, fmt.Errorf("normalizing LTE config: local ipv4: %w", err)
 	}
-	if len(cfg.LocalIPv4) != 0 && cfg.LocalIPv4.To4() == nil {
+	if len(c.LocalIPv4) != 0 && c.LocalIPv4.To4() == nil {
 		return Config{}, errors.New("normalizing LTE config: local ipv4 must be an IPv4 address")
 	}
-	cfg.LocalIPv6, err = normalizeConfigIP(cfg.LocalIPv6)
+	c.LocalIPv6, err = normalizeConfigIP(c.LocalIPv6)
 	if err != nil {
 		return Config{}, fmt.Errorf("normalizing LTE config: local ipv6: %w", err)
 	}
-	if len(cfg.LocalIPv6) != 0 && cfg.LocalIPv6.To4() != nil {
+	if len(c.LocalIPv6) != 0 && c.LocalIPv6.To4() != nil {
 		return Config{}, errors.New("normalizing LTE config: local ipv6 must be an IPv6 address")
 	}
-	if cfg.PDNType == "ipv4" && len(cfg.LocalIPv6) != 0 {
+	if c.PDNType == "ipv4" && len(c.LocalIPv6) != 0 {
 		return Config{}, errors.New("normalizing LTE config: local ipv6 requires ipv6 or ipv4v6 pdn type")
 	}
-	if cfg.PDNType == "ipv6" && len(cfg.LocalIPv4) != 0 {
+	if c.PDNType == "ipv6" && len(c.LocalIPv4) != 0 {
 		return Config{}, errors.New("normalizing LTE config: local ipv4 requires ipv4 or ipv4v6 pdn type")
 	}
-	cfg.PCSCFIPs, err = normalizeIPList(cfg.PCSCFIPs)
+	c.PCSCFIPs, err = normalizeIPList(c.PCSCFIPs)
 	if err != nil {
 		return Config{}, fmt.Errorf("normalizing LTE config: p-cscf addresses: %w", err)
 	}
-	return cfg, nil
+	return c, nil
 }
 
 // NormalizeAccessNetworkInfo validates and canonicalizes an E-UTRAN
@@ -213,48 +213,48 @@ func validateEUTRANCellID(value string) error {
 }
 
 // Clone returns an independent copy of Info, including all net.IP byte slices.
-func (info Info) Clone() Info {
-	info.LocalIPv4 = append(net.IP(nil), info.LocalIPv4...)
-	info.LocalIPv6 = append(net.IP(nil), info.LocalIPv6...)
-	info.PCSCFIPs = cloneIPs(info.PCSCFIPs)
-	return info
+func (i Info) Clone() Info {
+	i.LocalIPv4 = append(net.IP(nil), i.LocalIPv4...)
+	i.LocalIPv6 = append(net.IP(nil), i.LocalIPv6...)
+	i.PCSCFIPs = cloneIPs(i.PCSCFIPs)
+	return i
 }
 
 // LocalIPForRemote chooses the local IMS PDN address matching the remote IP family.
-func (info Info) LocalIPForRemote(remote net.IP) net.IP {
+func (i Info) LocalIPForRemote(remote net.IP) net.IP {
 	if len(remote) != 0 {
 		addr, ok := netip.AddrFromSlice(remote)
 		if !ok {
 			return nil
 		}
-		if addr.Unmap().Is4() && ipMatchesFamily(info.LocalIPv4, true) {
-			return append(net.IP(nil), info.LocalIPv4...)
+		if addr.Unmap().Is4() && ipMatchesFamily(i.LocalIPv4, true) {
+			return append(net.IP(nil), i.LocalIPv4...)
 		}
-		if !addr.Unmap().Is4() && ipMatchesFamily(info.LocalIPv6, false) {
-			return append(net.IP(nil), info.LocalIPv6...)
+		if !addr.Unmap().Is4() && ipMatchesFamily(i.LocalIPv6, false) {
+			return append(net.IP(nil), i.LocalIPv6...)
 		}
 		return nil
 	}
-	if pcscf := info.DefaultPCSCFIP(); len(pcscf) != 0 {
-		return info.LocalIPForRemote(pcscf)
+	if pcscf := i.DefaultPCSCFIP(); len(pcscf) != 0 {
+		return i.LocalIPForRemote(pcscf)
 	}
-	if ipMatchesFamily(info.LocalIPv6, false) {
-		return append(net.IP(nil), info.LocalIPv6...)
+	if ipMatchesFamily(i.LocalIPv6, false) {
+		return append(net.IP(nil), i.LocalIPv6...)
 	}
-	if ipMatchesFamily(info.LocalIPv4, true) {
-		return append(net.IP(nil), info.LocalIPv4...)
+	if ipMatchesFamily(i.LocalIPv4, true) {
+		return append(net.IP(nil), i.LocalIPv4...)
 	}
 	return nil
 }
 
 // RouteTo chooses a local IMS PDN address matching remote.
-func (info Info) RouteTo(remote net.IP) (Route, bool) {
+func (i Info) RouteTo(remote net.IP) (Route, bool) {
 	if len(remote) != 0 {
 		if _, ok := netip.AddrFromSlice(remote); !ok {
 			return Route{}, false
 		}
 	}
-	local := info.LocalIPForRemote(remote)
+	local := i.LocalIPForRemote(remote)
 	if len(local) == 0 {
 		return Route{}, false
 	}
@@ -265,9 +265,9 @@ func (info Info) RouteTo(remote net.IP) (Route, bool) {
 }
 
 // RouteToPCSCF chooses the first P-CSCF with a matching local IMS PDN address.
-func (info Info) RouteToPCSCF() (Route, bool) {
-	for _, pcscf := range info.pcscfCandidateIPs() {
-		route, ok := info.RouteTo(pcscf)
+func (i Info) RouteToPCSCF() (Route, bool) {
+	for _, pcscf := range i.pcscfCandidateIPs() {
+		route, ok := i.RouteTo(pcscf)
 		if ok {
 			return route, true
 		}
@@ -277,10 +277,10 @@ func (info Info) RouteToPCSCF() (Route, bool) {
 
 // PCSCFCandidateCount reports how many P-CSCF addresses have a matching local
 // IMS PDN address.
-func (info Info) PCSCFCandidateCount() int {
+func (i Info) PCSCFCandidateCount() int {
 	count := 0
-	for _, pcscf := range info.pcscfCandidateIPs() {
-		if _, ok := info.RouteTo(pcscf); ok {
+	for _, pcscf := range i.pcscfCandidateIPs() {
+		if _, ok := i.RouteTo(pcscf); ok {
 			count++
 		}
 	}
@@ -289,11 +289,11 @@ func (info Info) PCSCFCandidateCount() int {
 
 // WithNextPCSCF returns a copy with the current P-CSCF removed, making the next
 // usable address the preferred candidate. The receiver is not modified.
-func (info Info) WithNextPCSCF() (Info, bool) {
-	candidates := info.pcscfCandidateIPs()
-	current, ok := info.RouteToPCSCF()
-	if !ok || info.PCSCFCandidateCount() < 2 {
-		return info, false
+func (i Info) WithNextPCSCF() (Info, bool) {
+	candidates := i.pcscfCandidateIPs()
+	current, ok := i.RouteToPCSCF()
+	if !ok || i.PCSCFCandidateCount() < 2 {
+		return i, false
 	}
 	currentIndex := slices.IndexFunc(candidates, current.RemoteIP.Equal)
 	remaining := make([]net.IP, 0, len(candidates)-1)
@@ -301,28 +301,28 @@ func (info Info) WithNextPCSCF() (Info, bool) {
 		next := (currentIndex + offset) % len(candidates)
 		remaining = append(remaining, candidates[next])
 	}
-	info.PCSCFIPs = cloneIPs(remaining)
-	_, ok = info.RouteToPCSCF()
-	return info, ok
+	i.PCSCFIPs = cloneIPs(remaining)
+	_, ok = i.RouteToPCSCF()
+	return i, ok
 }
 
 // PCSCFAddresses returns the configured or modem-provided P-CSCF addresses.
-func (info Info) PCSCFAddresses() []net.IP {
-	return cloneIPs(info.PCSCFIPs)
+func (i Info) PCSCFAddresses() []net.IP {
+	return cloneIPs(i.PCSCFIPs)
 }
 
 // DefaultPCSCFIP returns the first usable P-CSCF address.
-func (info Info) DefaultPCSCFIP() net.IP {
-	route, ok := info.RouteToPCSCF()
+func (i Info) DefaultPCSCFIP() net.IP {
+	route, ok := i.RouteToPCSCF()
 	if !ok {
 		return nil
 	}
 	return append(net.IP(nil), route.RemoteIP...)
 }
 
-func (info Info) pcscfCandidateIPs() []net.IP {
-	candidates := uniqueIPs(info.PCSCFIPs)
-	if !ipMatchesFamily(info.LocalIPv4, true) || !ipMatchesFamily(info.LocalIPv6, false) {
+func (i Info) pcscfCandidateIPs() []net.IP {
+	candidates := uniqueIPs(i.PCSCFIPs)
+	if !ipMatchesFamily(i.LocalIPv4, true) || !ipMatchesFamily(i.LocalIPv6, false) {
 		return candidates
 	}
 	// IR.92 requires IPv6 P-CSCF preference when the IMS PDN assigned both

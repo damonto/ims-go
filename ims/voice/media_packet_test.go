@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestRTCPPacketHelpers(t *testing.T) {
+func TestRTCPPacketClassification(t *testing.T) {
 	tests := []struct {
 		name     string
 		payload  []byte
@@ -31,7 +31,7 @@ func TestRTCPPacketHelpers(t *testing.T) {
 	}
 }
 
-func TestMediaUDPAddrHelpers(t *testing.T) {
+func TestMediaUDPAddressOperations(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 40000, Zone: "zone"}
 	cloned := CloneUDPAddr(addr)
 	if cloned == addr || !UDPAddrMatches(cloned, addr) || cloned.Zone != addr.Zone {

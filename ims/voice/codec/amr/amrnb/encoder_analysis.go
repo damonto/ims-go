@@ -602,7 +602,7 @@ func (e *Encoder) searchFixedCodebook(ctx encoderSubframeContext) error {
 	pitch := sub.pitch
 	switch e.mode {
 	case Mode475, Mode515:
-		fixed := code2i40_9bits(
+		fixed := code2I40At9Bits(
 			int16(ctx.index),
 			pitch.xn2[:],
 			sub.h1[:],
@@ -619,7 +619,7 @@ func (e *Encoder) searchFixedCodebook(ctx encoderSubframeContext) error {
 		copy(sub.fixed.codeNoSharp[:], fixed.codeNoSharp[:])
 		sub.hasFixed = true
 	case Mode590:
-		fixed := code2i40_11bits(
+		fixed := code2I40At11Bits(
 			pitch.xn2[:],
 			sub.h1[:],
 			pitch.t0,
@@ -634,7 +634,7 @@ func (e *Encoder) searchFixedCodebook(ctx encoderSubframeContext) error {
 		sub.fixed.paramCount = 2
 		sub.hasFixed = true
 	case Mode670:
-		fixed := code3i40_14bits(
+		fixed := code3I40At14Bits(
 			pitch.xn2[:],
 			sub.h1[:],
 			pitch.t0,
@@ -649,7 +649,7 @@ func (e *Encoder) searchFixedCodebook(ctx encoderSubframeContext) error {
 		sub.fixed.paramCount = 2
 		sub.hasFixed = true
 	case Mode740, Mode795:
-		fixed := code4i40_17bits(
+		fixed := code4I40At17Bits(
 			pitch.xn2[:],
 			sub.h1[:],
 			pitch.t0,
@@ -669,7 +669,7 @@ func (e *Encoder) searchFixedCodebook(ctx encoderSubframeContext) error {
 			contribution := fxp.Mult(sub.h1[i-int(pitch.t0)], pitSharp)
 			sub.h1[i] = fxp.Add16(sub.h1[i], contribution)
 		}
-		fixed := code8i40_31bits(
+		fixed := code8I40At31Bits(
 			pitch.xn2[:],
 			sub.res[:],
 			sub.h1[:],
@@ -689,7 +689,7 @@ func (e *Encoder) searchFixedCodebook(ctx encoderSubframeContext) error {
 			contribution := int16((int32(sub.h1[i-int(pitch.t0)]) * int32(pitSharp)) >> 15)
 			sub.h1[i] = fxp.Add16(sub.h1[i], contribution)
 		}
-		fixed := code10i40_35bits(
+		fixed := code10I40At35Bits(
 			pitch.xn2[:],
 			sub.res[:],
 			sub.h1[:],

@@ -22,7 +22,7 @@ type QCOMClient struct {
 type QCOMClientConfig struct {
 	MuxDataPort       *qcom.WDSMuxDataPort
 	LegacyMuxDataPort qcom.WDSSIOPort
-	Network           IMSPDNNetwork
+	Network           PDNNetwork
 }
 
 // NewQCOMClient adapts a wwan-go QCOM client for SIM access and VoLTE IMS PDN setup.
@@ -46,7 +46,7 @@ func (c *QCOMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 		session, err = c.client.OpenIMSPDN(ctx, pdnCfg)
 		if err == nil {
 			adapted := qcomIMSPDNSession{session}
-			return configureIMSPDNNetwork(ctx, adapted, c.config.Network, qcomIMSPDNNetworkInfo(session.Info()))
+			return configurePDNNetwork(ctx, adapted, c.config.Network, qcomPDNNetworkInfo(session.Info()))
 		}
 		if i == 0 && len(pdnConfigs) > 1 && errors.Is(err, qcom.QMIErrorNotSupported) {
 			continue
@@ -56,8 +56,8 @@ func (c *QCOMClient) OpenIMSPDN(ctx context.Context, cfg imsPDNConfig) (imsPDNSe
 	return nil, err
 }
 
-func qcomIMSPDNNetworkInfo(info qcom.IMSPDNInfo) IMSPDNNetworkInfo {
-	return IMSPDNNetworkInfo{
+func qcomPDNNetworkInfo(info qcom.IMSPDNInfo) PDNNetworkInfo {
+	return PDNNetworkInfo{
 		LocalIPv4:   info.LocalIPv4,
 		LocalIPv6:   info.LocalIPv6,
 		IPv4Gateway: info.IPv4Gateway,

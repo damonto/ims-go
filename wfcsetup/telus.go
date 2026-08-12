@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,6 +40,7 @@ func (f telusFlow) Check(ctx context.Context) (Result, error) {
 		Card:            f.req.Card,
 		AuthenticateAKA: f.req.AuthenticateAKA,
 		HTTPClient:      f.req.HTTPClient,
+		logger:          f.req.logger(),
 	}
 	result, err := client.Check(ctx)
 	result.Carrier = telusCarrierName(f.req)
@@ -62,6 +64,7 @@ type telusClient struct {
 	Card            Card
 	AuthenticateAKA AKAAuthenticator
 	HTTPClient      *http.Client
+	logger          *slog.Logger
 }
 
 func (c telusClient) Check(ctx context.Context) (Result, error) {
@@ -192,10 +195,16 @@ func (c telusClient) exchangeChallenge(ctx context.Context, response string) (st
 	if err != nil {
 		return "", fmt.Errorf("posting telus eap-aka request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer logCloseError(c.logger, "closing telus eap-aka response body failed", resp.Body)
 	if resp.StatusCode != http.StatusFound {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("posting telus eap-aka request: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			readErr = fmt.Errorf("reading telus eap-aka response: %w", readErr)
+		}
+		return "", errors.Join(
+			fmt.Errorf("posting telus eap-aka request: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+			readErr,
+		)
 	}
 	token := telusAccessTokenFromLocation(resp.Header.Get("Location"))
 	if token == "" {
@@ -280,7 +289,7 @@ func (c telusClient) request(ctx context.Context, endpoint string, out any) erro
 	if err != nil {
 		return fmt.Errorf("querying telus endpoint: %w", err)
 	}
-	defer resp.Body.Close()
+	defer logCloseError(c.logger, "closing telus response body failed", resp.Body)
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("reading telus response: %w", err)

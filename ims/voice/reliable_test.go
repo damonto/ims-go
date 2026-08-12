@@ -287,7 +287,7 @@ func TestReliableProvisionalOutOfOrderIsNotProcessed(t *testing.T) {
 		reliableRSeq: map[string]int64{"early-a": 7},
 	}
 
-	if err := call.handleProvisionalResponse(context.Background(), msg); err != nil {
+	if err := call.handleProvisionalResponse(t.Context(), msg); err != nil {
 		t.Fatalf("handleProvisionalResponse() error = %v", err)
 	}
 	if dialog, ok := call.earlyDialogs["early-a"]; ok && dialog.hasAnswer {
@@ -330,7 +330,7 @@ func TestReliableProvisionalRetransmitsUntilPRACK(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() {
@@ -341,8 +341,7 @@ func TestReliableProvisionalRetransmitsUntilPRACK(t *testing.T) {
 	}
 	defer func() {
 		cancel()
-		_ = svc.Close()
-		_ = sess.Close()
+		closeEndpointAndStackAfterTest(t, svc, sess)
 		<-runErr
 	}()
 
@@ -422,7 +421,7 @@ func TestReliableProvisionalDuplicateInviteDoesNotAdvanceRSeq(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -433,8 +432,7 @@ func TestReliableProvisionalDuplicateInviteDoesNotAdvanceRSeq(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -536,7 +534,7 @@ func TestReliableProvisionalTimeoutRejectsInvite(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -547,8 +545,7 @@ func TestReliableProvisionalTimeoutRejectsInvite(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 

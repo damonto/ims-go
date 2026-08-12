@@ -335,8 +335,7 @@ func validateTransformAttributes(attrs []Attribute) error {
 	return nil
 }
 
-func decodeTransform(next byte, data []byte) (Transform, error) {
-	_ = next
+func decodeTransform(data []byte) (Transform, error) {
 	var transform Transform
 	if err := transform.UnmarshalBinary(data); err != nil {
 		return Transform{}, err
@@ -428,7 +427,7 @@ func (p *Proposal) UnmarshalBinary(data []byte) error {
 		if transformType != payloadTypeTransform {
 			return fmt.Errorf("parsing proposal: unexpected transform tag %d", transformType)
 		}
-		transform, err := decodeTransform(next, remaining[4:length])
+		transform, err := decodeTransform(remaining[4:length])
 		if err != nil {
 			return err
 		}

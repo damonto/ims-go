@@ -73,7 +73,7 @@ func TestSendDTMFWritesTelephoneEventRTP(t *testing.T) {
 			nextTimestamp: 2000,
 		},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := call.SendDTMF(ctx, DTMFRequest{Digits: "*", Duration: 65 * time.Millisecond, Volume: 7}); err != nil {
 		t.Fatalf("SendDTMF() error = %v", err)
@@ -140,7 +140,7 @@ func TestWriteRTPRebasesSpeechAfterDTMF(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	if err := call.SendDTMF(ctx, DTMFRequest{Digits: "1", Duration: 65 * time.Millisecond}); err != nil {
 		t.Fatalf("SendDTMF() error = %v", err)
@@ -160,7 +160,7 @@ func TestWriteRTPRebasesSpeechAfterDTMF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RTPPacket.MarshalBinary() error = %v", err)
 	}
-	if err := call.WriteRTP(context.Background(), speech); err != nil {
+	if err := call.WriteRTP(t.Context(), speech); err != nil {
 		t.Fatalf("WriteRTP() error = %v", err)
 	}
 	gotWire := <-writes
@@ -185,7 +185,7 @@ func TestSendDTMFRequiresNegotiatedTelephoneEvent(t *testing.T) {
 		transport: &voiceRTPOnlyMediaTransport{},
 		media:     NegotiatedMedia{Direction: MediaDirectionSendRecv},
 	}
-	if err := call.SendDTMF(context.Background(), DTMFRequest{Digits: "1"}); err == nil {
+	if err := call.SendDTMF(t.Context(), DTMFRequest{Digits: "1"}); err == nil {
 		t.Fatal("SendDTMF() error = nil, want missing telephone-event error")
 	}
 }
@@ -222,7 +222,7 @@ func TestSendDTMFRejectsUnnegotiatedEvent(t *testing.T) {
 				transport: &voiceRTPOnlyMediaTransport{},
 				media:     tt.media,
 			}
-			if err := call.SendDTMF(context.Background(), DTMFRequest{Digits: tt.digit}); err == nil {
+			if err := call.SendDTMF(t.Context(), DTMFRequest{Digits: tt.digit}); err == nil {
 				t.Fatal("SendDTMF() error = nil, want non-nil")
 			}
 		})
@@ -230,7 +230,7 @@ func TestSendDTMFRejectsUnnegotiatedEvent(t *testing.T) {
 }
 
 func TestSendDTMFSavesRTPStateOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	transport := &dtmfCancelTransport{cancel: cancel}
 	call := &Call{
 		state:     CallStateActive,

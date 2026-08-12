@@ -349,16 +349,13 @@ var gsm7ExtensionEncodeMap = map[rune]byte{
 	'€':  0x65,
 }
 
-var gsm7DecodeMap map[byte]rune
-var gsm7ExtensionDecodeMap map[byte]rune
+var gsm7DecodeMap = reverseGSM7Map(gsm7EncodeMap)
+var gsm7ExtensionDecodeMap = reverseGSM7Map(gsm7ExtensionEncodeMap)
 
-func init() {
-	gsm7DecodeMap = make(map[byte]rune, len(gsm7EncodeMap))
-	for r, v := range gsm7EncodeMap {
-		gsm7DecodeMap[v] = r
+func reverseGSM7Map(encode map[rune]byte) map[byte]rune {
+	decode := make(map[byte]rune, len(encode))
+	for r, v := range encode {
+		decode[v] = r
 	}
-	gsm7ExtensionDecodeMap = make(map[byte]rune, len(gsm7ExtensionEncodeMap))
-	for r, v := range gsm7ExtensionEncodeMap {
-		gsm7ExtensionDecodeMap[v] = r
-	}
+	return decode
 }

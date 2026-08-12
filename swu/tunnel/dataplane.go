@@ -71,7 +71,7 @@ func (s *Session) prepareInnerWrite(pkt packet.InnerPacket, payloadLen int) (inn
 }
 
 func sealInnerPacket(state innerWriteState, innerPacket []byte, nextHeader byte) ([]byte, error) {
-	return state.codec.Encode(esp.ESPPacket{SPI: state.codec.SPI, Sequence: state.seq, NextHeader: nextHeader, Payload: innerPacket})
+	return state.codec.Encode(esp.Packet{SPI: state.codec.SPI, Sequence: state.seq, NextHeader: nextHeader, Payload: innerPacket})
 }
 
 func (s *Session) writeInner(ctx context.Context, pkt packet.InnerPacket, innerPacket []byte, nextHeader byte) error {
@@ -215,7 +215,7 @@ func (s *Session) handleESPPacket(data []byte) {
 		s.logger.Debug("dropping ESP packet for unknown SPI", "spi", spi)
 		return
 	}
-	var espPacket esp.ESPPacket
+	var espPacket esp.Packet
 	var info Info
 	var protectedBytes uint64
 	var err error

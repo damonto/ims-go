@@ -14,14 +14,12 @@ type voLTENetwork struct {
 	interfaceIndex int
 }
 
-var voLTEInterfaceByName = net.InterfaceByName
-
-func newVoLTENetwork(interfaceName string) (voLTENetwork, error) {
+func newVoLTENetwork(interfaceByName func(string) (*net.Interface, error), interfaceName string) (voLTENetwork, error) {
 	interfaceName = strings.TrimSpace(interfaceName)
 	if interfaceName == "" {
 		return voLTENetwork{}, errors.New("IMS interface is required")
 	}
-	ifi, err := voLTEInterfaceByName(interfaceName)
+	ifi, err := interfaceByName(interfaceName)
 	if err != nil {
 		return voLTENetwork{}, fmt.Errorf("find IMS interface %s: %w", interfaceName, err)
 	}
@@ -42,8 +40,7 @@ func (n voLTENetwork) DialTCP(ctx context.Context, local, remote *net.TCPAddr) (
 	}
 	tcp, ok := conn.(*net.TCPConn)
 	if !ok {
-		_ = conn.Close()
-		return nil, errors.New("TCP connection has unexpected type")
+		return nil, errors.Join(errors.New("TCP connection has unexpected type"), conn.Close())
 	}
 	return tcp, nil
 }
@@ -59,8 +56,7 @@ func (n voLTENetwork) ListenUDP(ctx context.Context, local *net.UDPAddr) (*net.U
 	}
 	udp, ok := conn.(*net.UDPConn)
 	if !ok {
-		_ = conn.Close()
-		return nil, errors.New("UDP listener has unexpected type")
+		return nil, errors.Join(errors.New("UDP listener has unexpected type"), conn.Close())
 	}
 	return udp, nil
 }
@@ -76,8 +72,7 @@ func (n voLTENetwork) ListenIP(ctx context.Context, network string, local *net.I
 	}
 	ip, ok := conn.(*net.IPConn)
 	if !ok {
-		_ = conn.Close()
-		return nil, errors.New("IP listener has unexpected type")
+		return nil, errors.Join(errors.New("IP listener has unexpected type"), conn.Close())
 	}
 	return ip, nil
 }

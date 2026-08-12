@@ -61,12 +61,12 @@ const (
 )
 
 var (
-	_ encoding.BinaryAppender    = ESPPacket{}
-	_ encoding.BinaryMarshaler   = ESPPacket{}
-	_ encoding.BinaryUnmarshaler = (*ESPPacket)(nil)
+	_ encoding.BinaryAppender    = Packet{}
+	_ encoding.BinaryMarshaler   = Packet{}
+	_ encoding.BinaryUnmarshaler = (*Packet)(nil)
 )
 
-type ESPPacket struct {
+type Packet struct {
 	SPI        uint32
 	Sequence   uint32
 	NextHeader byte
@@ -87,11 +87,11 @@ func validateESPHeader(spi, sequence uint32) error {
 	return nil
 }
 
-func (p ESPPacket) MarshalBinary() ([]byte, error) {
+func (p Packet) MarshalBinary() ([]byte, error) {
 	return p.AppendBinary(nil)
 }
 
-func (p ESPPacket) AppendBinary(dst []byte) ([]byte, error) {
+func (p Packet) AppendBinary(dst []byte) ([]byte, error) {
 	if err := validateESPHeader(p.SPI, p.Sequence); err != nil {
 		return nil, fmt.Errorf("marshalling esp packet: %w", err)
 	}
@@ -108,7 +108,7 @@ func (p ESPPacket) AppendBinary(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
-func (p *ESPPacket) UnmarshalBinary(data []byte) error {
+func (p *Packet) UnmarshalBinary(data []byte) error {
 	if len(data) < espMinPacketLen {
 		return errors.New("parsing esp packet: packet too short")
 	}
@@ -127,7 +127,7 @@ func (p *ESPPacket) UnmarshalBinary(data []byte) error {
 			return errors.New("parsing esp packet: invalid padding")
 		}
 	}
-	*p = ESPPacket{
+	*p = Packet{
 		SPI:        spi,
 		Sequence:   sequence,
 		NextHeader: data[len(data)-1],
@@ -152,7 +152,7 @@ type Config struct {
 	IntegrityKey  []byte
 }
 
-type ESP struct {
+type SecurityAssociation struct {
 	mu     sync.Mutex
 	codec  Codec
 	seq    uint32
@@ -161,7 +161,7 @@ type ESP struct {
 
 var errNextHeaderRequired = errors.New("encoding ESP: next header is required")
 
-func NewESP(cfg Config) (*ESP, error) {
+func New(cfg Config) (*SecurityAssociation, error) {
 	if !ValidSPI(cfg.SPI) {
 		return nil, errors.New("creating ESP: invalid SPI")
 	}
@@ -171,7 +171,7 @@ func NewESP(cfg Config) (*ESP, error) {
 	if len(cfg.IntegrityKey) != 20 {
 		return nil, errors.New("creating ESP: expected 20-byte HMAC-SHA1 key")
 	}
-	return &ESP{
+	return &SecurityAssociation{
 		codec: Codec{
 			SPI:           cfg.SPI,
 			Encryption:    EncryptionAESCBC,
@@ -184,31 +184,31 @@ func NewESP(cfg Config) (*ESP, error) {
 
 // Seal cannot infer the protected protocol and therefore never emits a packet.
 // Deprecated: use SealWithNextHeader.
-func (e *ESP) Seal(payload []byte) ([]byte, error) {
+func (sa *SecurityAssociation) Seal(payload []byte) ([]byte, error) {
 	return nil, errNextHeaderRequired
 }
 
 // SealWithNextHeader encodes one ESP packet with the supplied Next Header.
 // A normal ESP data packet must identify the protected protocol; Next Header
 // 59 is reserved for dummy packets and is intentionally not accepted here.
-func (e *ESP) SealWithNextHeader(payload []byte, nextHeader byte) ([]byte, error) {
+func (sa *SecurityAssociation) SealWithNextHeader(payload []byte, nextHeader byte) ([]byte, error) {
 	if nextHeader == NextHeaderNoNext {
 		return nil, errors.New("encoding ESP: dummy packets are not supported")
 	}
-	e.mu.Lock()
-	seq, ok := NextSequence(&e.seq)
-	codec := e.codec
-	e.mu.Unlock()
+	sa.mu.Lock()
+	seq, ok := NextSequence(&sa.seq)
+	codec := sa.codec
+	sa.mu.Unlock()
 	if !ok {
 		return nil, errors.New("encoding ESP: sequence number overflow")
 	}
-	return codec.Encode(ESPPacket{SPI: codec.SPI, Sequence: seq, NextHeader: nextHeader, Payload: payload})
+	return codec.Encode(Packet{SPI: codec.SPI, Sequence: seq, NextHeader: nextHeader, Payload: payload})
 }
 
-func (e *ESP) Open(packet []byte) ([]byte, error) {
-	e.mu.Lock()
-	codec := e.codec
-	e.mu.Unlock()
+func (sa *SecurityAssociation) Open(packet []byte) ([]byte, error) {
+	sa.mu.Lock()
+	codec := sa.codec
+	sa.mu.Unlock()
 	pkt, err := codec.Decode(packet)
 	if err != nil {
 		return nil, err
@@ -219,15 +219,15 @@ func (e *ESP) Open(packet []byte) ([]byte, error) {
 	if pkt.NextHeader == NextHeaderNoNext {
 		return nil, errors.New("decoding ESP: dummy packets are not supported")
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.replay.Accept(pkt.Sequence) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	if !sa.replay.Accept(pkt.Sequence) {
 		return nil, fmt.Errorf("decoding ESP: replayed packet sequence %d", pkt.Sequence)
 	}
 	return pkt.Payload, nil
 }
 
-func (c Codec) Encode(pkt ESPPacket) ([]byte, error) {
+func (c Codec) Encode(pkt Packet) ([]byte, error) {
 	if !ValidSPI(c.SPI) {
 		return nil, errors.New("encoding ESP: invalid codec SPI")
 	}
@@ -328,24 +328,24 @@ func (c Codec) Encode(pkt ESPPacket) ([]byte, error) {
 	return buf, nil
 }
 
-func (c Codec) Decode(data []byte) (ESPPacket, error) {
+func (c Codec) Decode(data []byte) (Packet, error) {
 	if err := c.validateAlgorithms(); err != nil {
-		return ESPPacket{}, fmt.Errorf("decoding ESP: %w", err)
+		return Packet{}, fmt.Errorf("decoding ESP: %w", err)
 	}
 	if len(data) < espHeaderLen {
-		return ESPPacket{}, errors.New("decoding ESP: packet too short")
+		return Packet{}, errors.New("decoding ESP: packet too short")
 	}
-	pkt := ESPPacket{SPI: binary.BigEndian.Uint32(data[:espSPILen]), Sequence: binary.BigEndian.Uint32(data[espSPILen:espHeaderLen])}
+	pkt := Packet{SPI: binary.BigEndian.Uint32(data[:espSPILen]), Sequence: binary.BigEndian.Uint32(data[espSPILen:espHeaderLen])}
 	if err := validateESPHeader(pkt.SPI, pkt.Sequence); err != nil {
-		return ESPPacket{}, fmt.Errorf("decoding ESP: %w", err)
+		return Packet{}, fmt.Errorf("decoding ESP: %w", err)
 	}
 	if pkt.SPI != c.SPI {
-		return ESPPacket{}, fmt.Errorf("decoding ESP: packet SPI 0x%08X does not match codec SPI 0x%08X", pkt.SPI, c.SPI)
+		return Packet{}, fmt.Errorf("decoding ESP: packet SPI 0x%08X does not match codec SPI 0x%08X", pkt.SPI, c.SPI)
 	}
 
 	if c.Encryption == EncryptionAESGCM {
 		if len(data) < espHeaderLen+espExplicitIVLen+espGCMICVLen {
-			return ESPPacket{}, errors.New("decoding ESP: packet too short for AES-GCM")
+			return Packet{}, errors.New("decoding ESP: packet too short for AES-GCM")
 		}
 		header := data[:espHeaderLen]
 		iv := data[espHeaderLen : espHeaderLen+espExplicitIVLen]
@@ -353,51 +353,51 @@ func (c Codec) Decode(data []byte) (ESPPacket, error) {
 		tag := data[len(data)-espGCMICVLen:]
 		aead, err := newAESGCM(c.EncryptionKey)
 		if err != nil {
-			return ESPPacket{}, err
+			return Packet{}, err
 		}
 		sealed := make([]byte, 0, len(ciphertext)+len(tag))
 		sealed = append(sealed, ciphertext...)
 		sealed = append(sealed, tag...)
 		body, err := aead.Open(nil, nonce(c.Salt, iv), sealed, header)
 		if err != nil {
-			return ESPPacket{}, errors.New("decoding ESP: integrity check failed")
+			return Packet{}, errors.New("decoding ESP: integrity check failed")
 		}
 		return decodePlaintext(pkt, body)
 	}
 
 	if normalizeIntegrity(c.Integrity) == IntegrityAESGMAC {
 		if len(data) < espHeaderLen+espExplicitIVLen+espTrailerLen+espGCMICVLen {
-			return ESPPacket{}, errors.New("decoding ESP: packet too short for AES-GMAC")
+			return Packet{}, errors.New("decoding ESP: packet too short for AES-GMAC")
 		}
 		iv := data[espHeaderLen : espHeaderLen+espExplicitIVLen]
 		body := data[espHeaderLen+espExplicitIVLen : len(data)-espGCMICVLen]
 		tag := data[len(data)-espGCMICVLen:]
 		aead, err := newAESGCM(c.IntegrityKey)
 		if err != nil {
-			return ESPPacket{}, err
+			return Packet{}, err
 		}
 		aad := append([]byte(nil), data[:espHeaderLen]...)
 		aad = append(aad, body...)
 		if _, err := aead.Open(nil, nonce(c.Salt, iv), tag, aad); err != nil {
-			return ESPPacket{}, errors.New("decoding ESP: integrity check failed")
+			return Packet{}, errors.New("decoding ESP: integrity check failed")
 		}
 		return decodePlaintext(pkt, body)
 	}
 
 	icvLen, err := c.integrityLength()
 	if err != nil {
-		return ESPPacket{}, err
+		return Packet{}, err
 	}
 	if icvLen > 0 {
 		if len(data) < espHeaderLen+icvLen {
-			return ESPPacket{}, errors.New("decoding ESP: packet too short for ICV")
+			return Packet{}, errors.New("decoding ESP: packet too short for ICV")
 		}
 		mac, err := c.integritySum(data[:len(data)-icvLen])
 		if err != nil {
-			return ESPPacket{}, err
+			return Packet{}, err
 		}
 		if !hmac.Equal(mac, data[len(data)-icvLen:]) {
-			return ESPPacket{}, errors.New("decoding ESP: integrity check failed")
+			return Packet{}, errors.New("decoding ESP: integrity check failed")
 		}
 		data = data[:len(data)-icvLen]
 	}
@@ -405,11 +405,11 @@ func (c Codec) Decode(data []byte) (ESPPacket, error) {
 	body := data[espHeaderLen:]
 	if c.Encryption == EncryptionAESCBC {
 		if len(body) < aes.BlockSize || (len(body)-aes.BlockSize)%aes.BlockSize != 0 {
-			return ESPPacket{}, errors.New("decoding ESP: invalid AES-CBC body length")
+			return Packet{}, errors.New("decoding ESP: invalid AES-CBC body length")
 		}
 		block, err := aes.NewCipher(c.EncryptionKey)
 		if err != nil {
-			return ESPPacket{}, fmt.Errorf("creating cipher: %w", err)
+			return Packet{}, fmt.Errorf("creating cipher: %w", err)
 		}
 		iv := body[:aes.BlockSize]
 		ciphertext := body[aes.BlockSize:]
@@ -418,35 +418,35 @@ func (c Codec) Decode(data []byte) (ESPPacket, error) {
 		body = plaintext
 	} else if c.Encryption == EncryptionAESCTR {
 		if len(body) < aesctr.IVSize {
-			return ESPPacket{}, errors.New("decoding ESP: invalid AES-CTR body length")
+			return Packet{}, errors.New("decoding ESP: invalid AES-CTR body length")
 		}
 		iv := body[:aesctr.IVSize]
 		ciphertext := body[aesctr.IVSize:]
 		plaintext, err := aesctr.Crypt(c.EncryptionKey, c.Salt[:], iv, ciphertext)
 		if err != nil {
-			return ESPPacket{}, fmt.Errorf("decrypting AES-CTR payload: %w", err)
+			return Packet{}, fmt.Errorf("decrypting AES-CTR payload: %w", err)
 		}
 		body = plaintext
 	} else if c.Encryption != EncryptionNull {
-		return ESPPacket{}, fmt.Errorf("decoding ESP: unsupported encryption %q", c.Encryption)
+		return Packet{}, fmt.Errorf("decoding ESP: unsupported encryption %q", c.Encryption)
 	}
 
 	return decodePlaintext(pkt, body)
 }
 
-func decodePlaintext(pkt ESPPacket, body []byte) (ESPPacket, error) {
+func decodePlaintext(pkt Packet, body []byte) (Packet, error) {
 	if len(body) < espTrailerLen {
-		return ESPPacket{}, errors.New("decoding ESP: missing trailer")
+		return Packet{}, errors.New("decoding ESP: missing trailer")
 	}
 	padLen := int(body[len(body)-espTrailerLen])
 	pkt.NextHeader = body[len(body)-1]
 	if len(body) < espTrailerLen+padLen {
-		return ESPPacket{}, errors.New("decoding ESP: invalid padding")
+		return Packet{}, errors.New("decoding ESP: invalid padding")
 	}
 	padStart := len(body) - espTrailerLen - padLen
 	for i := range padLen {
 		if body[padStart+i] != byte(i+1) {
-			return ESPPacket{}, errors.New("decoding ESP: invalid padding")
+			return Packet{}, errors.New("decoding ESP: invalid padding")
 		}
 	}
 	pkt.Payload = append([]byte(nil), body[:len(body)-espTrailerLen-padLen]...)
@@ -573,15 +573,20 @@ func (c Codec) validateAlgorithms() error {
 		if !validAESKeyLength(len(c.IntegrityKey)) {
 			return fmt.Errorf("invalid AES-GMAC key length %d", len(c.IntegrityKey))
 		}
-	} else if integrity == IntegrityAESXCBC96 && len(c.IntegrityKey) != aesxcbc.KeySize {
+	}
+	if integrity == IntegrityAESXCBC96 && len(c.IntegrityKey) != aesxcbc.KeySize {
 		return fmt.Errorf("invalid AES-XCBC key length %d", len(c.IntegrityKey))
-	} else if integrity == IntegrityHMACSHA256128 && len(c.IntegrityKey) != sha256.Size {
+	}
+	if integrity == IntegrityHMACSHA256128 && len(c.IntegrityKey) != sha256.Size {
 		return fmt.Errorf("invalid HMAC-SHA256 key length %d", len(c.IntegrityKey))
-	} else if integrity == IntegrityHMACSHA384192 && len(c.IntegrityKey) != sha512.Size384 {
+	}
+	if integrity == IntegrityHMACSHA384192 && len(c.IntegrityKey) != sha512.Size384 {
 		return fmt.Errorf("invalid HMAC-SHA384 key length %d", len(c.IntegrityKey))
-	} else if integrity == IntegrityHMACSHA512256 && len(c.IntegrityKey) != sha512.Size {
+	}
+	if integrity == IntegrityHMACSHA512256 && len(c.IntegrityKey) != sha512.Size {
 		return fmt.Errorf("invalid HMAC-SHA512 key length %d", len(c.IntegrityKey))
-	} else if integrity != IntegrityNone && len(c.IntegrityKey) == 0 {
+	}
+	if integrity != IntegrityNone && len(c.IntegrityKey) == 0 {
 		return errors.New("integrity key is empty")
 	}
 	return nil

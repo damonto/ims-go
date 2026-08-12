@@ -183,7 +183,10 @@ func (m Message) StatusCode() int {
 	if len(parts) < 2 {
 		return 0
 	}
-	code, _ := strconv.Atoi(parts[1])
+	code, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
 	return code
 }
 
@@ -544,7 +547,10 @@ func CSeqNumber(value string) int64 {
 	if len(fields) == 0 {
 		return 0
 	}
-	n, _ := strconv.ParseInt(fields[0], 10, 64)
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0
+	}
 	return n
 }
 

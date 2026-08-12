@@ -12,7 +12,7 @@ import (
 )
 
 type serverTransaction struct {
-	session   *Session
+	session   *Stack
 	transport Transport
 	peer      net.Addr
 	request   sip.Message
@@ -51,7 +51,7 @@ const (
 
 const inviteTryingDelay = 200 * time.Millisecond
 
-func newServerTransaction(s *Session, req Request) *serverTransaction {
+func newServerTransaction(s *Stack, req Request) *serverTransaction {
 	msg := cloneSIPMessage(req.Message)
 	via := strings.TrimSpace(msg.Header("Via"))
 	return &serverTransaction{
@@ -73,7 +73,7 @@ func newServerTransaction(s *Session, req Request) *serverTransaction {
 	}
 }
 
-func (s *Session) processServerTransaction(ctx context.Context, req Request) (bool, error) {
+func (s *Stack) processServerTransaction(ctx context.Context, req Request) (bool, error) {
 	method := strings.ToUpper(strings.TrimSpace(req.Message.Method()))
 	switch method {
 	case "":
@@ -126,7 +126,7 @@ func (tx *serverTransaction) acceptedInvite() bool {
 	return tx.method == "INVITE" && tx.state == serverTransactionAccepted
 }
 
-func (s *Session) isMergedRequest(msg sip.Message) bool {
+func (s *Stack) isMergedRequest(msg sip.Message) bool {
 	if sip.HeaderTag(msg.Header("To")) != "" {
 		return false
 	}
@@ -150,7 +150,7 @@ func (s *Session) isMergedRequest(msg sip.Message) bool {
 	return false
 }
 
-func (s *Session) registerServerTransaction(tx *serverTransaction) {
+func (s *Stack) registerServerTransaction(tx *serverTransaction) {
 	if tx.key == "" {
 		return
 	}
@@ -167,7 +167,7 @@ func (s *Session) registerServerTransaction(tx *serverTransaction) {
 	}
 }
 
-func (s *Session) unregisterServerTransaction(tx *serverTransaction) {
+func (s *Stack) unregisterServerTransaction(tx *serverTransaction) {
 	if tx.key == "" {
 		return
 	}
@@ -180,7 +180,7 @@ func (s *Session) unregisterServerTransaction(tx *serverTransaction) {
 	s.mu.Unlock()
 }
 
-func (s *Session) clearServerTransactions() {
+func (s *Stack) clearServerTransactions() {
 	s.mu.Lock()
 	transactions := make([]*serverTransaction, 0, len(s.serverTxs))
 	for _, tx := range s.serverTxs {
@@ -194,7 +194,7 @@ func (s *Session) clearServerTransactions() {
 	}
 }
 
-func (s *Session) lookupServerTransaction(msg sip.Message) *serverTransaction {
+func (s *Stack) lookupServerTransaction(msg sip.Message) *serverTransaction {
 	key := serverTransactionKey(msg)
 	if key == "" {
 		return nil
@@ -204,7 +204,7 @@ func (s *Session) lookupServerTransaction(msg sip.Message) *serverTransaction {
 	return s.serverTxs[key]
 }
 
-func (s *Session) matchCanceledTransaction(msg sip.Message) *serverTransaction {
+func (s *Stack) matchCanceledTransaction(msg sip.Message) *serverTransaction {
 	s.mu.Lock()
 	transactions := make([]*serverTransaction, 0, len(s.serverTxs))
 	for _, tx := range s.serverTxs {
@@ -219,7 +219,7 @@ func (s *Session) matchCanceledTransaction(msg sip.Message) *serverTransaction {
 	return nil
 }
 
-func (s *Session) matchServerACK(msg sip.Message) *serverTransaction {
+func (s *Stack) matchServerACK(msg sip.Message) *serverTransaction {
 	s.mu.Lock()
 	transactions := make([]*serverTransaction, 0, len(s.serverTxs))
 	for _, tx := range s.serverTxs {
@@ -234,7 +234,7 @@ func (s *Session) matchServerACK(msg sip.Message) *serverTransaction {
 	return nil
 }
 
-func (s *Session) recordServerTransactionResponse(req Request, resp sip.Message) *serverTransaction {
+func (s *Stack) recordServerTransactionResponse(req Request, resp sip.Message) *serverTransaction {
 	tx := s.lookupServerTransaction(req.Message)
 	if tx == nil {
 		return nil
@@ -455,7 +455,7 @@ func (tx *serverTransaction) startLifetimeTimer(timeout time.Duration) {
 
 func (tx *serverTransaction) fail(err error) {
 	tx.terminate()
-	tx.session.notifyHandlers(err)
+	tx.session.notifyProcessors(err)
 }
 
 func (tx *serverTransaction) markTerminated() {

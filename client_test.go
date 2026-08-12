@@ -20,6 +20,7 @@ import (
 	imssms "github.com/damonto/ims-go/ims/sms"
 	imsussd "github.com/damonto/ims-go/ims/ussd"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
+	"github.com/damonto/ims-go/swu/handshake"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
 	usim "github.com/damonto/wwan-go/sim"
 	usimcard "github.com/damonto/wwan-go/sim/card"
@@ -101,6 +102,15 @@ func (testTransportFailure) TransportFailed() bool {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func closeClientAfterTest(t *testing.T, client *Client) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("Client.Close() error = %v", err)
+		}
+	})
 }
 
 func testRegistrationConfig(transport imssession.Transport) registration.Config {
@@ -321,7 +331,7 @@ func TestOpenIMSWithPCSCFFailover(t *testing.T) {
 			}
 			setup := &connectSetup{access: access}
 
-			err := (&Client{}).openIMSWithPCSCFFailover(context.Background(), setup)
+			err := (&Client{}).openIMSWithPCSCFFailover(t.Context(), setup)
 			if tt.wantSecondErr && !errors.Is(err, lastErr) {
 				t.Fatalf("openIMSWithPCSCFFailover() error = %v, want second P-CSCF error", err)
 			}
@@ -531,8 +541,8 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)
 			}
-			var connErr *ConnectionError
-			if !errors.As(err, &connErr) {
+			connErr, ok := errors.AsType[*ConnectionError](err)
+			if !ok {
 				t.Fatalf("error type = %T, want *ConnectionError", err)
 			}
 			if connErr.Status() != tt.status {
@@ -566,7 +576,7 @@ func TestCurrentVoiceClientRejectsInactiveTunnel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newClient(Config{Logger: testLogger()})
-			session, err := swutunnel.Dial(context.Background(), swutunnel.Config{
+			session, err := swutunnel.Dial(t.Context(), swutunnel.Config{
 				RemoteAddr: "198.51.100.1",
 				PacketConn: &clientTestPacketConn{
 					local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
@@ -754,7 +764,7 @@ func newStandaloneClient(t *testing.T) *Client {
 	return newReadyClient(t, Config{
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
-		IMS: IMSConfig{
+		IMS: ServiceConfig{
 			RegisterExpires: time.Minute,
 		},
 	})
@@ -836,7 +846,7 @@ func newUnauthorizedRegisterResponse(req imssip.Message, nonce string) imssip.Me
 	return res
 }
 
-func newRegisteredIMS(t *testing.T, transport *gatedCancelTransport, registerExpires time.Duration) (*imssession.Session, *registration.Registrar) {
+func newRegisteredIMS(t *testing.T, transport *gatedCancelTransport, registerExpires time.Duration) (*imssession.Stack, *registration.Registrar) {
 	t.Helper()
 	sess, err := imssession.Open(imssession.Config{}, transport)
 	if err != nil {
@@ -848,7 +858,7 @@ func newRegisteredIMS(t *testing.T, transport *gatedCancelTransport, registerExp
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg
@@ -1522,7 +1532,7 @@ func TestUSSDSessionStateErrors(t *testing.T) {
 	client := newStandaloneClient(t)
 	session := newSession(client)
 
-	replyResult, err := session.Reply(context.Background(), "1")
+	replyResult, err := session.Reply(t.Context(), "1")
 	if err == nil || !errors.Is(err, ErrUSSDNotStarted) {
 		t.Fatalf("Reply() error = %v, want ErrUSSDNotStarted", err)
 	}
@@ -1530,7 +1540,7 @@ func TestUSSDSessionStateErrors(t *testing.T) {
 		t.Fatalf("Reply() result = %+v, want zero value", replyResult)
 	}
 
-	closeResult, err := session.Close(context.Background())
+	closeResult, err := session.Close(t.Context())
 	if err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -1538,7 +1548,7 @@ func TestUSSDSessionStateErrors(t *testing.T) {
 		t.Fatalf("Close() result = %+v", closeResult)
 	}
 
-	if _, err := session.Send(context.Background(), "*100#"); err == nil || !errors.Is(err, ErrUSSDClosed) {
+	if _, err := session.Send(t.Context(), "*100#"); err == nil || !errors.Is(err, ErrUSSDClosed) {
 		t.Fatalf("Send(after Close) error = %v, want ErrUSSDClosed", err)
 	}
 
@@ -1546,13 +1556,13 @@ func TestUSSDSessionStateErrors(t *testing.T) {
 	if err := started.attachLowSession(&imsussd.Session{}, false); err != nil {
 		t.Fatalf("attachLowSession() error = %v", err)
 	}
-	if _, err := started.Send(context.Background(), "*100#"); err == nil || !errors.Is(err, ErrUSSDAlreadyStarted) {
+	if _, err := started.Send(t.Context(), "*100#"); err == nil || !errors.Is(err, ErrUSSDAlreadyStarted) {
 		t.Fatalf("second Send() error = %v, want ErrUSSDAlreadyStarted", err)
 	}
 
 	busy := newSession(client)
 	busy.busy = true
-	if _, err := busy.Reply(context.Background(), "1"); err == nil || !errors.Is(err, ErrUSSDInProgress) {
+	if _, err := busy.Reply(t.Context(), "1"); err == nil || !errors.Is(err, ErrUSSDInProgress) {
 		t.Fatalf("Reply(busy) error = %v, want ErrUSSDInProgress", err)
 	}
 }
@@ -1596,7 +1606,7 @@ func TestConnectReportsUSIMLoadError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	err = client.Connect(context.Background())
+	err = client.Connect(t.Context())
 	if err == nil {
 		t.Fatal("Connect() error = nil, want non-nil")
 	}
@@ -1622,7 +1632,7 @@ func TestConnectUsesContextForUSIMLoad(t *testing.T) {
 		{
 			name: "canceled before connect",
 			ctx: func() context.Context {
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
 				return ctx
 			},
@@ -1642,7 +1652,7 @@ func TestConnectUsesContextForUSIMLoad(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			defer client.Close()
+			closeClientAfterTest(t, client)
 			err = client.Connect(tt.ctx())
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Connect() error = %v, want context.Canceled", err)
@@ -1670,7 +1680,7 @@ func TestCloseCancelsUSIMLoadDuringConnect(t *testing.T) {
 
 	connectErr := make(chan error, 1)
 	go func() {
-		connectErr <- client.Connect(context.Background())
+		connectErr <- client.Connect(t.Context())
 	}()
 
 	select {
@@ -1711,7 +1721,7 @@ func TestConnectLeavesReaderOwnedAfterUSIMLoadError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	err = client.Connect(context.Background())
+	err = client.Connect(t.Context())
 	if err == nil {
 		t.Fatal("Connect() error = nil, want non-nil")
 	}
@@ -1751,6 +1761,29 @@ func TestClientCloseClosesOwnedReaderOnce(t *testing.T) {
 	}
 }
 
+func TestClientCloseForcesCleanupAfterTaskTimeout(t *testing.T) {
+	closeErr := errors.New("access close failed")
+	access := &pcscfReselectingAccessStub{closeErr: closeErr}
+	client := newStandaloneClient(t)
+	setClientActive(t, client, &activeConn{
+		scope:  newConnectionScope(),
+		access: access,
+	})
+	done, ok := client.reserveCloseTask()
+	if !ok {
+		t.Fatal("reserveCloseTask() = false, want true")
+	}
+
+	err := client.close(10 * time.Millisecond)
+	done()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close() error = %v, want context.DeadlineExceeded", err)
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("close() error = %v, want forced access cleanup error %v", err, closeErr)
+	}
+}
+
 func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1770,7 +1803,7 @@ func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newGatedCancelTransport(5062, 5060)
 			nonce := testNonce()
-			var group *RegistrationGroup
+			var group *registration.Group
 			if tt.multiple {
 				group = NewRegistrationGroup()
 			}
@@ -1831,13 +1864,13 @@ func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("registration.New() error = %v", err)
 			}
-			if err := reg.Register(context.Background()); err != nil {
+			if err := reg.Register(t.Context()); err != nil {
 				t.Fatalf("Register() error = %v", err)
 			}
 
 			if tt.setupRollback {
 				setup := &connectSetup{
-					imsCfg: IMSConfig{RegistrationGroup: group},
+					imsCfg: ServiceConfig{RegistrationGroup: group},
 					ims:    imsStack{sip: sess, reg: reg},
 				}
 				if err := setup.closeIMS(); err != nil {
@@ -1847,7 +1880,7 @@ func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 				client := newReadyClient(t, Config{
 					Terminal: TerminalInfo{ID: testIMEI},
 					Access:   VoWiFi(VoWiFiConfig{}),
-					IMS:      IMSConfig{RegistrationGroup: group},
+					IMS:      ServiceConfig{RegistrationGroup: group},
 				})
 				setClientActive(t, client, &activeConn{
 					scope: newConnectionScope(),
@@ -1901,18 +1934,18 @@ func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
 	client := newReadyClient(t, Config{
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
-		IMS: IMSConfig{
+		IMS: ServiceConfig{
 			RegisterExpires: time.Minute,
 		},
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 
 	scope := newConnectionScope()
 	active := &activeConn{
@@ -1930,20 +1963,22 @@ func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
 	runDone := client.startConnectionRunner(active, done)
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
-	cleanupDone := make(chan struct{})
+	cleanupDone := make(chan error, 1)
 	go func() {
-		client.cancelConnectStart(active, runDone)
-		close(cleanupDone)
+		cleanupDone <- client.cancelConnectStart(active, runDone)
 	}()
 
 	close(transport.cancelReadRelease)
 
 	select {
-	case <-cleanupDone:
+	case err := <-cleanupDone:
+		if err != nil {
+			t.Fatalf("cancelConnectStart() error = %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("cancelConnectStart() did not finish after IMS loop exit")
 	}
@@ -1982,7 +2017,7 @@ func TestCloseActiveConnectionSkipsDeregister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -2043,7 +2078,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -2051,7 +2086,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 
 	scope := newConnectionScope()
 	active := &activeConn{
@@ -2068,7 +2103,7 @@ func TestIMSRunnerMaintainsRegistration(t *testing.T) {
 		t.Fatal("reserveCloseTask() = false, want true")
 	}
 	runDone := client.startConnectionRunner(active, done)
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -2129,7 +2164,7 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 	events := client.Events()
 	defer events.Close()
 
@@ -2155,7 +2190,7 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 		done:      done,
 		reconnect: reconnect,
 	}.start()
-	if err := oldSess.WaitStarted(context.Background()); err != nil {
+	if err := oldSess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("old WaitStarted() error = %v", err)
 	}
 
@@ -2204,7 +2239,7 @@ func TestIMSRunnerReconnectsAfterPrimaryTransportFailure(t *testing.T) {
 	if state.Status != StatusRegistered {
 		t.Fatalf("State().Status = %s, want %s", state.Status, StatusRegistered)
 	}
-	if err := newSess.WaitStarted(context.Background()); err != nil {
+	if err := newSess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("new WaitStarted() error = %v", err)
 	}
 	if currentClientActive(t, client) != newActive {
@@ -2332,12 +2367,12 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 		Terminal:       TerminalInfo{ID: testIMEI},
 		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: 3 * time.Second,
-		IMS: IMSConfig{
+		IMS: ServiceConfig{
 			RegistrationRetryBase: 20 * time.Second,
 			RegistrationRetryMax:  80 * time.Second,
 		},
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 	delayCh := make(chan time.Duration, 1)
 	reconnect := func(cause error) (*activeConn, error) {
 		delay := client.reconnectDelay(
@@ -2363,7 +2398,7 @@ func TestIMSRunnerPassesRetryAfterToReconnect(t *testing.T) {
 		done:      done,
 		reconnect: reconnect,
 	}.start()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -2427,7 +2462,7 @@ func TestCloseCancelsIMSRunnerReconnect(t *testing.T) {
 		done:      done,
 		reconnect: reconnect,
 	}.start()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 
@@ -2501,7 +2536,7 @@ func TestReconnectDelayHonorsIMSRegistrationRetryPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	registerErr := reg.Register(context.Background())
+	registerErr := reg.Register(t.Context())
 	if registerErr == nil {
 		t.Fatal("Register() error = nil, want Retry-After registration error")
 	}
@@ -2513,12 +2548,12 @@ func TestReconnectDelayHonorsIMSRegistrationRetryPolicy(t *testing.T) {
 		Terminal:       TerminalInfo{ID: testIMEI},
 		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: 3 * time.Second,
-		IMS: IMSConfig{
+		IMS: ServiceConfig{
 			RegistrationRetryBase: 20 * time.Second,
 			RegistrationRetryMax:  80 * time.Second,
 		},
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 	got := client.reconnectDelay(
 		fmt.Errorf("running IMS loop: %w", registerErr),
 		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
@@ -2629,7 +2664,7 @@ func TestReconnectDelayHonorsIMSSubscribeRetryAfter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	subscribeErr := reg.Subscribe(context.Background())
+	subscribeErr := reg.Subscribe(t.Context())
 	if subscribeErr == nil {
 		t.Fatal("Subscribe() error = nil, want Retry-After subscription error")
 	}
@@ -2641,12 +2676,12 @@ func TestReconnectDelayHonorsIMSSubscribeRetryAfter(t *testing.T) {
 		Terminal:       TerminalInfo{ID: testIMEI},
 		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: 3 * time.Second,
-		IMS: IMSConfig{
+		IMS: ServiceConfig{
 			RegistrationRetryBase: 20 * time.Second,
 			RegistrationRetryMax:  80 * time.Second,
 		},
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 	got := client.reconnectDelay(
 		fmt.Errorf("starting IMS: %w", subscribeErr),
 		newReconnectBackoff(client.cfg.ReconnectDelay, client.cfg.ReconnectMaxDelay),
@@ -2663,7 +2698,7 @@ func TestReconnectStopsOnAccessRejectedCause(t *testing.T) {
 		Access:         VoWiFi(VoWiFiConfig{}),
 		ReconnectDelay: time.Hour,
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 
 	cause := fmt.Errorf("connecting swu: %w", swutunnel.ErrAccessRejected)
 	done := make(chan error, 1)
@@ -2739,7 +2774,7 @@ func TestSWUBackoffGateScopesPolicy(t *testing.T) {
 				Access:   VoWiFi(VoWiFiConfig{EPDG: "epdg.example"}),
 				Terminal: TerminalInfo{ID: testIMEI},
 			})
-			defer client.Close()
+			closeClientAfterTest(t, client)
 			client.recordSWUBackoff(tt.recordErr, now)
 			client.cfg.Access.VoWiFi.EPDG = configEPDG(tt.cfg)
 			client.cfg.Access.VoWiFi.Tunnel.APN = configTunnel(tt.cfg).APN
@@ -2803,7 +2838,7 @@ func TestSWUBackoffGateRecordsImplementationSpecificPolicy(t *testing.T) {
 				ReconnectDelay: 5 * time.Second,
 				Terminal:       TerminalInfo{ID: testIMEI},
 			})
-			defer client.Close()
+			closeClientAfterTest(t, client)
 			client.recordSWUBackoff(tt.err, now)
 			client.cfg.Access.VoWiFi.EPDG = configEPDG(tt.cfg)
 			client.cfg.Access.VoWiFi.Tunnel.APN = configTunnel(tt.cfg).APN
@@ -2829,7 +2864,7 @@ func TestSWUBackoffGateClearsExplicitZeroPolicy(t *testing.T) {
 		ReconnectDelay: 5 * time.Second,
 		Terminal:       TerminalInfo{ID: testIMEI},
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 
 	now := time.Unix(100, 0)
 	client.recordSWUBackoff(testTunnelBackoffError{delay: time.Minute, scope: swutunnel.BackoffScopeEPDG}, now)
@@ -2848,7 +2883,7 @@ func TestSWUBackoffGateExpiresAndClears(t *testing.T) {
 		Access:   VoWiFi(VoWiFiConfig{EPDG: "epdg.example"}),
 		Terminal: TerminalInfo{ID: testIMEI},
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 
 	now := time.Unix(100, 0)
 	client.recordSWUBackoff(testTunnelBackoffError{delay: time.Minute, scope: swutunnel.BackoffScopeEPDG}, now)
@@ -2872,8 +2907,8 @@ func TestSWUPDNTypeRestrictionGateAppliesPLMNAPN(t *testing.T) {
 		name    string
 		apn     string
 		card    Card
-		initial swutunnel.PDNType
-		want    swutunnel.PDNType
+		initial handshake.PDNType
+		want    handshake.PDNType
 	}{
 		{
 			name: "same plmn apn applies restriction",
@@ -2906,7 +2941,7 @@ func TestSWUPDNTypeRestrictionGateAppliesPLMNAPN(t *testing.T) {
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{Tunnel: swutunnel.Config{APN: "ims"}}),
 			})
-			defer client.Close()
+			closeClientAfterTest(t, client)
 			client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeIPv6})
 			client.card = tt.card
 			cfg := swutunnel.Config{APN: tt.apn, PDNType: tt.initial}
@@ -2925,7 +2960,7 @@ func TestSWUPDNTypeRestrictionGateIgnoresUnrestrictedInfo(t *testing.T) {
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{Tunnel: swutunnel.Config{APN: "ims"}}),
 	})
-	defer client.Close()
+	closeClientAfterTest(t, client)
 
 	client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeUnspecified})
 	cfg := swutunnel.Config{APN: "ims"}
@@ -2939,7 +2974,7 @@ func TestSWUPDNTypeRestrictionGateClearsAfterPDNDeactivation(t *testing.T) {
 	tests := []struct {
 		name  string
 		cause error
-		want  swutunnel.PDNType
+		want  handshake.PDNType
 	}{
 		{
 			name:  "network deactivation clears restriction",
@@ -2963,7 +2998,7 @@ func TestSWUPDNTypeRestrictionGateClearsAfterPDNDeactivation(t *testing.T) {
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{Tunnel: swutunnel.Config{APN: "ims"}}),
 			})
-			defer client.Close()
+			closeClientAfterTest(t, client)
 
 			client.recordSWUPDNTypeRestriction(swutunnel.Info{PDNTypeRestriction: swutunnel.PDNTypeIPv6})
 			client.clearSWUPDNTypeRestrictionAfterDisconnect(tt.cause)
@@ -3172,7 +3207,7 @@ func registrationTestInitialRequiredError(t *testing.T) error {
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	err = reg.Register(context.Background())
+	err = reg.Register(t.Context())
 	if err == nil {
 		t.Fatal("Register() error = nil, want initial registration required")
 	}
@@ -3220,7 +3255,7 @@ func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *t
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -3286,7 +3321,7 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	if err != nil {
 		t.Fatalf("registration.New() error = %v", err)
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -3305,7 +3340,7 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 		runner := connectionRunner{active: active}
 		errCh <- runner.runIMS()
 	}()
-	if err := sess.WaitStarted(context.Background()); err != nil {
+	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)
 	}
 

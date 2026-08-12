@@ -947,7 +947,7 @@ func TestAKAAuthFlowBuildChallengeResponseMalformedRequestReturnsClientError(t *
 	flow := akaAuthFlow{}
 	message := eapaka.AKAMessage{Identifier: 11}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, []byte{0x01, 0x02, 0x03})
+	response, err := flow.buildChallengeResponse(t.Context(), message, []byte{0x01, 0x02, 0x03})
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -978,7 +978,7 @@ func TestAKAAuthFlowBuildChallengeResponseDuplicateRANDReturnsClientError(t *tes
 	}
 	wire := marshalAKAMessageUncheckedForTest(t, message)
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1022,7 +1022,7 @@ func TestAKAAuthFlowBuildChallengeResponseUnexpectedAttributeReturnsClientError(
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1094,7 +1094,7 @@ func TestAKAAuthFlowBuildChallengeResponseUsesCurrentEAPIdentity(t *testing.T) {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1141,7 +1141,7 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsBiddingDown(t *testing.T) {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1193,7 +1193,7 @@ func TestAKAAuthFlowBuildChallengeResponseHonorsTrustIndication(t *testing.T) {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1288,7 +1288,7 @@ func TestAKAAuthFlowProcessesAKAPrimeChallengeInAuthenticatedStages(t *testing.T
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1343,7 +1343,7 @@ func TestAKAAuthFlowFullAuthStoresUnusedReauthCounter(t *testing.T) {
 		realm:           "nai.epc.mnc001.mcc001.3gppnetwork.org",
 		crypto:          &ikeCrypto{},
 	}
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1392,7 +1392,7 @@ func TestAKAAuthFlowBuildChallengeResponseSupportsAKAPrime(t *testing.T) {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1468,7 +1468,7 @@ func TestAKAAuthFlowBuildChallengeResponseUsesAKAPrimePermanentIdentity(t *testi
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1542,7 +1542,7 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsAKAPrimeNetworkNameMismatch(t *
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1640,7 +1640,7 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsInvalidAKAPrimeKDFAttributes(t 
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1700,7 +1700,7 @@ func TestAKAAuthFlowBuildChallengeResponseNegotiatesAKAPrimeKDF(t *testing.T) {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1785,7 +1785,7 @@ func TestAKAAuthFlowBuildChallengeResponseAcceptsNegotiatedAKAPrimeKDF(t *testin
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
 
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -1848,7 +1848,7 @@ func TestAKAAuthFlowBuildChallengeResponseCopiesNegotiatedKDFsOnAKAPrimeSyncFail
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1902,7 +1902,7 @@ func TestAKAAuthFlowBuildChallengeResponseRejectsAKAPrimeWithoutAMFSeparationBit
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
-	response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+	response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 	if err != nil {
 		t.Fatalf("buildChallengeResponse() error = %v", err)
 	}
@@ -1987,7 +1987,7 @@ func TestAKAAuthFlowBuildChallengeResponseVerifiesCheckcode(t *testing.T) {
 			if err := message.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -2072,7 +2072,7 @@ func TestAKAAuthFlowRequiresCheckcodeAfterExtendedIdentityRequest(t *testing.T) 
 			if err := message.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -2325,7 +2325,7 @@ func TestAKAAuthFlowProtectedResultIndRequiresSuccessNotification(t *testing.T) 
 				crypto:          &ikeCrypto{},
 				ipmsIndication:  tt.ipmsIndication,
 			}
-			response, err := flow.buildChallengeResponse(context.Background(), message, wire)
+			response, err := flow.buildChallengeResponse(t.Context(), message, wire)
 			if err != nil {
 				t.Fatalf("buildChallengeResponse() error = %v", err)
 			}
@@ -2997,8 +2997,8 @@ func TestOpenIKEAuthResponsePlaintextNotify(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := (ike.IKEPacket{
-				Header: ike.IKEHeader{
+			raw, err := (ike.Packet{
+				Header: ike.Header{
 					InitiatorSPI: 1,
 					ResponderSPI: 2,
 					Version:      ikeVersion20,
@@ -3014,7 +3014,7 @@ func TestOpenIKEAuthResponsePlaintextNotify(t *testing.T) {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
 
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(raw); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -3103,7 +3103,7 @@ func TestOpenIKEAuthResponseProtectedNotify(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			crypto := testIKECrypto()
 			wire := protectedIKEWire(t, crypto, exchangeTypeIKEAuth, flagResponse, 1, tt.payloads, false)
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -3198,7 +3198,7 @@ func TestExchangeProtectedIKEAuthNotify(t *testing.T) {
 			session := mustDialSession(t, conn)
 			session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
 
-			gotPayloads, gotPeer, err := session.exchangeProtectedIKE(context.Background(), protectedIKEExchange{
+			gotPayloads, gotPeer, err := session.exchangeProtectedIKE(t.Context(), protectedIKEExchange{
 				peer:                   peer,
 				requests:               [][]byte{request},
 				messageID:              1,
@@ -3236,8 +3236,8 @@ func TestExchangeProtectedIKEAuthNotify(t *testing.T) {
 }
 
 func TestOpenIKEAuthResponseCarriesBackoffTimer(t *testing.T) {
-	raw, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	raw, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: 1,
 			ResponderSPI: 2,
 			Version:      ikeVersion20,
@@ -3254,7 +3254,7 @@ func TestOpenIKEAuthResponseCarriesBackoffTimer(t *testing.T) {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(raw); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -3322,8 +3322,8 @@ func TestAppendDeviceIdentityResponsePayloadRequiresAuthenticatedNetwork(t *test
 }
 
 func TestOpenIKEAuthResponseCarriesDeactivatedBackoffTimer(t *testing.T) {
-	raw, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	raw, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: 1,
 			ResponderSPI: 2,
 			Version:      ikeVersion20,
@@ -3340,7 +3340,7 @@ func TestOpenIKEAuthResponseCarriesDeactivatedBackoffTimer(t *testing.T) {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(raw); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -3365,8 +3365,8 @@ func TestOpenIKEAuthResponseCarriesDeactivatedBackoffTimer(t *testing.T) {
 }
 
 func TestOpenIKEAuthResponseCarriesZeroBackoffTimer(t *testing.T) {
-	raw, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	raw, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: 1,
 			ResponderSPI: 2,
 			Version:      ikeVersion20,
@@ -3383,7 +3383,7 @@ func TestOpenIKEAuthResponseCarriesZeroBackoffTimer(t *testing.T) {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(raw); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -3418,8 +3418,8 @@ func TestOpenIKEAuthResponseIgnoresBackoffTimerWithoutErrorNotify(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := (ike.IKEPacket{
-				Header: ike.IKEHeader{
+			raw, err := (ike.Packet{
+				Header: ike.Header{
 					InitiatorSPI: 1,
 					ResponderSPI: 2,
 					Version:      ikeVersion20,
@@ -3435,7 +3435,7 @@ func TestOpenIKEAuthResponseIgnoresBackoffTimerWithoutErrorNotify(t *testing.T) 
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
 
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(raw); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -3458,8 +3458,8 @@ func TestOpenIKEAuthResponseIgnoresBackoffTimerWithoutErrorNotify(t *testing.T) 
 }
 
 func TestOpenIKEAuthResponseRejectsMalformedBackoffTimerWithErrorNotify(t *testing.T) {
-	raw, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	raw, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: 1,
 			ResponderSPI: 2,
 			Version:      ikeVersion20,
@@ -3476,7 +3476,7 @@ func TestOpenIKEAuthResponseRejectsMalformedBackoffTimerWithErrorNotify(t *testi
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(raw); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -3497,8 +3497,8 @@ func TestOpenIKEAuthResponseRejectsMalformedBackoffTimerWithErrorNotify(t *testi
 }
 
 func TestOpenIKEAuthResponseCarriesAccessRejectionWithBackoffTimer(t *testing.T) {
-	raw, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	raw, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: 1,
 			ResponderSPI: 2,
 			Version:      ikeVersion20,
@@ -3515,7 +3515,7 @@ func TestOpenIKEAuthResponseCarriesAccessRejectionWithBackoffTimer(t *testing.T)
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(raw); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
@@ -3548,8 +3548,8 @@ func TestOpenIKEAuthResponseBackoffPolicyScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := (ike.IKEPacket{
-				Header: ike.IKEHeader{
+			raw, err := (ike.Packet{
+				Header: ike.Header{
 					InitiatorSPI: 1,
 					ResponderSPI: 2,
 					Version:      ikeVersion20,
@@ -3566,7 +3566,7 @@ func TestOpenIKEAuthResponseBackoffPolicyScope(t *testing.T) {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
 
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(raw); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}

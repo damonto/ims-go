@@ -241,7 +241,7 @@ func (e *Encoder) searchMode885Codebook(sf *encoderSubframePitch) error {
 	if err != nil {
 		return fmt.Errorf("search 8.85 codebook: %w", err)
 	}
-	searched, err := acelp4t64_20(dn[:], sf.codeTarget[:], h[:])
+	searched, err := acelp4T64At20Bits(dn[:], sf.codeTarget[:], h[:])
 	if err != nil {
 		return fmt.Errorf("search 8.85 codebook: %w", err)
 	}
@@ -341,11 +341,11 @@ func scaleCodebookFallback(filtered []int16) {
 	}
 }
 
-func acelp4t64_20(dn []int16, cn []int16, h []int16) (acelp4t64Result, error) {
+func acelp4T64At20Bits(dn []int16, cn []int16, h []int16) (acelp4t64Result, error) {
 	return acelp4t64Indexed(dn, cn, h, 20, int16(frameBits[Mode885]))
 }
 
-func acelp4t64_36(dn []int16, cn []int16, h []int16) (acelp4t64Result, error) {
+func acelp4T64At36Bits(dn []int16, cn []int16, h []int16) (acelp4t64Result, error) {
 	return acelp4t64Indexed(dn, cn, h, 36, int16(frameBits[Mode1265]))
 }
 

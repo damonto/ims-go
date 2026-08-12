@@ -28,6 +28,7 @@ const (
 	sipStatusCallTransactionDoesNotExist = 481
 	sipStatusRequestTerminated           = 487
 	sipDatagramRequestLimit              = 1300
+	closeWaitTimeout                     = 5 * time.Second
 )
 
 type Config struct {
@@ -38,33 +39,37 @@ type Config struct {
 	OpenReliableTransport func(context.Context) (Transport, error)
 }
 
-func (cfg Config) Normalized() (Config, error) {
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+func (c Config) Normalized() (Config, error) {
+	if c.Logger == nil {
+		c.Logger = slog.Default()
 	}
-	timers, err := cfg.TransactionTimers.Normalized()
+	timers, err := c.TransactionTimers.Normalized()
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.TransactionTimers = timers
-	return cfg, nil
+	c.TransactionTimers = timers
+	return c, nil
 }
 
-type Session struct {
+type Stack struct {
 	cfg    Config
 	logger *slog.Logger
 
 	mu             sync.Mutex
 	sendMu         sync.Mutex
 	reliableMu     sync.Mutex
+	readMu         sync.Mutex
 	readWG         sync.WaitGroup
+	readClosed     bool
+	readers        map[Transport]*transportReader
 	transportErrs  chan struct{}
 	transportQueue []inboundMessage
+	inbound        chan inboundMessage
 	primary        Transport
 	aux            []Transport
 	active         map[Transport]struct{}
+	attachments    map[Transport]*transportAttachment
 	responseRoutes map[Transport]Transport
-	run            *runState
 	dialogs        map[string][]*dialogEntry
 	transactions   map[string]*clientTransaction
 	serverTxs      map[string]*serverTransaction
@@ -73,32 +78,36 @@ type Session struct {
 	crlfPending    map[Transport]chan error
 	txChanged      chan struct{}
 	inboundWatches map[*InboundWatch]struct{}
-	handlers       []*handlerEntry
+	processors     []*processorEntry
 	startedCh      chan struct{}
 	closedCh       chan struct{}
 	closed         bool
 	started        bool
 	ready          bool
 	running        bool
+	primaryErr     error
 
 	responseDecorator func(*sip.Message)
 	notifyOnce        sync.Once
 }
 
-func Open(cfg Config, primary Transport) (*Session, error) {
+func Open(c Config, primary Transport) (*Stack, error) {
 	if primary == nil {
 		return nil, errors.New("opening session: primary transport is nil")
 	}
-	cfg, err := cfg.Normalized()
+	c, err := c.Normalized()
 	if err != nil {
 		return nil, fmt.Errorf("opening session: %w", err)
 	}
-	return &Session{
-		cfg:            cfg,
-		logger:         cfg.Logger.With("component", "ims-session"),
+	stack := &Stack{
+		cfg:            c,
+		logger:         c.Logger.With("component", "ims-session"),
 		transportErrs:  make(chan struct{}, 1),
+		inbound:        make(chan inboundMessage, 16),
+		readers:        make(map[Transport]*transportReader),
 		primary:        primary,
 		active:         map[Transport]struct{}{primary: {}},
+		attachments:    make(map[Transport]*transportAttachment),
 		responseRoutes: make(map[Transport]Transport),
 		dialogs:        make(map[string][]*dialogEntry),
 		transactions:   make(map[string]*clientTransaction),
@@ -110,18 +119,15 @@ func Open(cfg Config, primary Transport) (*Session, error) {
 		inboundWatches: make(map[*InboundWatch]struct{}),
 		startedCh:      make(chan struct{}),
 		closedCh:       make(chan struct{}),
-	}, nil
+	}
+	stack.startReadLoop(primary)
+	return stack, nil
 }
 
-func (s *Session) TransactionTimers() TransactionTimers {
+func (s *Stack) TransactionTimers() TransactionTimers {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cfg.TransactionTimers
-}
-
-type runState struct {
-	ctx     context.Context
-	inbound chan<- inboundMessage
 }
 
 type inboundMessage struct {
@@ -133,12 +139,14 @@ type inboundMessage struct {
 	err       error
 }
 
+type transportReader byte
+
 type usableTransportError interface {
 	error
 	TransportUsable() bool
 }
 
-func (s *Session) Run(ctx context.Context) error {
+func (s *Stack) Run(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -150,18 +158,14 @@ func (s *Session) Run(ctx context.Context) error {
 	}
 	s.started = true
 	s.running = true
-	primary := s.primary
-	aux := append([]Transport(nil), s.aux...)
-	inboundCh := make(chan inboundMessage, 16)
-	s.run = &runState{ctx: ctx, inbound: inboundCh}
+	inboundCh := s.inbound
+	primaryErr := s.primaryErr
 	s.mu.Unlock()
 	defer s.finishRunning()
-
-	s.startReadLoop(ctx, primary, inboundCh)
-	for _, transport := range aux {
-		s.startReadLoop(ctx, transport, inboundCh)
-	}
 	s.markReady()
+	if primaryErr != nil {
+		return primaryErr
+	}
 
 	for {
 		select {
@@ -173,13 +177,13 @@ func (s *Session) Run(ctx context.Context) error {
 				if !ok {
 					break
 				}
-				if err := s.handleTransportError(ctx, failure, inboundCh); err != nil {
+				if err := s.handleTransportError(ctx, failure); err != nil {
 					return err
 				}
 			}
 		case inbound := <-inboundCh:
 			if inbound.err != nil {
-				if err := s.handleTransportError(ctx, inbound, inboundCh); err != nil {
+				if err := s.handleTransportError(ctx, inbound); err != nil {
 					return err
 				}
 				continue
@@ -191,7 +195,7 @@ func (s *Session) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Session) handleTransportError(ctx context.Context, inbound inboundMessage, inboundCh chan<- inboundMessage) error {
+func (s *Stack) handleTransportError(ctx context.Context, inbound inboundMessage) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -201,23 +205,27 @@ func (s *Session) handleTransportError(ctx context.Context, inbound inboundMessa
 	if transportRemainsUsable(inbound.err) {
 		s.logger.Warn("SIP transport connection lost; transport remains active", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
 		s.abortTransportTransactions(inbound.transport, inbound.err)
-		s.startReadLoop(ctx, inbound.transport, inboundCh)
+		s.startReadLoop(inbound.transport)
 		return nil
 	}
-	if s.removeFailedAuxTransport(inbound.transport) {
+	primary, removed, closeErr := s.removeFailedTransport(inbound.transport, inbound.err)
+	if !removed {
+		return nil
+	}
+	s.abortTransportTransactions(inbound.transport, inbound.err)
+	if !primary {
 		s.logger.Warn("removed failed auxiliary SIP transport", "local_addr", inbound.transport.LocalAddr(), "err", inbound.err)
-		s.abortTransportTransactions(inbound.transport, inbound.err)
-		return nil
+		return closeErr
 	}
-	return markTransportFailed(inbound.err)
+	return markTransportFailed(errors.Join(inbound.err, closeErr))
 }
 
 func transportRemainsUsable(err error) bool {
-	var usable usableTransportError
-	return errors.As(err, &usable) && usable.TransportUsable()
+	usable, ok := errors.AsType[usableTransportError](err)
+	return ok && usable.TransportUsable()
 }
 
-func (s *Session) handleInboundRequest(ctx context.Context, req Request) error {
+func (s *Stack) handleInboundRequest(ctx context.Context, req Request) error {
 	if err := validateInboundRequest(req.Message); err != nil {
 		s.logger.Debug("dropping malformed SIP request", "start_line", req.Message.StartLine, "err", err)
 		if !canRespondToRequest(req.Message) || strings.EqualFold(req.Message.Method(), "ACK") {
@@ -265,7 +273,7 @@ func unsupportedRequireOptions(msg sip.Message) []string {
 	return unsupported
 }
 
-func (s *Session) WaitStarted(ctx context.Context) error {
+func (s *Stack) WaitStarted(ctx context.Context) error {
 	s.mu.Lock()
 	if s.ready {
 		s.mu.Unlock()
@@ -291,7 +299,7 @@ func (s *Session) WaitStarted(ctx context.Context) error {
 	}
 }
 
-func (s *Session) markReady() {
+func (s *Stack) markReady() {
 	s.mu.Lock()
 	if s.ready {
 		s.mu.Unlock()
@@ -303,23 +311,22 @@ func (s *Session) markReady() {
 	close(startedCh)
 }
 
-func (s *Session) finishRunning() {
+func (s *Stack) finishRunning() {
 	s.mu.Lock()
 	s.running = false
-	s.run = nil
 	s.transportQueue = nil
 	s.mu.Unlock()
 }
 
-func (s *Session) timeoutContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+func (s *Stack) timeoutContext(timeout time.Duration) (context.Context, context.CancelFunc) {
 	s.mu.Lock()
 	closedCh := s.closedCh
 	s.mu.Unlock()
 	return contextWithDoneTimeout(closedCh, timeout)
 }
 
-func contextWithDoneTimeout(done <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func contextWithDone(done <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
 	stop := make(chan struct{})
 	var once sync.Once
 	go func() {
@@ -337,9 +344,22 @@ func contextWithDoneTimeout(done <-chan struct{}, timeout time.Duration) (contex
 	}
 }
 
+func contextWithDoneTimeout(done <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, stop := contextWithDone(done)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	return ctx, func() {
+		cancel()
+		stop()
+	}
+}
+
 var errSessionClosed = errors.New("session is closed")
 
-func (s *Session) Close() error {
+func (s *Stack) Close() error {
+	return s.close(closeWaitTimeout)
+}
+
+func (s *Stack) close(waitTimeout time.Duration) error {
 	state, ok := s.beginClose()
 	if !ok {
 		return nil
@@ -350,16 +370,16 @@ func (s *Session) Close() error {
 	if notifyErr == nil {
 		notifyErr = errSessionClosed
 	}
-	s.finishClose(state.handlers, notifyErr)
-	return errors.Join(closeErr, s.waitReadLoops())
+	s.finishClose(state.processors, notifyErr)
+	return errors.Join(closeErr, s.waitReadLoops(waitTimeout))
 }
 
 type closeState struct {
 	transports []Transport
-	handlers   []*handlerEntry
+	processors []*processorEntry
 }
 
-func (s *Session) beginClose() (closeState, bool) {
+func (s *Stack) beginClose() (closeState, bool) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -368,9 +388,19 @@ func (s *Session) beginClose() (closeState, bool) {
 	s.closed = true
 	primary := s.primary
 	aux := append([]Transport(nil), s.aux...)
-	transports := uniqueTransports(append(aux, primary))
-	handlers := s.handlerSnapshotCopy()
+	transports := make([]Transport, 0, len(aux)+1)
+	for _, transport := range append(aux, primary) {
+		if _, ok := s.active[transport]; ok {
+			transports = append(transports, transport)
+		}
+	}
+	transports = uniqueTransports(transports)
+	processors := s.processorSnapshotCopy()
 	closedCh := s.closedCh
+	for _, attachment := range s.attachments {
+		attachment.closed = true
+	}
+	s.attachments = make(map[Transport]*transportAttachment)
 	s.active = make(map[Transport]struct{})
 	s.responseRoutes = make(map[Transport]Transport)
 	s.mu.Unlock()
@@ -378,7 +408,7 @@ func (s *Session) beginClose() (closeState, bool) {
 
 	return closeState{
 		transports: transports,
-		handlers:   handlers,
+		processors: processors,
 	}, true
 }
 
@@ -390,19 +420,23 @@ func closeTransports(transports []Transport) error {
 	return err
 }
 
-func (s *Session) finishClose(handlers []*handlerEntry, notifyErr error) {
+func (s *Stack) finishClose(processors []*processorEntry, notifyErr error) {
 	s.abortTransactions(notifyErr)
 	s.clearServerTransactions()
-	s.notifyHandlersOnce(handlers, notifyErr)
+	s.notifyProcessorsOnce(processors, notifyErr)
 }
 
-func (s *Session) waitReadLoops() error {
+func (s *Stack) waitReadLoops(timeout time.Duration) error {
+	s.readMu.Lock()
+	s.readClosed = true
+	s.readMu.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		s.readWG.Wait()
 		close(done)
 	}()
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-done:
@@ -436,16 +470,50 @@ func readTransportMessage(ctx context.Context, transport Transport) (inboundMess
 	}
 }
 
-func (s *Session) startBootstrapReadLoop(ctx context.Context, transport Transport, out chan<- inboundMessage) {
-	go func() {
-		runTransportReadLoop(ctx, transport, out, true)
-	}()
+func (s *Stack) startReadLoop(transport Transport) {
+	s.readMu.Lock()
+	if s.readClosed {
+		s.readMu.Unlock()
+		return
+	}
+	if _, ok := s.readers[transport]; ok {
+		s.readMu.Unlock()
+		return
+	}
+	reader := new(transportReader)
+	s.readers[transport] = reader
+	s.readWG.Go(func() {
+		ctx, cancel := contextWithDone(s.closedCh)
+		defer cancel()
+		defer s.releaseReadLoop(transport, reader)
+		s.runTransportReadLoop(ctx, transport, reader)
+	})
+	s.readMu.Unlock()
 }
 
-func (s *Session) startReadLoop(ctx context.Context, transport Transport, out chan<- inboundMessage) {
-	s.readWG.Go(func() {
-		runTransportReadLoop(ctx, transport, out, false)
-	})
+func (s *Stack) releaseReadLoop(transport Transport, reader *transportReader) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if s.readers[transport] == reader {
+		delete(s.readers, transport)
+	}
+}
+
+func (s *Stack) runTransportReadLoop(ctx context.Context, transport Transport, reader *transportReader) {
+	for {
+		inbound, err := readTransportMessage(ctx, transport)
+		if err != nil {
+			s.releaseReadLoop(transport, reader)
+			if ctx.Err() != nil {
+				return
+			}
+			sendInbound(ctx, s.inbound, inboundMessage{transport: transport, err: err})
+			return
+		}
+		if !sendInbound(ctx, s.inbound, inbound) {
+			return
+		}
+	}
 }
 
 func runTransportReadLoop(ctx context.Context, transport Transport, out chan<- inboundMessage, reportContextError bool) {
@@ -455,7 +523,9 @@ func runTransportReadLoop(ctx context.Context, transport Transport, out chan<- i
 			if ctx.Err() != nil && !reportContextError {
 				return
 			}
-			_ = sendInbound(ctx, out, inboundMessage{transport: transport, err: err})
+			if !sendInbound(ctx, out, inboundMessage{transport: transport, err: err}) {
+				return
+			}
 			return
 		}
 		if !sendInbound(ctx, out, inbound) {
@@ -479,19 +549,19 @@ type Request struct {
 	PeerAddr  net.Addr
 }
 
-type Handler interface {
+type RequestProcessor interface {
 	HandleRequest(ctx context.Context, req Request) (bool, error)
 }
 
-type ErrorHandler interface {
+type ErrorObserver interface {
 	HandleError(err error)
 }
 
-type ResponseHandler interface {
+type ResponseProcessor interface {
 	HandleResponse(ctx context.Context, msg sip.Message) (bool, error)
 }
 
-func (s *Session) dispatchInbound(ctx context.Context, inbound inboundMessage) error {
+func (s *Stack) dispatchInbound(ctx context.Context, inbound inboundMessage) error {
 	if len(inbound.packet) != 0 {
 		return s.handleKeepAlivePacket(ctx, inbound)
 	}
@@ -564,7 +634,7 @@ func canRespondToRequest(msg sip.Message) bool {
 	return validateInboundCoreFields(msg) == nil
 }
 
-func (s *Session) handleRequest(ctx context.Context, req Request) error {
+func (s *Stack) handleRequest(ctx context.Context, req Request) error {
 	handled, err := s.dispatchRequest(ctx, req)
 	if err != nil {
 		return err
@@ -591,13 +661,13 @@ func (s *Session) handleRequest(ctx context.Context, req Request) error {
 	return s.WriteResponse(ctx, req, resp)
 }
 
-func (s *Session) dispatchRequest(ctx context.Context, req Request) (bool, error) {
-	for _, entry := range s.handlerSnapshot() {
-		handler, ok := entry.handlerIfOpen()
+func (s *Stack) dispatchRequest(ctx context.Context, req Request) (bool, error) {
+	for _, entry := range s.processorSnapshot() {
+		processor, ok := entry.processorIfOpen()
 		if !ok {
 			continue
 		}
-		handled, err := handler.HandleRequest(ctx, req)
+		handled, err := processor.HandleRequest(ctx, req)
 		if err != nil {
 			return false, err
 		}
@@ -608,17 +678,17 @@ func (s *Session) dispatchRequest(ctx context.Context, req Request) (bool, error
 	return false, nil
 }
 
-func (s *Session) handleInboundResponse(ctx context.Context, msg sip.Message) error {
-	for _, entry := range s.handlerSnapshot() {
-		handler, ok := entry.handlerIfOpen()
+func (s *Stack) handleInboundResponse(ctx context.Context, msg sip.Message) error {
+	for _, entry := range s.processorSnapshot() {
+		processor, ok := entry.processorIfOpen()
 		if !ok {
 			continue
 		}
-		responseHandler, ok := handler.(ResponseHandler)
+		responseProcessor, ok := processor.(ResponseProcessor)
 		if !ok {
 			continue
 		}
-		handled, err := responseHandler.HandleResponse(ctx, msg)
+		handled, err := responseProcessor.HandleResponse(ctx, msg)
 		if err != nil {
 			return err
 		}
@@ -640,20 +710,20 @@ type ExchangeOptions struct {
 	ResponseTransports      []Transport
 }
 
-func (s *Session) Exchange(ctx context.Context, req sip.Message) (sip.Message, error) {
+func (s *Stack) Exchange(ctx context.Context, req sip.Message) (sip.Message, error) {
 	return s.ExchangeWithOptions(ctx, req, ExchangeOptions{})
 }
 
 // PrimaryTransport returns the transport used for new client transactions.
-func (s *Session) PrimaryTransport() Transport {
+func (s *Stack) PrimaryTransport() Transport {
 	return s.primaryTransport()
 }
 
-func (s *Session) ExchangeWithOptions(ctx context.Context, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
+func (s *Stack) ExchangeWithOptions(ctx context.Context, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
 	return s.ExchangeWithTransport(ctx, s.primaryTransport(), req, opts)
 }
 
-func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
+func (s *Stack) ExchangeWithTransport(ctx context.Context, transport Transport, req sip.Message, opts ExchangeOptions) (sip.Message, error) {
 	if err := s.ensureOpen(); err != nil {
 		return sip.Message{}, fmt.Errorf("exchanging request: %w", err)
 	}
@@ -688,21 +758,13 @@ func (s *Session) ExchangeWithTransport(ctx context.Context, transport Transport
 	return tx.await(ctx)
 }
 
-func (s *Session) exchangeWithBootstrapReader(ctx context.Context, tx *clientTransaction) (sip.Message, error) {
+func (s *Stack) exchangeWithBootstrapReader(ctx context.Context, tx *clientTransaction) (sip.Message, error) {
 	if err := tx.start(ctx); err != nil {
 		return sip.Message{}, err
 	}
 
-	readCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	readTransports := exchangeReadTransports(tx.transport, tx.opts.ResponseTransports)
-	inboundCh := make(chan inboundMessage, len(readTransports))
-	for _, transport := range readTransports {
-		s.startBootstrapReadLoop(readCtx, transport, inboundCh)
-	}
-
 	resultCh := make(chan transactionResult, 1)
+	readTransports := exchangeReadTransports(tx.transport, tx.opts.ResponseTransports)
 	go func() {
 		msg, err := tx.await(ctx)
 		resultCh <- transactionResult{msg: msg, err: err}
@@ -715,36 +777,46 @@ func (s *Session) exchangeWithBootstrapReader(ctx context.Context, tx *clientTra
 				return sip.Message{}, result.err
 			}
 			return result.msg, nil
-		case inbound := <-inboundCh:
+		case inbound := <-s.inbound:
 			if inbound.err != nil {
 				if ctx.Err() != nil {
 					tx.abort(ctx.Err())
 					continue
 				}
+				transportErr := s.handleTransportError(ctx, inbound)
+				if !slices.Contains(readTransports, inbound.transport) {
+					if transportErr != nil {
+						s.notifyProcessors(transportErr)
+					}
+					continue
+				}
 				err := fmt.Errorf("receiving %s response: %w", tx.method, inbound.err)
 				tx.abort(err)
-				return sip.Message{}, err
+				return sip.Message{}, errors.Join(err, transportErr)
 			}
-			if err := s.dispatchInbound(readCtx, inbound); err != nil {
-				tx.abort(err)
-				return sip.Message{}, err
+			if err := s.dispatchInbound(ctx, inbound); err != nil {
+				s.notifyProcessors(err)
 			}
 		}
 	}
 }
 
-func (s *Session) Send(ctx context.Context, req sip.Message) error {
+func (s *Stack) Send(ctx context.Context, req sip.Message) error {
 	if err := s.ensureOpen(); err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
-	transport, req, err := s.prepareRequestTransport(ctx, s.primaryTransport(), req)
+	primary := s.primaryTransport()
+	if err := s.ensureActiveTransport(primary); err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	transport, req, err := s.prepareRequestTransport(ctx, primary, req)
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
 	return s.writeRequest(ctx, transport, req)
 }
 
-func (s *Session) prepareRequestTransport(ctx context.Context, preferred Transport, req sip.Message) (Transport, sip.Message, error) {
+func (s *Stack) prepareRequestTransport(ctx context.Context, preferred Transport, req sip.Message) (Transport, sip.Message, error) {
 	packet, err := req.MarshalBinary()
 	if err != nil {
 		return nil, sip.Message{}, fmt.Errorf("encoding %s request: %w", req.Method(), err)
@@ -778,7 +850,7 @@ type securityBoundTransport interface {
 	SecurityAssociationID() string
 }
 
-func (s *Session) reliableTransport(ctx context.Context, preferred Transport) (Transport, error) {
+func (s *Stack) reliableTransport(ctx context.Context, preferred Transport) (Transport, error) {
 	if transport := s.activeReliableTransport(preferred); transport != nil {
 		return transport, nil
 	}
@@ -798,23 +870,23 @@ func (s *Session) reliableTransport(ctx context.Context, preferred Transport) (T
 		return nil, errors.New("opening reliable SIP transport: transport is nil")
 	}
 	if !transportIsReliable(transport) {
-		_ = transport.Close()
-		return nil, errors.New("opening reliable SIP transport: transport is not reliable")
+		return nil, errors.Join(errors.New("opening reliable SIP transport: transport is not reliable"), transport.Close())
 	}
 	attachment, err := s.AddTransport(transport)
 	if err != nil {
-		_ = transport.Close()
-		return nil, fmt.Errorf("opening reliable SIP transport: %w", err)
+		return nil, errors.Join(fmt.Errorf("opening reliable SIP transport: %w", err), transport.Close())
 	}
 	if _, err := s.PromotePrimary(transport); err != nil {
-		_ = attachment.Close()
-		_ = transport.Close()
-		return nil, fmt.Errorf("opening reliable SIP transport: %w", err)
+		return nil, errors.Join(
+			fmt.Errorf("opening reliable SIP transport: %w", err),
+			attachment.Close(),
+			transport.Close(),
+		)
 	}
 	return transport, nil
 }
 
-func (s *Session) activeReliableTransport(preferred Transport) Transport {
+func (s *Stack) activeReliableTransport(preferred Transport) Transport {
 	remote := preferred.RemoteAddr()
 	secure := isSecureTransport(preferred)
 	associationID := securityAssociationID(preferred)
@@ -909,7 +981,7 @@ func setRequestViaTransport(req *sip.Message, transport Transport) error {
 	return nil
 }
 
-func (s *Session) writeRequest(ctx context.Context, transport Transport, req sip.Message) error {
+func (s *Stack) writeRequest(ctx context.Context, transport Transport, req sip.Message) error {
 	packet, err := req.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("encoding %s request: %w", req.Method(), err)
@@ -1001,13 +1073,13 @@ type targetedPacketWriter interface {
 	WritePacketTo(ctx context.Context, data []byte, addr net.Addr) error
 }
 
-func (s *Session) LocalAddr() net.Addr {
+func (s *Stack) LocalAddr() net.Addr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.primary.LocalAddr()
 }
 
-func (s *Session) RemoteAddr() net.Addr {
+func (s *Stack) RemoteAddr() net.Addr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.primary.RemoteAddr()
@@ -1015,13 +1087,13 @@ func (s *Session) RemoteAddr() net.Addr {
 
 // SupportsKeepAlive reports whether the primary transport permits the SIP
 // keep-alive mechanisms negotiated through RFC 6223.
-func (s *Session) SupportsKeepAlive() bool {
+func (s *Stack) SupportsKeepAlive() bool {
 	transport := s.primaryTransport()
 	capability, ok := transport.(keepAliveTransport)
 	return !ok || capability.SupportsSIPKeepAlive()
 }
 
-func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transport) error {
+func (s *Stack) WaitTransportsIdle(ctx context.Context, transports ...Transport) error {
 	watched, err := transportSet(transports)
 	if err != nil {
 		return err
@@ -1054,7 +1126,7 @@ func (s *Session) WaitTransportsIdle(ctx context.Context, transports ...Transpor
 }
 
 type InboundWatch struct {
-	session    *Session
+	session    *Stack
 	transports map[Transport]struct{}
 	excluded   string
 	done       chan struct{}
@@ -1062,17 +1134,17 @@ type InboundWatch struct {
 
 // WatchTransportsInbound snapshots the supplied transports so a later Wait
 // observes messages arriving immediately after this call.
-func (s *Session) WatchTransportsInbound(transports ...Transport) (*InboundWatch, error) {
+func (s *Stack) WatchTransportsInbound(transports ...Transport) (*InboundWatch, error) {
 	return s.watchTransportsInbound("", transports...)
 }
 
 // WatchTransportsInboundExcept ignores retransmissions of excluded while
 // waiting for a later SIP message.
-func (s *Session) WatchTransportsInboundExcept(excluded sip.Message, transports ...Transport) (*InboundWatch, error) {
+func (s *Stack) WatchTransportsInboundExcept(excluded sip.Message, transports ...Transport) (*InboundWatch, error) {
 	return s.watchTransportsInbound(inboundMessageKey(excluded), transports...)
 }
 
-func (s *Session) watchTransportsInbound(excluded string, transports ...Transport) (*InboundWatch, error) {
+func (s *Stack) watchTransportsInbound(excluded string, transports ...Transport) (*InboundWatch, error) {
 	watched, err := transportSet(transports)
 	if err != nil {
 		return nil, err
@@ -1115,7 +1187,7 @@ func (w *InboundWatch) Close() {
 
 // WaitTransportsInbound waits for the next valid SIP message received after
 // this call on one of the supplied transports.
-func (s *Session) WaitTransportsInbound(ctx context.Context, transports ...Transport) error {
+func (s *Stack) WaitTransportsInbound(ctx context.Context, transports ...Transport) error {
 	watch, err := s.WatchTransportsInbound(transports...)
 	if err != nil {
 		return err
@@ -1123,7 +1195,7 @@ func (s *Session) WaitTransportsInbound(ctx context.Context, transports ...Trans
 	return watch.Wait(ctx)
 }
 
-func (s *Session) markTransportInbound(transport Transport, msg sip.Message) {
+func (s *Stack) markTransportInbound(transport Transport, msg sip.Message) {
 	key := inboundMessageKey(msg)
 	s.mu.Lock()
 	for watch := range s.inboundWatches {
@@ -1136,7 +1208,7 @@ func (s *Session) markTransportInbound(transport Transport, msg sip.Message) {
 	s.mu.Unlock()
 }
 
-func (s *Session) removeInboundWatch(watch *InboundWatch) {
+func (s *Stack) removeInboundWatch(watch *InboundWatch) {
 	s.mu.Lock()
 	delete(s.inboundWatches, watch)
 	s.mu.Unlock()
@@ -1153,7 +1225,7 @@ func inboundMessageKey(msg sip.Message) string {
 	}, "\x00")
 }
 
-func (s *Session) ensureOpen() error {
+func (s *Stack) ensureOpen() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -1162,7 +1234,7 @@ func (s *Session) ensureOpen() error {
 	return nil
 }
 
-func (s *Session) ensureActiveTransport(transport Transport) error {
+func (s *Stack) ensureActiveTransport(transport Transport) error {
 	if transport == nil {
 		return errors.New("transport is nil")
 	}
@@ -1174,46 +1246,54 @@ func (s *Session) ensureActiveTransport(transport Transport) error {
 	return nil
 }
 
-func (s *Session) isRunning() bool {
+func (s *Stack) isRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.running
 }
 
-func (s *Session) primaryTransport() Transport {
+func (s *Stack) primaryTransport() Transport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.primary
 }
 
-func (s *Session) isTransportActive(transport Transport) bool {
+func (s *Stack) isTransportActive(transport Transport) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.active[transport]
 	return ok
 }
 
-func (s *Session) removeFailedAuxTransport(transport Transport) bool {
+func (s *Stack) removeFailedTransport(transport Transport, cause error) (bool, bool, error) {
 	s.mu.Lock()
-	if s.closed || transport == s.primary {
+	if s.closed {
 		s.mu.Unlock()
-		return false
+		return false, false, nil
 	}
 	if _, ok := s.active[transport]; !ok {
 		s.mu.Unlock()
-		return true
+		return false, false, nil
 	}
+	primary := transport == s.primary
 	delete(s.active, transport)
+	if attachment := s.attachments[transport]; attachment != nil {
+		attachment.closed = true
+		delete(s.attachments, transport)
+	}
 	s.removeResponseRoutesFor(transport)
 	s.aux = removeTransport(s.aux, transport)
+	if primary {
+		s.primaryErr = markTransportFailed(cause)
+	}
 	s.notifyTransactionsChanged()
 	s.mu.Unlock()
 	s.abortTransportKeepAlives(transport, errors.New("waiting for keepalive: transport failed"))
-	_ = transport.Close()
-	return true
+	closeErr := transport.Close()
+	return primary, true, closeErr
 }
 
-func (s *Session) transportsIdle(transports map[Transport]struct{}) bool {
+func (s *Stack) transportsIdle(transports map[Transport]struct{}) bool {
 	for _, tx := range s.transactions {
 		if _, ok := transports[tx.transport]; ok {
 			return false
@@ -1227,7 +1307,7 @@ func (s *Session) transportsIdle(transports map[Transport]struct{}) bool {
 	return true
 }
 
-func (s *Session) notifyTransactionsChanged() {
+func (s *Stack) notifyTransactionsChanged() {
 	close(s.txChanged)
 	s.txChanged = make(chan struct{})
 }
@@ -1267,7 +1347,7 @@ func uniqueTransports(transports []Transport) []Transport {
 	return unique
 }
 
-func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Message) error {
+func (s *Stack) WriteResponse(ctx context.Context, req Request, resp sip.Message) error {
 	if err := s.ensureOpen(); err != nil {
 		return fmt.Errorf("writing response: %w", err)
 	}
@@ -1285,19 +1365,19 @@ func (s *Session) WriteResponse(ctx context.Context, req Request, resp sip.Messa
 	return nil
 }
 
-func (s *Session) WriteStatus(ctx context.Context, req Request, code int, reason string) error {
+func (s *Stack) WriteStatus(ctx context.Context, req Request, code int, reason string) error {
 	resp := sip.NewResponse(code, reason)
 	resp.Headers = sip.ResponseHeaders(req.Message, code)
 	return s.WriteResponse(ctx, req, resp)
 }
 
-func (s *Session) SetResponseDecorator(fn func(*sip.Message)) {
+func (s *Stack) SetResponseDecorator(fn func(*sip.Message)) {
 	s.mu.Lock()
 	s.responseDecorator = fn
 	s.mu.Unlock()
 }
 
-func (s *Session) applyResponseDecorator(resp *sip.Message) {
+func (s *Stack) applyResponseDecorator(resp *sip.Message) {
 	s.mu.Lock()
 	fn := s.responseDecorator
 	s.mu.Unlock()
@@ -1309,20 +1389,16 @@ func (s *Session) applyResponseDecorator(resp *sip.Message) {
 	}
 }
 
-func (s *Session) writePacket(ctx context.Context, transport Transport, data []byte) error {
+func (s *Stack) writePacket(ctx context.Context, transport Transport, data []byte) error {
 	return s.writePacketTo(ctx, transport, data, nil)
 }
 
-func (s *Session) writePacketTo(ctx context.Context, transport Transport, data []byte, addr net.Addr) error {
+func (s *Stack) writePacketTo(ctx context.Context, transport Transport, data []byte, addr net.Addr) error {
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
-	for {
+	for !s.sendMu.TryLock() {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if s.sendMu.TryLock() {
-			defer s.sendMu.Unlock()
-			break
 		}
 		select {
 		case <-ctx.Done():
@@ -1330,6 +1406,7 @@ func (s *Session) writePacketTo(ctx context.Context, transport Transport, data [
 		case <-ticker.C:
 		}
 	}
+	defer s.sendMu.Unlock()
 	if addr == nil {
 		return transport.WritePacket(ctx, data)
 	}
@@ -1340,7 +1417,7 @@ func (s *Session) writePacketTo(ctx context.Context, transport Transport, data [
 	return writer.WritePacketTo(ctx, data, addr)
 }
 
-func (s *Session) writeResponse(ctx context.Context, transport Transport, peer net.Addr, req sip.Message, resp sip.Message) error {
+func (s *Stack) writeResponse(ctx context.Context, transport Transport, peer net.Addr, req sip.Message, resp sip.Message) error {
 	data, err := resp.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("encoding %d response: %w", resp.StatusCode(), err)
@@ -1357,7 +1434,7 @@ func (s *Session) writeResponse(ctx context.Context, transport Transport, peer n
 	return s.writePacketTo(ctx, transport, data, target)
 }
 
-func (s *Session) responseTransport(fallback Transport, target net.Addr) Transport {
+func (s *Stack) responseTransport(fallback Transport, target net.Addr) Transport {
 	if fallback != nil {
 		s.mu.Lock()
 		routed := s.responseRoutes[fallback]
@@ -1410,7 +1487,7 @@ func responseDestination(remote net.Addr, via string) net.Addr {
 	return target
 }
 
-func (s *Session) dispatchResponse(inbound inboundMessage) bool {
+func (s *Stack) dispatchResponse(inbound inboundMessage) bool {
 	key := sip.PendingKey(inbound.msg)
 	s.mu.Lock()
 	tx, ok := s.transactions[key]
@@ -1468,7 +1545,7 @@ func stripHostBrackets(host string) string {
 
 var sipCRLFKeepAlive = []byte("\r\n\r\n")
 
-func (s *Session) SendKeepAlive(ctx context.Context) error {
+func (s *Stack) SendKeepAlive(ctx context.Context) error {
 	if err := s.ensureOpen(); err != nil {
 		return fmt.Errorf("sending SIP keepalive: %w", err)
 	}
@@ -1476,6 +1553,9 @@ func (s *Session) SendKeepAlive(ctx context.Context) error {
 		return errors.New("sending SIP keepalive: primary transport disables SIP keepalive")
 	}
 	transport := s.primaryTransport()
+	if err := s.ensureActiveTransport(transport); err != nil {
+		return fmt.Errorf("sending SIP keepalive: %w", err)
+	}
 	switch transport.LocalAddr().(type) {
 	case *net.TCPAddr:
 		return s.sendCRLFKeepAlive(ctx, transport)

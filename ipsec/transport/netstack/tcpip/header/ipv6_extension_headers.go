@@ -687,7 +687,7 @@ func (i *IPv6PayloadIterator) nextHeaderData(ignoreLength bool, bytes []byte) (I
 	// at max 1 bytes since rune has a length of 1. If we read 0 bytes, the Read
 	// would return io.EOF to indicate that io.Reader has reached the end of the
 	// payload.
-	rdr := i.payload.AsBufferReader()
+	rdr := i.payload.AsReader()
 	nextHdrIdentifier, err := rdr.ReadByte()
 	if err != nil {
 		return 0, nil, fmt.Errorf("error when reading the Next Header field for extension header with id = %d: %w", i.nextHdrIdentifier, err)

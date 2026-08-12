@@ -22,6 +22,7 @@ type attachmentDrain struct {
 	cancel      context.CancelFunc
 	closeOnce   sync.Once
 	attachments []session.Attachment
+	closeErr    error
 }
 
 type secureAssociationExpiry struct {
@@ -144,28 +145,32 @@ func uniqueSessionTransports(transports []session.Transport) []session.Transport
 	return unique
 }
 
-func closeAttachments(attachments []session.Attachment) {
+func closeAttachments(attachments []session.Attachment) error {
+	var closeErr error
 	for _, attachment := range attachments {
 		if attachment != nil {
-			_ = attachment.Close()
+			closeErr = errors.Join(closeErr, attachment.Close())
 		}
 	}
+	return closeErr
 }
 
-func (r *registerSecurity) close() {
+func (r *registerSecurity) close() error {
 	if r == nil {
-		return
+		return nil
 	}
-	closeAttachments(r.inboundAttachments)
+	var closeErr error
+	closeErr = errors.Join(closeErr, closeAttachments(r.inboundAttachments))
 	r.inboundAttachments = nil
 	r.inboundTransports = nil
-	closeAttachments(r.responseAttachments)
+	closeErr = errors.Join(closeErr, closeAttachments(r.responseAttachments))
 	r.responseAttachments = nil
 	if r.outboundAttachment != nil {
-		_ = r.outboundAttachment.Close()
+		closeErr = errors.Join(closeErr, r.outboundAttachment.Close())
 		r.outboundAttachment = nil
 	}
 	r.outbound = nil
+	return closeErr
 }
 
 func (r *registerSecurity) exchangeOptions() session.ExchangeOptions {
@@ -204,7 +209,7 @@ func (s *Registrar) closeAttachmentsAfter(attachments []session.Attachment, dela
 		return
 	}
 	if delay <= 0 {
-		closeAttachments(attachments)
+		s.logAttachmentCloseError(closeAttachments(attachments))
 		return
 	}
 	drain := &attachmentDrain{
@@ -214,7 +219,7 @@ func (s *Registrar) closeAttachmentsAfter(attachments []session.Attachment, dela
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		closeAttachments(attachments)
+		s.logAttachmentCloseError(closeAttachments(attachments))
 		return
 	}
 	ctx, cancel := contextWithDoneTimeout(s.done, delay)
@@ -225,9 +230,11 @@ func (s *Registrar) closeAttachmentsAfter(attachments []session.Attachment, dela
 		if len(transports) == 0 {
 			<-ctx.Done()
 		} else {
-			_ = s.sess.WaitTransportsIdle(ctx, transports...)
+			if err := s.sess.WaitTransportsIdle(ctx, transports...); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				s.logger.Warn("waiting for IMS security transports to become idle", "err", err)
+			}
 		}
-		drain.close()
+		s.logAttachmentCloseError(drain.close())
 		s.forgetDrain(drain)
 	})
 	s.mu.Unlock()
@@ -241,7 +248,7 @@ func (s *Registrar) closeOldSecurityAfterNewInbound(attachments []session.Attach
 	}
 	if !expiresAt.IsZero() && !expiresAt.After(time.Now()) {
 		watch.Close()
-		closeAttachments(attachments)
+		s.logAttachmentCloseError(closeAttachments(attachments))
 		return
 	}
 	drain := &attachmentDrain{attachments: append([]session.Attachment(nil), attachments...)}
@@ -251,7 +258,7 @@ func (s *Registrar) closeOldSecurityAfterNewInbound(attachments []session.Attach
 	if s.closed {
 		s.mu.Unlock()
 		watch.Close()
-		closeAttachments(attachments)
+		s.logAttachmentCloseError(closeAttachments(attachments))
 		return
 	}
 	ctx, cancel := contextWithDoneDeadline(s.done, expiresAt)
@@ -263,11 +270,13 @@ func (s *Registrar) closeOldSecurityAfterNewInbound(attachments []session.Attach
 			delay := saDrainDelayBefore(expiresAt, s.sess.TransactionTimers())
 			if delay > 0 && len(oldTransports) != 0 {
 				idleCtx, idleCancel := context.WithTimeout(ctx, delay)
-				_ = s.sess.WaitTransportsIdle(idleCtx, oldTransports...)
+				if err := s.sess.WaitTransportsIdle(idleCtx, oldTransports...); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					s.logger.Warn("waiting for replaced IMS security transports to become idle", "err", err)
+				}
 				idleCancel()
 			}
 		}
-		drain.close()
+		s.logAttachmentCloseError(drain.close())
 		s.forgetDrain(drain)
 	})
 	s.mu.Unlock()
@@ -295,10 +304,17 @@ func attachmentTransports(attachments []session.Attachment) []session.Transport 
 	return transports
 }
 
-func (d *attachmentDrain) close() {
+func (d *attachmentDrain) close() error {
 	d.closeOnce.Do(func() {
-		closeAttachments(d.attachments)
+		d.closeErr = closeAttachments(d.attachments)
 	})
+	return d.closeErr
+}
+
+func (s *Registrar) logAttachmentCloseError(err error) {
+	if err != nil {
+		s.logger.Warn("closing IMS security attachment failed", "err", err)
+	}
 }
 
 func newSecureAssociationExpiry() *secureAssociationExpiry {
@@ -329,9 +345,9 @@ func (s *Registrar) closeSecureResources() error {
 	s.registrationCommitMu.Lock()
 	resources := s.takeSecureResourcesForClose()
 	s.registrationCommitMu.Unlock()
-	resources.stop()
+	stopErr := resources.stop()
 	s.bgWG.Wait()
-	err := resources.close(s.sess)
+	err := errors.Join(stopErr, resources.close(s.sess))
 	s.secureCleanupWG.Wait()
 	s.replacementWG.Wait()
 	return err
@@ -343,9 +359,9 @@ func (s *Registrar) clearSecureResources() error {
 		return nil
 	}
 	defer s.secureCleanupWG.Done()
-	resources.stop()
+	stopErr := resources.stop()
 	s.bgWG.Wait()
-	return resources.close(s.sess)
+	return errors.Join(stopErr, resources.close(s.sess))
 }
 
 func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func()) {
@@ -356,7 +372,9 @@ func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func())
 		}
 		return
 	}
-	resources.stop()
+	if err := resources.stop(); err != nil {
+		s.logger.Warn("stopping IMS security resources failed", "err", err)
+	}
 	s.bgWG.Wait()
 	if delay <= 0 {
 		defer s.secureCleanupWG.Done()
@@ -452,7 +470,8 @@ func (s *Registrar) takeSecureResourcesLocked() secureResources {
 	return resources
 }
 
-func (r secureResources) stop() {
+func (r secureResources) stop() error {
+	var stopErr error
 	if r.expiry != nil {
 		r.expiry.stop()
 	}
@@ -461,11 +480,12 @@ func (r secureResources) stop() {
 	}
 	for _, drain := range r.drains {
 		drain.cancel()
-		drain.close()
+		stopErr = errors.Join(stopErr, drain.close())
 	}
+	return stopErr
 }
 
-func (r secureResources) close(sess *session.Session) error {
+func (r secureResources) close(sess *session.Stack) error {
 	var restoreErr error
 	if r.unprotectedPrimary != nil {
 		securePrimary, err := sess.PromotePrimary(r.unprotectedPrimary)
@@ -477,9 +497,7 @@ func (r secureResources) close(sess *session.Session) error {
 			}
 		}
 	}
-	closeAttachments(r.serverAttachments)
-	closeAttachments(r.responseAttachments)
-	return restoreErr
+	return errors.Join(restoreErr, closeAttachments(r.serverAttachments), closeAttachments(r.responseAttachments))
 }
 
 func saDrainDelay(timers session.TransactionTimers) time.Duration {
@@ -588,8 +606,7 @@ func (s *Registrar) expireActiveSecureAssociation(expiry *secureAssociationExpir
 	if !ok {
 		return
 	}
-	resources.stop()
-	if err := resources.close(s.sess); err != nil {
+	if err := errors.Join(resources.stop(), resources.close(s.sess)); err != nil {
 		s.logger.Error("deleting expired IMS security association", "err", err)
 	}
 	s.setRegistered(false)
@@ -633,23 +650,20 @@ func (s *Registrar) openRegisterSecurity(ctx context.Context) (*registerSecurity
 	if !sameSessionEndpoint(outbound, s.sess.LocalAddr(), s.sess.RemoteAddr()) {
 		attachment, err := s.sess.AddTransport(outbound)
 		if err != nil {
-			outbound.Close()
-			return nil, fmt.Errorf("adding secure IMS transport: %w", err)
+			return nil, errors.Join(fmt.Errorf("adding secure IMS transport: %w", err), outbound.Close())
 		}
 		registration.outboundAttachment = attachment
 	}
 	inboundTransports, inboundAttachments, err := s.startSecureServerTransports(ctx, verify)
 	if err != nil {
-		registration.close()
-		return nil, err
+		return nil, errors.Join(err, registration.close())
 	}
 	registration.inboundTransports = inboundTransports
 	registration.inboundAttachments = inboundAttachments
 	s.addReliableOutboundTransport(ctx, registration, verify, flow)
 	responseAttachments, err := s.startSecureResponseTransportsWithKeys(ctx, verify, flow, outbound, inboundTransports, s.authCK, s.authIK)
 	if err != nil {
-		registration.close()
-		return nil, err
+		return nil, errors.Join(err, registration.close())
 	}
 	registration.responseAttachments = responseAttachments
 	return registration, nil
@@ -672,7 +686,9 @@ func (s *Registrar) addReliableOutboundTransport(ctx context.Context, registrati
 	}
 	attachment, err := s.sess.AddTransport(reliable)
 	if err != nil {
-		_ = reliable.Close()
+		if closeErr := reliable.Close(); closeErr != nil {
+			s.logger.Warn("closing unavailable secure TCP fallback", "err", closeErr)
+		}
 		s.logger.Warn("adding secure TCP fallback", "err", err)
 		return
 	}
@@ -720,12 +736,11 @@ func (s *Registrar) commitRegisterSecurity(registration *registerSecurity) error
 	registration.outboundAttachment = nil
 	registration.inboundAttachments = nil
 	registration.responseAttachments = nil
-	closeAttachments(oldServers)
-	closeAttachments(oldResponses)
+	closeErr := errors.Join(closeAttachments(oldServers), closeAttachments(oldResponses))
 	if oldPrimary != nil && !s.retainUnprotectedPrimary(oldPrimary) {
-		_ = oldPrimary.Close()
+		closeErr = errors.Join(closeErr, oldPrimary.Close())
 	}
-	return nil
+	return closeErr
 }
 
 func (s *Registrar) retainUnprotectedPrimary(attachment session.Attachment) bool {
@@ -954,14 +969,12 @@ func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, ver
 			ck: ck, ik: ik, outboundSaltBits: saltUEServerToPCSCFClient, inboundSaltBits: saltPCSCFClientToUEServer,
 		}))
 		if err != nil {
-			closeAttachments(attachments)
-			return nil, nil, fmt.Errorf("listening secure IMS transport: %w", err)
+			return nil, nil, errors.Join(fmt.Errorf("listening secure IMS transport: %w", err), closeAttachments(attachments))
 		}
 		attachment, err := s.sess.AddTransport(serverTransport)
 		if err != nil {
-			serverTransport.Close()
-			closeAttachments(attachments)
-			return nil, nil, fmt.Errorf("adding secure IMS transport: %w", err)
+			closeErr := serverTransport.Close()
+			return nil, nil, errors.Join(fmt.Errorf("adding secure IMS transport: %w", err), closeErr, closeAttachments(attachments))
 		}
 		transports = append(transports, serverTransport)
 		attachments = append(attachments, attachment)
@@ -974,14 +987,12 @@ func (s *Registrar) startSecureServerTransportsWithKeys(ctx context.Context, ver
 			ck: ck, ik: ik, outboundSaltBits: saltUEServerToPCSCFClient, inboundSaltBits: saltPCSCFClientToUEServer,
 		}))
 		if err != nil {
-			closeAttachments(attachments)
-			return nil, nil, fmt.Errorf("listening secure IMS datagram transport: %w", err)
+			return nil, nil, errors.Join(fmt.Errorf("listening secure IMS datagram transport: %w", err), closeAttachments(attachments))
 		}
 		attachment, err := s.sess.AddTransport(serverDatagramTransport)
 		if err != nil {
-			serverDatagramTransport.Close()
-			closeAttachments(attachments)
-			return nil, nil, fmt.Errorf("adding secure IMS datagram transport: %w", err)
+			closeErr := serverDatagramTransport.Close()
+			return nil, nil, errors.Join(fmt.Errorf("adding secure IMS datagram transport: %w", err), closeErr, closeAttachments(attachments))
 		}
 		transports = append(transports, serverDatagramTransport)
 		attachments = append(attachments, attachment)
@@ -1014,13 +1025,11 @@ func (s *Registrar) startSecureResponseTransportsWithKeys(ctx context.Context, v
 	}
 	attachment, err := s.sess.AddTransport(responseTransport)
 	if err != nil {
-		responseTransport.Close()
-		return nil, fmt.Errorf("adding secure IMS datagram response transport: %w", err)
+		return nil, errors.Join(fmt.Errorf("adding secure IMS datagram response transport: %w", err), responseTransport.Close())
 	}
 	route, err := s.sess.RouteResponses(inboundDatagramTransport, responseTransport)
 	if err != nil {
-		_ = attachment.Close()
-		return nil, fmt.Errorf("routing secure IMS datagram responses: %w", err)
+		return nil, errors.Join(fmt.Errorf("routing secure IMS datagram responses: %w", err), attachment.Close())
 	}
 	return []session.Attachment{attachment, route}, nil
 }

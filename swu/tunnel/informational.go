@@ -11,7 +11,7 @@ import (
 	"github.com/damonto/ims-go/swu/ike"
 )
 
-var invalidMessageIDNotifyTimeout = 750 * time.Millisecond
+const defaultInvalidMessageIDNotifyTimeout = 750 * time.Millisecond
 
 type ikeExchangeState struct {
 	informWaiters      map[ikeMessageKey]chan inboundIKE
@@ -41,7 +41,11 @@ func (s *Session) sendInvalidMessageIDNotification(state informationalState, inv
 	if !state.available() || !s.allowInvalidMessageIDNotification(time.Now()) {
 		return nil
 	}
-	ctx, cancel := s.timeoutContext(invalidMessageIDNotifyTimeout)
+	timeout := s.invalidMessageIDNotifyTimeout
+	if timeout <= 0 {
+		timeout = defaultInvalidMessageIDNotifyTimeout
+	}
+	ctx, cancel := s.timeoutContext(timeout)
 	defer cancel()
 	release, err := s.acquireIKERequest(ctx, ikeActionSendInvalidMessageIDNotification)
 	if err != nil {

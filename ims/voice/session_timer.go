@@ -161,13 +161,16 @@ func (c *Call) expireUnrefreshedSession() {
 	ctx, cancel := c.endpoint.timeoutContext(callReleaseTimeout)
 	defer cancel()
 	c.setState(CallStateEnding, "session timer expired")
-	_ = c.closeMedia()
+	closeErr := c.closeMedia()
 	resp, err := c.endpoint.sess.Exchange(ctx, c.buildBYE(""))
 	if !byeReleaseCompleted(resp, err) {
-		err := byeReleaseError(callActionExpireSessionTimer, resp, err)
+		err := errors.Join(byeReleaseError(callActionExpireSessionTimer, resp, err), closeErr)
 		c.finish(CallStateFailed, err.Error())
 		c.endpoint.emitError(err)
 		return
+	}
+	if closeErr != nil {
+		c.endpoint.emitError(fmt.Errorf("closing media after session expiry: %w", closeErr))
 	}
 	c.finish(CallStateEnded, "session timer expired")
 }

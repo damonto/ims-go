@@ -169,26 +169,26 @@ type Request struct {
 	HTTPClient      *http.Client
 }
 
-func (req Request) validate() error {
-	if req.Card == nil {
+func (r Request) validate() error {
+	if r.Card == nil {
 		return errors.New("wfc setup card is required")
 	}
-	if !req.Purpose.valid() {
-		return fmt.Errorf("wfc setup purpose %d is invalid", req.Purpose)
+	if !r.Purpose.valid() {
+		return fmt.Errorf("wfc setup purpose %d is invalid", r.Purpose)
 	}
 	return nil
 }
 
-func (req Request) now() time.Time {
-	if req.Now.IsZero() {
+func (r Request) now() time.Time {
+	if r.Now.IsZero() {
 		return time.Now()
 	}
-	return req.Now
+	return r.Now
 }
 
-func (req Request) logger() *slog.Logger {
-	if req.Logger != nil {
-		return req.Logger
+func (r Request) logger() *slog.Logger {
+	if r.Logger != nil {
+		return r.Logger
 	}
 	return slog.Default()
 }

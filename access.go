@@ -2,7 +2,7 @@ package ims
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 
 	imssession "github.com/damonto/ims-go/ims/session"
@@ -24,16 +24,16 @@ type VoWiFiConfig struct {
 	Underlay Underlay
 }
 
-func VoWiFi(cfg VoWiFiConfig) AccessConfig {
-	return AccessConfig{VoWiFi: &cfg}
+func VoWiFi(c VoWiFiConfig) AccessConfig {
+	return AccessConfig{VoWiFi: &c}
 }
 
-func VoLTE(cfg lte.Config) AccessConfig {
-	return AccessConfig{VoLTE: &cfg}
+func VoLTE(c lte.Config) AccessConfig {
+	return AccessConfig{VoLTE: &c}
 }
 
 type accessSession interface {
-	OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAccess, error)
+	OpenIMS(ctx context.Context, c accessIMSConfig) (imsAccess, error)
 	Close() error
 }
 
@@ -64,29 +64,29 @@ type imsSecurity struct {
 	ListenSecureUDP func(context.Context, imssession.SecureUDPConfig) (imssession.Transport, error)
 }
 
-func (cfg AccessConfig) normalized() (AccessConfig, error) {
-	if cfg.VoWiFi != nil && cfg.VoLTE != nil {
-		return AccessConfig{}, fmt.Errorf("normalizing access config: choose VoWiFi or VoLTE, not both")
+func (c AccessConfig) normalized() (AccessConfig, error) {
+	if c.VoWiFi != nil && c.VoLTE != nil {
+		return AccessConfig{}, errors.New("normalizing access config: choose VoWiFi or VoLTE, not both")
 	}
-	if cfg.VoWiFi == nil && cfg.VoLTE == nil {
-		return AccessConfig{}, fmt.Errorf("normalizing access config: choose VoWiFi or VoLTE")
+	if c.VoWiFi == nil && c.VoLTE == nil {
+		return AccessConfig{}, errors.New("normalizing access config: choose VoWiFi or VoLTE")
 	}
-	if cfg.VoLTE != nil {
-		volte, err := cfg.VoLTE.Normalized()
+	if c.VoLTE != nil {
+		volte, err := c.VoLTE.Normalized()
 		if err != nil {
 			return AccessConfig{}, err
 		}
 		return AccessConfig{VoLTE: &volte}, nil
 	}
-	wifi := *cfg.VoWiFi
+	wifi := *c.VoWiFi
 	wifi.EPDG = strings.TrimSpace(wifi.EPDG)
 	return AccessConfig{VoWiFi: &wifi}, nil
 }
 
-func (cfg Config) usesVoWiFi() bool {
-	return cfg.Access.VoWiFi != nil
+func (c Config) usesVoWiFi() bool {
+	return c.Access.VoWiFi != nil
 }
 
-func (cfg Config) usesVoLTE() bool {
-	return cfg.Access.VoLTE != nil
+func (c Config) usesVoLTE() bool {
+	return c.Access.VoLTE != nil
 }

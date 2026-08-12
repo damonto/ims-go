@@ -45,7 +45,7 @@ func (c *testPacketConn) Close() error {
 	return nil
 }
 
-type testInnerHandler struct {
+type testInnerPacketProcessor struct {
 	handle  bool
 	packets []packet.InnerPacket
 	errors  []error
@@ -68,12 +68,12 @@ func (l *testPacketListener) ListenUDPPacket(_ context.Context, local *net.UDPAd
 	return &testPacketConn{local: local}, nil
 }
 
-func (h *testInnerHandler) HandleInnerPacket(pkt packet.InnerPacket) bool {
+func (h *testInnerPacketProcessor) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	h.packets = append(h.packets, pkt)
 	return h.handle
 }
 
-func (h *testInnerHandler) HandleError(err error) {
+func (h *testInnerPacketProcessor) HandleError(err error) {
 	h.errors = append(h.errors, err)
 }
 
@@ -138,10 +138,10 @@ func TestSessionEnableOpensModeOnce(t *testing.T) {
 				return &testPacketConn{local: &net.UDPAddr{IP: s.localIP, Port: udpEncapPort}}, nil
 			}
 
-			if err := s.Enable(context.Background(), tt.mode); err != nil {
+			if err := s.Enable(t.Context(), tt.mode); err != nil {
 				t.Fatalf("Enable() error = %v", err)
 			}
-			if err := s.Enable(context.Background(), tt.mode); err != nil {
+			if err := s.Enable(t.Context(), tt.mode); err != nil {
 				t.Fatalf("second Enable() error = %v", err)
 			}
 			if calls != 1 {
@@ -182,7 +182,7 @@ func TestSessionUsesConfiguredPacketListener(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSessionWithConfig() error = %v", err)
 			}
-			if err := s.Enable(context.Background(), tt.mode); err != nil {
+			if err := s.Enable(t.Context(), tt.mode); err != nil {
 				t.Fatalf("Enable() error = %v", err)
 			}
 			if tt.wantNetwork != "" {
@@ -233,7 +233,7 @@ func TestSessionWriteInnerPacketMapsOuterTransport(t *testing.T) {
 			s.espConn = espConn
 			s.udpConn = udpConn
 
-			if err := s.WriteInnerPacket(context.Background(), tt.packet); err != nil {
+			if err := s.WriteInnerPacket(t.Context(), tt.packet); err != nil {
 				t.Fatalf("WriteInnerPacket() error = %v", err)
 			}
 			conn := espConn
@@ -297,14 +297,14 @@ func TestSessionAttachmentDispatchAndClose(t *testing.T) {
 		wantSecond  int
 		wantHandled bool
 	}{
-		{name: "first handler accepts", wantFirst: 1, wantHandled: true},
-		{name: "closed first handler is skipped", closeFirst: true, wantSecond: 1, wantHandled: true},
+		{name: "first processor accepts", wantFirst: 1, wantHandled: true},
+		{name: "closed first processor is skipped", closeFirst: true, wantSecond: 1, wantHandled: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			first := &testInnerHandler{handle: true}
-			second := &testInnerHandler{handle: true}
+			first := &testInnerPacketProcessor{handle: true}
+			second := &testInnerPacketProcessor{handle: true}
 			firstAttachment, err := s.Attach(first)
 			if err != nil {
 				t.Fatalf("Attach(first) error = %v", err)
@@ -324,20 +324,24 @@ func TestSessionAttachmentDispatchAndClose(t *testing.T) {
 				t.Fatalf("dispatch() = %v, want %v", got, tt.wantHandled)
 			}
 			if len(first.packets) != tt.wantFirst || len(second.packets) != tt.wantSecond {
-				t.Fatalf("handler calls = %d/%d, want %d/%d", len(first.packets), len(second.packets), tt.wantFirst, tt.wantSecond)
+				t.Fatalf("processor calls = %d/%d, want %d/%d", len(first.packets), len(second.packets), tt.wantFirst, tt.wantSecond)
 			}
-			_ = firstAttachment.Close()
-			_ = secondAttachment.Close()
+			if err := firstAttachment.Close(); err != nil {
+				t.Errorf("Close(first) cleanup error = %v", err)
+			}
+			if err := secondAttachment.Close(); err != nil {
+				t.Errorf("Close(second) cleanup error = %v", err)
+			}
 		})
 	}
 
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if _, err := s.Attach(&testInnerHandler{}); err == nil {
+	if _, err := s.Attach(&testInnerPacketProcessor{}); err == nil {
 		t.Fatal("Attach() after Close error = nil, want non-nil")
 	}
-	if err := s.WriteInnerPacket(context.Background(), packet.InnerPacket{}); err == nil {
+	if err := s.WriteInnerPacket(t.Context(), packet.InnerPacket{}); err == nil {
 		t.Fatal("WriteInnerPacket() after Close error = nil, want non-nil")
 	}
 }

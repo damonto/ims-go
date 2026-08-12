@@ -71,26 +71,24 @@ func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voL
 		return nil, fmt.Errorf("opening VoLTE IMS PDN: %w", err)
 	}
 	info := lteInfoFromIMSPDN(*c.cfg.Access.VoLTE, pdn.Info())
+	closePDN := func(err error) (*voLTEAccess, error) {
+		return nil, errors.Join(err, pdn.Close())
+	}
 	if c.cfg.Access.VoLTE.RequireVoPS && (!info.VoPSKnown || !info.VoPSSupported) {
-		_ = pdn.Close()
-		return nil, errors.New("opening VoLTE access: LTE IMS voice over PS support is not confirmed")
+		return closePDN(errors.New("opening VoLTE access: LTE IMS voice over PS support is not confirmed"))
 	}
 	if !info.IMSPDNConnected {
-		_ = pdn.Close()
-		return nil, errors.New("opening VoLTE access: IMS PDN packet data is not ready")
+		return closePDN(errors.New("opening VoLTE access: IMS PDN packet data is not ready"))
 	}
 	if len(info.LocalIPv4) == 0 && len(info.LocalIPv6) == 0 {
-		_ = pdn.Close()
-		return nil, errors.New("opening VoLTE access: IMS PDN local address is unavailable")
+		return closePDN(errors.New("opening VoLTE access: IMS PDN local address is unavailable"))
 	}
 	if len(info.PCSCFIPs) == 0 {
-		_ = pdn.Close()
-		return nil, errors.New("opening VoLTE access: P-CSCF address is unavailable")
+		return closePDN(errors.New("opening VoLTE access: P-CSCF address is unavailable"))
 	}
-	network, err := newVoLTENetwork(info.InterfaceName)
+	network, err := newVoLTENetwork(c.interfaceByName, info.InterfaceName)
 	if err != nil {
-		_ = pdn.Close()
-		return nil, fmt.Errorf("opening VoLTE access: %w", err)
+		return closePDN(fmt.Errorf("opening VoLTE access: %w", err))
 	}
 	setup.tunnel = nil
 	return &voLTEAccess{
@@ -120,14 +118,15 @@ func (a *voLTEAccess) OpenIMS(ctx context.Context, cfg accessIMSConfig) (imsAcce
 		PacketListener: a.network,
 	})
 	if err != nil {
-		_ = transport.Close()
-		return imsAccess{}, err
+		return imsAccess{}, errors.Join(err, transport.Close())
 	}
 	netstack, err := ipsectransport.NewNetstack(ipsecSession)
 	if err != nil {
-		_ = ipsecSession.Close()
-		_ = transport.Close()
-		return imsAccess{}, fmt.Errorf("opening VoLTE userspace network stack: %w", err)
+		return imsAccess{}, errors.Join(
+			fmt.Errorf("opening VoLTE userspace network stack: %w", err),
+			ipsecSession.Close(),
+			transport.Close(),
+		)
 	}
 	a.mu.Lock()
 	a.ipsec = ipsecSession
@@ -172,8 +171,7 @@ func (a *voLTEAccess) openSIPTransportTo(ctx context.Context, cfg accessIMSConfi
 		}
 		transport, err := imssession.NewTCPTransport(conn)
 		if err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("opening tcp transport: %w", err)
+			return nil, errors.Join(fmt.Errorf("opening tcp transport: %w", err), conn.Close())
 		}
 		return transport, nil
 	case "udp":
@@ -185,8 +183,7 @@ func (a *voLTEAccess) openSIPTransportTo(ctx context.Context, cfg accessIMSConfi
 		}
 		transport, err := imssession.NewUDPTransport(conn, remote)
 		if err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("opening udp transport: %w", err)
+			return nil, errors.Join(fmt.Errorf("opening udp transport: %w", err), conn.Close())
 		}
 		return transport, nil
 	default:

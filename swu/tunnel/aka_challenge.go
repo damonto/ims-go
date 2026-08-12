@@ -159,9 +159,11 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 		return response, err
 	}
 	challengeMessage := message
-	if data, ok, err := sanitizedAKAPrimeChallengeData(message); err != nil {
+	data, ok, err := sanitizedAKAPrimeChallengeData(message)
+	if err != nil {
 		return akaResponse{}, fmt.Errorf("sanitizing aka prime challenge: %w", err)
-	} else if ok {
+	}
+	if ok {
 		if err := challengeMessage.UnmarshalBinary(data); err != nil {
 			return akaResponse{}, fmt.Errorf("parsing sanitized aka prime challenge: %w", err)
 		}
@@ -300,7 +302,7 @@ func (f *akaAuthFlow) buildChallengeResponse(ctx context.Context, message eapaka
 	if useResultInd && f.ipmsIndication {
 		ipmsSupport = eapaka.IPMSSupportNBMOnly
 	}
-	data, err := eapaka.BuildChallengeResponsePacketWithOptions(eapaka.ChallengeResponseOptions{
+	data, err = eapaka.BuildChallengeResponsePacketWithOptions(eapaka.ChallengeResponseOptions{
 		Identifier:   message.Identifier,
 		EAPType:      message.EAPType,
 		RES:          aka.RES,

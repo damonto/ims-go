@@ -103,7 +103,7 @@ func (s *decoderCoreState) reset(mode Mode) {
 }
 
 func (s *decoderCoreState) beginFrame(mode Mode, rxType RXFrameType, params []int16) ([]int16, error) {
-	s.lastDTXState = s.dtx.rxHandler(rxType)
+	s.lastDTXState = s.dtx.nextRXState(rxType)
 	if s.lastDTXState != dtxStateSpeech {
 		s.reset(ModeDTX)
 		return params, nil
@@ -123,32 +123,32 @@ func (s *decoderCoreState) predictPitch(t0, frac int16, useThirdResolution bool)
 	return predictAdaptiveCodebook(s.oldExc[:], s.excOffset, t0, frac, subframeSamples, useThirdResolution)
 }
 
-func (s *decoderCoreState) decodeFixed2i40_9bits(subframeNumber, sign, index int16) []int16 {
-	s.code = decode2i40_9bits(subframeNumber, sign, index)
+func (s *decoderCoreState) decodeFixed2I40At9Bits(subframeNumber, sign, index int16) []int16 {
+	s.code = decode2I40At9Bits(subframeNumber, sign, index)
 	return s.code[:]
 }
 
-func (s *decoderCoreState) decodeFixed2i40_11bits(sign, index int16) []int16 {
-	s.code = decode2i40_11bits(sign, index)
+func (s *decoderCoreState) decodeFixed2I40At11Bits(sign, index int16) []int16 {
+	s.code = decode2I40At11Bits(sign, index)
 	return s.code[:]
 }
 
-func (s *decoderCoreState) decodeFixed3i40_14bits(sign, index int16) []int16 {
-	s.code = decode3i40_14bits(sign, index)
+func (s *decoderCoreState) decodeFixed3I40At14Bits(sign, index int16) []int16 {
+	s.code = decode3I40At14Bits(sign, index)
 	return s.code[:]
 }
 
-func (s *decoderCoreState) decodeFixed4i40_17bits(sign, index int16) []int16 {
-	s.code = decode4i40_17bits(sign, index)
+func (s *decoderCoreState) decodeFixed4I40At17Bits(sign, index int16) []int16 {
+	s.code = decode4I40At17Bits(sign, index)
 	return s.code[:]
 }
 
-func (s *decoderCoreState) decodeFixed8i40_31bits(index []int16) []int16 {
-	s.code = decode8i40_31bits(index)
+func (s *decoderCoreState) decodeFixed8I40At31Bits(index []int16) []int16 {
+	s.code = decode8I40At31Bits(index)
 	return s.code[:]
 }
 
-func (s *decoderCoreState) decodeFixed10i40_35bits(index []int16) []int16 {
-	s.code = decode10i40_35bits(index)
+func (s *decoderCoreState) decodeFixed10I40At35Bits(index []int16) []int16 {
+	s.code = decode10I40At35Bits(index)
 	return s.code[:]
 }

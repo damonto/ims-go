@@ -1,7 +1,6 @@
 package evs
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -21,7 +20,7 @@ func TestCodecRoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			codec, err := NewCodec(ctx, Config{
 				SampleRate: tt.sampleRate,
 				Encoder: EncoderConfig{
@@ -32,7 +31,11 @@ func TestCodecRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewCodec() error = %v", err)
 			}
-			defer codec.Close(ctx)
+			defer func() {
+				if err := codec.Close(ctx); err != nil {
+					t.Errorf("Codec.Close() error = %v", err)
+				}
+			}()
 			encoderDelay, err := codec.EncoderDelay(ctx)
 			if err != nil || encoderDelay <= 0 {
 				t.Fatalf("EncoderDelay() = %d, %v, want positive delay", encoderDelay, err)
@@ -61,12 +64,16 @@ func TestCodecRoundTrip(t *testing.T) {
 }
 
 func TestCodecModeSwitchAndPLC(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	engine, err := NewEngine(ctx)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
-	defer engine.Close(ctx)
+	defer func() {
+		if err := engine.Close(ctx); err != nil {
+			t.Errorf("Engine.Close() error = %v", err)
+		}
+	}()
 	codec, err := engine.NewCodec(ctx, Config{
 		SampleRate: SampleRateWB,
 		Encoder:    EncoderConfig{Bitrate: 13200, Bandwidth: BandwidthWB},
@@ -74,7 +81,11 @@ func TestCodecModeSwitchAndPLC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCodec() error = %v", err)
 	}
-	defer codec.Close(ctx)
+	defer func() {
+		if err := codec.Close(ctx); err != nil {
+			t.Errorf("Codec.Close() error = %v", err)
+		}
+	}()
 
 	tests := []struct {
 		name   string
@@ -126,7 +137,7 @@ func TestCodecDTX(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			codec, err := NewCodec(ctx, Config{
 				SampleRate: SampleRateWB,
 				Encoder:    EncoderConfig{Bitrate: tt.bitrate, Bandwidth: BandwidthWB, DTX: true},
@@ -134,7 +145,11 @@ func TestCodecDTX(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewCodec() error = %v", err)
 			}
-			defer codec.Close(ctx)
+			defer func() {
+				if err := codec.Close(ctx); err != nil {
+					t.Errorf("Codec.Close() error = %v", err)
+				}
+			}()
 
 			seenDTX := false
 			for range 50 {
@@ -157,7 +172,7 @@ func TestCodecDTX(t *testing.T) {
 }
 
 func TestEngineLifecycle(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	engine, err := NewEngine(ctx)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
@@ -222,7 +237,9 @@ func TestEngineConcurrentCreateAndClose(t *testing.T) {
 						t.Errorf("Engine.NewCodec() error = %v", err)
 					}
 					if codec != nil {
-						_ = codec.Close(ctx)
+						if err := codec.Close(ctx); err != nil {
+							t.Errorf("Codec.Close() error = %v", err)
+						}
 					}
 				}()
 			}

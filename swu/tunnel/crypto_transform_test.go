@@ -284,7 +284,7 @@ func TestIKEAESCTRRoundTripAndUniqueIV(t *testing.T) {
 	crypto.encr = transformENCRAESCTR
 	crypto.keys.SKEI = append(bytes.Repeat([]byte{0x33}, 16), 0x01, 0x02, 0x03, 0x04)
 	crypto.keys.SKER = append(bytes.Repeat([]byte{0x44}, 16), 0x05, 0x06, 0x07, 0x08)
-	header := ike.IKEHeader{
+	header := ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -302,7 +302,7 @@ func TestIKEAESCTRRoundTripAndUniqueIV(t *testing.T) {
 			t.Fatalf("SealIKE(%d) error = %v", i, err)
 		}
 		wires[i] = wire
-		var packet ike.IKEPacket
+		var packet ike.Packet
 		if err := packet.UnmarshalBinary(wire); err != nil {
 			t.Fatalf("UnmarshalBinary(%d) error = %v", i, err)
 		}
@@ -326,7 +326,7 @@ func TestIKEAESCTRRoundTripAndUniqueIV(t *testing.T) {
 
 	tampered := append([]byte(nil), wires[0]...)
 	tampered[len(tampered)-1] ^= 0x01
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(tampered); err != nil {
 		t.Fatalf("UnmarshalBinary(tampered) error = %v", err)
 	}

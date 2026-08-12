@@ -11,43 +11,43 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
-type closingSessionHandler struct {
-	sess       *Session
+type closingSessionProcessor struct {
+	sess       *Stack
 	errCh      chan error
 	closeErrCh chan error
 }
 
-func (h *closingSessionHandler) HandleRequest(context.Context, Request) (bool, error) {
+func (h *closingSessionProcessor) HandleRequest(context.Context, Request) (bool, error) {
 	return false, nil
 }
 
-func (h *closingSessionHandler) HandleError(err error) {
+func (h *closingSessionProcessor) HandleError(err error) {
 	h.errCh <- err
 	h.closeErrCh <- h.sess.Close()
 }
 
-type concurrentHandler struct {
+type concurrentProcessor struct {
 	requests  atomic.Int64
 	responses atomic.Int64
 }
 
-func (h *concurrentHandler) HandleRequest(context.Context, Request) (bool, error) {
+func (h *concurrentProcessor) HandleRequest(context.Context, Request) (bool, error) {
 	h.requests.Add(1)
 	return true, nil
 }
 
-func (h *concurrentHandler) HandleResponse(context.Context, sip.Message) (bool, error) {
+func (h *concurrentProcessor) HandleResponse(context.Context, sip.Message) (bool, error) {
 	h.responses.Add(1)
 	return true, nil
 }
 
-func (h *concurrentHandler) HandleError(error) {}
+func (h *concurrentProcessor) HandleError(error) {}
 
-func TestNotifyHandlersOnceAllowsHandlerToCloseSession(t *testing.T) {
+func TestNotifyProcessorsOnceAllowsProcessorToCloseSession(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "handler closes session during error notification"},
+		{name: "processor closes session during error notification"},
 	}
 
 	for _, tt := range tests {
@@ -56,12 +56,12 @@ func TestNotifyHandlersOnceAllowsHandlerToCloseSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			handler := &closingSessionHandler{
+			processor := &closingSessionProcessor{
 				sess:       sess,
 				errCh:      make(chan error, 1),
 				closeErrCh: make(chan error, 1),
 			}
-			if _, err := sess.Attach(handler); err != nil {
+			if _, err := sess.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
@@ -69,17 +69,17 @@ func TestNotifyHandlersOnceAllowsHandlerToCloseSession(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				sess.notifyHandlersOnce(sess.handlerSnapshot(), cause)
+				sess.notifyProcessorsOnce(sess.processorSnapshot(), cause)
 			}()
 
 			select {
 			case <-done:
 			case <-time.After(time.Second):
-				t.Fatal("notifyHandlersOnce() did not return")
+				t.Fatal("notifyProcessorsOnce() did not return")
 			}
 
 			select {
-			case got := <-handler.errCh:
+			case got := <-processor.errCh:
 				if !errors.Is(got, cause) {
 					t.Fatalf("HandleError() error = %v, want %v", got, cause)
 				}
@@ -88,7 +88,7 @@ func TestNotifyHandlersOnceAllowsHandlerToCloseSession(t *testing.T) {
 			}
 
 			select {
-			case err := <-handler.closeErrCh:
+			case err := <-processor.closeErrCh:
 				if err != nil {
 					t.Fatalf("Close() from HandleError() error = %v", err)
 				}
@@ -99,26 +99,27 @@ func TestNotifyHandlersOnceAllowsHandlerToCloseSession(t *testing.T) {
 	}
 }
 
-func TestHandlerAttachmentCloseConcurrentWithDispatch(t *testing.T) {
+func TestProcessorAttachmentCloseConcurrentWithDispatch(t *testing.T) {
 	tests := []struct {
 		name     string
-		dispatch func(*Session, *stubTransport)
+		dispatch func(context.Context, *Stack, *stubTransport) error
 	}{
 		{
 			name: "request",
-			dispatch: func(sess *Session, transport *stubTransport) {
-				_, _ = sess.dispatchRequest(context.Background(), Request{
-					Message:   newInboundRequest("MESSAGE", "handler-race", "1 MESSAGE"),
+			dispatch: func(ctx context.Context, sess *Stack, transport *stubTransport) error {
+				_, err := sess.dispatchRequest(ctx, Request{
+					Message:   newInboundRequest("MESSAGE", "processor-race", "1 MESSAGE"),
 					Transport: transport,
 					PeerAddr:  transport.RemoteAddr(),
 				})
+				return err
 			},
 		},
 		{
 			name: "response",
-			dispatch: func(sess *Session, _ *stubTransport) {
-				req := newInboundRequest("INVITE", "handler-race", "1 INVITE")
-				_ = sess.handleInboundResponse(context.Background(), newResponse(req, 180, "Ringing"))
+			dispatch: func(ctx context.Context, sess *Stack, _ *stubTransport) error {
+				req := newInboundRequest("INVITE", "processor-race", "1 INVITE")
+				return sess.handleInboundResponse(ctx, newResponse(req, 180, "Ringing"))
 			},
 		},
 	}
@@ -132,18 +133,22 @@ func TestHandlerAttachmentCloseConcurrentWithDispatch(t *testing.T) {
 			transport := newStubTransport(6062, 6060)
 
 			for range 100 {
-				handler := &concurrentHandler{}
-				attachment, err := sess.Attach(handler)
+				processor := &concurrentProcessor{}
+				attachment, err := sess.Attach(processor)
 				if err != nil {
 					t.Fatalf("Attach() error = %v", err)
 				}
 
 				var wg sync.WaitGroup
+				dispatchErr := make(chan error, 1)
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					for range 20 {
-						tt.dispatch(sess, transport)
+						if err := tt.dispatch(t.Context(), sess, transport); err != nil {
+							dispatchErr <- err
+							return
+						}
 					}
 				}()
 
@@ -151,6 +156,109 @@ func TestHandlerAttachmentCloseConcurrentWithDispatch(t *testing.T) {
 					t.Fatalf("attachment.Close() error = %v", err)
 				}
 				wg.Wait()
+				select {
+				case err := <-dispatchErr:
+					t.Fatalf("dispatch error = %v", err)
+				default:
+				}
+			}
+		})
+	}
+}
+
+func TestTransportRegistrationRejectsDuplicateOwnership(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*Stack, *stubTransport) error
+	}{
+		{
+			name: "add primary",
+			run: func(sess *Stack, primary *stubTransport) error {
+				_, err := sess.AddTransport(primary)
+				return err
+			},
+		},
+		{
+			name: "replace primary with active auxiliary",
+			run: func(sess *Stack, _ *stubTransport) error {
+				aux := newStubTransport(15062, 15060)
+				if _, err := sess.AddTransport(aux); err != nil {
+					return err
+				}
+				return sess.ReplacePrimary(aux)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			closeStackAfterTest(t, sess)
+
+			if err := tt.run(sess, primary); err == nil {
+				t.Fatal("transport registration error = nil, want duplicate ownership error")
+			}
+		})
+	}
+}
+
+func TestPromotePrimaryTransfersAttachmentOwnership(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "promoted transport ignores stale auxiliary attachment"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			next := newStubTransport(15062, 15060)
+			sess, err := Open(Config{}, primary)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			closeStackAfterTest(t, sess)
+
+			staleAttachment, err := sess.AddTransport(next)
+			if err != nil {
+				t.Fatalf("AddTransport() error = %v", err)
+			}
+			oldPrimaryAttachment, err := sess.PromotePrimary(next)
+			if err != nil {
+				t.Fatalf("PromotePrimary() error = %v", err)
+			}
+			if oldPrimaryAttachment == nil {
+				t.Fatal("PromotePrimary() old attachment = nil, want non-nil")
+			}
+
+			if err := staleAttachment.Close(); err != nil {
+				t.Fatalf("stale attachment Close() error = %v", err)
+			}
+			if !sess.isTransportActive(next) {
+				t.Fatal("promoted transport became inactive after closing stale attachment")
+			}
+			next.mu.Lock()
+			nextCloseCount := next.closeCount
+			next.mu.Unlock()
+			if nextCloseCount != 0 {
+				t.Fatalf("promoted transport close count = %d, want 0", nextCloseCount)
+			}
+
+			if err := oldPrimaryAttachment.Close(); err != nil {
+				t.Fatalf("old primary attachment Close() error = %v", err)
+			}
+			if sess.isTransportActive(primary) {
+				t.Fatal("old primary transport is still active after closing its attachment")
+			}
+			primary.mu.Lock()
+			primaryCloseCount := primary.closeCount
+			primary.mu.Unlock()
+			if primaryCloseCount != 1 {
+				t.Fatalf("old primary close count = %d, want 1", primaryCloseCount)
 			}
 		})
 	}

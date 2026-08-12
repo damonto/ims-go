@@ -215,7 +215,7 @@ func TestSendBuildsMESSAGEFromRegistrationState(t *testing.T) {
 		ackMOSubmit(t, svc, req)
 	}
 
-	got, err := svc.Send(context.Background(), "777", "BAL")
+	got, err := svc.Send(t.Context(), "777", "BAL")
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
@@ -256,7 +256,7 @@ func TestSendUsesIndependentRPAndTPReferences(t *testing.T) {
 		ackMOSubmit(t, svc, req)
 	}
 
-	submission, err := svc.Send(context.Background(), "777", "BAL")
+	submission, err := svc.Send(t.Context(), "777", "BAL")
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
@@ -299,7 +299,7 @@ func TestSendUsesServiceCenterPSIForSIPTargetAndAddressForRP(t *testing.T) {
 		ackMOSubmit(t, svc, req)
 	}
 
-	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+	if _, err := svc.Send(t.Context(), "777", "BAL"); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 }
@@ -349,7 +349,7 @@ func TestSendRequestsStatusReportWhenConfigured(t *testing.T) {
 				ackMOSubmit(t, svc, req)
 			}
 
-			if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+			if _, err := svc.Send(t.Context(), "777", "BAL"); err != nil {
 				t.Fatalf("Send() error = %v", err)
 			}
 		})
@@ -376,8 +376,7 @@ func TestNotifyMemoryAvailableSendsRPSMMA(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			setMemoryAvailableRetryTimeout(10 * time.Millisecond)
-			defer setMemoryAvailableRetryTimeout(defaultTRATimeout)
+			svc.memoryAvailableRetryTimeout = 10 * time.Millisecond
 			var references []byte
 
 			transport.onWrite = func(data []byte) {
@@ -406,13 +405,13 @@ func TestNotifyMemoryAvailableSendsRPSMMA(t *testing.T) {
 				go func() {
 					msg := newInboundRequest("smma-report", "2 MESSAGE", reportBody)
 					msg.Headers.Add("In-Reply-To", req.Header("Call-ID"))
-					if _, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: transport}); err != nil {
+					if _, err := svc.HandleRequest(t.Context(), session.Request{Message: msg, Transport: transport}); err != nil {
 						t.Errorf("HandleRequest(report) error = %v", err)
 					}
 				}()
 			}
 
-			err = svc.NotifyMemoryAvailable(context.Background(), "sip:ipsmgw.example.net")
+			err = svc.NotifyMemoryAvailable(t.Context(), "sip:ipsmgw.example.net")
 			if len(references) != tt.wantAttempts {
 				t.Fatalf("RP-SMMA attempts = %d, want %d", len(references), tt.wantAttempts)
 			}
@@ -479,7 +478,7 @@ func TestSendSIPURIUsesMSISDNLessMultipart(t *testing.T) {
 				ackMOSubmit(t, svc, req)
 			}
 
-			if _, err := svc.Send(context.Background(), tt.to, "BAL"); err != nil {
+			if _, err := svc.Send(t.Context(), tt.to, "BAL"); err != nil {
 				t.Fatalf("Send() error = %v", err)
 			}
 		})
@@ -509,7 +508,7 @@ func TestSendPrefersDefaultPublicIdentityWhenNoTelURI(t *testing.T) {
 		ackMOSubmit(t, svc, req)
 	}
 
-	if _, err := svc.Send(context.Background(), "777", "BAL"); err != nil {
+	if _, err := svc.Send(t.Context(), "777", "BAL"); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 }
@@ -524,7 +523,7 @@ func TestHandleMalformedInboundSMSReturns200(t *testing.T) {
 
 	inboundTransport := newServiceTransport()
 	req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", []byte{0x03}), Transport: inboundTransport}
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -575,14 +574,14 @@ func TestHandleInboundSMSCallsOnIncoming(t *testing.T) {
 	msg := newInboundRequest("call-1", "1 MESSAGE", rpdu)
 	msg.Headers.Set("To", "<sip:+19293101226@one.att.net>")
 	req := session.Request{Message: msg, Transport: inboundTransport}
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
 	if !handled {
 		t.Fatal("HandleRequest() handled = false, want true")
 	}
-	if _, err := svc.HandleRequest(context.Background(), req); err != nil {
+	if _, err := svc.HandleRequest(t.Context(), req); err != nil {
 		t.Fatalf("HandleRequest(retransmission) error = %v", err)
 	}
 	if accepted != 1 {
@@ -637,7 +636,7 @@ func TestHandleInboundReservedMTISMSPreservesRawTPDU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -722,7 +721,7 @@ func TestHandleInboundMSISDNLessSMSUsesXMLFromAndReportsMultipart(t *testing.T) 
 			msg.Headers.Set("Content-Type", contentType)
 			msg.Headers.Add("Feature-Caps", "*;+g.3gpp.smsip-msisdn-less")
 			req := session.Request{Message: msg, Transport: inboundTransport}
-			handled, err := svc.HandleRequest(context.Background(), req)
+			handled, err := svc.HandleRequest(t.Context(), req)
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -795,7 +794,7 @@ func TestHandleInboundMSISDNLessSMSRequiresFeatureCaps(t *testing.T) {
 	inboundTransport := newServiceTransport()
 	msg := newInboundRequest("call-1", "1 MESSAGE", body)
 	msg.Headers.Set("Content-Type", contentType)
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: msg, Transport: inboundTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -851,7 +850,7 @@ func TestHandleInboundNonDummyMultipartSMSIgnoresXMLFrom(t *testing.T) {
 	msg := newInboundRequest("call-1", "1 MESSAGE", body)
 	msg.Headers.Set("Content-Type", contentType)
 	msg.Headers.Add("Feature-Caps", "*;+g.3gpp.smsip-msisdn-less")
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: msg, Transport: inboundTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -923,7 +922,7 @@ func TestHandleInboundMSISDNLessStatusReportUsesPlainDeliveryReport(t *testing.T
 	msg := newInboundRequest("call-status", "1 MESSAGE", body)
 	msg.Headers.Set("Content-Type", contentType)
 	msg.Headers.Add("Feature-Caps", "*;+g.3gpp.smsip-msisdn-less")
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: msg, Transport: inboundTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -995,7 +994,7 @@ func TestHandleInboundSMSPPDataDownloadUsesUICCResponseInRPACK(t *testing.T) {
 
 	inboundTransport := newServiceTransport()
 	req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", rpdu), Transport: inboundTransport}
-	handled, err := svc.HandleRequest(context.Background(), req)
+	handled, err := svc.HandleRequest(t.Context(), req)
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -1062,7 +1061,7 @@ func TestHandleInboundSMSDelaysRPACKUntilCallbackReturns(t *testing.T) {
 	inboundTransport := newServiceTransport()
 	done := make(chan error, 1)
 	go func() {
-		_, err := svc.HandleRequest(context.Background(), session.Request{
+		_, err := svc.HandleRequest(t.Context(), session.Request{
 			Message:   newInboundRequest("call-1", "1 MESSAGE", rpdu),
 			Transport: inboundTransport,
 		})
@@ -1740,7 +1739,7 @@ func TestHandleMessageRejectsNonBinaryTransferEncoding(t *testing.T) {
 	msg := newInboundRequest("call-cte-status", "1 MESSAGE", []byte{rpDataNetworkToMS, 0x01})
 	msg.Headers.Set("Content-Transfer-Encoding", "base64")
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: msg, Transport: inboundTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -1781,7 +1780,7 @@ func TestHandleMessageRejectsUnsupportedContentType(t *testing.T) {
 	msg := newInboundRequest("call-content-type-status", "1 MESSAGE", []byte("hello"))
 	msg.Headers.Set("Content-Type", "text/plain")
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inboundTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: msg, Transport: inboundTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -1835,7 +1834,7 @@ func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 	}
 	sendDone := make(chan sendResult, 1)
 	go func() {
-		submission, err := svc.Send(context.Background(), "777", "BAL")
+		submission, err := svc.Send(t.Context(), "777", "BAL")
 		sendDone <- sendResult{submission: submission, err: err}
 	}()
 	first := nextSMSRequest(t, requests)
@@ -1865,7 +1864,7 @@ func TestSendReturnsSuccessWhenSubmitReportMissing(t *testing.T) {
 		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmitUnknown)
 	}
 
-	if err := sendSubmitReport(svc, rpMessage{Type: rpErrorNetworkToMS, Reference: moReference(t, first), Cause: rpCauseTemporaryFailure, HasCause: true}, first.Header("Call-ID")); err != nil {
+	if err := sendSubmitReport(t.Context(), svc, rpMessage{Type: rpErrorNetworkToMS, Reference: moReference(t, first), Cause: rpCauseTemporaryFailure, HasCause: true}, first.Header("Call-ID")); err != nil {
 		t.Fatalf("late sendSubmitReport() error = %v", err)
 	}
 
@@ -1916,12 +1915,12 @@ func TestSendReturnsPartialSubmissionAfterMultipartFailure(t *testing.T) {
 		}
 	}
 
-	submission, err := svc.Send(context.Background(), "777", strings.Repeat("A", 200))
+	submission, err := svc.Send(t.Context(), "777", strings.Repeat("A", 200))
 	if err == nil {
 		t.Fatal("Send() error = nil, want second segment failure")
 	}
-	var partial *PartialSubmissionError
-	if !errors.As(err, &partial) {
+	partial, ok := errors.AsType[*PartialSubmissionError](err)
+	if !ok {
 		t.Fatalf("Send() error = %T %[1]v, want PartialSubmissionError", err)
 	}
 	if len(submission.Segments) != 1 {
@@ -1944,7 +1943,7 @@ func TestSendReturnsPartialSubmissionAfterMultipartFailure(t *testing.T) {
 		t.Fatalf("submission update states = %v, want %s", states, SubmissionSubmitUnknown)
 	}
 
-	if err := sendSubmitReport(svc, rpMessage{Type: rpAckNetworkToMS, Reference: moReference(t, first)}, first.Header("Call-ID")); err != nil {
+	if err := sendSubmitReport(t.Context(), svc, rpMessage{Type: rpAckNetworkToMS, Reference: moReference(t, first)}, first.Header("Call-ID")); err != nil {
 		t.Fatalf("late sendSubmitReport() error = %v", err)
 	}
 
@@ -1992,7 +1991,7 @@ func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
 
 			sendErr := make(chan error, 1)
 			go func() {
-				_, err := svc.Send(context.Background(), "777", "BAL")
+				_, err := svc.Send(t.Context(), "777", "BAL")
 				sendErr <- err
 			}()
 			first := nextSMSRequest(t, requests)
@@ -2015,7 +2014,7 @@ func TestSendMatchesSubmitReportByRPReference(t *testing.T) {
 
 			inbound := newServiceTransport()
 			ack := newInboundRequest("submit-report", "2 MESSAGE", ackBody)
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: ack, Transport: inbound})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: ack, Transport: inbound})
 			if err != nil {
 				t.Fatalf("HandleRequest(ack) error = %v", err)
 			}
@@ -2064,7 +2063,7 @@ func TestSendSIPURIRequiresInReplyToForSubmitReport(t *testing.T) {
 		transport.queue(newResponse(req, 202, "Accepted"))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	sendErr := make(chan error, 1)
 	go func() {
@@ -2088,7 +2087,7 @@ func TestSendSIPURIRequiresInReplyToForSubmitReport(t *testing.T) {
 
 	missing := newInboundRequest("submit-report-missing", "2 MESSAGE", reportBody)
 	missingTransport := newServiceTransport()
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: missing, Transport: missingTransport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: missing, Transport: missingTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest(missing In-Reply-To) error = %v", err)
 	}
@@ -2105,7 +2104,7 @@ func TestSendSIPURIRequiresInReplyToForSubmitReport(t *testing.T) {
 	matched := newInboundRequest("submit-report-matched", "3 MESSAGE", reportBody)
 	matched.Headers.Add("In-Reply-To", first.Header("Call-ID"))
 	matchedTransport := newServiceTransport()
-	handled, err = svc.HandleRequest(context.Background(), session.Request{Message: matched, Transport: matchedTransport})
+	handled, err = svc.HandleRequest(t.Context(), session.Request{Message: matched, Transport: matchedTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest(matched submit report) error = %v", err)
 	}
@@ -2121,7 +2120,7 @@ func TestSendSIPURIRequiresInReplyToForSubmitReport(t *testing.T) {
 
 	duplicateMissing := newInboundRequest("submit-report-duplicate-missing", "4 MESSAGE", reportBody)
 	duplicateTransport := newServiceTransport()
-	handled, err = svc.HandleRequest(context.Background(), session.Request{Message: duplicateMissing, Transport: duplicateTransport})
+	handled, err = svc.HandleRequest(t.Context(), session.Request{Message: duplicateMissing, Transport: duplicateTransport})
 	if err != nil {
 		t.Fatalf("HandleRequest(duplicate missing In-Reply-To) error = %v", err)
 	}
@@ -2170,7 +2169,7 @@ func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 			reportMsg := newInboundRequest("submit-report", "2 MESSAGE", nil)
 			reportMsg.Headers.Add("In-Reply-To", req.Header("Call-ID"))
 			if !svc.completePending(reportMsg, report) {
-				reportErr <- fmt.Errorf("completePending() = false")
+				reportErr <- errors.New("completePending() = false")
 			} else {
 				reportErr <- nil
 			}
@@ -2184,7 +2183,7 @@ func TestSendDoesNotRetrySubmitRPError(t *testing.T) {
 	}
 	sendDone := make(chan sendResult, 1)
 	go func() {
-		submission, err := svc.Send(context.Background(), "777", "BAL")
+		submission, err := svc.Send(t.Context(), "777", "BAL")
 		sendDone <- sendResult{submission: submission, err: err}
 	}()
 	_ = nextSMSRequest(t, requests)
@@ -2278,7 +2277,7 @@ func TestHandleInboundReservedRPDirectionReturnsRPError97(t *testing.T) {
 
 			inboundTransport := newServiceTransport()
 			req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", tt.rpdu), Transport: inboundTransport}
-			handled, err := svc.HandleRequest(context.Background(), req)
+			handled, err := svc.HandleRequest(t.Context(), req)
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -2362,7 +2361,7 @@ func TestHandleMalformedInboundRPDataReturnsRPError96(t *testing.T) {
 
 			inboundTransport := newServiceTransport()
 			req := session.Request{Message: newInboundRequest("call-1", "1 MESSAGE", tt.rpdu), Transport: inboundTransport}
-			handled, err := svc.HandleRequest(context.Background(), req)
+			handled, err := svc.HandleRequest(t.Context(), req)
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -2408,12 +2407,14 @@ func ackMOSubmit(t *testing.T, svc *Endpoint, req sip.Message) {
 	t.Helper()
 	report := rpMessage{Type: rpAckNetworkToMS, Reference: moReference(t, req)}
 	inReplyTo := req.Header("Call-ID")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Second)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- sendSubmitReport(svc, report, inReplyTo)
+		errCh <- sendSubmitReport(ctx, svc, report, inReplyTo)
 	}()
 	t.Cleanup(func() {
 		t.Helper()
+		defer cancel()
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -2425,7 +2426,7 @@ func ackMOSubmit(t *testing.T, svc *Endpoint, req sip.Message) {
 	})
 }
 
-func sendSubmitReport(svc *Endpoint, report rpMessage, inReplyTo string) error {
+func sendSubmitReport(ctx context.Context, svc *Endpoint, report rpMessage, inReplyTo string) error {
 	body, err := report.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("marshal submit report: %w", err)
@@ -2435,12 +2436,12 @@ func sendSubmitReport(svc *Endpoint, report rpMessage, inReplyTo string) error {
 		msg.Headers.Add("In-Reply-To", inReplyTo)
 	}
 	inbound := newServiceTransport()
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: msg, Transport: inbound})
+	handled, err := svc.HandleRequest(ctx, session.Request{Message: msg, Transport: inbound})
 	if err != nil {
 		return fmt.Errorf("handle submit report: %w", err)
 	}
 	if !handled {
-		return fmt.Errorf("handle submit report: handled = false, want true")
+		return errors.New("handle submit report: handled = false, want true")
 	}
 	return nil
 }
@@ -2462,7 +2463,7 @@ func moReference(t *testing.T, req sip.Message) byte {
 	return rp.Reference
 }
 
-func registeredService(t *testing.T, transport *serviceStubTransport) (*session.Session, *registration.Registrar) {
+func registeredService(t *testing.T, transport *serviceStubTransport) (*session.Stack, *registration.Registrar) {
 	t.Helper()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
@@ -2489,13 +2490,13 @@ func registeredService(t *testing.T, transport *serviceStubTransport) (*session.
 			))
 		}
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg
 }
 
-func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTransport, associatedURIs ...string) (*session.Session, *registration.Registrar) {
+func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTransport, associatedURIs ...string) (*session.Stack, *registration.Registrar) {
 	t.Helper()
 	sess, err := session.Open(session.Config{}, transport)
 	if err != nil {
@@ -2523,7 +2524,7 @@ func registeredServiceWithAssociatedURIs(t *testing.T, transport *serviceStubTra
 			transport.queue(newResponse(req, 200, "OK", headers...))
 		}
 	}
-	if err := reg.Register(context.Background()); err != nil {
+	if err := reg.Register(t.Context()); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	return sess, reg

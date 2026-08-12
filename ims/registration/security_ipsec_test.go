@@ -106,11 +106,13 @@ func TestDialSecureTransportPreservesSIPTransport(t *testing.T) {
 			verify := security.Param{Alg: "hmac-sha-1-96", EAlg: "null", Mod: "UDP-enc-tun", PortS: 4060, SPIS: 0x1001}
 			flow := Flow{ContactHost: "198.51.100.10", SecurityClient: security.Param{PortC: 40000, SPIC: 0x2001}}
 
-			transport, err := svc.dialSecureTransport(context.Background(), &verify, flow, nil, make([]byte, 16))
+			transport, err := svc.dialSecureTransport(t.Context(), &verify, flow, nil, make([]byte, 16))
 			if err != nil {
 				t.Fatalf("dialSecureTransport() error = %v", err)
 			}
-			_ = transport.Close()
+			if err := transport.Close(); err != nil {
+				t.Fatalf("transport.Close() error = %v", err)
+			}
 			if tcpCalled != tt.wantTCP || udpCalled != tt.wantUDP {
 				t.Fatalf("dialers called TCP/UDP = %v/%v, want %v/%v", tcpCalled, udpCalled, tt.wantTCP, tt.wantUDP)
 			}
@@ -618,14 +620,18 @@ func TestIPsecSecurityAssociationsFollowTS33203Flows(t *testing.T) {
 		},
 	}, primary, stubCard{})
 
-	if _, err := svc.dialSecureTransport(context.Background(), &verify, flow, []byte("ck"), []byte("ik")); err != nil {
+	if _, err := svc.dialSecureTransport(t.Context(), &verify, flow, []byte("ck"), []byte("ik")); err != nil {
 		t.Fatalf("dialSecureTransport() error = %v", err)
 	}
-	_, attachments, err := svc.startSecureServerTransportsWithKeys(context.Background(), &verify, flow, []byte("ck"), []byte("ik"))
+	_, attachments, err := svc.startSecureServerTransportsWithKeys(t.Context(), &verify, flow, []byte("ck"), []byte("ik"))
 	if err != nil {
 		t.Fatalf("startSecureServerTransportsWithKeys() error = %v", err)
 	}
-	defer closeAttachments(attachments)
+	t.Cleanup(func() {
+		if err := closeAttachments(attachments); err != nil {
+			t.Errorf("closeAttachments() error = %v", err)
+		}
+	})
 
 	tests := []struct {
 		name string

@@ -42,27 +42,27 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	resp, err := s.exchangeCallInvite(ctx, call, invite)
 	if err != nil {
 		call.stopRingbackTimer()
-		_ = call.closeMedia()
+		closeErr := call.closeMedia()
 		if errors.Is(err, errInviteCleanupContinues) {
-			return nil, errors.New("dialing call: cancelled")
+			return nil, errors.Join(errors.New("dialing call: cancelled"), closeErr)
 		}
 		if call.State() == CallStateEnding {
 			call.finish(CallStateEnded, "cancelled")
-			return nil, errors.New("dialing call: cancelled")
+			return nil, errors.Join(errors.New("dialing call: cancelled"), closeErr)
 		}
 		s.removeCall(start.callID)
 		call.setState(CallStateFailed, err.Error())
-		return nil, fmt.Errorf("dialing call: %w", err)
+		return nil, errors.Join(fmt.Errorf("dialing call: %w", err), closeErr)
 	}
 	lastMinSE := 0
 	for resp.StatusCode() == sipStatusSessionIntervalTooSmall && s.cfg.SessionTimer {
 		minSE, ok := parseMinSessionSeconds(resp.Header("Min-SE"))
 		if !ok {
 			call.stopRingbackTimer()
-			_ = call.closeMedia()
+			closeErr := call.closeMedia()
 			s.removeCall(start.callID)
 			call.setState(CallStateFailed, fmt.Sprintf("session timer retry: invalid Min-SE %q", resp.Header("Min-SE")))
-			return nil, fmt.Errorf("dialing call: session timer retry: invalid Min-SE %q", resp.Header("Min-SE"))
+			return nil, errors.Join(fmt.Errorf("dialing call: session timer retry: invalid Min-SE %q", resp.Header("Min-SE")), closeErr)
 		}
 		if minSE <= lastMinSE {
 			break
@@ -71,17 +71,17 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 		resp, err = s.retryInviteWithMinSE(ctx, call, invite, resp)
 		if err != nil {
 			call.stopRingbackTimer()
-			_ = call.closeMedia()
+			closeErr := call.closeMedia()
 			if errors.Is(err, errInviteCleanupContinues) {
-				return nil, errors.New("dialing call: cancelled")
+				return nil, errors.Join(errors.New("dialing call: cancelled"), closeErr)
 			}
 			if call.State() == CallStateEnding {
 				call.finish(CallStateEnded, "cancelled")
-				return nil, errors.New("dialing call: cancelled")
+				return nil, errors.Join(errors.New("dialing call: cancelled"), closeErr)
 			}
 			s.removeCall(start.callID)
 			call.setState(CallStateFailed, err.Error())
-			return nil, fmt.Errorf("dialing call: %w", err)
+			return nil, errors.Join(fmt.Errorf("dialing call: %w", err), closeErr)
 		}
 		invite = call.inviteRequest
 	}
@@ -91,11 +91,11 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 			call.finish(CallStateEnded, "cancelled")
 			return nil, errors.New("dialing call: cancelled")
 		}
-		_ = call.closeMedia()
+		closeErr := call.closeMedia()
 		s.removeCall(start.callID)
 		err := fmt.Errorf("dialing call: expected 2xx, got %w", sip.NewResponseError(resp))
 		call.setState(CallStateFailed, err.Error())
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 	if call.State() == CallStateEnding {
 		if err := call.releaseCancelledInvite2xx(resp); err != nil {
@@ -107,31 +107,31 @@ func (s *Endpoint) Dial(ctx context.Context, req DialRequest) (*Call, error) {
 	}
 	answer, ok, err := call.answerFromFinalResponse(resp)
 	if err != nil {
-		_ = call.closeMedia()
+		closeErr := call.closeMedia()
 		s.removeCall(start.callID)
 		call.setState(CallStateFailed, err.Error())
-		return nil, fmt.Errorf("dialing call: %w", err)
+		return nil, errors.Join(fmt.Errorf("dialing call: %w", err), closeErr)
 	}
 	if !ok {
-		_ = call.closeMedia()
+		closeErr := call.closeMedia()
 		s.removeCall(start.callID)
 		err := errors.New("dialing call: missing answer sdp")
 		call.setState(CallStateFailed, err.Error())
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 	negotiated, ok := chooseCodec(answer, s.cfg.Codecs)
 	if !ok {
-		_ = call.closeMedia()
+		closeErr := call.closeMedia()
 		s.removeCall(start.callID)
 		err := errors.New("dialing call: no compatible answer codec")
 		call.setState(CallStateFailed, err.Error())
-		return nil, err
+		return nil, errors.Join(err, closeErr)
 	}
 	if err := call.acceptRemotePayloadMappings(answer); err != nil {
-		_ = call.closeMedia()
+		closeErr := call.closeMedia()
 		s.removeCall(start.callID)
 		call.setState(CallStateFailed, err.Error())
-		return nil, fmt.Errorf("dialing call: %w", err)
+		return nil, errors.Join(fmt.Errorf("dialing call: %w", err), closeErr)
 	}
 	dtmf, hasDTMF := chooseTelephoneEventForClock(answer, s.cfg.Codecs, negotiated.ClockRate)
 	answerMedia := negotiatedMedia(answer, negotiated, nonZeroDuration(answer.PTime, start.media.PTime), nonZeroDuration(answer.MaxPTime, start.media.MaxPTime, s.cfg.MaxPTime), dtmf, hasDTMF)

@@ -132,12 +132,12 @@ func (c *serializedWritePacketConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
-type recordingInnerHandler struct {
+type recordingInnerPacketProcessor struct {
 	packetCh chan packet.InnerPacket
 	errCh    chan error
 }
 
-func (h *recordingInnerHandler) HandleInnerPacket(pkt packet.InnerPacket) bool {
+func (h *recordingInnerPacketProcessor) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	if h.packetCh == nil {
 		return false
 	}
@@ -148,7 +148,7 @@ func (h *recordingInnerHandler) HandleInnerPacket(pkt packet.InnerPacket) bool {
 	return true
 }
 
-func (h *recordingInnerHandler) HandleError(err error) {
+func (h *recordingInnerPacketProcessor) HandleError(err error) {
 	select {
 	case h.errCh <- err:
 	default:
@@ -161,7 +161,7 @@ func testLogger() *slog.Logger {
 
 func mustDialSession(t *testing.T, conn net.PacketConn) *Session {
 	t.Helper()
-	session, err := Dial(context.Background(), Config{
+	session, err := Dial(t.Context(), Config{
 		RemoteAddr: "127.0.0.1:4500",
 		PacketConn: conn,
 		Logger:     testLogger(),
@@ -186,7 +186,7 @@ func TestDialUsesListenPacket(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4zero, Port: 40000}}
 			var network, address string
-			session, err := Dial(context.Background(), Config{
+			session, err := Dial(t.Context(), Config{
 				RemoteAddr: tt.remote,
 				ListenPacket: func(_ context.Context, gotNetwork, gotAddress string) (net.PacketConn, error) {
 					network = gotNetwork
@@ -235,7 +235,7 @@ func TestWriteOuterSerializesDeadlineAndWrite(t *testing.T) {
 		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500},
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
 	errs := make(chan error, 2)
@@ -286,7 +286,7 @@ func TestConnectRejectsConcurrentConnect(t *testing.T) {
 
 	firstResult := make(chan error, 1)
 	go func() {
-		firstResult <- session.Connect(context.Background(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
+		firstResult <- session.Connect(t.Context(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 	}()
 
 	select {
@@ -295,7 +295,7 @@ func TestConnectRejectsConcurrentConnect(t *testing.T) {
 		t.Fatal("first Connect() did not reach write path")
 	}
 
-	err := session.Connect(context.Background(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
+	err := session.Connect(t.Context(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 	if err == nil || !strings.Contains(err.Error(), "connect already in progress") {
 		t.Fatalf("concurrent Connect() error = %v, want in-progress error", err)
 	}
@@ -306,7 +306,7 @@ func TestConnectRejectsConcurrentConnect(t *testing.T) {
 		t.Fatalf("first Connect() error = %v, want wrapped write failure", err)
 	}
 
-	err = session.Connect(context.Background(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
+	err = session.Connect(t.Context(), ConnectRequest{IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA})
 	if err == nil {
 		t.Fatal("Connect() after failed in-flight attempt error = nil, want non-nil")
 	}
@@ -338,8 +338,8 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	session.natKeepaliveInterval = 20 * time.Second
 	session.mu.Unlock()
 
-	handler := &recordingInnerHandler{errCh: make(chan error, 1)}
-	if _, err := session.Attach(handler); err != nil {
+	processor := &recordingInnerPacketProcessor{errCh: make(chan error, 1)}
+	if _, err := session.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
@@ -347,7 +347,7 @@ func TestDiscardChildSecurityAssociationsKeepsIKESessionOpen(t *testing.T) {
 	session.discardChildSecurityAssociations(cause)
 
 	select {
-	case err := <-handler.errCh:
+	case err := <-processor.errCh:
 		if !errors.Is(err, cause) {
 			t.Fatalf("HandleError() error = %v, want wrapped %v", err, cause)
 		}
@@ -499,8 +499,8 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndNotifiesAttachment(t *testing.T) {
 		Integrity:        transformINTEGHMACSHA256,
 	}
 	session.mu.Unlock()
-	handler := &recordingInnerHandler{errCh: make(chan error, 1)}
-	if _, err := session.Attach(handler); err != nil {
+	processor := &recordingInnerPacketProcessor{errCh: make(chan error, 1)}
+	if _, err := session.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
@@ -523,7 +523,7 @@ func TestApplyPCSCFReselectionUpdatesTunnelAndNotifiesAttachment(t *testing.T) {
 		t.Fatalf("PCSCFIPs = %v, want %v", info.PCSCFIPs, want.PCSCFIPs)
 	}
 	select {
-	case err := <-handler.errCh:
+	case err := <-processor.errCh:
 		if !PCSCFReselectionRequested(err) {
 			t.Fatalf("HandleError() error = %v, want P-CSCF reselection", err)
 		}
@@ -577,8 +577,8 @@ func TestLivenessLoopFailsSecurityAssociationsAfterDPDTimeout(t *testing.T) {
 	session.livenessTimeout = 10 * time.Millisecond
 	session.lastProtectedRx = time.Now().Add(-20 * time.Millisecond)
 	session.mu.Unlock()
-	handler := &recordingInnerHandler{errCh: make(chan error, 1)}
-	if _, err := session.Attach(handler); err != nil {
+	processor := &recordingInnerPacketProcessor{errCh: make(chan error, 1)}
+	if _, err := session.Attach(processor); err != nil {
 		t.Fatalf("Attach() error = %v", err)
 	}
 
@@ -590,7 +590,7 @@ func TestLivenessLoopFailsSecurityAssociationsAfterDPDTimeout(t *testing.T) {
 	}()
 
 	select {
-	case err := <-handler.errCh:
+	case err := <-processor.errCh:
 		if !errors.Is(err, errIKERequestIncomplete) || !strings.Contains(err.Error(), "liveness check") {
 			t.Fatalf("HandleError() error = %v, want liveness incomplete request", err)
 		}
@@ -613,19 +613,15 @@ func TestSARekeyTimeAppliesJitterInsideRekeyMargin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			previous := saRekeyJitter
-			saRekeyJitter = func(maxDelay time.Duration) time.Duration {
+			jitter := func(maxDelay time.Duration) time.Duration {
 				if maxDelay != tt.wantWindow {
 					t.Fatalf("jitter window = %s, want %s", maxDelay, tt.wantWindow)
 				}
 				return tt.jitter
 			}
-			t.Cleanup(func() {
-				saRekeyJitter = previous
-			})
 
 			now := time.Unix(1000, 0)
-			got := childSARekeyTime(now, tt.lifetime, tt.margin)
+			got := childSARekeyTimeWithJitter(now, tt.lifetime, tt.margin, jitter)
 			want := now.Add(tt.lifetime - tt.margin + tt.wantAfterBase)
 			if !got.Equal(want) {
 				t.Fatalf("childSARekeyTime() = %s, want %s", got, want)
@@ -927,9 +923,6 @@ func TestNextRekeyLoopDeadline(t *testing.T) {
 
 func TestDeferRekeyAfterErrorMovesExpiredSoftDeadline(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	oldRetryDelay := rekeyTemporaryFailureRetryDelay
-	rekeyTemporaryFailureRetryDelay = 30 * time.Second
-	defer func() { rekeyTemporaryFailureRetryDelay = oldRetryDelay }()
 
 	tests := []struct {
 		name      string
@@ -1296,7 +1289,7 @@ func TestInitiatedIKESARekeyResultRetriesInvalidKEPayload(t *testing.T) {
 				return []ike.Payload{&ike.NotifyPayload{NotifyType: notifyTypeInvalidKEPayload, Data: data}}, nil
 			}
 
-			_, err := session.initiatedIKESARekeyResult(context.Background(), state, exchange)
+			_, err := session.initiatedIKESARekeyResult(t.Context(), state, exchange)
 			if err == nil || !strings.Contains(err.Error(), "repeated INVALID_KE_PAYLOAD group") {
 				t.Fatalf("initiatedIKESARekeyResult() error = %v, want repeated INVALID_KE_PAYLOAD group", err)
 			}
@@ -1483,8 +1476,7 @@ func TestBuildCreateChildSAResponsePayloadsRejectsMissingSAAsInvalidSyntax(t *te
 			if !action.fatalIKE {
 				t.Fatal("fatalIKE = false, want true for invalid CREATE_CHILD_SA syntax")
 			}
-			var syntax ike.InvalidSyntaxError
-			if !errors.As(action.fatalErr, &syntax) {
+			if _, ok := errors.AsType[ike.InvalidSyntaxError](action.fatalErr); !ok {
 				t.Fatalf("fatalErr = %v, want InvalidSyntaxError", action.fatalErr)
 			}
 			notify := ike.FindNotifyPayload(responsePayloads, notifyTypeInvalidSyntax)
@@ -1510,8 +1502,7 @@ func TestBuildCreateChildSAResponsePayloadsRejectsInvalidProposalNumbering(t *te
 	if !action.fatalIKE {
 		t.Fatal("fatalIKE = false, want true for invalid CREATE_CHILD_SA syntax")
 	}
-	var syntax ike.InvalidSyntaxError
-	if !errors.As(action.fatalErr, &syntax) {
+	if _, ok := errors.AsType[ike.InvalidSyntaxError](action.fatalErr); !ok {
 		t.Fatalf("fatalErr = %v, want InvalidSyntaxError", action.fatalErr)
 	}
 	if notify := ike.FindNotifyPayload(responsePayloads, notifyTypeInvalidSyntax); notify == nil {
@@ -1535,7 +1526,7 @@ func TestHandleCreateChildSARequestMissingSAClosesIKESA(t *testing.T) {
 				&ike.NoncePayload{Data: testNonce("peer nonce")},
 				&ike.KeyExchangePayload{DHGroup: transformDH2048MODP, Data: bytes.Repeat([]byte{0x01}, 256)},
 			}, false)
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -1563,7 +1554,7 @@ func TestHandleCreateChildSARequestMissingSAClosesIKESA(t *testing.T) {
 			if got := len(conn.writes); got != 1 {
 				t.Fatalf("writes = %d, want INVALID_SYNTAX response", got)
 			}
-			var response ike.IKEPacket
+			var response ike.Packet
 			if err := response.UnmarshalBinary(conn.writes[0][4:]); err != nil {
 				t.Fatalf("response UnmarshalBinary() error = %v", err)
 			}
@@ -1974,7 +1965,7 @@ func TestInitiatedChildSARekeyRetriesInvalidKEPayloadGroup(t *testing.T) {
 				return tt.responses(t, 0x50607080), nil
 			}
 
-			result, err := session.initiatedChildSARekeyResult(context.Background(), state, pfs, exchange)
+			result, err := session.initiatedChildSARekeyResult(t.Context(), state, pfs, exchange)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("initiatedChildSARekeyResult() error = %v, want %q", err, tt.wantErr)
@@ -2481,7 +2472,7 @@ func TestRekeyChildSACreatesReplacementAfterChildSANotFound(t *testing.T) {
 			session.inboundESP = esp.Codec{SPI: 0x01020304}
 			session.mu.Unlock()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 			errCh := make(chan error, 1)
 			go func() {
@@ -2570,7 +2561,7 @@ func TestRekeyChildSAIgnoresChildSANotFoundAfterSimultaneousRekey(t *testing.T) 
 			session.inboundESP = esp.Codec{SPI: 0x01020304}
 			session.mu.Unlock()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 			errCh := make(chan error, 1)
 			go func() {
@@ -2633,7 +2624,7 @@ func sealCreateChildSAResponse(t *testing.T, crypto *ikeCrypto, senderInitiator 
 	if senderInitiator {
 		flags |= flagInitiator
 	}
-	wire, err := crypto.SealIKE(ike.IKEHeader{
+	wire, err := crypto.SealIKE(ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -2648,15 +2639,6 @@ func sealCreateChildSAResponse(t *testing.T, crypto *ikeCrypto, senderInitiator 
 }
 
 func TestRekeyTemporaryFailureBackoff(t *testing.T) {
-	oldRetryDelay := rekeyTemporaryFailureRetryDelay
-	oldMaxDuration := rekeyTemporaryFailureMaxDuration
-	rekeyTemporaryFailureRetryDelay = 10 * time.Second
-	rekeyTemporaryFailureMaxDuration = 30 * time.Second
-	t.Cleanup(func() {
-		rekeyTemporaryFailureRetryDelay = oldRetryDelay
-		rekeyTemporaryFailureMaxDuration = oldMaxDuration
-	})
-
 	tests := []struct {
 		name string
 		run  func(t *testing.T)
@@ -2665,7 +2647,7 @@ func TestRekeyTemporaryFailureBackoff(t *testing.T) {
 			name: "waits until retry delay",
 			run: func(t *testing.T) {
 				now := time.Unix(1_700_000_000, 0)
-				var backoff rekeyTemporaryFailureBackoff
+				backoff := rekeyTemporaryFailureBackoff{retryDelay: 10 * time.Second, maxDuration: 30 * time.Second}
 
 				if !backoff.record(now) {
 					t.Fatal("record() = false, want true")
@@ -2682,7 +2664,7 @@ func TestRekeyTemporaryFailureBackoff(t *testing.T) {
 			name: "expires after sustained temporary failure",
 			run: func(t *testing.T) {
 				now := time.Unix(1_700_000_000, 0)
-				var backoff rekeyTemporaryFailureBackoff
+				backoff := rekeyTemporaryFailureBackoff{retryDelay: 10 * time.Second, maxDuration: 30 * time.Second}
 
 				if !backoff.record(now) {
 					t.Fatal("first record() = false, want true")
@@ -2696,7 +2678,7 @@ func TestRekeyTemporaryFailureBackoff(t *testing.T) {
 			name: "reset clears retry window",
 			run: func(t *testing.T) {
 				now := time.Unix(1_700_000_000, 0)
-				var backoff rekeyTemporaryFailureBackoff
+				backoff := rekeyTemporaryFailureBackoff{retryDelay: 10 * time.Second, maxDuration: 30 * time.Second}
 
 				if !backoff.record(now) {
 					t.Fatal("record() = false, want true")
@@ -3418,7 +3400,7 @@ func TestInstallSurvivingIKESARekeyRetainsPeerCreatedLosingSA(t *testing.T) {
 
 			session.installSurvivingIKESARekey(local, decision, peerAddr)
 
-			wire, err := peerLosing.SealIKE(ike.IKEHeader{
+			wire, err := peerLosing.SealIKE(ike.Header{
 				InitiatorSPI: peerLosingInitiator,
 				ResponderSPI: peerLosingResponder,
 				Version:      ikeVersion20,
@@ -3440,7 +3422,7 @@ func TestInstallSurvivingIKESARekeyRetainsPeerCreatedLosingSA(t *testing.T) {
 			if len(conn.writes) != 1 {
 				t.Fatalf("response writes = %d, want 1", len(conn.writes))
 			}
-			var responsePacket ike.IKEPacket
+			var responsePacket ike.Packet
 			if err := responsePacket.UnmarshalBinary(conn.writes[0][nonESPMarkerLen:]); err != nil {
 				t.Fatalf("response UnmarshalBinary() error = %v", err)
 			}
@@ -3745,7 +3727,7 @@ func TestPendingIKESecurityAssociationPromotesOnValidNewIKERequest(t *testing.T)
 			session.pendingIKESAReady = true
 			session.mu.Unlock()
 
-			wire, err := pending.SealIKE(ike.IKEHeader{
+			wire, err := pending.SealIKE(ike.Header{
 				InitiatorSPI: tt.initiatorSPI,
 				ResponderSPI: tt.responderSPI,
 				Version:      ikeVersion20,
@@ -3821,7 +3803,7 @@ func TestPendingIKESecurityAssociationCreateChildUsesNewMessageWindow(t *testing
 			session.mu.Unlock()
 
 			payloads := childSACreateRequestPayloads(handshakeConfig(Config{}), 0x50607080, testNonce("peer nonce"))
-			wire, err := pending.SealIKE(ike.IKEHeader{
+			wire, err := pending.SealIKE(ike.Header{
 				InitiatorSPI: tt.initiatorSPI,
 				ResponderSPI: tt.responderSPI,
 				Version:      ikeVersion20,
@@ -3959,7 +3941,7 @@ func TestRetiredIKESecurityAssociationHandlesLateOldIKEMessages(t *testing.T) {
 			if len(conn.writes) != 1 {
 				t.Fatalf("response writes = %d, want 1", len(conn.writes))
 			}
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(conn.writes[0][4:]); err != nil {
 				t.Fatalf("response UnmarshalBinary() error = %v", err)
 			}
@@ -4053,7 +4035,7 @@ func TestProtectedRequestParseErrorsGetNotifyResponse(t *testing.T) {
 			if len(conn.writes) != 1 {
 				t.Fatalf("response writes = %d, want 1", len(conn.writes))
 			}
-			var response ike.IKEPacket
+			var response ike.Packet
 			if err := response.UnmarshalBinary(conn.writes[0][4:]); err != nil {
 				t.Fatalf("response UnmarshalBinary() error = %v", err)
 			}
@@ -4124,14 +4106,14 @@ func TestOpenIKERejectsNestedEncryptedPayload(t *testing.T) {
 		nested,
 		false,
 	)
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(wire); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 
 	_, err := crypto.OpenIKE(packet, false)
-	var syntax ike.InvalidSyntaxError
-	if err == nil || !errors.As(err, &syntax) || !strings.Contains(err.Error(), "nested encrypted payload") {
+	_, isSyntax := errors.AsType[ike.InvalidSyntaxError](err)
+	if err == nil || !isSyntax || !strings.Contains(err.Error(), "nested encrypted payload") {
 		t.Fatalf("OpenIKE() error = %v, want nested encrypted InvalidSyntaxError", err)
 	}
 }
@@ -4146,7 +4128,7 @@ func testPayloadBlock(next byte, body []byte) []byte {
 
 func protectedIKEWire(t *testing.T, crypto *ikeCrypto, exchangeType byte, flags byte, messageID uint32, payloads []ike.Payload, senderInitiator bool) []byte {
 	t.Helper()
-	wire, err := crypto.SealIKE(ike.IKEHeader{
+	wire, err := crypto.SealIKE(ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -4179,7 +4161,7 @@ func protectedIKERawPlain(t *testing.T, crypto *ikeCrypto, exchangeType byte, fl
 		t.Fatalf("integLength() error = %v", err)
 	}
 	container := &ike.EncryptedPayload{NextPayload: firstPayload, Raw: append(append(iv, ciphertext...), make([]byte, icvLen)...)}
-	packet := ike.IKEPacket{Header: ike.IKEHeader{
+	packet := ike.Packet{Header: ike.Header{
 		InitiatorSPI: 0x0102030405060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -4911,7 +4893,7 @@ func TestIKESAByteHardLifetimeRejectsOutboundBeforeOverflow(t *testing.T) {
 			session.ikeSAOutboundBytes = 1
 			session.mu.Unlock()
 
-			err = session.writeProtectedWire(context.Background(), ikeActionTestSend, crypto, nattWire, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}, false)
+			err = session.writeProtectedWire(t.Context(), ikeActionTestSend, crypto, nattWire, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}, false)
 
 			if !errors.Is(err, errIKESAExpired) {
 				t.Fatalf("writeProtectedWire() error = %v, want %v", err, errIKESAExpired)
@@ -4965,7 +4947,7 @@ func TestInformationalRequestAtIKEByteHardBoundaryRepliesBeforeClosing(t *testin
 			session := mustDialSession(t, conn)
 			crypto := testIKECrypto()
 			wire := protectedIKEWire(t, crypto, exchangeTypeInformational, 0, 0, nil, false)
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -5035,7 +5017,7 @@ func TestChildSAByteLifetimeTriggersSoftRekey(t *testing.T) {
 			session.childSARekeyAt = futureRekey
 			session.mu.Unlock()
 
-			if err := session.writeInner(context.Background(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP); err != nil {
+			if err := session.writeInner(t.Context(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP); err != nil {
 				t.Fatalf("writeInner() error = %v", err)
 			}
 
@@ -5078,7 +5060,7 @@ func TestChildSAByteHardLifetimeDiscardsBeforeOutboundOverflow(t *testing.T) {
 			session.childSAByteExpiresAt = tt.hardBytes
 			session.mu.Unlock()
 
-			err := session.writeInner(context.Background(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP)
+			err := session.writeInner(t.Context(), packet.InnerPacket{}, make([]byte, tt.payloadLength), packet.ProtocolUDP)
 
 			if !errors.Is(err, errChildSAExpired) {
 				t.Fatalf("writeInner() error = %v, want %v", err, errChildSAExpired)
@@ -5231,7 +5213,7 @@ func TestHandleESPPacketValidatesTunnelNextHeader(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			codec := esp.Codec{SPI: 0x01020304, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: bytes.Repeat([]byte{0x11}, 20)}
-			wire, err := codec.Encode(esp.ESPPacket{
+			wire, err := codec.Encode(esp.Packet{
 				SPI:        codec.SPI,
 				Sequence:   1,
 				NextHeader: tt.nextHeader,
@@ -5247,8 +5229,8 @@ func TestHandleESPPacketValidatesTunnelNextHeader(t *testing.T) {
 			oldRx := time.Now().Add(-time.Hour)
 			session.lastProtectedRx = oldRx
 			session.mu.Unlock()
-			handler := &recordingInnerHandler{packetCh: make(chan packet.InnerPacket, 1)}
-			if _, err := session.Attach(handler); err != nil {
+			processor := &recordingInnerPacketProcessor{packetCh: make(chan packet.InnerPacket, 1)}
+			if _, err := session.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
@@ -5261,7 +5243,7 @@ func TestHandleESPPacketValidatesTunnelNextHeader(t *testing.T) {
 				t.Fatalf("lastProtectedRx = %s, want after %s for accepted protected ESP packet", lastRx, oldRx)
 			}
 			select {
-			case inbound := <-handler.packetCh:
+			case inbound := <-processor.packetCh:
 				if !tt.wantRead {
 					t.Fatalf("HandleInnerPacket() got %+v, want packet discarded", inbound)
 				}
@@ -5314,7 +5296,7 @@ func TestHandleESPPacketDropsPacketsOutsideTrafficSelectors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			codec := esp.Codec{SPI: 0x01020304, Encryption: esp.EncryptionNull, Integrity: esp.IntegrityHMACSHA196, IntegrityKey: bytes.Repeat([]byte{0x11}, 20)}
-			wire, err := codec.Encode(esp.ESPPacket{
+			wire, err := codec.Encode(esp.Packet{
 				SPI:        codec.SPI,
 				Sequence:   1,
 				NextHeader: packet.OuterIPv4,
@@ -5333,15 +5315,15 @@ func TestHandleESPPacketDropsPacketsOutsideTrafficSelectors(t *testing.T) {
 				ResponderTrafficSelectors: []ike.TrafficSelector{ipv4Selector(net.IPv4(10, 0, 0, 2), 5060)},
 			}
 			session.mu.Unlock()
-			handler := &recordingInnerHandler{packetCh: make(chan packet.InnerPacket, 1)}
-			if _, err := session.Attach(handler); err != nil {
+			processor := &recordingInnerPacketProcessor{packetCh: make(chan packet.InnerPacket, 1)}
+			if _, err := session.Attach(processor); err != nil {
 				t.Fatalf("Attach() error = %v", err)
 			}
 
 			session.handleESPPacket(wire)
 
 			select {
-			case inbound := <-handler.packetCh:
+			case inbound := <-processor.packetCh:
 				if !tt.wantRead {
 					t.Fatalf("HandleInnerPacket() got %+v, want packet discarded", inbound)
 				}
@@ -5403,7 +5385,7 @@ func TestWriteInnerPacketRejectsPacketsOutsideTrafficSelectors(t *testing.T) {
 			}
 			session.mu.Unlock()
 
-			err := session.WriteInnerPacket(context.Background(), innerPacket(tt.src, tt.dst))
+			err := session.WriteInnerPacket(t.Context(), innerPacket(tt.src, tt.dst))
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("WriteInnerPacket() error = %v, want %q", err, tt.wantErr)
@@ -5526,7 +5508,7 @@ func TestExpiredChildSAIsDiscardedBeforeUse(t *testing.T) {
 		{
 			name: "outbound write",
 			act: func(session *Session) error {
-				return session.WriteInnerPacket(context.Background(), packet.InnerPacket{
+				return session.WriteInnerPacket(t.Context(), packet.InnerPacket{
 					UDP: &packet.UDPSegment{
 						Src:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 5062},
 						Dst:     &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 5060},

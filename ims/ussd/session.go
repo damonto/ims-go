@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	imssession "github.com/damonto/ims-go/ims/session"
-	"github.com/damonto/ims-go/ims/sip"
 	"strconv"
 	"strings"
+
+	imssession "github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
 )
 
 func (s *Session) Events() <-chan Message {
@@ -304,10 +305,19 @@ func (s *Session) nextCSeq() int64 {
 }
 
 func (s *Session) emit(msg Message) {
-	defer func() { _ = recover() }()
+	s.mu.Lock()
+	if s.state == sessionStateClosed {
+		s.mu.Unlock()
+		return
+	}
+	dropped := false
 	select {
 	case s.events <- msg:
 	default:
+		dropped = true
+	}
+	s.mu.Unlock()
+	if dropped {
 		s.endpoint.logger.Debug("dropping USSD event", "call_id", s.callID, "text", msg.Text)
 	}
 }
@@ -344,10 +354,16 @@ func (s *Session) setDialogKind(payload Message) {
 }
 
 func (s *Session) finish(fromNetwork bool) {
+	if err := s.finishError(fromNetwork); err != nil {
+		s.endpoint.logger.Warn("closing USSD session resources failed", "call_id", s.callID, "err", err)
+	}
+}
+
+func (s *Session) finishError(fromNetwork bool) error {
 	s.mu.Lock()
 	if s.state == sessionStateClosed {
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	s.state = sessionStateClosed
 	s.deliveringInvite = false
@@ -362,17 +378,18 @@ func (s *Session) finish(fromNetwork bool) {
 	if stop != nil {
 		close(stop)
 	}
+	var closeErr error
 	if s.dialogAttachment != nil {
-		_ = s.dialogAttachment.Close()
+		closeErr = s.dialogAttachment.Close()
 		s.dialogAttachment = nil
 	}
 	s.endpoint.removeSession(s.sessionKey())
 	s.closeEvents()
 	s.endpoint.logger.Debug("ended USSD session", "call_id", s.callID, "from_network", fromNetwork)
+	return closeErr
 }
 
 func (s *Session) closeEvents() {
-	defer func() { _ = recover() }()
 	close(s.events)
 }
 
@@ -489,9 +506,11 @@ func looksLikeDialogMessage(msg sip.Message) bool {
 func (s *Session) handleRequest(ctx context.Context, req imssession.Request) error {
 	method := strings.ToUpper(req.Message.Method())
 	if method != "ACK" && method != "CANCEL" {
-		if duplicate, status, reason := s.recordRemoteCSeq(req.Message); status != 0 {
+		duplicate, status, reason := s.recordRemoteCSeq(req.Message)
+		if status != 0 {
 			return s.endpoint.sess.WriteStatus(ctx, req, status, reason)
-		} else if duplicate {
+		}
+		if duplicate {
 			if err := s.endpoint.sess.WriteStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 				return err
 			}

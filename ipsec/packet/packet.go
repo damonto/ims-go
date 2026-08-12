@@ -85,7 +85,7 @@ type InnerPacket struct {
 	IP   IPPacket
 	UDP  *UDPSegment
 	TCP  *TCPSegment
-	ESP  *esp.ESPPacket
+	ESP  *esp.Packet
 	wire []byte
 }
 
@@ -607,24 +607,24 @@ func transportChecksumContext(srcIP, dstIP net.IP) (int, net.IP, net.IP, bool, e
 	return version, src, dst, true, nil
 }
 
-func decodeOpaqueESPPacket(data []byte) (esp.ESPPacket, error) {
+func decodeOpaqueESPPacket(data []byte) (esp.Packet, error) {
 	if len(data) < 8 {
-		return esp.ESPPacket{}, errors.New("parsing esp packet: packet too short")
+		return esp.Packet{}, errors.New("parsing esp packet: packet too short")
 	}
 	spi := binary.BigEndian.Uint32(data[:4])
 	sequence := binary.BigEndian.Uint32(data[4:8])
 	if !esp.ValidSPI(spi) {
-		return esp.ESPPacket{}, errors.New("parsing esp packet: invalid spi")
+		return esp.Packet{}, errors.New("parsing esp packet: invalid spi")
 	}
 	if sequence == 0 {
-		return esp.ESPPacket{}, errors.New("parsing esp packet: invalid sequence number")
+		return esp.Packet{}, errors.New("parsing esp packet: invalid sequence number")
 	}
-	packet := esp.ESPPacket{
+	packet := esp.Packet{
 		SPI:      spi,
 		Sequence: sequence,
 		Payload:  append([]byte(nil), data[8:]...),
 	}
-	var decoded esp.ESPPacket
+	var decoded esp.Packet
 	if err := decoded.UnmarshalBinary(data); err == nil {
 		packet.NextHeader = decoded.NextHeader
 		packet.Payload = decoded.Payload

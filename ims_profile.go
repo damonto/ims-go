@@ -2,7 +2,6 @@ package ims
 
 import (
 	"bytes"
-	_ "embed"
 	"encoding"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,8 @@ import (
 	"time"
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
+
+	_ "embed"
 )
 
 //go:embed ims.json
@@ -155,7 +156,7 @@ func (d *imsProfileDuration) UnmarshalText(text []byte) error {
 func (d *imsProfileDuration) UnmarshalJSON(data []byte) error {
 	value := strings.TrimSpace(string(data))
 	if value == "null" {
-		return fmt.Errorf("profile duration cannot be null")
+		return errors.New("profile duration cannot be null")
 	}
 
 	var text string
@@ -283,14 +284,14 @@ func newIMSProfileMatchScore(profile imsProfile) imsProfileMatchScore {
 	return score
 }
 
-func (score imsProfileMatchScore) betterThan(other imsProfileMatchScore) bool {
-	if score.conditions != other.conditions {
-		return score.conditions > other.conditions
+func (s imsProfileMatchScore) betterThan(other imsProfileMatchScore) bool {
+	if s.conditions != other.conditions {
+		return s.conditions > other.conditions
 	}
-	if score.specificity != other.specificity {
-		return score.specificity > other.specificity
+	if s.specificity != other.specificity {
+		return s.specificity > other.specificity
 	}
-	return score.length > other.length
+	return s.length > other.length
 }
 
 func matchesIMSIPrefix(imsi, pattern string) bool {
@@ -354,9 +355,9 @@ func normalizeDigits(value string) string {
 	}, value)
 }
 
-func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
-	if cfg.usesVoWiFi() {
-		wifi := cfg.Access.VoWiFi
+func (c Config) withIMSProfile(profile imsProfile, card Card) Config {
+	if c.usesVoWiFi() {
+		wifi := c.Access.VoWiFi
 		if wifi.EPDG == "" {
 			wifi.EPDG = firstNonEmpty(profile.EPDG, profile.EPDGAddresses...)
 		}
@@ -436,143 +437,143 @@ func (cfg Config) withIMSProfile(profile imsProfile, card Card) Config {
 		}
 	}
 
-	if strings.TrimSpace(cfg.IMS.Transport) == "" {
-		cfg.IMS.Transport = profile.IMSTransport
+	if strings.TrimSpace(c.IMS.Transport) == "" {
+		c.IMS.Transport = profile.IMSTransport
 	}
-	if strings.TrimSpace(cfg.IMS.HomeDomain) == "" {
-		cfg.IMS.HomeDomain = profile.IMSHomeDomain
+	if strings.TrimSpace(c.IMS.HomeDomain) == "" {
+		c.IMS.HomeDomain = profile.IMSHomeDomain
 	}
-	if strings.TrimSpace(cfg.IMS.PublicIdentity) == "" {
-		cfg.IMS.PublicIdentity = renderIMSIdentity(profile.IMSPublicIdentity, cfg, card)
+	if strings.TrimSpace(c.IMS.PublicIdentity) == "" {
+		c.IMS.PublicIdentity = renderIMSIdentity(profile.IMSPublicIdentity, c, card)
 	}
-	if strings.TrimSpace(cfg.IMS.PhoneContextDomain) == "" {
-		cfg.IMS.PhoneContextDomain = profile.IMSPhoneContextDomain
+	if strings.TrimSpace(c.IMS.PhoneContextDomain) == "" {
+		c.IMS.PhoneContextDomain = profile.IMSPhoneContextDomain
 	}
-	if cfg.usesVoWiFi() && strings.TrimSpace(cfg.IMS.AccessNetworkInfo) == "" {
-		cfg.IMS.AccessNetworkInfo = profile.IMSAccessNetworkInfo
+	if c.usesVoWiFi() && strings.TrimSpace(c.IMS.AccessNetworkInfo) == "" {
+		c.IMS.AccessNetworkInfo = profile.IMSAccessNetworkInfo
 	}
-	if strings.TrimSpace(cfg.IMS.UserAgent) == "" {
-		cfg.IMS.UserAgent = renderIMSUserAgent(profile.IMSUserAgent, cfg, profile)
+	if strings.TrimSpace(c.IMS.UserAgent) == "" {
+		c.IMS.UserAgent = renderIMSUserAgent(profile.IMSUserAgent, c, profile)
 	}
-	if cfg.IMS.RegisterExpires == 0 {
-		cfg.IMS.RegisterExpires = profile.IMSRegisterExpires.Duration
+	if c.IMS.RegisterExpires == 0 {
+		c.IMS.RegisterExpires = profile.IMSRegisterExpires.Duration
 	}
-	if cfg.IMS.RegistrationRetryBase == 0 {
-		cfg.IMS.RegistrationRetryBase = imsProfileDurationValue(profile.IMSRegistrationRetryBase)
+	if c.IMS.RegistrationRetryBase == 0 {
+		c.IMS.RegistrationRetryBase = imsProfileDurationValue(profile.IMSRegistrationRetryBase)
 	}
-	if cfg.IMS.RegistrationRetryMax == 0 {
-		cfg.IMS.RegistrationRetryMax = imsProfileDurationValue(profile.IMSRegistrationRetryMax)
+	if c.IMS.RegistrationRetryMax == 0 {
+		c.IMS.RegistrationRetryMax = imsProfileDurationValue(profile.IMSRegistrationRetryMax)
 	}
-	if len(cfg.IMS.IPSecIntegrityAlgorithms) == 0 {
-		cfg.IMS.IPSecIntegrityAlgorithms = cloneStrings(profile.IMSIPSecIntegrityAlgorithms)
+	if len(c.IMS.IPSecIntegrityAlgorithms) == 0 {
+		c.IMS.IPSecIntegrityAlgorithms = cloneStrings(profile.IMSIPSecIntegrityAlgorithms)
 	}
-	if len(cfg.IMS.IPSecEncryptionAlgorithms) == 0 {
-		cfg.IMS.IPSecEncryptionAlgorithms = cloneStrings(profile.IMSIPSecEncryptionAlgorithms)
+	if len(c.IMS.IPSecEncryptionAlgorithms) == 0 {
+		c.IMS.IPSecEncryptionAlgorithms = cloneStrings(profile.IMSIPSecEncryptionAlgorithms)
 	}
-	cfg.IMS.IPSecModes = cloneStrings(profile.IMSIPSecModes)
-	if len(cfg.IMS.Voice.GeolocationPIDFInvite) == 0 {
-		cfg.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)
+	c.IMS.IPSecModes = cloneStrings(profile.IMSIPSecModes)
+	if len(c.IMS.Voice.GeolocationPIDFInvite) == 0 {
+		c.IMS.Voice.GeolocationPIDFInvite = cloneInts(profile.IMSGeolocationPIDFInvite)
 	}
-	if len(cfg.IMS.GeolocationPIDFRegister) == 0 {
-		cfg.IMS.GeolocationPIDFRegister = cloneInts(profile.IMSGeolocationPIDFRegister)
+	if len(c.IMS.GeolocationPIDFRegister) == 0 {
+		c.IMS.GeolocationPIDFRegister = cloneInts(profile.IMSGeolocationPIDFRegister)
 	}
-	if !cfg.IMS.UseTelURIForPIDFXML {
-		cfg.IMS.UseTelURIForPIDFXML = profile.IMSUseTelURIForPIDFXML
+	if !c.IMS.UseTelURIForPIDFXML {
+		c.IMS.UseTelURIForPIDFXML = profile.IMSUseTelURIForPIDFXML
 	}
-	if cfg.IMS.Voice.RequestURIFormat == "" {
-		cfg.IMS.Voice.RequestURIFormat = profile.IMSRequestURIFormat
+	if c.IMS.Voice.RequestURIFormat == "" {
+		c.IMS.Voice.RequestURIFormat = profile.IMSRequestURIFormat
 	}
-	if cfg.IMS.SIPServerPort == 0 {
-		cfg.IMS.SIPServerPort = firstNonZero(profile.IMSSIPServerPort, profile.SIPPort)
+	if c.IMS.SIPServerPort == 0 {
+		c.IMS.SIPServerPort = firstNonZero(profile.IMSSIPServerPort, profile.SIPPort)
 	}
-	if cfg.IMS.SIPTimers.T1 == 0 {
-		cfg.IMS.SIPTimers.T1 = profile.IMSSIPTimerT1.Duration
+	if c.IMS.SIPTimers.T1 == 0 {
+		c.IMS.SIPTimers.T1 = profile.IMSSIPTimerT1.Duration
 	}
-	if cfg.IMS.SIPTimers.T2 == 0 {
-		cfg.IMS.SIPTimers.T2 = profile.IMSSIPTimerT2.Duration
+	if c.IMS.SIPTimers.T2 == 0 {
+		c.IMS.SIPTimers.T2 = profile.IMSSIPTimerT2.Duration
 	}
-	if cfg.IMS.SIPTimers.T4 == 0 {
-		cfg.IMS.SIPTimers.T4 = profile.IMSSIPTimerT4.Duration
+	if c.IMS.SIPTimers.T4 == 0 {
+		c.IMS.SIPTimers.T4 = profile.IMSSIPTimerT4.Duration
 	}
-	if cfg.IMS.SIPTimers.TB == 0 {
-		cfg.IMS.SIPTimers.TB = profile.IMSSIPTimerB.Duration
+	if c.IMS.SIPTimers.TB == 0 {
+		c.IMS.SIPTimers.TB = profile.IMSSIPTimerB.Duration
 	}
-	if cfg.IMS.SIPTimers.TD == 0 {
-		cfg.IMS.SIPTimers.TD = profile.IMSSIPTimerD.Duration
+	if c.IMS.SIPTimers.TD == 0 {
+		c.IMS.SIPTimers.TD = profile.IMSSIPTimerD.Duration
 	}
-	if cfg.IMS.SIPTimers.TF == 0 {
-		cfg.IMS.SIPTimers.TF = profile.IMSSIPTimerF.Duration
+	if c.IMS.SIPTimers.TF == 0 {
+		c.IMS.SIPTimers.TF = profile.IMSSIPTimerF.Duration
 	}
-	if cfg.IMS.SIPTimers.TH == 0 {
-		cfg.IMS.SIPTimers.TH = profile.IMSSIPTimerH.Duration
+	if c.IMS.SIPTimers.TH == 0 {
+		c.IMS.SIPTimers.TH = profile.IMSSIPTimerH.Duration
 	}
-	if cfg.IMS.SIPTimers.TJ == 0 {
-		cfg.IMS.SIPTimers.TJ = profile.IMSSIPTimerJ.Duration
+	if c.IMS.SIPTimers.TJ == 0 {
+		c.IMS.SIPTimers.TJ = profile.IMSSIPTimerJ.Duration
 	}
-	cfg.smsRequestStatusReport = profile.EnableSMSDeliveryReports
-	cfg = cfg.withIMSVoiceProfile(profile.IMSVoice)
-	return cfg
+	c.smsRequestStatusReport = profile.EnableSMSDeliveryReports
+	c = c.withIMSVoiceProfile(profile.IMSVoice)
+	return c
 }
 
-func (cfg Config) withIMSVoiceProfile(profile imsVoiceProfile) Config {
-	if strings.TrimSpace(cfg.IMS.Voice.RTPProfile) == "" {
-		cfg.IMS.Voice.RTPProfile = profile.RTPProfile
+func (c Config) withIMSVoiceProfile(profile imsVoiceProfile) Config {
+	if strings.TrimSpace(c.IMS.Voice.RTPProfile) == "" {
+		c.IMS.Voice.RTPProfile = profile.RTPProfile
 	}
-	if cfg.IMS.Voice.PTime == 0 {
-		cfg.IMS.Voice.PTime = profile.PTime.Duration
+	if c.IMS.Voice.PTime == 0 {
+		c.IMS.Voice.PTime = profile.PTime.Duration
 	}
-	if cfg.IMS.Voice.MaxPTime == 0 {
-		cfg.IMS.Voice.MaxPTime = profile.MaxPTime.Duration
+	if c.IMS.Voice.MaxPTime == 0 {
+		c.IMS.Voice.MaxPTime = profile.MaxPTime.Duration
 	}
-	if strings.TrimSpace(cfg.IMS.Voice.GeolocationCountry) == "" {
-		cfg.IMS.Voice.GeolocationCountry = profile.GeolocationCountry
+	if strings.TrimSpace(c.IMS.Voice.GeolocationCountry) == "" {
+		c.IMS.Voice.GeolocationCountry = profile.GeolocationCountry
 	}
-	if len(cfg.IMS.Voice.PIDFShortCodes) == 0 {
-		cfg.IMS.Voice.PIDFShortCodes = cloneStrings(profile.PIDFShortCodes)
+	if len(c.IMS.Voice.PIDFShortCodes) == 0 {
+		c.IMS.Voice.PIDFShortCodes = cloneStrings(profile.PIDFShortCodes)
 	}
-	cfg.IMS.Voice.Preconditions = profile.QoSPreconditionsSupported
-	cfg.IMS.Voice.ReliableProvisional = profile.ReliableProvisionalSupported
-	cfg.IMS.Voice.SessionTimer = profile.SessionTimer
-	if cfg.IMS.Voice.SessionExpires == 0 {
-		cfg.IMS.Voice.SessionExpires = profile.SessionExpires.Duration
+	c.IMS.Voice.Preconditions = profile.QoSPreconditionsSupported
+	c.IMS.Voice.ReliableProvisional = profile.ReliableProvisionalSupported
+	c.IMS.Voice.SessionTimer = profile.SessionTimer
+	if c.IMS.Voice.SessionExpires == 0 {
+		c.IMS.Voice.SessionExpires = profile.SessionExpires.Duration
 	}
-	if cfg.IMS.Voice.MinSessionExpires == 0 {
-		cfg.IMS.Voice.MinSessionExpires = profile.MinimumSessionExpires.Duration
+	if c.IMS.Voice.MinSessionExpires == 0 {
+		c.IMS.Voice.MinSessionExpires = profile.MinimumSessionExpires.Duration
 	}
-	if strings.TrimSpace(cfg.IMS.Voice.SessionRefresher) == "" {
-		cfg.IMS.Voice.SessionRefresher = profile.SessionRefresher
+	if strings.TrimSpace(c.IMS.Voice.SessionRefresher) == "" {
+		c.IMS.Voice.SessionRefresher = profile.SessionRefresher
 	}
-	if cfg.IMS.Voice.MOCallRequestTimeout == 0 {
-		cfg.IMS.Voice.MOCallRequestTimeout = profile.MOCallRequestTimeout.Duration
+	if c.IMS.Voice.MOCallRequestTimeout == 0 {
+		c.IMS.Voice.MOCallRequestTimeout = profile.MOCallRequestTimeout.Duration
 	}
-	if cfg.IMS.Voice.RingbackTimeout == 0 {
-		cfg.IMS.Voice.RingbackTimeout = profile.RingbackTimer.Duration
+	if c.IMS.Voice.RingbackTimeout == 0 {
+		c.IMS.Voice.RingbackTimeout = profile.RingbackTimer.Duration
 	}
-	if cfg.IMS.Voice.RingingTimeout == 0 {
-		cfg.IMS.Voice.RingingTimeout = profile.RingingTimer.Duration
+	if c.IMS.Voice.RingingTimeout == 0 {
+		c.IMS.Voice.RingingTimeout = profile.RingingTimer.Duration
 	}
-	if cfg.IMS.Voice.AudioASBandwidthKbps == 0 {
-		cfg.IMS.Voice.AudioASBandwidthKbps = profile.AudioASBandwidthKbps
+	if c.IMS.Voice.AudioASBandwidthKbps == 0 {
+		c.IMS.Voice.AudioASBandwidthKbps = profile.AudioASBandwidthKbps
 	}
-	if cfg.IMS.Voice.RTPInactivityTimeout == nil {
-		cfg.IMS.Voice.RTPInactivityTimeout = imsvoice.Duration(profile.RTPInactivityTimeout.Duration)
+	if c.IMS.Voice.RTPInactivityTimeout == nil {
+		c.IMS.Voice.RTPInactivityTimeout = imsvoice.Duration(profile.RTPInactivityTimeout.Duration)
 	}
-	if cfg.IMS.Voice.RTCPInactivityTimeout == nil {
-		cfg.IMS.Voice.RTCPInactivityTimeout = imsvoice.Duration(profile.RTCPInactivityTimeout.Duration)
+	if c.IMS.Voice.RTCPInactivityTimeout == nil {
+		c.IMS.Voice.RTCPInactivityTimeout = imsvoice.Duration(profile.RTCPInactivityTimeout.Duration)
 	}
-	if cfg.IMS.Voice.AudioInactivityCallEndReasons == nil && profile.AudioInactivityCallEndReasons != nil {
-		cfg.IMS.Voice.AudioInactivityCallEndReasons = append([]imsvoice.AudioInactivityCallEndReason(nil), profile.AudioInactivityCallEndReasons...)
+	if c.IMS.Voice.AudioInactivityCallEndReasons == nil && profile.AudioInactivityCallEndReasons != nil {
+		c.IMS.Voice.AudioInactivityCallEndReasons = append([]imsvoice.AudioInactivityCallEndReason(nil), profile.AudioInactivityCallEndReasons...)
 	}
-	if cfg.IMS.Voice.LocalRTPPortMin == 0 {
-		cfg.IMS.Voice.LocalRTPPortMin = profile.LocalRTPPortMin
+	if c.IMS.Voice.LocalRTPPortMin == 0 {
+		c.IMS.Voice.LocalRTPPortMin = profile.LocalRTPPortMin
 	}
-	if cfg.IMS.Voice.LocalRTPPortMax == 0 {
-		cfg.IMS.Voice.LocalRTPPortMax = profile.LocalRTPPortMax
+	if c.IMS.Voice.LocalRTPPortMax == 0 {
+		c.IMS.Voice.LocalRTPPortMax = profile.LocalRTPPortMax
 	}
-	if len(cfg.IMS.Voice.Codecs) == 0 {
-		cfg.IMS.Voice.Codecs = imsProfileVoiceCodecs(profile)
+	if len(c.IMS.Voice.Codecs) == 0 {
+		c.IMS.Voice.Codecs = imsProfileVoiceCodecs(profile)
 	}
-	return cfg
+	return c
 }
 
 func imsProfileVoiceCodecs(profile imsVoiceProfile) []imsvoice.AudioCodecConfig {
@@ -628,7 +629,7 @@ func validEVSChannelAwareReceive(value int) bool {
 	}
 }
 
-func renderIMSIdentity(template string, cfg Config, card Card) string {
+func renderIMSIdentity(template string, c Config, card Card) string {
 	template = strings.TrimSpace(template)
 	if template == "" {
 		return ""
@@ -637,7 +638,7 @@ func renderIMSIdentity(template string, cfg Config, card Card) string {
 		"#IMSI#", strings.TrimSpace(card.IMSI()),
 		"#MCC#", strings.TrimSpace(card.MCC()),
 		"#MNC#", strings.TrimSpace(card.MNC()),
-		"#HOME_DOMAIN#", strings.TrimSpace(cfg.IMS.HomeDomain),
+		"#HOME_DOMAIN#", strings.TrimSpace(c.IMS.HomeDomain),
 	)
 	return replacer.Replace(template)
 }

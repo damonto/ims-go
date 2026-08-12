@@ -67,8 +67,8 @@ type SessionConfig struct {
 }
 
 type attachment struct {
-	session *Session
-	handler ipsecbase.InnerHandler
+	session   *Session
+	processor ipsecbase.InnerPacketProcessor
 
 	mu     sync.RWMutex
 	closed bool
@@ -157,21 +157,21 @@ func (s *Session) Logger() *slog.Logger {
 	return s.logger
 }
 
-func (s *Session) Attach(handler ipsecbase.InnerHandler) (ipsecbase.Attachment, error) {
-	if handler == nil {
-		return nil, errors.New("attaching LTE IPsec handler: handler is nil")
+func (s *Session) Attach(processor ipsecbase.InnerPacketProcessor) (ipsecbase.Attachment, error) {
+	if processor == nil {
+		return nil, errors.New("attaching LTE IPsec processor: processor is nil")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, errors.New("attaching LTE IPsec handler: session is closed")
+		return nil, errors.New("attaching LTE IPsec processor: session is closed")
 	}
-	a := &attachment{session: s, handler: handler}
+	a := &attachment{session: s, processor: processor}
 	s.attachments = append(s.attachments, a)
 	return a, nil
 }
 
-func (s *Session) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) error {
+func (s *Session) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) (resultErr error) {
 	var conn packetConn
 	var data []byte
 	var remote net.Addr
@@ -209,7 +209,9 @@ func (s *Session) WriteInnerPacket(ctx context.Context, pkt packet.InnerPacket) 
 			return fmt.Errorf("writing LTE IPsec packet: %w", err)
 		}
 		defer func() {
-			_ = conn.SetWriteDeadline(time.Time{})
+			if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("clearing LTE IPsec write deadline: %w", err))
+			}
 		}()
 	}
 	n, err := conn.WriteTo(data, remote)
@@ -324,7 +326,7 @@ func (s *Session) dispatch(pkt packet.InnerPacket) bool {
 		if a == nil || a.isClosed() {
 			continue
 		}
-		if a.handler.HandleInnerPacket(pkt) {
+		if a.processor.HandleInnerPacket(pkt) {
 			return true
 		}
 	}
@@ -337,7 +339,7 @@ func (s *Session) fail(err error) {
 	s.mu.RUnlock()
 	for _, a := range attachments {
 		if a != nil && !a.isClosed() {
-			a.handler.HandleError(err)
+			a.processor.HandleError(err)
 		}
 	}
 }
@@ -442,8 +444,8 @@ func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
 }
 
 func isTimeout(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	netErr, ok := errors.AsType[net.Error](err)
+	return ok && netErr.Timeout()
 }
 
 func normalizeCloseError(err error) error {

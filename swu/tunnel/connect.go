@@ -108,18 +108,18 @@ func (s *Session) prepareConnect(req ConnectRequest) (*connectState, func(), err
 	return state, finish, nil
 }
 
-func (state *connectState) consumeInitialAKAReauthIdentity() bool {
-	if state.identityType != akaIdentityFastReauth {
+func (cs *connectState) consumeInitialAKAReauthIdentity() bool {
+	if cs.identityType != akaIdentityFastReauth {
 		return false
 	}
-	return discardStoredAKAReauthState(state.card, state.initialAKAState)
+	return discardStoredAKAReauthState(cs.card, cs.initialAKAState)
 }
 
-func (state *connectState) discardRejectedAKAPseudonym(err error) bool {
-	if state.identityType != akaIdentityPseudonym || !isProtectedIKEAuthenticationFailed(err) {
+func (cs *connectState) discardRejectedAKAPseudonym(err error) bool {
+	if cs.identityType != akaIdentityPseudonym || !isProtectedIKEAuthenticationFailed(err) {
 		return false
 	}
-	return discardStoredAKATemporaryIdentities(state.card, state.initialAKAState)
+	return discardStoredAKATemporaryIdentities(cs.card, cs.initialAKAState)
 }
 
 func (s *Session) beginConnect() (func(), error) {
@@ -183,38 +183,26 @@ func newConnectCryptoState(dhGroup uint16) (*ikeCrypto, uint64, uint32, []byte, 
 	if err != nil {
 		return nil, 0, 0, nil, err
 	}
-	initiatorSPI, err := randomIKESPI()
-	if err != nil {
-		return nil, 0, 0, nil, fmt.Errorf("generating initiator spi: %w", err)
-	}
-	espInitiatorSPI, err := randomESPSPI()
-	if err != nil {
-		return nil, 0, 0, nil, fmt.Errorf("generating child spi: %w", err)
-	}
-	nonceI, err := randomBytes(defaultIKENonceLength)
-	if err != nil {
-		return nil, 0, 0, nil, fmt.Errorf("generating nonce: %w", err)
-	}
+	initiatorSPI := randomIKESPI()
+	espInitiatorSPI := randomESPSPI()
+	nonceI := randomBytes(defaultIKENonceLength)
 	crypto.SetSPIs(initiatorSPI, 0)
 	crypto.SetNonces(nonceI, nil)
 	return crypto, initiatorSPI, espInitiatorSPI, nonceI, nil
 }
 
-func (state *connectState) resetDHGroup(dhGroup uint16) error {
+func (cs *connectState) resetDHGroup(dhGroup uint16) error {
 	crypto, err := newIKECrypto(dhGroup)
 	if err != nil {
 		return err
 	}
-	nonceI, err := randomBytes(defaultIKENonceLength)
-	if err != nil {
-		return fmt.Errorf("generating nonce: %w", err)
-	}
-	crypto.SetSPIs(state.initiatorSPI, 0)
+	nonceI := randomBytes(defaultIKENonceLength)
+	crypto.SetSPIs(cs.initiatorSPI, 0)
 	crypto.SetNonces(nonceI, nil)
-	state.crypto = crypto
-	state.nonceI = nonceI
-	state.saInit.DHGroup = dhGroup
-	state.saInit.NonceI = append([]byte(nil), nonceI...)
+	cs.crypto = crypto
+	cs.nonceI = nonceI
+	cs.saInit.DHGroup = dhGroup
+	cs.saInit.NonceI = append([]byte(nil), nonceI...)
 	return nil
 }
 
@@ -230,12 +218,12 @@ func marshalPayloadCopies(payloads []ike.Payload) [][]byte {
 	return out
 }
 
-func (state *connectState) outboundESPCodec() esp.Codec {
-	return outboundESPCodec(state.tunnel, state.espKeys)
+func (cs *connectState) outboundESPCodec() esp.Codec {
+	return outboundESPCodec(cs.tunnel, cs.espKeys)
 }
 
-func (state *connectState) inboundESPCodec() esp.Codec {
-	return inboundESPCodec(state.tunnel, state.espKeys)
+func (cs *connectState) inboundESPCodec() esp.Codec {
+	return inboundESPCodec(cs.tunnel, cs.espKeys)
 }
 
 func (s *Session) connectIKEPeer(state *connectState) (*net.UDPAddr, bool) {
@@ -286,13 +274,13 @@ func encryptionName(transform uint16) string {
 	}
 }
 
-func (state *connectState) sessionLivenessTimeout() time.Duration {
-	timeout := livenessTimeout(state.finalPayloads)
+func (cs *connectState) sessionLivenessTimeout() time.Duration {
+	timeout := livenessTimeout(cs.finalPayloads)
 	if timeout > 0 {
 		return timeout
 	}
-	if state.input.Config.LivenessTimeout > 0 {
-		return state.input.Config.LivenessTimeout
+	if cs.input.Config.LivenessTimeout > 0 {
+		return cs.input.Config.LivenessTimeout
 	}
 	return defaultLivenessTimeout
 }
@@ -343,32 +331,28 @@ func integrityName(transform uint16) string {
 	}
 }
 
-func randomBytes(n int) ([]byte, error) {
+func randomBytes(n int) []byte {
 	buf := make([]byte, n)
-	_, err := crand.Read(buf)
-	return buf, err
+	_, _ = crand.Read(buf)
+	return buf
 }
 
-func randomIKESPI() (uint64, error) {
+func randomIKESPI() uint64 {
 	for {
 		buf := make([]byte, 8)
-		if _, err := crand.Read(buf); err != nil {
-			return 0, err
-		}
+		_, _ = crand.Read(buf)
 		if spi := binary.BigEndian.Uint64(buf); spi != 0 {
-			return spi, nil
+			return spi
 		}
 	}
 }
 
-func randomESPSPI() (uint32, error) {
+func randomESPSPI() uint32 {
 	for {
 		buf := make([]byte, 4)
-		if _, err := crand.Read(buf); err != nil {
-			return 0, err
-		}
+		_, _ = crand.Read(buf)
 		if spi := binary.BigEndian.Uint32(buf); esp.ValidSPI(spi) {
-			return spi, nil
+			return spi
 		}
 	}
 }

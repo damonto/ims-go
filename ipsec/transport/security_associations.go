@@ -50,7 +50,7 @@ func (s *SecurityAssociations) sealESP(codec esp.Codec, nextHeader byte, payload
 	if !ok {
 		return nil, errors.New("esp sequence number overflow")
 	}
-	return codec.Encode(esp.ESPPacket{SPI: codec.SPI, Sequence: seq, NextHeader: nextHeader, Payload: payload})
+	return codec.Encode(esp.Packet{SPI: codec.SPI, Sequence: seq, NextHeader: nextHeader, Payload: payload})
 }
 
 func (s *SecurityAssociations) acceptInboundESP(codec esp.Codec, sequence uint32) bool {

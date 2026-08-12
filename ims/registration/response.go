@@ -58,18 +58,20 @@ func statusClass(status int) int {
 // initial registration error. The caller owns scheduling; registration only
 // reports the protocol constraint.
 func InitialRegistrationRetryAfter(err error) (time.Duration, bool) {
-	var initial *initialRegistrationRequired
-	if !errors.As(err, &initial) || initial.retryAfter <= 0 {
+	initial, ok := errors.AsType[*initialRegistrationRequired](err)
+	if !ok || initial.retryAfter <= 0 {
 		return 0, false
 	}
 	return initial.retryAfter, true
 }
 
 func RetryAfterDelay(err error) (time.Duration, bool) {
-	var retryAfter interface {
+	type retryAfterError interface {
+		error
 		retryAfterDelay() time.Duration
 	}
-	if !errors.As(err, &retryAfter) {
+	retryAfter, ok := errors.AsType[retryAfterError](err)
+	if !ok {
 		return 0, false
 	}
 	delay := retryAfter.retryAfterDelay()
@@ -77,13 +79,13 @@ func RetryAfterDelay(err error) (time.Duration, bool) {
 }
 
 func InitialRegistrationRequired(err error) bool {
-	var initial *initialRegistrationRequired
-	return errors.As(err, &initial)
+	_, ok := errors.AsType[*initialRegistrationRequired](err)
+	return ok
 }
 
 func PCSCFReselectionRequired(err error) bool {
-	var reselection *pcscfReselectionRequired
-	return errors.As(err, &reselection)
+	_, ok := errors.AsType[*pcscfReselectionRequired](err)
+	return ok
 }
 
 // PCSCFFailoverRequired reports whether a registration response makes the
@@ -92,8 +94,8 @@ func PCSCFFailoverRequired(err error, timerF time.Duration) bool {
 	if PCSCFReselectionRequired(err) {
 		return true
 	}
-	var response *sip.ResponseError
-	if !errors.As(err, &response) {
+	response, ok := errors.AsType[*sip.ResponseError](err)
+	if !ok {
 		return false
 	}
 	switch response.StatusCode {

@@ -73,8 +73,7 @@ func (r *ikeFragmentReassembly) addAt(fragment ikeFragment, packet []byte, now t
 	}
 	payloads, err := ike.DecodePayloadChain(r.firstPayload, body)
 	if err != nil {
-		var critical ike.UnsupportedCriticalPayloadError
-		if errors.As(err, &critical) {
+		if _, ok := errors.AsType[ike.UnsupportedCriticalPayloadError](err); ok {
 			return nil, r.firstPacket, false, true, err
 		}
 		return nil, r.firstPacket, false, true, ike.InvalidSyntaxError{Err: err}
@@ -89,7 +88,7 @@ func (r ikeFragmentReassembly) expired(now time.Time) bool {
 	return !r.expiresAt.IsZero() && !now.Before(r.expiresAt)
 }
 
-func (s *Session) openIKEPacketForState(state informationalState, packet ike.IKEPacket, senderInitiator bool) ([]ike.Payload, []byte, bool, bool, error) {
+func (s *Session) openIKEPacketForState(state informationalState, packet ike.Packet, senderInitiator bool) ([]ike.Payload, []byte, bool, bool, error) {
 	key := ikeMessageKeyForHeader(packet.Header)
 	if _, _, ok := encryptedFragmentPayload(packet.Payloads); !ok {
 		if len(packet.Payloads) != 1 {
@@ -117,7 +116,7 @@ func (s *Session) openIKEPacketForState(state informationalState, packet ike.IKE
 	return payloads, firstPacket, complete, stored, err
 }
 
-func canRetransmitCachedResponse(packet ike.IKEPacket) bool {
+func canRetransmitCachedResponse(packet ike.Packet) bool {
 	fragment, _, ok := encryptedFragmentPayload(packet.Payloads)
 	if !ok {
 		if len(packet.Payloads) != 1 {
@@ -138,7 +137,7 @@ func encryptedFragmentPayload(payloads []ike.Payload) (*ike.EncryptedFragmentPay
 	return nil, 0, false
 }
 
-func responseCacheRequest(packet ike.IKEPacket, request []byte) []byte {
+func responseCacheRequest(packet ike.Packet, request []byte) []byte {
 	if len(request) != 0 {
 		return request
 	}

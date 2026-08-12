@@ -2,7 +2,6 @@ package evs
 
 import (
 	"context"
-	_ "embed"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,7 +9,9 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	wasi "github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+
+	_ "embed"
 )
 
 //go:embed evs.wasm
@@ -31,14 +32,12 @@ type Engine struct {
 // once. No wazero object escapes this package.
 func NewEngine(ctx context.Context) (*Engine, error) {
 	runtime := wazero.NewRuntime(ctx)
-	if _, err := wasi_snapshot_preview1.Instantiate(ctx, runtime); err != nil {
-		_ = runtime.Close(ctx)
-		return nil, fmt.Errorf("creating EVS engine: instantiating WASI: %w", err)
+	if _, err := wasi.Instantiate(ctx, runtime); err != nil {
+		return nil, errors.Join(fmt.Errorf("creating EVS engine: instantiating WASI: %w", err), runtime.Close(ctx))
 	}
 	compiled, err := runtime.CompileModule(ctx, wasmBinary)
 	if err != nil {
-		_ = runtime.Close(ctx)
-		return nil, fmt.Errorf("creating EVS engine: compiling module: %w", err)
+		return nil, errors.Join(fmt.Errorf("creating EVS engine: compiling module: %w", err), runtime.Close(ctx))
 	}
 	return &Engine{
 		runtime:  runtime,
@@ -57,8 +56,7 @@ func NewCodec(ctx context.Context, cfg Config) (*Codec, error) {
 	}
 	codec, err := engine.NewCodec(ctx, cfg)
 	if err != nil {
-		_ = engine.Close(ctx)
-		return nil, err
+		return nil, errors.Join(err, engine.Close(ctx))
 	}
 	codec.ownsEngine = true
 	return codec, nil
@@ -158,44 +156,38 @@ func newCodec(ctx context.Context, runtime wazero.Runtime, compiled wazero.Compi
 	}
 	codec := &Codec{module: module, memory: module.Memory(), sampleRate: cfg.SampleRate, encConfig: cfg.Encoder}
 	if err := codec.loadFunctions(); err != nil {
-		_ = module.Close(ctx)
-		return nil, err
+		return nil, errors.Join(err, module.Close(ctx))
 	}
 	version, err := codec.call(ctx, codec.functions.abiVersion)
 	if err != nil {
-		_ = module.Close(ctx)
-		return nil, fmt.Errorf("creating EVS codec: reading ABI version: %w", err)
+		return nil, errors.Join(fmt.Errorf("creating EVS codec: reading ABI version: %w", err), module.Close(ctx))
 	}
 	if version != ABIVersion {
-		_ = module.Close(ctx)
-		return nil, fmt.Errorf("creating EVS codec: ABI version %d, want %d", version, ABIVersion)
+		return nil, errors.Join(fmt.Errorf("creating EVS codec: ABI version %d, want %d", version, ABIVersion), module.Close(ctx))
 	}
 	encoder, err := codec.call(ctx, codec.functions.encoderCreate,
 		uint64(cfg.SampleRate), uint64(cfg.Encoder.Bitrate), uint64(cfg.Encoder.Bandwidth),
 		boolParam(cfg.Encoder.DTX), uint64(cfg.Encoder.RF.Offset), uint64(cfg.Encoder.RF.Indicator))
 	if err != nil || encoder == 0 {
-		_ = module.Close(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("creating EVS codec: creating encoder: %w", err)
+			return nil, errors.Join(fmt.Errorf("creating EVS codec: creating encoder: %w", err), module.Close(ctx))
 		}
-		return nil, errors.New("creating EVS codec: encoder rejected configuration")
+		return nil, errors.Join(errors.New("creating EVS codec: encoder rejected configuration"), module.Close(ctx))
 	}
 	codec.encoder = uint32(encoder)
 	decoder, err := codec.call(ctx, codec.functions.decoderCreate, uint64(cfg.SampleRate))
 	if err != nil || decoder == 0 {
-		_, _ = codec.functions.encoderDestroy.Call(ctx, uint64(codec.encoder))
-		_ = module.Close(ctx)
+		_, destroyErr := codec.functions.encoderDestroy.Call(ctx, uint64(codec.encoder))
 		if err != nil {
-			return nil, fmt.Errorf("creating EVS codec: creating decoder: %w", err)
+			return nil, errors.Join(fmt.Errorf("creating EVS codec: creating decoder: %w", err), destroyErr, module.Close(ctx))
 		}
-		return nil, errors.New("creating EVS codec: decoder rejected configuration")
+		return nil, errors.Join(errors.New("creating EVS codec: decoder rejected configuration"), destroyErr, module.Close(ctx))
 	}
 	codec.decoder = uint32(decoder)
 	if err := codec.loadMemoryLayout(ctx); err != nil {
-		_, _ = codec.functions.encoderDestroy.Call(ctx, uint64(codec.encoder))
-		_, _ = codec.functions.decoderDestroy.Call(ctx, uint64(codec.decoder))
-		_ = module.Close(ctx)
-		return nil, err
+		_, encoderErr := codec.functions.encoderDestroy.Call(ctx, uint64(codec.encoder))
+		_, decoderErr := codec.functions.decoderDestroy.Call(ctx, uint64(codec.decoder))
+		return nil, errors.Join(err, encoderErr, decoderErr, module.Close(ctx))
 	}
 	return codec, nil
 }

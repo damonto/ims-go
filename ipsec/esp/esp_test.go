@@ -11,11 +11,11 @@ import (
 func TestESPPacketRoundTrip(t *testing.T) {
 	tests := []struct {
 		name   string
-		packet ESPPacket
+		packet Packet
 	}{
 		{
 			name: "basic",
-			packet: ESPPacket{
+			packet: Packet{
 				SPI:        0x11223344,
 				Sequence:   7,
 				NextHeader: 17,
@@ -29,7 +29,7 @@ func TestESPPacketRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			var got ESPPacket
+			var got Packet
 			if err := got.UnmarshalBinary(wire); err != nil {
 				t.Fatalf("UnmarshalBinary() error = %v", err)
 			}
@@ -62,7 +62,7 @@ func TestValidSPI(t *testing.T) {
 }
 
 func TestESPPacketMarshalBinaryAddsSequentialPadding(t *testing.T) {
-	wire, err := (ESPPacket{
+	wire, err := (Packet{
 		SPI:        0x11223344,
 		Sequence:   7,
 		NextHeader: 17,
@@ -109,7 +109,7 @@ func TestCodecEncodeNullAddsAlignmentPadding(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wire, err := codec.Encode(ESPPacket{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: tt.payload})
+			wire, err := codec.Encode(Packet{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: tt.payload})
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
@@ -159,7 +159,7 @@ func TestCodecHMACIntegrityRoundTrip(t *testing.T) {
 				Integrity:    tt.integrity,
 				IntegrityKey: tt.key,
 			}
-			pkt := ESPPacket{SPI: codec.SPI, Sequence: 7, NextHeader: 17, Payload: []byte("REGISTER")}
+			pkt := Packet{SPI: codec.SPI, Sequence: 7, NextHeader: 17, Payload: []byte("REGISTER")}
 			wire, err := codec.Encode(pkt)
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
@@ -206,7 +206,7 @@ func TestCodecAESCTRRoundTripAndTamper(t *testing.T) {
 				IntegrityKey:  []byte("0123456789abcdef0123"),
 				Salt:          tt.salt,
 			}
-			packet := ESPPacket{
+			packet := Packet{
 				SPI:        codec.SPI,
 				Sequence:   7,
 				NextHeader: 17,
@@ -254,7 +254,7 @@ func TestCodecRejectsAESCTRWithoutIntegrity(t *testing.T) {
 				Salt:          [4]byte{0x01, 0x02, 0x03, 0x04},
 			}
 			if tt.encode {
-				_, err := codec.Encode(ESPPacket{SPI: codec.SPI, Sequence: 7, NextHeader: 17, Payload: []byte("REGISTER")})
+				_, err := codec.Encode(Packet{SPI: codec.SPI, Sequence: 7, NextHeader: 17, Payload: []byte("REGISTER")})
 				if err == nil {
 					t.Fatal("Encode() error = nil, want AES-CTR integrity error")
 				}
@@ -269,7 +269,7 @@ func TestCodecRejectsAESCTRWithoutIntegrity(t *testing.T) {
 
 func TestCodecRejectsNullEncryptionWithoutIntegrity(t *testing.T) {
 	codec := Codec{SPI: 0x11223344, Encryption: EncryptionNull, Integrity: IntegrityNone}
-	if _, err := codec.Encode(ESPPacket{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: []byte{0xAA}}); err == nil {
+	if _, err := codec.Encode(Packet{SPI: 0x11223344, Sequence: 7, NextHeader: 17, Payload: []byte{0xAA}}); err == nil {
 		t.Fatal("Encode() error = nil, want error")
 	}
 	if _, err := codec.Decode([]byte{0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0x01, 0x00, 0x3b}); err == nil {
@@ -306,7 +306,7 @@ func TestCodecAEADRoundTripAndTamper(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			packet := ESPPacket{
+			packet := Packet{
 				SPI:        0x11223344,
 				Sequence:   7,
 				NextHeader: 17,
@@ -339,7 +339,7 @@ func TestCodecAEADRoundTripAndTamper(t *testing.T) {
 func TestCodecAESGMACUsesRFC4543AAD(t *testing.T) {
 	key := []byte("0123456789abcdef")
 	salt := [4]byte{0x05, 0x06, 0x07, 0x08}
-	pkt := ESPPacket{
+	pkt := Packet{
 		SPI:        0x11223344,
 		Sequence:   7,
 		NextHeader: 17,
@@ -394,13 +394,13 @@ func TestCodecAESGMACUsesRFC4543AAD(t *testing.T) {
 }
 
 func TestESPSealRequiresNextHeader(t *testing.T) {
-	esp, err := NewESP(Config{
+	esp, err := New(Config{
 		SPI:           0x11223344,
 		EncryptionKey: []byte("0123456789abcdef"),
 		IntegrityKey:  []byte("0123456789abcdef0123"),
 	})
 	if err != nil {
-		t.Fatalf("NewESP() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 	if _, err := esp.Seal([]byte("payload")); err == nil {
 		t.Fatal("Seal() error = nil, want next header error")
@@ -464,22 +464,22 @@ func TestNewESPValidatesTS33203Config(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewESP(tt.cfg)
+			_, err := New(tt.cfg)
 			if (err == nil) != tt.ok {
-				t.Fatalf("NewESP() error = %v, ok %t", err, tt.ok)
+				t.Fatalf("New() error = %v, ok %t", err, tt.ok)
 			}
 		})
 	}
 }
 
 func TestESPSealUsesDistinctCBCIVs(t *testing.T) {
-	esp, err := NewESP(Config{
+	esp, err := New(Config{
 		SPI:           0x11223344,
 		EncryptionKey: []byte("0123456789abcdef"),
 		IntegrityKey:  []byte("0123456789abcdef0123"),
 	})
 	if err != nil {
-		t.Fatalf("NewESP() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 	first, err := esp.SealWithNextHeader([]byte("payload"), 17)
 	if err != nil {
@@ -507,7 +507,7 @@ func TestCodecRejectsMismatchedSPI(t *testing.T) {
 		Integrity:    IntegrityHMACSHA196,
 		IntegrityKey: []byte("0123456789abcdef0123"),
 	}
-	pkt := ESPPacket{SPI: packetSPIValue, Sequence: 1, NextHeader: 17, Payload: []byte("payload")}
+	pkt := Packet{SPI: packetSPIValue, Sequence: 1, NextHeader: 17, Payload: []byte("payload")}
 	wire, err := base.Encode(pkt)
 	if err != nil {
 		t.Fatalf("Encode() fixture error = %v", err)
@@ -598,7 +598,7 @@ func TestCodecRejectsInvalidKeyLengths(t *testing.T) {
 		},
 	}
 
-	pkt := ESPPacket{SPI: 0x11223344, Sequence: 1, NextHeader: 17}
+	pkt := Packet{SPI: 0x11223344, Sequence: 1, NextHeader: 17}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := tt.codec.Encode(pkt); err == nil {
@@ -626,7 +626,7 @@ func TestCodecRejectsInvalidESPHeader(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := codec.Encode(ESPPacket{SPI: tt.spi, Sequence: tt.sequence, NextHeader: 17}); err == nil {
+			if _, err := codec.Encode(Packet{SPI: tt.spi, Sequence: tt.sequence, NextHeader: 17}); err == nil {
 				t.Fatal("Encode() error = nil, want invalid ESP header error")
 			}
 		})
@@ -641,7 +641,7 @@ func TestCodecNormalizesIntegrityNames(t *testing.T) {
 		IntegrityKey: []byte("0123456789abcdef"),
 		Salt:         [4]byte{0x05, 0x06, 0x07, 0x08},
 	}
-	wire, err := codec.Encode(ESPPacket{SPI: codec.SPI, Sequence: 1, NextHeader: 17, Payload: []byte("payload")})
+	wire, err := codec.Encode(Packet{SPI: codec.SPI, Sequence: 1, NextHeader: 17, Payload: []byte("payload")})
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -679,7 +679,7 @@ func TestCodecDefaultExplicitIVUsesSPIAndSequence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			packet := ESPPacket{
+			packet := Packet{
 				SPI:        0x11223344,
 				Sequence:   7,
 				NextHeader: 17,

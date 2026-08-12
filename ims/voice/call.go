@@ -160,15 +160,15 @@ func (c *Call) Hangup(ctx context.Context) error {
 		return fmt.Errorf("hanging up call: call state is %s", state)
 	}
 	c.setState(CallStateEnding, "")
-	_ = c.closeMedia()
+	closeErr := c.closeMedia()
 	resp, err := c.endpoint.sess.Exchange(ctx, c.buildBYE(reasonUserTriggered))
 	if !byeReleaseCompleted(resp, err) {
 		err := byeReleaseError(callActionHangUp, resp, err)
 		c.finish(CallStateFailed, err.Error())
-		return err
+		return errors.Join(err, closeErr)
 	}
 	c.finish(CallStateEnded, "")
-	return nil
+	return closeErr
 }
 
 func byeReleaseCompleted(resp sip.Message, err error) bool {
@@ -187,7 +187,7 @@ func byeReleaseError(action callAction, resp sip.Message, err error) error {
 }
 
 func (c *Call) releaseAcknowledgedInviteFailure(err error, reason string) {
-	_ = c.closeMedia()
+	err = errors.Join(err, c.closeMedia())
 	releaseCtx, cancel := c.endpoint.timeoutContext(callReleaseTimeout)
 	defer cancel()
 
@@ -234,14 +234,14 @@ func (c *Call) cancelOutgoingInvite(ctx context.Context) error {
 
 	c.endpoint.emit(event)
 	c.stopRingbackTimer()
-	_ = c.closeMedia()
+	closeErr := c.closeMedia()
 	if !sendCancel {
-		return nil
+		return closeErr
 	}
 
 	cancel := snap.buildCANCEL(reasonUserTriggered)
 	c.startCancelledInviteTimer()
-	return c.exchangeCancel(ctx, cancel)
+	return errors.Join(c.exchangeCancel(ctx, cancel), closeErr)
 }
 
 func (c *Call) exchangeCancel(ctx context.Context, cancel sip.Message) error {
@@ -306,10 +306,16 @@ func callCanTransition(from, to CallState) bool {
 }
 
 func (c *Call) finish(state CallState, cause string) {
+	if err := c.finishError(state, cause); err != nil {
+		c.endpoint.logger.Warn("closing call resources failed", "call_id", c.ID(), "err", err)
+	}
+}
+
+func (c *Call) finishError(state CallState, cause string) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 	c.closed = true
 	id := c.id
@@ -376,14 +382,16 @@ func (c *Call) finish(state CallState, cause string) {
 	if inviteCancel != nil {
 		inviteCancel()
 	}
+	var closeErr error
 	if attachment != nil {
-		_ = attachment.Close()
+		closeErr = errors.Join(closeErr, attachment.Close())
 	}
-	_ = c.closeMedia()
+	closeErr = errors.Join(closeErr, c.closeMedia())
 	c.endpoint.removeCall(id)
 	if emit {
 		c.endpoint.emit(CallEvent{Call: c, CallID: id, State: state, Hold: hold, Cause: cause, At: time.Now()})
 	}
+	return closeErr
 }
 
 const sipTransactionTimeoutMultiplier = 64

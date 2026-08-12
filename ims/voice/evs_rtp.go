@@ -60,9 +60,11 @@ func (c EVSPayloadCodec) Append(dst []byte, payload EVSPayload) ([]byte, error) 
 		}
 	}
 	if !c.HeaderFullOnly && !payload.HeaderFull && len(payload.Frames) == 1 {
-		if compact, ok, err := appendEVSCompact(dst, payload); err != nil {
+		compact, ok, err := appendEVSCompact(dst, payload)
+		if err != nil {
 			return nil, err
-		} else if ok {
+		}
+		if ok {
 			return compact, nil
 		}
 	}
@@ -223,7 +225,10 @@ func unmarshalEVSHeaderFull(data []byte) (EVSPayload, error) {
 		}
 	}
 	for i := range payload.Frames {
-		frameBytes, _ := evsFrameDataBytes(payload.Frames[i].AMRWBIO, payload.Frames[i].FrameType)
+		frameBytes, err := evsFrameDataBytes(payload.Frames[i].AMRWBIO, payload.Frames[i].FrameType)
+		if err != nil {
+			return EVSPayload{}, fmt.Errorf("unmarshaling EVS header-full payload: frame %d: %w", i, err)
+		}
 		end := offset + frameBytes
 		if end > len(data) {
 			return EVSPayload{}, fmt.Errorf("unmarshaling EVS header-full payload: frame %d data is truncated", i)

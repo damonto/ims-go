@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -61,6 +62,7 @@ func (f o2ukFlow) Check(ctx context.Context) (Result, error) {
 		AuthenticateAKA: f.req.AuthenticateAKA,
 		Device:          f.req.Device,
 		HTTPClient:      f.req.HTTPClient,
+		logger:          f.req.logger(),
 	}
 	result, err := client.Check(ctx)
 	result.Carrier = "O2 UK"
@@ -85,6 +87,7 @@ type o2UKClient struct {
 	AuthenticateAKA AKAAuthenticator
 	Device          Device
 	HTTPClient      *http.Client
+	logger          *slog.Logger
 }
 
 var o2UKTokens = struct {
@@ -296,7 +299,11 @@ func (c o2UKClient) post(ctx context.Context, requests []o2Request) ([]o2Respons
 	var body bytes.Buffer
 	gz := gzip.NewWriter(&body)
 	if _, err := gz.Write(data); err != nil {
-		return nil, fmt.Errorf("compressing o2 uk request: %w", err)
+		closeErr := gz.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("closing o2 uk request compressor: %w", closeErr)
+		}
+		return nil, errors.Join(fmt.Errorf("compressing o2 uk request: %w", err), closeErr)
 	}
 	if err := gz.Close(); err != nil {
 		return nil, fmt.Errorf("compressing o2 uk request: %w", err)
@@ -315,7 +322,7 @@ func (c o2UKClient) post(ctx context.Context, requests []o2Request) ([]o2Respons
 	if err != nil {
 		return nil, fmt.Errorf("posting o2 uk request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer logCloseError(c.logger, "closing o2 uk response body failed", resp.Body)
 	respData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading o2 uk response: %w", err)
@@ -330,9 +337,9 @@ func (c o2UKClient) post(ctx context.Context, requests []o2Request) ([]o2Respons
 	return responses, nil
 }
 
-func (responses o2Responses) Status() o2Status {
+func (rs o2Responses) Status() o2Status {
 	status := o2Status{AuthResponseCode: -1, EntitlementResponseCode: -1, EntitlementStatus: -1}
-	for _, resp := range responses {
+	for _, resp := range rs {
 		switch resp.MessageID {
 		case o2MessageAuthentication:
 			status.AuthResponseCode = resp.ResponseCode

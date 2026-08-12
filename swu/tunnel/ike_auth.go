@@ -37,7 +37,7 @@ func buildIKEAuthRequest(state *connectState) ([][]byte, []byte, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("building ike_auth request: %w", err)
 	}
-	header := ike.IKEHeader{InitiatorSPI: state.initiatorSPI, ResponderSPI: state.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: 1}
+	header := ike.Header{InitiatorSPI: state.initiatorSPI, ResponderSPI: state.responderSPI, Version: ikeVersion20, ExchangeType: exchangeTypeIKEAuth, Flags: flagInitiator, MessageID: 1}
 	requests, err := sealIKEPackets(state.crypto, header, payloads, true, state.ikeFragmentationSupported)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sealing ike_auth request: %w", err)
@@ -69,7 +69,7 @@ func (s *Session) readIKEAuthChallenge(ctx context.Context, state *connectState,
 	return challengePayloads, nil
 }
 
-func sealIKEPackets(crypto *ikeCrypto, header ike.IKEHeader, payloads []ike.Payload, initiator bool, fragmentationSupported bool) ([][]byte, error) {
+func sealIKEPackets(crypto *ikeCrypto, header ike.Header, payloads []ike.Payload, initiator bool, fragmentationSupported bool) ([][]byte, error) {
 	if !fragmentationSupported {
 		wire, err := crypto.SealIKE(header, payloads, initiator)
 		if err != nil {

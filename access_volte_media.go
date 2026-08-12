@@ -32,10 +32,12 @@ type volteMediaTransport struct {
 	mu          sync.Mutex
 	writeMu     sync.Mutex
 	closeOnce   sync.Once
+	readWG      sync.WaitGroup
 	closed      bool
 	remote      imsvoice.MediaRemote
 	onPacket    func(imsvoice.MediaPacket)
 	terminalErr error
+	closeErr    error
 }
 
 type volteMediaPacket struct {
@@ -66,8 +68,7 @@ func openVoLTEMediaTransport(ctx context.Context, network voLTENetwork, localIP 
 	}
 	rtcp, err := network.ListenUDP(ctx, imsvoice.RTCPAddr(local))
 	if err != nil {
-		_ = rtp.Close()
-		return nil, fmt.Errorf("opening voice media rtcp transport: %w", err)
+		return nil, errors.Join(fmt.Errorf("opening voice media rtcp transport: %w", err), rtp.Close())
 	}
 	transport := &volteMediaTransport{
 		rtp:      rtp,
@@ -80,12 +81,18 @@ func openVoLTEMediaTransport(ctx context.Context, network voLTENetwork, localIP 
 	}
 	if len(cfg.RemoteIP) != 0 && cfg.RemotePort != 0 {
 		if err := transport.applyRemoteConfig(cfg); err != nil {
-			_ = transport.Close()
-			return nil, err
+			return nil, errors.Join(err, transport.Close())
 		}
 	}
-	go transport.readLoop(rtp, false)
-	go transport.readLoop(rtcp, true)
+	transport.readWG.Add(2)
+	go func() {
+		defer transport.readWG.Done()
+		transport.readLoop(rtp, false)
+	}()
+	go func() {
+		defer transport.readWG.Done()
+		transport.readLoop(rtcp, true)
+	}()
 	return transport, nil
 }
 
@@ -137,7 +144,7 @@ func (t *volteMediaTransport) WriteRTCP(ctx context.Context, data []byte) error 
 	return t.writeUDP(ctx, data, true)
 }
 
-func (t *volteMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp bool) error {
+func (t *volteMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp bool) (resultErr error) {
 	t.mu.Lock()
 	closed := t.closed
 	remote := t.remote.Addr(rtcp)
@@ -160,7 +167,11 @@ func (t *volteMediaTransport) writeUDP(ctx context.Context, data []byte, rtcp bo
 		if err := conn.SetWriteDeadline(deadline); err != nil {
 			return fmt.Errorf("writing voice media packet: %w", err)
 		}
-		defer conn.SetWriteDeadline(time.Time{})
+		defer func() {
+			if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("clearing voice media write deadline: %w", err))
+			}
+		}()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -251,12 +262,13 @@ func (t *volteMediaTransport) Close() error {
 		t.closed = true
 		t.mu.Unlock()
 		close(t.done)
-		_ = t.rtp.Close()
+		t.closeErr = errors.Join(t.closeErr, t.rtp.Close())
 		if t.rtcp != nil && t.rtcp != t.rtp {
-			_ = t.rtcp.Close()
+			t.closeErr = errors.Join(t.closeErr, t.rtcp.Close())
 		}
+		t.readWG.Wait()
 	})
-	return nil
+	return t.closeErr
 }
 
 func (t *volteMediaTransport) notifyPacket(rtcp bool, payload []byte) {
@@ -283,6 +295,6 @@ func volteMediaContextDeadline(ctx context.Context) (time.Time, bool) {
 }
 
 func isVolteMediaTimeout(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	netErr, ok := errors.AsType[net.Error](err)
+	return ok && netErr.Timeout()
 }

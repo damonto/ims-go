@@ -14,7 +14,7 @@ const (
 	interpolLen2 = 16
 )
 
-var inter4_2 = [...][2 * interpolLen2]int16{
+var inter4By2 = [...][2 * interpolLen2]int16{
 	{
 		0, -2, 4, -2, -10, 38, -88, 165,
 		-275, 424, -619, 871, -1207, 1699, -2598, 5531,
@@ -49,7 +49,7 @@ func predictAdaptiveCodebook(excitation []int16, offset int, t0 int16, frac int1
 		past--
 	}
 	past -= interpolLen2 - 1
-	filter := inter4_2[upSample-1-int(frac)]
+	filter := inter4By2[upSample-1-int(frac)]
 	for n := range length {
 		var sum int32
 		for i := range 2 * interpolLen2 {

@@ -72,7 +72,7 @@ func TestUnderlayHTTPTransport(t *testing.T) {
 			if got.DialTLSContext != nil {
 				t.Fatal("custom TLS dialer was retained")
 			}
-			if _, err := got.DialContext(context.Background(), "tcp", "carrier.example:443"); !errors.Is(err, underlayDialErr) {
+			if _, err := got.DialContext(t.Context(), "tcp", "carrier.example:443"); !errors.Is(err, underlayDialErr) {
 				t.Fatalf("DialContext() error = %v, want %v", err, underlayDialErr)
 			}
 			if underlay.dials != 1 || underlay.dialNet != "tcp" || underlay.dialAddr != "carrier.example:443" {
@@ -166,7 +166,7 @@ func TestEPDGRemoteCandidates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			underlay := &underlayStub{localIP: tt.localIP, addresses: tt.addresses}
-			got, err := epdgRemoteCandidates(context.Background(), underlay, tt.remote, tt.initialPort)
+			got, err := epdgRemoteCandidates(t.Context(), underlay, tt.remote, tt.initialPort)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("epdgRemoteCandidates() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -184,7 +184,7 @@ func TestEPDGRemoteCandidates(t *testing.T) {
 }
 
 func TestShouldTryNextEPDG(t *testing.T) {
-	canceled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
 	tests := []struct {
 		name string
@@ -192,12 +192,12 @@ func TestShouldTryNextEPDG(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "ike sa init received no response", ctx: context.Background(), err: swutunnel.ErrIKESAInitNoResponse, want: true},
-		{name: "wrapped no response", ctx: context.Background(), err: errors.Join(errors.New("connecting swu"), swutunnel.ErrIKESAInitNoResponse), want: true},
-		{name: "ordinary network error", ctx: context.Background(), err: errors.New("network unreachable")},
-		{name: "access rejection", ctx: context.Background(), err: swutunnel.ErrAccessRejected},
+		{name: "ike sa init received no response", ctx: t.Context(), err: swutunnel.ErrIKESAInitNoResponse, want: true},
+		{name: "wrapped no response", ctx: t.Context(), err: errors.Join(errors.New("connecting swu"), swutunnel.ErrIKESAInitNoResponse), want: true},
+		{name: "ordinary network error", ctx: t.Context(), err: errors.New("network unreachable")},
+		{name: "access rejection", ctx: t.Context(), err: swutunnel.ErrAccessRejected},
 		{name: "canceled attempt", ctx: canceled, err: swutunnel.ErrIKESAInitNoResponse},
-		{name: "deadline error", ctx: context.Background(), err: context.DeadlineExceeded},
+		{name: "deadline error", ctx: t.Context(), err: context.DeadlineExceeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

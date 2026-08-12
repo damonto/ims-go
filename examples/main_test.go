@@ -81,29 +81,32 @@ func TestTCPAPDUTransmitterTransmit(t *testing.T) {
 	req := []byte{0x00, 0xA4, 0x04, 0x04, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 	resp := []byte{0x61, 0x0F}
 	client, server := net.Pipe()
-	defer client.Close()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close() error = %v", err)
+		}
+	})
 
 	serverErr := make(chan error, 1)
 	go func() {
-		defer server.Close()
-
-		got, err := readTCPAPDUFrame(server)
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		if !bytes.Equal(got, req) {
-			serverErr <- fmt.Errorf("server request = %X, want %X", got, req)
-			return
-		}
-		serverErr <- writeTCPAPDUFrame(server, resp)
+		err := func() error {
+			got, err := readTCPAPDUFrame(server)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(got, req) {
+				return fmt.Errorf("server request = %X, want %X", got, req)
+			}
+			return writeTCPAPDUFrame(server, resp)
+		}()
+		serverErr <- errors.Join(err, server.Close())
 	}()
 
 	tx := &tcpAPDUTransmitter{
 		conn:    client,
 		timeout: time.Second,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
 	got, err := tx.Transmit(ctx, req)
@@ -239,7 +242,7 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var calls int
-			err := connectWithWFCServiceFlow(context.Background(), func(context.Context) error {
+			err := connectWithWFCServiceFlow(t.Context(), func(context.Context) error {
 				if calls >= len(tt.errors) {
 					t.Fatalf("connect calls = %d, want at most %d", calls+1, len(tt.errors))
 				}
@@ -333,7 +336,7 @@ func TestServeTCPAPDUConnForwardsAPDU(t *testing.T) {
 		wantReq: req,
 		resp:    resp,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	serverErr := make(chan error, 1)

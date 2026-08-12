@@ -140,21 +140,29 @@ func (c *ikeCrypto) DeriveIKEKeys(peerPublic []byte) error {
 	binary.BigEndian.PutUint64(spi[0:8], c.initiatorSPI)
 	binary.BigEndian.PutUint64(spi[8:16], c.responderSPI)
 	seed = append(seed, spi...)
-	total := (3 * c.prfLength()) + (2 * c.integKeyLength()) + (2 * c.encrKeyLength())
+	integKeyLen, err := integKeyLength(c.integ)
+	if err != nil {
+		return fmt.Errorf("deriving ike keys: %w", err)
+	}
+	encrKeyLen, err := encryptionKeyMaterialLength(c.encr, c.encrKeyBits)
+	if err != nil {
+		return fmt.Errorf("deriving ike keys: %w", err)
+	}
+	total := (3 * c.prfLength()) + (2 * integKeyLen) + (2 * encrKeyLen)
 	stream, err := c.prfPlus(skeyseed, seed, total)
 	if err != nil {
 		return err
 	}
 	c.keys.SKD = append([]byte(nil), stream[:c.prfLength()]...)
 	stream = stream[c.prfLength():]
-	c.keys.SKAI = append([]byte(nil), stream[:c.integKeyLength()]...)
-	stream = stream[c.integKeyLength():]
-	c.keys.SKAR = append([]byte(nil), stream[:c.integKeyLength()]...)
-	stream = stream[c.integKeyLength():]
-	c.keys.SKEI = append([]byte(nil), stream[:c.encrKeyLength()]...)
-	stream = stream[c.encrKeyLength():]
-	c.keys.SKER = append([]byte(nil), stream[:c.encrKeyLength()]...)
-	stream = stream[c.encrKeyLength():]
+	c.keys.SKAI = append([]byte(nil), stream[:integKeyLen]...)
+	stream = stream[integKeyLen:]
+	c.keys.SKAR = append([]byte(nil), stream[:integKeyLen]...)
+	stream = stream[integKeyLen:]
+	c.keys.SKEI = append([]byte(nil), stream[:encrKeyLen]...)
+	stream = stream[encrKeyLen:]
+	c.keys.SKER = append([]byte(nil), stream[:encrKeyLen]...)
+	stream = stream[encrKeyLen:]
 	c.keys.SKPI = append([]byte(nil), stream[:c.prfLength()]...)
 	stream = stream[c.prfLength():]
 	c.keys.SKPR = append([]byte(nil), stream[:c.prfLength()]...)
@@ -194,21 +202,29 @@ func (c *ikeCrypto) DeriveRekeyedIKEKeys(old *ikeCrypto, peerPublic []byte) erro
 	binary.BigEndian.PutUint64(spi[0:8], c.initiatorSPI)
 	binary.BigEndian.PutUint64(spi[8:16], c.responderSPI)
 	seed = append(seed, spi...)
-	total := (3 * c.prfLength()) + (2 * c.integKeyLength()) + (2 * c.encrKeyLength())
+	integKeyLen, err := integKeyLength(c.integ)
+	if err != nil {
+		return fmt.Errorf("deriving rekeyed ike keys: %w", err)
+	}
+	encrKeyLen, err := encryptionKeyMaterialLength(c.encr, c.encrKeyBits)
+	if err != nil {
+		return fmt.Errorf("deriving rekeyed ike keys: %w", err)
+	}
+	total := (3 * c.prfLength()) + (2 * integKeyLen) + (2 * encrKeyLen)
 	stream, err := c.prfPlus(skeyseed, seed, total)
 	if err != nil {
 		return err
 	}
 	c.keys.SKD = append([]byte(nil), stream[:c.prfLength()]...)
 	stream = stream[c.prfLength():]
-	c.keys.SKAI = append([]byte(nil), stream[:c.integKeyLength()]...)
-	stream = stream[c.integKeyLength():]
-	c.keys.SKAR = append([]byte(nil), stream[:c.integKeyLength()]...)
-	stream = stream[c.integKeyLength():]
-	c.keys.SKEI = append([]byte(nil), stream[:c.encrKeyLength()]...)
-	stream = stream[c.encrKeyLength():]
-	c.keys.SKER = append([]byte(nil), stream[:c.encrKeyLength()]...)
-	stream = stream[c.encrKeyLength():]
+	c.keys.SKAI = append([]byte(nil), stream[:integKeyLen]...)
+	stream = stream[integKeyLen:]
+	c.keys.SKAR = append([]byte(nil), stream[:integKeyLen]...)
+	stream = stream[integKeyLen:]
+	c.keys.SKEI = append([]byte(nil), stream[:encrKeyLen]...)
+	stream = stream[encrKeyLen:]
+	c.keys.SKER = append([]byte(nil), stream[:encrKeyLen]...)
+	stream = stream[encrKeyLen:]
 	c.keys.SKPI = append([]byte(nil), stream[:c.prfLength()]...)
 	stream = stream[c.prfLength():]
 	c.keys.SKPR = append([]byte(nil), stream[:c.prfLength()]...)
@@ -347,7 +363,7 @@ func (c *ikeCrypto) ComputeResponderAuth(saInitResponse, initiatorNonce, idrRaw 
 	return result, nil
 }
 
-func (c *ikeCrypto) SealIKE(header ike.IKEHeader, payloads []ike.Payload, initiator bool) ([]byte, error) {
+func (c *ikeCrypto) SealIKE(header ike.Header, payloads []ike.Payload, initiator bool) ([]byte, error) {
 	first, body, err := ike.MarshalPayloadChain(payloads)
 	if err != nil {
 		return nil, fmt.Errorf("sealing ike packet: %w", err)
@@ -360,7 +376,7 @@ func (c *ikeCrypto) SealIKE(header ike.IKEHeader, payloads []ike.Payload, initia
 	return c.sealIKEContainer(header, container, initiator)
 }
 
-func (c *ikeCrypto) SealIKEFragments(header ike.IKEHeader, payloads []ike.Payload, initiator bool, maxSize int) ([][]byte, error) {
+func (c *ikeCrypto) SealIKEFragments(header ike.Header, payloads []ike.Payload, initiator bool, maxSize int) ([][]byte, error) {
 	single, err := c.SealIKE(header, payloads, initiator)
 	if err != nil {
 		return nil, err
@@ -462,8 +478,8 @@ func (c *ikeCrypto) sealIKEPayloadBody(body []byte, initiator bool) ([]byte, err
 	return raw, nil
 }
 
-func (c *ikeCrypto) sealIKEContainer(header ike.IKEHeader, container ike.Payload, initiator bool) ([]byte, error) {
-	packet := ike.IKEPacket{Header: header, Payloads: []ike.Payload{container}}
+func (c *ikeCrypto) sealIKEContainer(header ike.Header, container ike.Payload, initiator bool) ([]byte, error) {
+	packet := ike.Packet{Header: header, Payloads: []ike.Payload{container}}
 	raw, err := packet.MarshalBinary()
 	if err != nil {
 		return nil, err
@@ -480,7 +496,7 @@ func (c *ikeCrypto) sealIKEContainer(header ike.IKEHeader, container ike.Payload
 	return raw, nil
 }
 
-func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.Payload, error) {
+func (c *ikeCrypto) OpenIKE(packet ike.Packet, senderInitiator bool) ([]ike.Payload, error) {
 	if len(packet.Payloads) != 1 {
 		return nil, errors.New("opening ike packet: expected encrypted payload container")
 	}
@@ -494,8 +510,7 @@ func (c *ikeCrypto) OpenIKE(packet ike.IKEPacket, senderInitiator bool) ([]ike.P
 	}
 	payloads, err := ike.DecodePayloadChain(container.NextPayload, plain)
 	if err != nil {
-		var critical ike.UnsupportedCriticalPayloadError
-		if errors.As(err, &critical) {
+		if _, ok := errors.AsType[ike.UnsupportedCriticalPayloadError](err); ok {
 			return nil, err
 		}
 		return nil, ike.InvalidSyntaxError{Err: err}
@@ -513,7 +528,7 @@ type ikeFragment struct {
 	data         []byte
 }
 
-func (c *ikeCrypto) OpenIKEFragment(packet ike.IKEPacket, senderInitiator bool) (ikeFragment, error) {
+func (c *ikeCrypto) OpenIKEFragment(packet ike.Packet, senderInitiator bool) (ikeFragment, error) {
 	if len(packet.Payloads) != 1 {
 		return ikeFragment{}, errors.New("opening ike fragment: expected encrypted fragment payload container")
 	}
@@ -577,7 +592,7 @@ func (c *ikeCrypto) openIKEPayloadBody(packetRaw, body []byte, senderInitiator b
 }
 
 func (c *ikeCrypto) ProtectedBytes(wire []byte) (uint64, error) {
-	var ikePacket ike.IKEPacket
+	var ikePacket ike.Packet
 	if err := ikePacket.UnmarshalBinary(wire); err != nil {
 		packet := normalizeIKEPacket(wire, true)
 		if len(packet) == len(wire) {
@@ -783,16 +798,6 @@ func (c *ikeCrypto) prfLength() int {
 	default:
 		return 0
 	}
-}
-
-func (c *ikeCrypto) integKeyLength() int {
-	length, _ := integKeyLength(c.integ)
-	return length
-}
-
-func (c *ikeCrypto) encrKeyLength() int {
-	length, _ := encryptionKeyMaterialLength(c.encr, c.encrKeyBits)
-	return length
 }
 
 func (c *ikeCrypto) encryptionIVLength() (int, error) {

@@ -61,14 +61,17 @@ const (
 )
 
 type backoffDelayCarrier interface {
+	error
 	BackoffDelay() time.Duration
 }
 
 type backoffDeactivatedCarrier interface {
+	error
 	BackoffDeactivated() bool
 }
 
 type backoffPolicyCarrier interface {
+	error
 	BackoffPolicy() BackoffPolicy
 }
 
@@ -130,21 +133,21 @@ func (e *backoffTimerError) BackoffPolicy() BackoffPolicy {
 // BackoffDelay returns the finite ePDG backoff delay carried by an IKE error.
 // The caller owns scheduling; SWu only preserves the protocol constraint.
 func BackoffDelay(err error) (time.Duration, bool) {
-	var backoff backoffDelayCarrier
-	if !errors.As(err, &backoff) || backoff.BackoffDelay() <= 0 {
+	backoff, ok := errors.AsType[backoffDelayCarrier](err)
+	if !ok || backoff.BackoffDelay() <= 0 {
 		return 0, false
 	}
 	return backoff.BackoffDelay(), true
 }
 
 func BackoffDeactivated(err error) bool {
-	var backoff backoffDeactivatedCarrier
-	return errors.As(err, &backoff) && backoff.BackoffDeactivated()
+	backoff, ok := errors.AsType[backoffDeactivatedCarrier](err)
+	return ok && backoff.BackoffDeactivated()
 }
 
 func BackoffPolicyFor(err error) (BackoffPolicy, bool) {
-	var backoff backoffPolicyCarrier
-	if !errors.As(err, &backoff) {
+	backoff, ok := errors.AsType[backoffPolicyCarrier](err)
+	if !ok {
 		return BackoffPolicy{}, false
 	}
 	policy := backoff.BackoffPolicy()

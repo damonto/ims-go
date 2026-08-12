@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 
@@ -28,10 +29,11 @@ type Card interface {
 }
 
 type Client struct {
-	cfg    Config
-	card   Card
-	reader usimcard.Reader
-	logger *slog.Logger
+	cfg             Config
+	card            Card
+	reader          usimcard.Reader
+	logger          *slog.Logger
+	interfaceByName func(string) (*net.Interface, error)
 
 	state clientState
 
@@ -72,8 +74,9 @@ func New(reader usimcard.Reader, cfg *Config) (*Client, error) {
 
 func newClient(cfg Config) *Client {
 	client := &Client{
-		cfg:    cfg,
-		logger: cfg.Logger.With("component", "ims-go"),
+		cfg:             cfg,
+		logger:          cfg.Logger.With("component", "ims-go"),
+		interfaceByName: net.InterfaceByName,
 		state: clientState{
 			done:   make(chan struct{}),
 			status: StatusIdle,

@@ -34,28 +34,28 @@ type createChildSARequestState struct {
 	promoteIKESA              bool
 }
 
-func (state createChildSARequestState) informationalState() informationalState {
+func (rs createChildSARequestState) informationalState() informationalState {
 	return informationalState{
-		ike:                       state.ike,
-		localInitiator:            state.localInitiator,
-		initiatorSPI:              state.initiatorSPI,
-		responderSPI:              state.responderSPI,
-		peer:                      cloneUDPAddr(state.peer),
-		retiredIKESA:              state.retiredIKESA,
-		promoteIKESA:              state.promoteIKESA,
-		ikeFragmentationSupported: state.ikeFragmentationSupported,
-		useNATT:                   state.useNATT,
-		nextPeerMessageID:         state.nextPeerMessageID,
-		responses:                 cloneIKEMessageResponses(state.responses),
-		responseReqs:              cloneIKEMessageRequests(state.responseReqs),
+		ike:                       rs.ike,
+		localInitiator:            rs.localInitiator,
+		initiatorSPI:              rs.initiatorSPI,
+		responderSPI:              rs.responderSPI,
+		peer:                      cloneUDPAddr(rs.peer),
+		retiredIKESA:              rs.retiredIKESA,
+		promoteIKESA:              rs.promoteIKESA,
+		ikeFragmentationSupported: rs.ikeFragmentationSupported,
+		useNATT:                   rs.useNATT,
+		nextPeerMessageID:         rs.nextPeerMessageID,
+		responses:                 cloneIKEMessageResponses(rs.responses),
+		responseReqs:              cloneIKEMessageRequests(rs.responseReqs),
 	}
 }
 
-func (state createChildSARequestState) available() bool {
-	return state.ike != nil && state.initiatorSPI != 0 && state.responderSPI != 0
+func (rs createChildSARequestState) available() bool {
+	return rs.ike != nil && rs.initiatorSPI != 0 && rs.responderSPI != 0
 }
 
-func (s *Session) handleCreateChildSARequest(state createChildSARequestState, packet ike.IKEPacket, addr net.Addr) (bool, error) {
+func (s *Session) handleCreateChildSARequest(state createChildSARequestState, packet ike.Packet, addr net.Addr) (bool, error) {
 	if !state.available() {
 		return true, errors.New("handling create_child_sa request: ike state is unavailable")
 	}
@@ -154,7 +154,7 @@ func (s *Session) handleCreateChildSARequest(state createChildSARequestState, pa
 	return true, nil
 }
 
-func (s *Session) handleNonCurrentCreateChildSARequest(state createChildSARequestState, infoState informationalState, packet ike.IKEPacket, addr net.Addr, relation ikeMessageIDRelation) (bool, error) {
+func (s *Session) handleNonCurrentCreateChildSARequest(state createChildSARequestState, infoState informationalState, packet ike.Packet, addr net.Addr, relation ikeMessageIDRelation) (bool, error) {
 	switch relation {
 	case ikeMessageIDFuture:
 		s.logger.Debug("ignoring create_child_sa request outside message id window", "message_id", packet.Header.MessageID)
@@ -175,7 +175,7 @@ func (s *Session) handleNonCurrentCreateChildSARequest(state createChildSAReques
 	}
 }
 
-func (s *Session) writeIKEErrorNotifyCreateChildSAResponse(state createChildSARequestState, packet ike.IKEPacket, request []byte, addr net.Addr, payloads []ike.Payload) (bool, error) {
+func (s *Session) writeIKEErrorNotifyCreateChildSAResponse(state createChildSARequestState, packet ike.Packet, request []byte, addr net.Addr, payloads []ike.Payload) (bool, error) {
 	if state.promoteIKESA {
 		s.promotePendingIKESecurityAssociation()
 	}
@@ -309,14 +309,8 @@ func buildChildSAResponsePayloads(state createChildSARequestState, payloads []ik
 		}
 		return createChildSAErrorNotify(notifyTypeNoProposalChosen, nil), createChildSAAction{}, nil
 	}
-	localInboundSPI, err := randomESPSPI()
-	if err != nil {
-		return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa child response: generating child spi: %w", err)
-	}
-	nonceR, err := randomBytes(defaultIKENonceLength)
-	if err != nil {
-		return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa child response: generating nonce: %w", err)
-	}
+	localInboundSPI := randomESPSPI()
+	nonceR := randomBytes(defaultIKENonceLength)
 	var pfs *ikeCrypto
 	var keR *ike.KeyExchangePayload
 	if keI != nil {
@@ -406,18 +400,12 @@ func buildIKESARekeyResponsePayloads(state createChildSARequestState, payloads [
 	}
 	var responderSPI uint64
 	for {
-		responderSPI, err = randomIKESPI()
-		if err != nil {
-			return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa ike response: generating responder spi: %w", err)
-		}
+		responderSPI = randomIKESPI()
 		if !ikeSPIInUse(responderSPI, peerSPI, state.initiatorSPI, state.responderSPI) {
 			break
 		}
 	}
-	nonceR, err := randomBytes(defaultIKENonceLength)
-	if err != nil {
-		return nil, createChildSAAction{}, fmt.Errorf("building create_child_sa ike response: generating nonce: %w", err)
-	}
+	nonceR := randomBytes(defaultIKENonceLength)
 	next.SetProposal(proposal.Encryption, proposal.EncryptionKeyLen, proposal.Integrity, proposal.PRF)
 	next.SetSPIs(peerSPI, responderSPI)
 	next.SetNonces(nonceI.Data, nonceR)
@@ -761,12 +749,12 @@ func (s *Session) writeCreateChildSAResponseWire(state createChildSARequestState
 	return nil
 }
 
-func createChildSAResponseHeader(state createChildSARequestState, messageID uint32) ike.IKEHeader {
+func createChildSAResponseHeader(state createChildSARequestState, messageID uint32) ike.Header {
 	flags := flagResponse
 	if state.localInitiator {
 		flags |= flagInitiator
 	}
-	return ike.IKEHeader{
+	return ike.Header{
 		InitiatorSPI: state.initiatorSPI,
 		ResponderSPI: state.responderSPI,
 		Version:      ikeVersion20,

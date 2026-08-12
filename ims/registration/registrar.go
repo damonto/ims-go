@@ -100,13 +100,14 @@ type State struct {
 }
 
 type Registrar struct {
-	cfg         Config
-	sess        *session.Session
-	card        Card
-	logger      *slog.Logger
-	attachment  session.Attachment
-	group       *Group
-	contactUser string
+	cfg               Config
+	sess              *session.Stack
+	card              Card
+	logger            *slog.Logger
+	attachment        session.Attachment
+	group             *Group
+	contactUser       string
+	keepAliveInterval func(time.Duration) time.Duration
 
 	mu                  sync.Mutex
 	state               State
@@ -169,7 +170,7 @@ const defaultIMSExpires = 600000 * time.Second
 const secureAssociationLifetimeGrace = 30 * time.Second
 const maxSIPCSeq = 1<<31 - 1
 
-func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
+func New(cfg Config, sess *session.Stack, card Card) (*Registrar, error) {
 	cfg, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating IMS registrar: %w", err)
@@ -189,12 +190,13 @@ func New(cfg Config, sess *session.Session, card Card) (*Registrar, error) {
 		group = &Group{}
 	}
 	registrar := &Registrar{
-		cfg:         cfg,
-		sess:        sess,
-		card:        card,
-		logger:      cfg.Logger.With("component", "ims-registration"),
-		group:       group,
-		contactUser: cryptorand.Text(),
+		cfg:               cfg,
+		sess:              sess,
+		card:              card,
+		logger:            cfg.Logger.With("component", "ims-registration"),
+		group:             group,
+		contactUser:       cryptorand.Text(),
+		keepAliveInterval: randomizedRegistrationKeepAliveInterval,
 		state: State{
 			PublicIdentity:      identity.publicIdentity,
 			DefaultPublicID:     identity.publicIdentity,
@@ -417,7 +419,9 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 	committedSecurity := false
 	defer func() {
 		if !committedSecurity {
-			pendingSecurity.close()
+			if err := pendingSecurity.close(); err != nil {
+				s.logger.Warn("closing pending IMS security failed", "err", err)
+			}
 		}
 	}()
 	for {
@@ -444,7 +448,9 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 			}
 		}
 		if pendingSecurity == nil || secureTransportStale {
-			pendingSecurity.close()
+			if err := pendingSecurity.close(); err != nil {
+				return fmt.Errorf("closing stale IMS security: %w", err)
+			}
 			nextSecurity, err := s.openRegisterSecurity(ctx)
 			if err != nil {
 				return err
@@ -602,14 +608,15 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	}
 	outboundAttachment, err := s.sess.AddTransport(outbound)
 	if err != nil {
-		outbound.Close()
-		return fmt.Errorf("refreshing IMS registration: adding secure IMS transport: %w", err)
+		return errors.Join(fmt.Errorf("refreshing IMS registration: adding secure IMS transport: %w", err), outbound.Close())
 	}
 	cleanup := []session.Attachment{outboundAttachment}
 	committed := false
 	defer func() {
 		if !committed {
-			closeAttachments(cleanup)
+			if err := closeAttachments(cleanup); err != nil {
+				s.logger.Warn("closing uncommitted IMS security failed", "err", err)
+			}
 		}
 	}()
 

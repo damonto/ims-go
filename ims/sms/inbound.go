@@ -23,12 +23,12 @@ func (s *Endpoint) handleMessageRequest(ctx context.Context, req session.Request
 	msg.Body = payload.RPDU
 	var rp rpMessage
 	if err := rp.UnmarshalBinary(msg.Body); err != nil {
-		var unsupportedType unsupportedRPMessageTypeError
-		if errors.As(err, &unsupportedType) && len(msg.Body) >= 2 {
+		unsupportedType, ok := errors.AsType[unsupportedRPMessageTypeError](err)
+		if ok && len(msg.Body) >= 2 {
 			if err := s.writeMessageStatus(ctx, req, sipStatusOK, "OK"); err != nil {
 				return err
 			}
-			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseMessageTypeNotImplemented), payload.Info)
+			s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseMessageTypeNotImplemented), payload.Info)
 			s.logger.Debug("rejecting unsupported sms rp message type", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", msg.Body[1], "rp_type", unsupportedType.Type)
 			return nil
 		}
@@ -43,7 +43,7 @@ func (s *Endpoint) handleMessageRequest(ctx context.Context, req session.Request
 			switch report.Type {
 			case rpAckNetworkToMS:
 				s.logger.Debug("submit report invalid mandatory information", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference, "err", err)
-				_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidMandatoryInformation), payload.Info)
+				s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(report.Reference, rpCauseInvalidMandatoryInformation), payload.Info)
 			case rpErrorNetworkToMS:
 				s.logger.Debug("submit report protocol error", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", report.Reference, "cause", rpCauseProtocolErrorUnspecified, "err", err)
 				s.completePending(msg, report)
@@ -55,10 +55,10 @@ func (s *Endpoint) handleMessageRequest(ctx context.Context, req session.Request
 		}
 		if len(msg.Body) >= 2 && msg.Body[0] == rpDataNetworkToMS {
 			if s.beginMTTransfer() {
-				_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseInvalidMandatoryInformation), payload.Info)
+				s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseInvalidMandatoryInformation), payload.Info)
 				s.endMTTransfer()
 			} else {
-				_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseMessageNotCompatibleWithState), payload.Info)
+				s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(msg.Body[1], rpCauseMessageNotCompatibleWithState), payload.Info)
 			}
 		}
 		s.logger.Debug("ignoring malformed sms message", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "err", err)
@@ -87,18 +87,18 @@ func (s *Endpoint) writeMessageStatus(ctx context.Context, req session.Request, 
 
 func (s *Endpoint) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMessage, info xmlInfo) error {
 	if rp.Type != rpDataNetworkToMS {
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageTypeNotImplemented), info)
+		s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageTypeNotImplemented), info)
 		return nil
 	}
 	if !s.beginMTTransfer() {
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageNotCompatibleWithState), info)
+		s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseMessageNotCompatibleWithState), info)
 		return nil
 	}
 	defer s.endMTTransfer()
 
 	mti, err := tpduMessageType(rp.TPDU)
 	if err != nil {
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
+		s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
 		return nil
 	}
 	switch mti {
@@ -106,7 +106,7 @@ func (s *Endpoint) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMe
 		fields, err := decodeDeliverFields(rp.TPDU)
 		if err != nil {
 			s.logger.Debug("rejecting inbound sms deliver", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
+			s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
 			return nil
 		}
 		if isPPDataDownload(fields.part) {
@@ -129,7 +129,7 @@ func (s *Endpoint) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMe
 		var tpdu deliverTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
 			s.logger.Debug("rejecting inbound sms deliver", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), ackInfo)
+			s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), ackInfo)
 			return nil
 		}
 		if fromURI := strings.TrimSpace(ackInfo.From); fromURI != "" {
@@ -140,25 +140,21 @@ func (s *Endpoint) handleInboundRP(ctx context.Context, msg sip.Message, rp rpMe
 			cause := incomingRPCause(err)
 			failureCause := incomingTPFailureCause(err)
 			s.logger.Debug("rejecting inbound sms", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "cause", cause, "err", err)
-			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, cause, failureCause), ackInfo)
+			s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, cause, failureCause), ackInfo)
 			return nil
 		}
-		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), ackInfo); !ok {
-			return nil
-		}
+		s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), ackInfo)
 	case tpduMTIStatusReport:
 		var tpdu statusReportTPDU
 		if err := tpdu.UnmarshalBinary(rp.TPDU); err != nil {
 			s.logger.Debug("rejecting inbound sms status report", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-			_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
+			s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
 			return nil
 		}
 		s.deliverIncomingStatusReport(msg, rp, tpdu.Message)
-		if ok := s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), xmlInfo{}); !ok {
-			return nil
-		}
+		s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, nil), xmlInfo{})
 	default:
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
+		s.sendInboundDeliveryReport(ctx, msg, newRPErrorMessage(rp.Reference, rpCauseInvalidMandatoryInformation), info)
 	}
 	return nil
 }
@@ -167,7 +163,7 @@ func (s *Endpoint) handlePPDataDownload(ctx context.Context, msg sip.Message, rp
 	downloader, ok := s.card.(ppDownloader)
 	if !ok {
 		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", "card does not support SMS-PP download")
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, rpCauseProtocolErrorUnspecified, tpFailureCauseUSIMDataDownloadError), info)
+		s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, rpCauseProtocolErrorUnspecified, tpFailureCauseUSIMDataDownloadError), info)
 		return
 	}
 
@@ -177,20 +173,20 @@ func (s *Endpoint) handlePPDataDownload(ctx context.Context, msg sip.Message, rp
 	})
 	if err != nil {
 		s.logger.Debug("rejecting sms-pp data download", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "err", err)
-		_ = s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, rpCauseProtocolErrorUnspecified, tpFailureCauseUSIMDataDownloadError), info)
+		s.sendInboundDeliveryReport(ctx, msg, newRPErrorDeliverReportMessage(rp.Reference, rpCauseProtocolErrorUnspecified, tpFailureCauseUSIMDataDownloadError), info)
 		return
 	}
 	s.logger.Debug("sms-pp data download delivered", "call_id", msg.Header("Call-ID"), "cseq", msg.Header("CSeq"), "rp_ref", rp.Reference, "sw1", resp.SW1, "sw2", resp.SW2, "response_len", len(resp.Data))
-	_ = s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, resp.Data), info)
+	s.sendInboundDeliveryReport(ctx, msg, newRPAckDeliverReportMessage(rp.Reference, resp.Data), info)
 }
 
 func isSubmitReport(rp rpMessage) bool {
 	return rp.Type == rpAckNetworkToMS || rp.Type == rpErrorNetworkToMS
 }
 
-func (s *Endpoint) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) bool {
+func (s *Endpoint) sendInboundDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) {
 	if !s.markDeliveryReportSent(msg) {
-		return true
+		return
 	}
 
 	started := s.startBackgroundTask(func(done <-chan struct{}) {
@@ -205,9 +201,7 @@ func (s *Endpoint) sendInboundDeliveryReport(ctx context.Context, msg sip.Messag
 	})
 	if !started {
 		s.clearDeliveryReportSent(msg)
-		return false
 	}
-	return true
 }
 
 func (s *Endpoint) sendDeliveryReport(ctx context.Context, msg sip.Message, report rpMessage, info xmlInfo) error {
@@ -261,8 +255,8 @@ func (s *Endpoint) deliverIncoming(ctx context.Context, msg sip.Message, rp rpMe
 }
 
 func incomingRPCause(err error) byte {
-	var rpErr *RPError
-	if !errors.As(err, &rpErr) {
+	rpErr, ok := errors.AsType[*RPError](err)
+	if !ok {
 		return rpCauseProtocolErrorUnspecified
 	}
 	switch rpErr.Cause {
@@ -281,8 +275,8 @@ func incomingRPCause(err error) byte {
 }
 
 func incomingTPFailureCause(err error) byte {
-	var rpErr *RPError
-	if errors.As(err, &rpErr) && rpErr.Cause == rpCauseMemoryCapacityExceeded {
+	rpErr, ok := errors.AsType[*RPError](err)
+	if ok && rpErr.Cause == rpCauseMemoryCapacityExceeded {
 		return tpFailureCauseMemoryCapacityExceeded
 	}
 	return tpFailureCauseUnspecified

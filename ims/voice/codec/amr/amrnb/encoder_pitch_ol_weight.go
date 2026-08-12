@@ -9,7 +9,7 @@
 package amrnb
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/damonto/ims-go/ims/voice/codec/amr/fxp"
 )
@@ -85,7 +85,7 @@ func (s *pitchOLWeightState) pitch(in pitchOLWeightInput) (int16, error) {
 		len(in.oldLags) < 5 ||
 		len(in.olGainFlag) <= in.index ||
 		in.index < 0 {
-		return 0, fmt.Errorf("searching AMR-NB weighted open-loop pitch: invalid search buffers or range")
+		return 0, errors.New("searching AMR-NB weighted open-loop pitch: invalid search buffers or range")
 	}
 
 	var scaled [pitchMax + FrameSamples]int16

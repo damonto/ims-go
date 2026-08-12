@@ -14,34 +14,34 @@ func newConcatState(total int) concatState {
 	}
 }
 
-func (state concatState) expired(now time.Time) bool {
-	return now.Sub(state.updatedAt) > concatRetention
+func (cs concatState) expired(now time.Time) bool {
+	return now.Sub(cs.updatedAt) > concatRetention
 }
 
-func (state *concatState) reset(total int) {
-	*state = newConcatState(total)
+func (cs *concatState) reset(total int) {
+	*cs = newConcatState(total)
 }
 
-func (state *concatState) addPart(sequence int, msg Incoming, now time.Time) {
-	if state.parts == nil {
-		state.parts = make(map[int]string, max(state.total, 0))
+func (cs *concatState) addPart(sequence int, msg Incoming, now time.Time) {
+	if cs.parts == nil {
+		cs.parts = make(map[int]string, max(cs.total, 0))
 	}
-	if state.rawTPDUs == nil {
-		state.rawTPDUs = make(map[int][]byte, max(state.total, 0))
+	if cs.rawTPDUs == nil {
+		cs.rawTPDUs = make(map[int][]byte, max(cs.total, 0))
 	}
-	state.parts[sequence] = msg.Text
-	state.rawTPDUs[sequence] = append([]byte(nil), msg.RawTPDU...)
-	state.reservedMTI = state.reservedMTI || msg.ReservedMTI
-	state.updatedAt = now
+	cs.parts[sequence] = msg.Text
+	cs.rawTPDUs[sequence] = append([]byte(nil), msg.RawTPDU...)
+	cs.reservedMTI = cs.reservedMTI || msg.ReservedMTI
+	cs.updatedAt = now
 }
 
-func (state concatState) joinedText() (string, bool) {
-	if state.total <= 0 || len(state.parts) < state.total {
+func (cs concatState) joinedText() (string, bool) {
+	if cs.total <= 0 || len(cs.parts) < cs.total {
 		return "", false
 	}
-	parts := make([]string, state.total)
-	for i := 1; i <= state.total; i++ {
-		part, ok := state.parts[i]
+	parts := make([]string, cs.total)
+	for i := 1; i <= cs.total; i++ {
+		part, ok := cs.parts[i]
 		if !ok {
 			return "", false
 		}
@@ -50,10 +50,10 @@ func (state concatState) joinedText() (string, bool) {
 	return strings.Join(parts, ""), true
 }
 
-func (state concatState) joinedRawTPDUs() [][]byte {
-	raw := make([][]byte, 0, state.total)
-	for i := 1; i <= state.total; i++ {
-		if part := state.rawTPDUs[i]; len(part) != 0 {
+func (cs concatState) joinedRawTPDUs() [][]byte {
+	raw := make([][]byte, 0, cs.total)
+	for i := 1; i <= cs.total; i++ {
+		if part := cs.rawTPDUs[i]; len(part) != 0 {
 			raw = append(raw, append([]byte(nil), part...))
 		}
 	}

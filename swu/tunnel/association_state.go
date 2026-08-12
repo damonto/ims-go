@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"errors"
+	"net"
 	"time"
 
 	"github.com/damonto/ims-go/ipsec/esp"
@@ -132,7 +133,9 @@ func (s *Session) failSecurityAssociations(cause error) {
 	s.discardSecurityAssociations(cause)
 	s.closeSession()
 	if s.owned && s.conn != nil {
-		_ = s.conn.Close()
+		if err := s.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			s.logger.Warn("closing failed SWu packet connection", "err", err)
+		}
 	}
 }
 

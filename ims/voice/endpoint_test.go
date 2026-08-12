@@ -5,18 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
-	"github.com/damonto/ims-go/ims/pidf"
-	"github.com/damonto/ims-go/ims/registration"
-	"github.com/damonto/ims-go/ims/session"
-	"github.com/damonto/ims-go/ims/sip"
-	usim "github.com/damonto/wwan-go/sim"
 	"io"
 	"log/slog"
-
 	"mime/multipart"
 	"net"
-
 	"net/textproto"
 	"slices"
 	"strconv"
@@ -24,12 +16,38 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/registration"
+	"github.com/damonto/ims-go/ims/session"
+	"github.com/damonto/ims-go/ims/sip"
+	usim "github.com/damonto/wwan-go/sim"
 )
 
 type voiceStubCard struct{}
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func closeEndpointAfterTest(t *testing.T, endpoint *Endpoint) {
+	t.Helper()
+	if err := endpoint.Close(); err != nil {
+		t.Errorf("Endpoint.Close() error = %v", err)
+	}
+}
+
+func closeStackAfterTest(t *testing.T, stack *session.Stack) {
+	t.Helper()
+	if err := stack.Close(); err != nil {
+		t.Errorf("Stack.Close() error = %v", err)
+	}
+}
+
+func closeEndpointAndStackAfterTest(t *testing.T, endpoint *Endpoint, stack *session.Stack) {
+	t.Helper()
+	closeEndpointAfterTest(t, endpoint)
+	closeStackAfterTest(t, stack)
 }
 
 type voiceStubTransport struct {
@@ -86,7 +104,7 @@ func secureRegistrationConfig(transport *voiceStubTransport, cfg registration.Co
 	return cfg
 }
 
-func newTestRegistrar(cfg registration.Config, sess *session.Session, card registration.Card) (*registration.Registrar, error) {
+func newTestRegistrar(cfg registration.Config, sess *session.Stack, card registration.Card) (*registration.Registrar, error) {
 	if len(cfg.IPSecIntegrityAlgorithms) == 0 {
 		cfg.IPSecIntegrityAlgorithms = []string{"hmac-sha-1-96"}
 	}
@@ -596,7 +614,7 @@ func TestTargetURI(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer func() {
-		_ = sess.Close()
+		closeStackAfterTest(t, sess)
 	}()
 	reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 		PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
@@ -759,7 +777,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				resp.Headers.Add("Service-Route", "<sip:pcscf.example.com;lr>")
 				transport.queue(resp)
 			}
-			if err := reg.Register(context.Background()); err != nil {
+			if err := reg.Register(t.Context()); err != nil {
 				t.Fatalf("Register() error = %v", err)
 			}
 
@@ -768,7 +786,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -779,8 +797,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -797,7 +814,7 @@ func TestDialUsesSIPAssociatedURIForOriginatingIdentity(t *testing.T) {
 				}
 				transport.queue(callOK(msg))
 			}
-			if _, err := svc.Dial(context.Background(), DialRequest{To: "+12242255559"}); err != nil {
+			if _, err := svc.Dial(t.Context(), DialRequest{To: "+12242255559"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 		})
@@ -891,7 +908,7 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -902,8 +919,7 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -962,7 +978,7 @@ func TestDialIncludesGeolocationPIDFWhenConfigured(t *testing.T) {
 				}
 				transport.queue(callOK(msg))
 			}
-			if _, err := svc.Dial(context.Background(), tt.req); err != nil {
+			if _, err := svc.Dial(t.Context(), tt.req); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 		})
@@ -1045,8 +1061,7 @@ func TestEmergencyCurrentLocationDiscoveryOneShotPublishesPIDF(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			transport.onWrite = func(msg sip.Message) {
@@ -1067,7 +1082,7 @@ func TestEmergencyCurrentLocationDiscoveryOneShotPublishesPIDF(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "911", Emergency: true})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "911", Emergency: true})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -1084,7 +1099,7 @@ func TestEmergencyCurrentLocationDiscoveryOneShotPublishesPIDF(t *testing.T) {
 			info.Headers.Add("Content-Disposition", currentLocationDiscoveryDisposition)
 			info.Body = []byte(tt.body)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: info, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: info, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest(INFO) error = %v", err)
 			}
@@ -1129,7 +1144,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1140,8 +1155,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1159,7 +1173,7 @@ func TestDialAcceptsMultipartAnswerSDP(t *testing.T) {
 				resp.Body = body
 				transport.queue(resp)
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "+12242255559"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "+12242255559"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -1447,7 +1461,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1458,8 +1472,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1472,7 +1485,7 @@ func TestDialHandlesRetransmittedInvite2xx(t *testing.T) {
 				transport.queue(ok200)
 			}
 
-			dialCtx, dialCancel := context.WithTimeout(context.Background(), time.Second)
+			dialCtx, dialCancel := context.WithTimeout(t.Context(), time.Second)
 			defer dialCancel()
 			call, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
@@ -1533,7 +1546,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1544,8 +1557,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1582,7 +1594,7 @@ func TestDialPreparesMediaBeforeInvite(t *testing.T) {
 				}
 				transport.queue(callOK(msg))
 			}
-			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
+			if _, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 		})
@@ -1633,7 +1645,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1644,8 +1656,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1665,7 +1676,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 
 			dialErr := make(chan error, 1)
 			go func() {
-				_, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+				_, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 				dialErr <- err
 			}()
 
@@ -1674,7 +1685,7 @@ func TestHangupCancelsOutgoingDialBeforeFinalResponse(t *testing.T) {
 			if call == nil {
 				t.Fatalf("lookupCall(%q) = nil", event.CallID)
 			}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 
@@ -1759,7 +1770,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1770,8 +1781,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1812,7 +1822,7 @@ func TestDialRetriesInviteAfterSessionIntervalTooSmall(t *testing.T) {
 				}
 			}
 
-			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
+			if _, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			if invites != 3 {
@@ -1852,7 +1862,7 @@ func TestDialRejectsInvalidMinSEOnSessionIntervalRetry(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1863,8 +1873,7 @@ func TestDialRejectsInvalidMinSEOnSessionIntervalRetry(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1884,7 +1893,7 @@ func TestDialRejectsInvalidMinSEOnSessionIntervalRetry(t *testing.T) {
 				transport.queue(resp)
 			}
 
-			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			_, err = svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil {
 				t.Fatal("Dial() error = nil, want invalid Min-SE")
 			}
@@ -1925,7 +1934,7 @@ func TestDialRejectsTimerRequiredResponseWithoutSessionExpires(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1936,8 +1945,7 @@ func TestDialRejectsTimerRequiredResponseWithoutSessionExpires(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -1950,7 +1958,7 @@ func TestDialRejectsTimerRequiredResponseWithoutSessionExpires(t *testing.T) {
 				transport.queue(resp)
 			}
 
-			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			_, err = svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil {
 				t.Fatal("Dial() error = nil, want missing Session-Expires")
 			}
@@ -1988,7 +1996,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -1999,8 +2007,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2017,7 +2024,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 				if call == nil {
 					t.Fatalf("lookupCall(%q) = nil", msg.Header("Call-ID"))
 				}
-				if err := call.Hangup(context.Background()); err != nil {
+				if err := call.Hangup(t.Context()); err != nil {
 					t.Fatalf("Hangup() error = %v", err)
 				}
 				resp := callStatus(msg, 422, "Session Interval Too Small")
@@ -2025,7 +2032,7 @@ func TestDialSkipsSessionTimerRetryAfterCancel(t *testing.T) {
 				transport.queue(resp)
 			}
 
-			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
+			if _, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"}); err == nil || !strings.Contains(err.Error(), "cancelled") {
 				t.Fatalf("Dial() error = %v, want cancelled", err)
 			}
 			if invites != 1 {
@@ -2067,7 +2074,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2078,8 +2085,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2093,7 +2099,7 @@ func TestDialMOCallRequestTimeoutStopsAfterFirstProvisional(t *testing.T) {
 					transport.queue(callOK(msg))
 				}()
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -2131,7 +2137,7 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2142,12 +2148,11 @@ func TestDialMOCallRequestTimeoutBeforeFirstProvisional(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
-			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			_, err = svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil || !strings.Contains(err.Error(), "first provisional") {
 				t.Fatalf("Dial() error = %v, want first provisional timeout", err)
 			}
@@ -2234,7 +2239,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2245,8 +2250,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2269,7 +2273,7 @@ func TestDialRingbackTimeoutCancelsInvite(t *testing.T) {
 			if dialTimeout == 0 {
 				dialTimeout = 750 * time.Millisecond
 			}
-			dialCtx, cancelDial := context.WithTimeout(context.Background(), dialTimeout)
+			dialCtx, cancelDial := context.WithTimeout(t.Context(), dialTimeout)
 			defer cancelDial()
 			started := time.Now()
 			_, err = svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
@@ -2349,7 +2353,7 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2360,8 +2364,7 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2415,7 +2418,7 @@ func TestDialPreconditionSendsUPDATEAfterReliableAnswer(t *testing.T) {
 				}
 			}
 
-			dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			dialCtx, dialCancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer dialCancel()
 			dialErr := make(chan error, 1)
 			go func() {
@@ -2484,7 +2487,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2495,8 +2498,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2513,7 +2515,7 @@ func TestDialDoesNotUseTerminatedEarlyDialogAnswer(t *testing.T) {
 				}
 			}
 
-			_, err = svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			_, err = svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err == nil || !strings.Contains(err.Error(), "missing answer sdp") {
 				t.Fatalf("Dial() error = %v, want missing answer sdp", err)
 			}
@@ -2556,7 +2558,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2567,8 +2569,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2580,7 +2581,7 @@ func TestOutgoingRemoteBYEEndsCall(t *testing.T) {
 				ok200 = callOK(msg)
 				transport.queue(ok200)
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -2623,7 +2624,7 @@ func TestOutgoingRemoteBYEBeforeFinalResponseGets481(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2634,8 +2635,7 @@ func TestOutgoingRemoteBYEBeforeFinalResponseGets481(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2650,7 +2650,7 @@ func TestOutgoingRemoteBYEBeforeFinalResponseGets481(t *testing.T) {
 				transport.queue(byeForConfirmedDialog(ringing))
 			}
 
-			dialCtx, cancelDial := context.WithCancel(context.Background())
+			dialCtx, cancelDial := context.WithCancel(t.Context())
 			dialErr := make(chan error, 1)
 			go func() {
 				_, err := svc.Dial(dialCtx, DialRequest{To: "sip:remote@example.com"})
@@ -2708,7 +2708,7 @@ func TestHangupAcceptsBYETerminationResponses(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2719,8 +2719,7 @@ func TestHangupAcceptsBYETerminationResponses(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2734,15 +2733,15 @@ func TestHangupAcceptsBYETerminationResponses(t *testing.T) {
 					}
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 
-			hangupCtx := context.Background()
+			hangupCtx := t.Context()
 			hangupCancel := func() {}
 			if tt.noResponse {
-				hangupCtx, hangupCancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+				hangupCtx, hangupCancel = context.WithTimeout(t.Context(), 20*time.Millisecond)
 			}
 			defer hangupCancel()
 			if err := call.Hangup(hangupCtx); err != nil {
@@ -2782,7 +2781,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -2793,8 +2792,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -2815,7 +2813,7 @@ func TestDialReleasesForkedInvite2xx(t *testing.T) {
 				}
 			}
 
-			if _, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"}); err != nil {
+			if _, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"}); err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			transport.queue(forkedOK)
@@ -2848,7 +2846,7 @@ func TestHangupIsIdempotentForTerminalStates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			call := &Call{state: tt.state}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
@@ -2868,7 +2866,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 			defer func() {
-				_ = sess.Close()
+				closeStackAfterTest(t, sess)
 			}()
 			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity:   "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
@@ -2885,7 +2883,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
+				closeEndpointAfterTest(t, svc)
 			}()
 
 			var ringing sip.Message
@@ -2894,7 +2892,7 @@ func TestIncomingInviteRingingResponseIncludesContact(t *testing.T) {
 					ringing = msg
 				}
 			}
-			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: delayedInvite(), Transport: transport}); err != nil {
+			if err := svc.handleIncomingInvite(t.Context(), session.Request{Message: delayedInvite(), Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
 
@@ -2970,8 +2968,7 @@ func TestIncomingInviteRejectsTooSmallSessionInterval(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			invite := delayedInvite()
@@ -2982,7 +2979,7 @@ func TestIncomingInviteRejectsTooSmallSessionInterval(t *testing.T) {
 				invite.Headers.Add("Min-SE", tt.minSE)
 			}
 
-			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
+			if err := svc.handleIncomingInvite(t.Context(), session.Request{Message: invite, Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
 
@@ -3026,8 +3023,7 @@ func TestIncomingInviteRejectsRefresherWithoutTimerSupport(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			invite := delayedInvite()
@@ -3035,7 +3031,7 @@ func TestIncomingInviteRejectsRefresherWithoutTimerSupport(t *testing.T) {
 			invite.Headers.Del("Supported")
 			invite.Headers.Add("Session-Expires", "180;refresher=uas")
 
-			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
+			if err := svc.handleIncomingInvite(t.Context(), session.Request{Message: invite, Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
 
@@ -3069,15 +3065,14 @@ func TestIncomingInviteRejectsRequiredTimerWhenUnsupported(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	defer func() {
-		_ = svc.Close()
-		_ = sess.Close()
+		closeEndpointAndStackAfterTest(t, svc, sess)
 	}()
 
 	invite := delayedInvite()
 	invite.Headers.Set("Call-ID", "required-timer-unsupported")
 	invite.Headers.Add("Require", sessionTimerOption)
 
-	handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+	handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 	if err != nil {
 		t.Fatalf("HandleRequest() error = %v", err)
 	}
@@ -3141,8 +3136,7 @@ func TestIncomingInviteRequiredReliableProvisional(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			invite := delayedInvite()
@@ -3150,7 +3144,7 @@ func TestIncomingInviteRequiredReliableProvisional(t *testing.T) {
 			invite.Headers.Del("Supported")
 			invite.Headers.Add("Require", reliableProvisionalOption)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -3210,8 +3204,7 @@ func TestIncomingInvitePreconditionResponseRequiresPrecondition(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 			invite := inviteWithSDP()
 			invite.Headers.Set("Call-ID", "incoming-precondition")
@@ -3222,7 +3215,7 @@ func TestIncomingInvitePreconditionResponseRequiresPrecondition(t *testing.T) {
 					"a=des:qos mandatory local sendrecv\r\n"+
 					"a=des:qos optional remote sendrecv\r\n")...)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -3281,15 +3274,14 @@ func TestIncomingInviteRejectsUnsupportedMandatoryPrecondition(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			invite := inviteWithSDP()
 			invite.Headers.Set("Call-ID", "unsupported-precondition-"+strings.ReplaceAll(tt.name, " ", "-"))
 			invite.Headers.Add("Supported", preconditionOption)
 			invite.Body = append(invite.Body, tt.attribute...)
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: invite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: invite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -3366,11 +3358,10 @@ func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: tt.invite(), Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: tt.invite(), Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -3383,7 +3374,7 @@ func TestIncomingInvitePreconditionFinalOKRequiresPrecondition(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("incoming call was not reported after resources were ready")
 			}
-			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+			if err := got.Call.Answer(t.Context(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			responses := transport.messagesByStatus(sipStatusOK, "INVITE")
@@ -3427,8 +3418,7 @@ func TestIncomingUPDATESessionRefresh(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			call := &Call{
@@ -3462,7 +3452,7 @@ func TestIncomingUPDATESessionRefresh(t *testing.T) {
 			update.Headers.Add("Session-Expires", "600;refresher=uac")
 			update.Headers.Add("Min-SE", "600")
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: update, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: update, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -3530,8 +3520,7 @@ func TestIncomingUPDATESessionRefreshWithOfferAnswersSDP(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			call := &Call{
@@ -3565,7 +3554,7 @@ func TestIncomingUPDATESessionRefreshWithOfferAnswersSDP(t *testing.T) {
 			update.Headers.Add("Content-Type", "application/sdp")
 			update.Body = inviteWithSDP().Body
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: update, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: update, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -3632,7 +3621,7 @@ func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -3643,8 +3632,7 @@ func TestIncomingUPDATEPreconditionAnswerRequiresPrecondition(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 			transport.onWrite = func(msg sip.Message) {
@@ -3821,7 +3809,7 @@ func TestIncomingPreconditionConfirmationWaitsForSuccessfulUPDATE(t *testing.T) 
 			}
 			svc.preconditionRetryDelay = func(CallDirection) time.Duration { return 0 }
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			runErr := make(chan error, 1)
 			go func() { runErr <- sess.Run(ctx) }()
 			if err := sess.WaitStarted(ctx); err != nil {
@@ -3829,8 +3817,7 @@ func TestIncomingPreconditionConfirmationWaitsForSuccessfulUPDATE(t *testing.T) 
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 			transport.onWrite = func(msg sip.Message) {
@@ -3957,7 +3944,7 @@ func TestIncomingPreconditionTimeout(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			runErr := make(chan error, 1)
 			go func() { runErr <- sess.Run(ctx) }()
 			if err := sess.WaitStarted(ctx); err != nil {
@@ -3965,8 +3952,7 @@ func TestIncomingPreconditionTimeout(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -4092,7 +4078,7 @@ func TestIncomingPreconditionReadinessDoesNotBlockSIPDispatch(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			runErr := make(chan error, 1)
 			go func() { runErr <- sess.Run(ctx) }()
 			if err := sess.WaitStarted(ctx); err != nil {
@@ -4100,8 +4086,7 @@ func TestIncomingPreconditionReadinessDoesNotBlockSIPDispatch(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -4233,8 +4218,7 @@ func TestIncomingReINVITESessionRefresh(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			initial, err := unmarshalSDP(inviteWithSDP().Body)
@@ -4273,7 +4257,7 @@ func TestIncomingReINVITESessionRefresh(t *testing.T) {
 				reinvite.Body = tt.updateBody(reinvite.Body)
 			}
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: reinvite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -4329,8 +4313,7 @@ func TestIncomingReINVITEGlareWhileLocalINVITEPending(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			call := &Call{
@@ -4360,7 +4343,7 @@ func TestIncomingReINVITEGlareWhileLocalINVITEPending(t *testing.T) {
 			reinvite.Headers.Set("To", "<sip:001010123456789@example.com>;tag=local-tag")
 			reinvite.Headers.Set("CSeq", "2 INVITE")
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: reinvite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -4424,8 +4407,7 @@ func TestIncomingRemoteHoldReINVITEUpdatesHoldState(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			call := &Call{
@@ -4455,7 +4437,7 @@ func TestIncomingRemoteHoldReINVITEUpdatesHoldState(t *testing.T) {
 			reinvite.Headers.Set("CSeq", "2 INVITE")
 			reinvite.Body = append(reinvite.Body, []byte("a=recvonly\r\n")...)
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: reinvite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -4523,8 +4505,7 @@ func TestSecondIncomingReINVITEGetsRetryAfterWhileFirstPending(t *testing.T) {
 			}
 			defer func() {
 				releaseOnce.Do(func() { close(releaseOpen) })
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			call := &Call{
@@ -4555,7 +4536,7 @@ func TestSecondIncomingReINVITEGetsRetryAfterWhileFirstPending(t *testing.T) {
 
 			firstErr := make(chan error, 1)
 			go func() {
-				_, err := svc.HandleRequest(context.Background(), session.Request{Message: first, Transport: transport})
+				_, err := svc.HandleRequest(t.Context(), session.Request{Message: first, Transport: transport})
 				firstErr <- err
 			}()
 			select {
@@ -4568,7 +4549,7 @@ func TestSecondIncomingReINVITEGetsRetryAfterWhileFirstPending(t *testing.T) {
 			second.Headers = first.Headers.Clone()
 			second.Body = append([]byte(nil), first.Body...)
 			second.Headers.Set("CSeq", "3 INVITE")
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: second, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: second, Transport: transport})
 			if err != nil {
 				t.Fatalf("second HandleRequest() error = %v", err)
 			}
@@ -4622,8 +4603,7 @@ func TestUnknownReINVITEDialogGets481(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			reinvite := sip.NewRequest("INVITE", "sip:001010123456789@192.0.2.20:5062")
@@ -4633,7 +4613,7 @@ func TestUnknownReINVITEDialogGets481(t *testing.T) {
 			reinvite.Headers.Add("Call-ID", "missing-reinvite-call")
 			reinvite.Headers.Add("CSeq", "2 INVITE")
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: reinvite, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: reinvite, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -4681,11 +4661,11 @@ func TestIncomingCancelEndsRingingCall(t *testing.T) {
 			}
 
 			invite := delayedInvite()
-			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
+			if err := svc.handleIncomingInvite(t.Context(), session.Request{Message: invite, Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
 			cancel := cancelForInvite(invite)
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: cancel, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: cancel, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest(CANCEL) error = %v", err)
 			}
@@ -4734,7 +4714,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -4745,8 +4725,7 @@ func TestIncomingRingingTimeoutRejectsInvite(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -4805,7 +4784,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -4816,8 +4795,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -4914,7 +4892,7 @@ func TestIncomingReliableDelayedOfferUsesPRACKAnswer(t *testing.T) {
 				t.Fatalf("media remote = %v, want 192.0.2.10:50000", remote)
 			}
 
-			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+			if err := got.Call.Answer(t.Context(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			var inviteOK sip.Message
@@ -4968,7 +4946,7 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -4979,8 +4957,7 @@ func TestIncomingReliableDelayedOfferRejectsMismatchedPRACK(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5063,7 +5040,7 @@ func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5074,8 +5051,7 @@ func TestIncomingReliablePRACKOfferGetsAnswer(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5197,7 +5173,7 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5208,8 +5184,7 @@ func TestIncomingDelayedOfferPRACKConfirmationSendsPreconditionUPDATE(t *testing
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5348,7 +5323,7 @@ func TestIncomingReliableInviteAnswerGateSurvivesCancel(t *testing.T) {
 			invite := inviteWithSDP()
 			invite.Headers.Add("Supported", "100rel")
 			invite.Headers.Add("Allow", sip.DefaultClientAllow)
-			if err := svc.handleIncomingInvite(context.Background(), session.Request{Message: invite, Transport: transport}); err != nil {
+			if err := svc.handleIncomingInvite(t.Context(), session.Request{Message: invite, Transport: transport}); err != nil {
 				t.Fatalf("handleIncomingInvite() error = %v", err)
 			}
 			select {
@@ -5366,11 +5341,11 @@ func TestIncomingReliableInviteAnswerGateSurvivesCancel(t *testing.T) {
 			if call == nil {
 				t.Fatal("incoming call was not stored")
 			}
-			if err := call.Answer(context.Background(), MediaOffer{}); err == nil || !strings.Contains(err.Error(), "media resources are not ready") {
+			if err := call.Answer(t.Context(), MediaOffer{}); err == nil || !strings.Contains(err.Error(), "media resources are not ready") {
 				t.Fatalf("Answer() error = %v, want media readiness error", err)
 			}
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: cancelForInvite(invite), Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: cancelForInvite(invite), Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest(CANCEL) error = %v", err)
 			}
@@ -5438,7 +5413,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5449,8 +5424,7 @@ func TestIncomingInvitePreparesMediaBeforeRinging(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5570,7 +5544,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5581,8 +5555,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5646,7 +5619,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			if call == nil {
 				t.Fatal("incoming call was not stored")
 			}
-			if err := call.Answer(context.Background(), MediaOffer{}); err == nil || !strings.Contains(err.Error(), "media resources are not ready") {
+			if err := call.Answer(t.Context(), MediaOffer{}); err == nil || !strings.Contains(err.Error(), "media resources are not ready") {
 				t.Fatalf("Answer() error = %v, want media readiness error", err)
 			}
 
@@ -5683,7 +5656,7 @@ func TestIncomingReliableInviteAnswerWaitsForPRACKBeforeRinging(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("incoming call was not reported after PRACK and media preparation")
 			}
-			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+			if err := got.Call.Answer(t.Context(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			var inviteOK sip.Message
@@ -5752,7 +5725,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5763,8 +5736,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5786,7 +5758,7 @@ func TestIncomingDelayedOfferCall(t *testing.T) {
 			if len(got.Offer.Formats) != 0 {
 				t.Fatalf("incoming offer formats = %v, want empty delayed offer", got.Offer.Formats)
 			}
-			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+			if err := got.Call.Answer(t.Context(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			if !waitForCallTest(func() bool { return ok200.StartLine != "" }) {
@@ -5845,7 +5817,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5856,8 +5828,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5878,7 +5849,7 @@ func TestIncomingInviteAnswerOmitsGeolocationPIDF(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("incoming call event timed out")
 			}
-			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+			if err := got.Call.Answer(t.Context(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			if !waitForCallTest(func() bool { return ok200.StartLine != "" }) {
@@ -5957,7 +5928,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -5968,8 +5939,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -5994,7 +5964,7 @@ func TestIncomingDelayedOfferAnswersInFinalOK(t *testing.T) {
 			if !waitForCallTest(func() bool { return ringing.StartLine != "" }) {
 				t.Fatal("180 Ringing was not sent")
 			}
-			if err := got.Call.Answer(context.Background(), MediaOffer{}); err != nil {
+			if err := got.Call.Answer(t.Context(), MediaOffer{}); err != nil {
 				t.Fatalf("Answer() error = %v", err)
 			}
 			if !waitForCallTest(func() bool { return inviteOK.StartLine != "" }) {
@@ -6057,7 +6027,7 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -6068,8 +6038,7 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -6087,20 +6056,20 @@ func TestCallHoldAndResumeSendReINVITEs(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			if tt.rtcpDisabled && !call.Media().RTCPDisabled {
 				t.Fatal("negotiated RTCPDisabled = false, want true")
 			}
-			if err := call.Hold(context.Background()); err != nil {
+			if err := call.Hold(t.Context()); err != nil {
 				t.Fatalf("Hold() error = %v", err)
 			}
 			if got := call.HoldState(); got != CallHoldLocal {
 				t.Fatalf("hold state after Hold = %s, want %s", got, CallHoldLocal)
 			}
-			if err := call.Resume(context.Background()); err != nil {
+			if err := call.Resume(t.Context()); err != nil {
 				t.Fatalf("Resume() error = %v", err)
 			}
 			if got := call.HoldState(); got != CallHoldNone {
@@ -6169,7 +6138,7 @@ func TestCallHoldResponseWithoutSessionExpiresStopsTimer(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -6180,8 +6149,7 @@ func TestCallHoldResponseWithoutSessionExpiresStopsTimer(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -6199,7 +6167,7 @@ func TestCallHoldResponseWithoutSessionExpiresStopsTimer(t *testing.T) {
 				transport.queue(resp)
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -6210,7 +6178,7 @@ func TestCallHoldResponseWithoutSessionExpiresStopsTimer(t *testing.T) {
 				t.Fatal("session timer active before hold = false, want true")
 			}
 
-			if err := call.Hold(context.Background()); err != nil {
+			if err := call.Hold(t.Context()); err != nil {
 				t.Fatalf("Hold() error = %v", err)
 			}
 			call.mu.Lock()
@@ -6258,7 +6226,7 @@ func TestCallHoldRetriesIncreasingMinSE(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -6269,8 +6237,7 @@ func TestCallHoldRetriesIncreasingMinSE(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -6306,11 +6273,11 @@ func TestCallHoldRetriesIncreasingMinSE(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if err := call.Hold(context.Background()); err != nil {
+			if err := call.Hold(t.Context()); err != nil {
 				t.Fatalf("Hold() error = %v", err)
 			}
 			if invites != 3 {
@@ -6352,7 +6319,7 @@ func TestCallHoldRejectsPendingAndEmergency(t *testing.T) {
 			svc := &Endpoint{cfg: tt.cfg}
 			call := tt.call()
 			call.endpoint = svc
-			err := call.Hold(context.Background())
+			err := call.Hold(t.Context())
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("Hold() error = %v, want containing %q", err, tt.wantError)
 			}
@@ -6369,17 +6336,17 @@ func TestCallHoldResumeAlreadyAppliedAreIdempotent(t *testing.T) {
 		{
 			name: "hold already local held",
 			call: func() *Call { return &Call{state: CallStateActive, hold: CallHoldLocal} },
-			run:  func(call *Call) error { return call.Hold(context.Background()) },
+			run:  func(call *Call) error { return call.Hold(t.Context()) },
 		},
 		{
 			name: "resume already locally resumed",
 			call: func() *Call { return &Call{state: CallStateActive} },
-			run:  func(call *Call) error { return call.Resume(context.Background()) },
+			run:  func(call *Call) error { return call.Resume(t.Context()) },
 		},
 		{
 			name: "resume keeps remote hold",
 			call: func() *Call { return &Call{state: CallStateActive, hold: CallHoldRemote} },
-			run:  func(call *Call) error { return call.Resume(context.Background()) },
+			run:  func(call *Call) error { return call.Resume(t.Context()) },
 		},
 	}
 	for _, tt := range tests {
@@ -6411,7 +6378,7 @@ func TestCallHoldAllowsEmergencyOverride(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 			defer func() {
-				_ = sess.Close()
+				closeStackAfterTest(t, sess)
 			}()
 			reg, err := newTestRegistrar(registration.Config{Logger: testLogger(),
 				PrivateIdentity: "001010123456789@ims.mnc001.mcc001.3gppnetwork.org",
@@ -6525,7 +6492,7 @@ func TestCallHoldNon2xxRestoresState(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -6536,8 +6503,7 @@ func TestCallHoldNon2xxRestoresState(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -6554,12 +6520,12 @@ func TestCallHoldNon2xxRestoresState(t *testing.T) {
 				transport.queue(callStatus(msg, sipStatusNotAcceptableHere, "Not Acceptable Here"))
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			before := append([]byte(nil), call.localSDP...)
-			err = call.Hold(context.Background())
+			err = call.Hold(t.Context())
 			if err == nil {
 				t.Fatal("Hold() error = nil, want remote rejection")
 			}
@@ -6600,7 +6566,7 @@ func TestCallHoldContextCancelRestoresPendingState(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -6611,8 +6577,7 @@ func TestCallHoldContextCancelRestoresPendingState(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -6627,12 +6592,12 @@ func TestCallHoldContextCancelRestoresPendingState(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
 			before := append([]byte(nil), call.localSDP...)
-			holdCtx, holdCancel := context.WithCancel(context.Background())
+			holdCtx, holdCancel := context.WithCancel(t.Context())
 			holdCancel()
 			err = call.Hold(holdCtx)
 			if err == nil || !errors.Is(err, context.Canceled) {
@@ -6678,14 +6643,14 @@ func TestCallHoldBlocksRTPButAllowsRTCP(t *testing.T) {
 					rtcpCh: rtcpCh,
 				},
 			}
-			err := call.WriteRTP(context.Background(), []byte("rtp"))
+			err := call.WriteRTP(t.Context(), []byte("rtp"))
 			if tt.wantRTP && err != nil {
 				t.Fatalf("WriteRTP() error = %v, want nil", err)
 			}
 			if !tt.wantRTP && err == nil {
 				t.Fatal("WriteRTP() error = nil, want hold rejection")
 			}
-			if err := call.WriteRTCP(context.Background(), []byte("rtcp")); err != nil {
+			if err := call.WriteRTCP(t.Context(), []byte("rtcp")); err != nil {
 				t.Fatalf("WriteRTCP() error = %v", err)
 			}
 			select {
@@ -6742,7 +6707,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -6753,8 +6718,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -6768,7 +6732,7 @@ func TestDialEndsAfterRTPInactivity(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -6830,7 +6794,7 @@ func TestOpenMediaEmitsNegotiatedMedia(t *testing.T) {
 				}}},
 				media: tt.media,
 			}
-			if err := call.openMedia(context.Background()); err != nil {
+			if err := call.openMedia(t.Context()); err != nil {
 				t.Fatalf("openMedia() error = %v", err)
 			}
 			select {
@@ -6870,7 +6834,7 @@ func TestOpenMediaRequiresTransport(t *testing.T) {
 				closed: tt.closed,
 			}
 
-			err := call.openMedia(context.Background())
+			err := call.openMedia(t.Context())
 			if err == nil || !strings.Contains(err.Error(), "media transport is nil") {
 				t.Fatalf("openMedia() error = %v, want nil transport error", err)
 			}
@@ -6905,9 +6869,9 @@ func TestMediaTransportDoesNotConfirmLocalQoS(t *testing.T) {
 			}
 			var err error
 			if tt.prepare {
-				err = call.prepareMedia(context.Background())
+				err = call.prepareMedia(t.Context())
 			} else {
-				err = call.openMedia(context.Background())
+				err = call.openMedia(t.Context())
 			}
 			if err != nil {
 				t.Fatalf("opening media transport: %v", err)
@@ -6961,7 +6925,7 @@ func TestConfirmMediaResources(t *testing.T) {
 				},
 			}
 			tt.configure(call)
-			err := call.confirmMediaResources(context.Background(), call.media)
+			err := call.confirmMediaResources(t.Context(), call.media)
 			if tt.wantError == "" && err != nil {
 				t.Fatalf("confirmMediaResources() error = %v", err)
 			}
@@ -6997,7 +6961,7 @@ func TestConfirmMediaResourcesRejectsStaleCompletion(t *testing.T) {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- call.confirmMediaResources(context.Background(), call.media)
+		errCh <- call.confirmMediaResources(t.Context(), call.media)
 	}()
 	<-started
 	if err := call.closeMedia(); err != nil {
@@ -7025,7 +6989,7 @@ func TestOpenMediaReplacementClearsLocalQoS(t *testing.T) {
 		localQoSStatus:  qosStatusSendRecv,
 		media:           NegotiatedMedia{RemoteIP: net.IPv4(192, 0, 2, 10), RemotePort: 50000},
 	}
-	if err := call.openMedia(context.Background()); err == nil || !strings.Contains(err.Error(), "replacement unavailable") {
+	if err := call.openMedia(t.Context()); err == nil || !strings.Contains(err.Error(), "replacement unavailable") {
 		t.Fatalf("openMedia() error = %v, want replacement error", err)
 	}
 	if call.transport != nil {
@@ -7067,10 +7031,10 @@ func TestConfigureRemoteBindsQoSToMediaResource(t *testing.T) {
 				qosMediaResource: originalKey,
 				localQoSStatus:   qosStatusSendRecv,
 			}
-			if err := call.openMedia(context.Background()); err != nil {
+			if err := call.openMedia(t.Context()); err != nil {
 				t.Fatalf("openMedia() error = %v", err)
 			}
-			if err := call.confirmMediaResources(context.Background(), media); err != nil {
+			if err := call.confirmMediaResources(t.Context(), media); err != nil {
 				t.Fatalf("confirmMediaResources() error = %v", err)
 			}
 			if waitCalls != tt.wantWaitCalls {
@@ -7162,7 +7126,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7173,8 +7137,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7188,7 +7151,7 @@ func TestDialEndsAfterRTCPBye(t *testing.T) {
 					transport.queue(callStatus(msg, tt.byeStatus, tt.byeReason))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -7277,7 +7240,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			}
 			svc.rtcpInterval = func(NegotiatedMedia) time.Duration { return 20 * time.Millisecond }
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7288,8 +7251,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7301,7 +7263,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -7321,7 +7283,7 @@ func TestDialSendsRTCPReports(t *testing.T) {
 			if got := packet[9]; got != rtcpSDESPacketType {
 				t.Fatalf("RTCP second packet type = %d, want %d", got, rtcpSDESPacketType)
 			}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
@@ -7369,7 +7331,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7380,8 +7342,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7395,7 +7356,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -7408,7 +7369,7 @@ func TestDialDoesNotSendRTCPWhenAnswerDisablesRTCP(t *testing.T) {
 				t.Fatalf("RTCP packet was sent despite disabled RTCP: %x", packet)
 			case <-time.After(80 * time.Millisecond):
 			}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
@@ -7517,7 +7478,7 @@ func TestHeldCallInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7528,8 +7489,7 @@ func TestHeldCallInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7541,7 +7501,7 @@ func TestHeldCallInactivityWatchUsesRTCPOnHoldPolicy(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -7608,7 +7568,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7619,8 +7579,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7632,11 +7591,11 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
-			if err := call.WriteRTCP(context.Background(), []byte("rtcp")); err == nil {
+			if err := call.WriteRTCP(t.Context(), []byte("rtcp")); err == nil {
 				t.Fatal("WriteRTCP() error = nil, want unsupported transport error")
 			}
 
@@ -7645,7 +7604,7 @@ func TestDialDoesNotWriteRTCPReportsToRTPTransport(t *testing.T) {
 				t.Fatalf("RTP WritePacket received RTCP fallback packet: %x", packet)
 			case <-time.After(80 * time.Millisecond):
 			}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
@@ -7698,7 +7657,7 @@ func TestDialEndsAfterRTCPInactivityWhenPolicyIncludesRTCP(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7709,8 +7668,7 @@ func TestDialEndsAfterRTCPInactivityWhenPolicyIncludesRTCP(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7722,7 +7680,7 @@ func TestDialEndsAfterRTCPInactivityWhenPolicyIncludesRTCP(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -7797,7 +7755,7 @@ func TestDialUsesEmergencyAudioInactivityPolicy(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7808,8 +7766,7 @@ func TestDialUsesEmergencyAudioInactivityPolicy(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7821,7 +7778,7 @@ func TestDialUsesEmergencyAudioInactivityPolicy(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "911", Emergency: true})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "911", Emergency: true})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -7836,7 +7793,7 @@ func TestDialUsesEmergencyAudioInactivityPolicy(t *testing.T) {
 			if got := transport.countMethod("BYE"); got != 0 {
 				t.Fatalf("BYE count before hangup = %d, want 0", got)
 			}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
@@ -7880,7 +7837,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				resp.Headers.Add("Service-Route", "<sip:pcscf.example.com;lr>")
 				transport.queue(resp)
 			}
-			if err := reg.Register(context.Background()); err != nil {
+			if err := reg.Register(t.Context()); err != nil {
 				t.Fatalf("Register() error = %v", err)
 			}
 			svc, err := New(Config{Logger: testLogger(), SessionTimer: true,
@@ -7892,7 +7849,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -7903,8 +7860,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -7933,7 +7889,7 @@ func TestDialSendsPRACKForReliableProvisionalResponse(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -8004,8 +7960,7 @@ func TestUnknownPRACKDialogGets481(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 			defer func() {
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 			}()
 
 			prack := sip.NewRequest("PRACK", "sip:001010123456789@192.0.2.20:5062")
@@ -8016,7 +7971,7 @@ func TestUnknownPRACKDialogGets481(t *testing.T) {
 			prack.Headers.Add("CSeq", "2 PRACK")
 			prack.Headers.Add("RAck", "1 1 INVITE")
 
-			handled, err := svc.HandleRequest(context.Background(), session.Request{Message: prack, Transport: transport})
+			handled, err := svc.HandleRequest(t.Context(), session.Request{Message: prack, Transport: transport})
 			if err != nil {
 				t.Fatalf("HandleRequest() error = %v", err)
 			}
@@ -8063,7 +8018,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -8074,8 +8029,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -8094,7 +8048,7 @@ func TestDialDoesNotOpenUnauthorizedEarlyMedia(t *testing.T) {
 
 			errCh := make(chan error, 1)
 			go func() {
-				_, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+				_, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 				errCh <- err
 			}()
 			select {
@@ -8166,7 +8120,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -8177,8 +8131,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -8203,7 +8156,7 @@ func TestDialOpensAuthorizedEarlyMediaBeforeConfirmed(t *testing.T) {
 			}
 			dialDone := make(chan dialResult, 1)
 			go func() {
-				call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+				call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 				dialDone <- dialResult{call: call, err: err}
 			}()
 			select {
@@ -8278,7 +8231,7 @@ func TestDialSendsACKBeforeOpeningFinalMedia(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -8289,8 +8242,7 @@ func TestDialSendsACKBeforeOpeningFinalMedia(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -8305,7 +8257,7 @@ func TestDialSendsACKBeforeOpeningFinalMedia(t *testing.T) {
 					}
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -8346,7 +8298,7 @@ func TestDialRoutesInDialogRequestImmediatelyAfterACK(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -8357,8 +8309,7 @@ func TestDialRoutesInDialogRequestImmediatelyAfterACK(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -8378,7 +8329,7 @@ func TestDialRoutesInDialogRequestImmediatelyAfterACK(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -8430,7 +8381,7 @@ func TestDialKeepsEarlyMediaCallAfterRTCPBye(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -8441,8 +8392,7 @@ func TestDialKeepsEarlyMediaCallAfterRTCPBye(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -8468,7 +8418,7 @@ func TestDialKeepsEarlyMediaCallAfterRTCPBye(t *testing.T) {
 			errCh := make(chan error, 1)
 			callCh := make(chan *Call, 1)
 			go func() {
-				call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+				call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 				if err != nil {
 					errCh <- err
 					return
@@ -8562,7 +8512,7 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -8573,8 +8523,7 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -8586,7 +8535,7 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 					transport.queue(callStatus(msg, 200, "OK"))
 				}
 			}
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -8607,7 +8556,7 @@ func TestDialContinuesAfterRTCPInactivityWhenPolicyOmitsRTCP(t *testing.T) {
 			if got := transport.countMethod("BYE"); got != 0 {
 				t.Fatalf("BYE count before hangup = %d, want 0", got)
 			}
-			if err := call.Hangup(context.Background()); err != nil {
+			if err := call.Hangup(t.Context()); err != nil {
 				t.Fatalf("Hangup() error = %v", err)
 			}
 		})
@@ -9122,7 +9071,7 @@ func TestDialSessionTimerRefreshesWithUPDATE(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -9133,8 +9082,7 @@ func TestDialSessionTimerRefreshesWithUPDATE(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -9154,7 +9102,7 @@ func TestDialSessionTimerRefreshesWithUPDATE(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -9209,7 +9157,7 @@ func TestDialSessionTimerRefreshRetriesIncreasingMinSE(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -9220,8 +9168,7 @@ func TestDialSessionTimerRefreshRetriesIncreasingMinSE(t *testing.T) {
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -9268,7 +9215,7 @@ func TestDialSessionTimerRefreshRetriesIncreasingMinSE(t *testing.T) {
 				}
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}
@@ -9318,7 +9265,7 @@ func TestSessionTimerRefreshNon2xxTerminatesDialog(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() {
@@ -9329,8 +9276,7 @@ func TestSessionTimerRefreshNon2xxTerminatesDialog(t *testing.T) {
 	}
 	defer func() {
 		cancel()
-		_ = svc.Close()
-		_ = sess.Close()
+		closeEndpointAndStackAfterTest(t, svc, sess)
 		<-runErr
 	}()
 
@@ -9349,7 +9295,7 @@ func TestSessionTimerRefreshNon2xxTerminatesDialog(t *testing.T) {
 		}
 	}
 
-	call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+	call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 	if err != nil {
 		t.Fatalf("Dial() error = %v", err)
 	}
@@ -9398,7 +9344,7 @@ func TestDialSessionTimerRefreshFallsBackToReINVITEWithoutRemoteUPDATE(t *testin
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			runErr := make(chan error, 1)
 			go func() {
@@ -9409,8 +9355,7 @@ func TestDialSessionTimerRefreshFallsBackToReINVITEWithoutRemoteUPDATE(t *testin
 			}
 			defer func() {
 				cancel()
-				_ = svc.Close()
-				_ = sess.Close()
+				closeEndpointAndStackAfterTest(t, svc, sess)
 				<-runErr
 			}()
 
@@ -9432,7 +9377,7 @@ func TestDialSessionTimerRefreshFallsBackToReINVITEWithoutRemoteUPDATE(t *testin
 				transport.queue(resp)
 			}
 
-			call, err := svc.Dial(context.Background(), DialRequest{To: "sip:remote@example.com"})
+			call, err := svc.Dial(t.Context(), DialRequest{To: "sip:remote@example.com"})
 			if err != nil {
 				t.Fatalf("Dial() error = %v", err)
 			}

@@ -35,11 +35,8 @@ type stunPendingTransaction struct {
 	resultCh  chan stunResult
 }
 
-func (s *Session) sendSTUNBindingRequest(ctx context.Context, transport Transport) error {
-	packet, transactionID, err := newSTUNBindingRequest()
-	if err != nil {
-		return fmt.Errorf("creating STUN binding request: %w", err)
-	}
+func (s *Stack) sendSTUNBindingRequest(ctx context.Context, transport Transport) error {
+	packet, transactionID := newSTUNBindingRequest()
 	resultCh := make(chan stunResult, 1)
 	s.mu.Lock()
 	if s.closed {
@@ -74,7 +71,7 @@ func (s *Session) sendSTUNBindingRequest(ctx context.Context, transport Transpor
 	return nil
 }
 
-func (s *Session) awaitSTUNBinding(ctx context.Context, transport Transport, packet []byte, resultCh <-chan stunResult, rto time.Duration) (stunResult, error) {
+func (s *Stack) awaitSTUNBinding(ctx context.Context, transport Transport, packet []byte, resultCh <-chan stunResult, rto time.Duration) (stunResult, error) {
 	if rto <= 0 {
 		return stunResult{}, errors.New("sending STUN binding request: RTO must be positive")
 	}
@@ -105,7 +102,7 @@ func (s *Session) awaitSTUNBinding(ctx context.Context, transport Transport, pac
 	return stunResult{}, errors.New("waiting for STUN binding response: transaction timeout")
 }
 
-func (s *Session) sendCRLFKeepAlive(ctx context.Context, transport Transport) error {
+func (s *Stack) sendCRLFKeepAlive(ctx context.Context, transport Transport) error {
 	responseCh := make(chan error, 1)
 	s.mu.Lock()
 	if s.closed {
@@ -138,7 +135,7 @@ func (s *Session) sendCRLFKeepAlive(ctx context.Context, transport Transport) er
 	}
 }
 
-func (s *Session) handleKeepAlivePacket(ctx context.Context, inbound inboundMessage) error {
+func (s *Stack) handleKeepAlivePacket(ctx context.Context, inbound inboundMessage) error {
 	if isCRLFKeepAlivePacket(inbound.packet) {
 		if string(inbound.packet) == string(sipCRLFKeepAlive) {
 			return s.writePacketTo(ctx, inbound.transport, []byte("\r\n"), inbound.peer)
@@ -192,7 +189,7 @@ func (s *Session) handleKeepAlivePacket(ctx context.Context, inbound inboundMess
 	return nil
 }
 
-func (s *Session) abortTransportKeepAlives(transport Transport, err error) {
+func (s *Stack) abortTransportKeepAlives(transport Transport, err error) {
 	s.mu.Lock()
 	stunChannels := make([]chan stunResult, 0)
 	for transactionID, pending := range s.stunPending {
@@ -227,13 +224,11 @@ type stunMessage struct {
 	unknownRequiredAttrs []uint16
 }
 
-func newSTUNBindingRequest() ([]byte, [12]byte, error) {
+func newSTUNBindingRequest() ([]byte, [12]byte) {
 	var transactionID [12]byte
-	if _, err := rand.Read(transactionID[:]); err != nil {
-		return nil, transactionID, err
-	}
+	_, _ = rand.Read(transactionID[:])
 	packet := stunHeader(stunBindingRequest, transactionID, 0)
-	return packet, transactionID, nil
+	return packet, transactionID
 }
 
 func stunBindingResponse(transactionID [12]byte, peer net.Addr) ([]byte, error) {

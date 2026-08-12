@@ -106,7 +106,7 @@ func (s *Session) awaitInformationalResponse(ctx context.Context, state informat
 }
 
 func (s *Session) openInformationalResponse(state informationalState, data []byte) ([]ike.Payload, error) {
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(data); err != nil {
 		return nil, fmt.Errorf("sending informational: parsing response: %w", err)
 	}

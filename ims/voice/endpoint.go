@@ -13,7 +13,7 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
-func New(cfg Config, sess *session.Session, reg *registration.Registrar) (*Endpoint, error) {
+func New(cfg Config, sess *session.Stack, reg *registration.Registrar) (*Endpoint, error) {
 	if sess == nil {
 		return nil, errors.New("creating voice endpoint: session is nil")
 	}
@@ -69,7 +69,7 @@ func (s *Endpoint) Close() error {
 		err = attachment.Close()
 	}
 	for _, call := range calls {
-		call.finish(CallStateEnded, "")
+		err = errors.Join(err, call.finishError(CallStateEnded, ""))
 	}
 	s.bgWG.Wait()
 	return err

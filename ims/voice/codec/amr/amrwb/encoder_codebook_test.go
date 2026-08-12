@@ -52,7 +52,7 @@ func TestAcelp2t64CodewordRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAcelp4t64_20CodewordRoundTrip(t *testing.T) {
+func TestACELP4T64At20BitsCodewordRoundTrip(t *testing.T) {
 	dn := make([]int16, subframeSamples)
 	cn := make([]int16, subframeSamples)
 	h := make([]int16, subframeSamples)
@@ -65,10 +65,10 @@ func TestAcelp4t64_20CodewordRoundTrip(t *testing.T) {
 	h[2] = -768
 	h[3] = 384
 
-	got, err := acelp4t64_20(dn, cn, h)
+	got, err := acelp4T64At20Bits(dn, cn, h)
 
 	if err != nil {
-		t.Fatalf("acelp4t64_20() error = %v", err)
+		t.Fatalf("acelp4T64At20Bits() error = %v", err)
 	}
 	for i, index := range got.indices[:got.indexCount] {
 		if index < 0 || index >= 1<<5 {
@@ -89,7 +89,7 @@ func TestAcelp4t64_20CodewordRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAcelp4t64_36CodewordRoundTrip(t *testing.T) {
+func TestACELP4T64At36BitsCodewordRoundTrip(t *testing.T) {
 	dn := make([]int16, subframeSamples)
 	cn := make([]int16, subframeSamples)
 	h := make([]int16, subframeSamples)
@@ -102,10 +102,10 @@ func TestAcelp4t64_36CodewordRoundTrip(t *testing.T) {
 	h[2] = -768
 	h[3] = 384
 
-	got, err := acelp4t64_36(dn, cn, h)
+	got, err := acelp4T64At36Bits(dn, cn, h)
 
 	if err != nil {
-		t.Fatalf("acelp4t64_36() error = %v", err)
+		t.Fatalf("acelp4T64At36Bits() error = %v", err)
 	}
 	for i, index := range got.indices[:got.indexCount] {
 		if index < 0 || index >= 1<<9 {

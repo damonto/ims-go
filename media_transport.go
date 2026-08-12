@@ -18,6 +18,7 @@ var errVoiceMediaTransportClosed = errors.New("reading voice media packet: trans
 type netstackMediaTransport struct {
 	rtpConn  *ipsectransport.NetstackUDPConn
 	rtcpConn *ipsectransport.NetstackUDPConn
+	readStop context.CancelFunc
 	logger   *slog.Logger
 	local    *net.UDPAddr
 	remote   imsvoice.MediaRemote
@@ -29,11 +30,13 @@ type netstackMediaTransport struct {
 	mu          sync.Mutex
 	closed      bool
 	terminalErr error
+	closeErr    error
 	inRTP       int
 	inRTCP      int
 	outRTP      int
 	outRTCP     int
 	closeOnce   sync.Once
+	readWG      sync.WaitGroup
 }
 
 type mediaPacket struct {
@@ -67,12 +70,13 @@ func newNetstackMediaTransport(ctx context.Context, session *swutunnel.Session, 
 	}
 	rtcpConn, err := netstack.ListenUDP(ctx, ipsectransport.UDPConfig{LocalPort: cfg.LocalPort + 1, RemoteIP: cfg.RemoteIP})
 	if err != nil {
-		_ = rtpConn.Close()
-		return nil, fmt.Errorf("opening voice media transport: RTCP socket: %w", err)
+		return nil, errors.Join(fmt.Errorf("opening voice media transport: RTCP socket: %w", err), rtpConn.Close())
 	}
+	readCtx, readStop := context.WithCancel(context.WithoutCancel(ctx))
 	transport := &netstackMediaTransport{
 		rtpConn:  rtpConn,
 		rtcpConn: rtcpConn,
+		readStop: readStop,
 		logger:   session.Logger(),
 		local:    &net.UDPAddr{IP: append(net.IP(nil), localIP...), Port: cfg.LocalPort},
 		readCh:   make(chan mediaPacket, 32),
@@ -82,13 +86,19 @@ func newNetstackMediaTransport(ctx context.Context, session *swutunnel.Session, 
 	}
 	if len(cfg.RemoteIP) != 0 && cfg.RemotePort != 0 {
 		if err := transport.applyRemoteConfig(cfg); err != nil {
-			_ = rtpConn.Close()
-			_ = rtcpConn.Close()
-			return nil, err
+			readStop()
+			return nil, errors.Join(err, rtpConn.Close(), rtcpConn.Close())
 		}
 	}
-	go transport.readLoop(rtpConn)
-	go transport.readLoop(rtcpConn)
+	transport.readWG.Add(2)
+	go func() {
+		defer transport.readWG.Done()
+		transport.readLoop(readCtx, rtpConn)
+	}()
+	go func() {
+		defer transport.readWG.Done()
+		transport.readLoop(readCtx, rtcpConn)
+	}()
 	return transport, nil
 }
 
@@ -185,9 +195,9 @@ func (t *netstackMediaTransport) read(ctx context.Context, rtcp bool) ([]byte, n
 	}
 }
 
-func (t *netstackMediaTransport) readLoop(conn *ipsectransport.NetstackUDPConn) {
+func (t *netstackMediaTransport) readLoop(ctx context.Context, conn *ipsectransport.NetstackUDPConn) {
 	for {
-		data, peer, err := conn.ReadPacket(context.Background())
+		data, peer, err := conn.ReadPacket(ctx)
 		if err != nil {
 			select {
 			case <-t.done:
@@ -282,18 +292,21 @@ func (t *netstackMediaTransport) logMediaPacket(direction string, rtcp bool, cou
 
 func (t *netstackMediaTransport) Close() error {
 	t.closeWithError(nil)
-	return nil
+	t.readWG.Wait()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closeErr
 }
 
 func (t *netstackMediaTransport) closeWithError(err error) {
 	t.closeOnce.Do(func() {
+		t.readStop()
 		t.mu.Lock()
 		t.closed = true
 		t.terminalErr = err
 		t.mu.Unlock()
 		close(t.done)
-		_ = t.rtpConn.Close()
-		_ = t.rtcpConn.Close()
+		t.closeErr = errors.Join(t.closeErr, t.rtpConn.Close(), t.rtcpConn.Close())
 	})
 }
 

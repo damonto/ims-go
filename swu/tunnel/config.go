@@ -23,7 +23,7 @@ type Config struct {
 	// RequestDefaultAPN omits IDr so the ePDG selects the default APN.
 	// APN must be empty when this option is enabled.
 	RequestDefaultAPN                bool
-	PDNType                          PDNType
+	PDNType                          handshake.PDNType
 	AKAPrimeNetworkName              string
 	AllowAKAPrimeNetworkNameMismatch bool
 	PacketConn                       net.PacketConn
@@ -59,10 +59,6 @@ type Config struct {
 	AddKEToChildSARekey              bool
 	Logger                           *slog.Logger
 }
-
-type IPAddress = handshake.IPAddress
-type IPPrefix = handshake.IPPrefix
-type PDNType = handshake.PDNType
 
 const (
 	PDNTypeUnspecified = handshake.PDNTypeUnspecified
@@ -101,196 +97,196 @@ const (
 	transformKeyLenAES256 uint16 = 256
 )
 
-func (cfg Config) Normalized() (Config, error) {
-	cfg.LocalAddr = strings.TrimSpace(cfg.LocalAddr)
-	cfg.RemoteAddr = strings.TrimSpace(cfg.RemoteAddr)
-	cfg.APN = strings.TrimSpace(cfg.APN)
-	cfg.AKAPrimeNetworkName = strings.TrimSpace(cfg.AKAPrimeNetworkName)
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+func (c Config) Normalized() (Config, error) {
+	c.LocalAddr = strings.TrimSpace(c.LocalAddr)
+	c.RemoteAddr = strings.TrimSpace(c.RemoteAddr)
+	c.APN = strings.TrimSpace(c.APN)
+	c.AKAPrimeNetworkName = strings.TrimSpace(c.AKAPrimeNetworkName)
+	if c.Logger == nil {
+		c.Logger = slog.Default()
 	}
-	if cfg.RequestDefaultAPN && cfg.APN != "" {
+	if c.RequestDefaultAPN && c.APN != "" {
 		return Config{}, errors.New("normalizing swu config: apn must be empty when requesting the default apn")
 	}
-	if !cfg.RequestDefaultAPN && cfg.APN == "" {
-		cfg.APN = DefaultAPN
+	if !c.RequestDefaultAPN && c.APN == "" {
+		c.APN = DefaultAPN
 	}
-	if cfg.AKAPrimeNetworkName == "" {
-		cfg.AKAPrimeNetworkName = defaultAKAPrimeNetworkName
+	if c.AKAPrimeNetworkName == "" {
+		c.AKAPrimeNetworkName = defaultAKAPrimeNetworkName
 	}
-	if !validPDNType(cfg.PDNType) {
-		return Config{}, fmt.Errorf("normalizing swu config: invalid pdn type %d", cfg.PDNType)
+	if !validPDNType(c.PDNType) {
+		return Config{}, fmt.Errorf("normalizing swu config: invalid pdn type %d", c.PDNType)
 	}
 
-	if err := validatePortRange("initial port", cfg.InitialPort); err != nil {
+	if err := validatePortRange("initial port", c.InitialPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if cfg.NATTPort == 0 {
-		cfg.NATTPort = defaultNATTPort
+	if c.NATTPort == 0 {
+		c.NATTPort = defaultNATTPort
 	}
-	if cfg.SIPPort == 0 {
-		cfg.SIPPort = defaultSIPPort
+	if c.SIPPort == 0 {
+		c.SIPPort = defaultSIPPort
 	}
-	if len(cfg.DHGroups) == 0 {
-		cfg.DHGroups = append([]uint16(nil), defaultDHGroups...)
+	if len(c.DHGroups) == 0 {
+		c.DHGroups = append([]uint16(nil), defaultDHGroups...)
 	} else {
-		cfg.DHGroups = append([]uint16(nil), cfg.DHGroups...)
+		c.DHGroups = append([]uint16(nil), c.DHGroups...)
 	}
-	for _, group := range cfg.DHGroups {
+	for _, group := range c.DHGroups {
 		if err := validateDHGroup(group); err != nil {
 			return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 		}
 	}
-	if len(cfg.IKEEncryption) == 0 {
-		cfg.IKEEncryption = append([]uint16(nil), defaultEncryption...)
+	if len(c.IKEEncryption) == 0 {
+		c.IKEEncryption = append([]uint16(nil), defaultEncryption...)
 	} else {
-		cfg.IKEEncryption = append([]uint16(nil), cfg.IKEEncryption...)
+		c.IKEEncryption = append([]uint16(nil), c.IKEEncryption...)
 	}
-	if err := validateEncryptionTransforms("ike encryption transforms", cfg.IKEEncryption); err != nil {
+	if err := validateEncryptionTransforms("ike encryption transforms", c.IKEEncryption); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.IKEEncryptionKeyLens) == 0 {
-		cfg.IKEEncryptionKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
+	if len(c.IKEEncryptionKeyLens) == 0 {
+		c.IKEEncryptionKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
 	} else {
-		cfg.IKEEncryptionKeyLens = append([]uint16(nil), cfg.IKEEncryptionKeyLens...)
+		c.IKEEncryptionKeyLens = append([]uint16(nil), c.IKEEncryptionKeyLens...)
 	}
-	if err := validateEncryptionKeyLens("ike encryption key lengths", cfg.IKEEncryptionKeyLens); err != nil {
+	if err := validateEncryptionKeyLens("ike encryption key lengths", c.IKEEncryptionKeyLens); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.IKEEncryptionAESCTRKeyLens) == 0 {
-		cfg.IKEEncryptionAESCTRKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
+	if len(c.IKEEncryptionAESCTRKeyLens) == 0 {
+		c.IKEEncryptionAESCTRKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
 	} else {
-		cfg.IKEEncryptionAESCTRKeyLens = append([]uint16(nil), cfg.IKEEncryptionAESCTRKeyLens...)
+		c.IKEEncryptionAESCTRKeyLens = append([]uint16(nil), c.IKEEncryptionAESCTRKeyLens...)
 	}
-	if err := validateEncryptionKeyLens("ike AES-CTR key lengths", cfg.IKEEncryptionAESCTRKeyLens); err != nil {
+	if err := validateEncryptionKeyLens("ike AES-CTR key lengths", c.IKEEncryptionAESCTRKeyLens); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.IKEIntegrity) == 0 {
-		cfg.IKEIntegrity = append([]uint16(nil), defaultIKEIntegrity...)
+	if len(c.IKEIntegrity) == 0 {
+		c.IKEIntegrity = append([]uint16(nil), defaultIKEIntegrity...)
 	} else {
-		cfg.IKEIntegrity = append([]uint16(nil), cfg.IKEIntegrity...)
+		c.IKEIntegrity = append([]uint16(nil), c.IKEIntegrity...)
 	}
-	if err := validateIntegrityTransforms("ike integrity transforms", cfg.IKEIntegrity); err != nil {
+	if err := validateIntegrityTransforms("ike integrity transforms", c.IKEIntegrity); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.IKEPRF) == 0 {
-		cfg.IKEPRF = append([]uint16(nil), defaultIKEPRF...)
+	if len(c.IKEPRF) == 0 {
+		c.IKEPRF = append([]uint16(nil), defaultIKEPRF...)
 	} else {
-		cfg.IKEPRF = append([]uint16(nil), cfg.IKEPRF...)
+		c.IKEPRF = append([]uint16(nil), c.IKEPRF...)
 	}
-	if err := validatePRFTransforms("ike prf transforms", cfg.IKEPRF); err != nil {
+	if err := validatePRFTransforms("ike prf transforms", c.IKEPRF); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.ChildEncryption) == 0 {
-		cfg.ChildEncryption = append([]uint16(nil), defaultEncryption...)
+	if len(c.ChildEncryption) == 0 {
+		c.ChildEncryption = append([]uint16(nil), defaultEncryption...)
 	} else {
-		cfg.ChildEncryption = append([]uint16(nil), cfg.ChildEncryption...)
+		c.ChildEncryption = append([]uint16(nil), c.ChildEncryption...)
 	}
-	if err := validateEncryptionTransforms("child encryption transforms", cfg.ChildEncryption); err != nil {
+	if err := validateEncryptionTransforms("child encryption transforms", c.ChildEncryption); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.ChildEncryptionKeyLens) == 0 {
-		cfg.ChildEncryptionKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
+	if len(c.ChildEncryptionKeyLens) == 0 {
+		c.ChildEncryptionKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
 	} else {
-		cfg.ChildEncryptionKeyLens = append([]uint16(nil), cfg.ChildEncryptionKeyLens...)
+		c.ChildEncryptionKeyLens = append([]uint16(nil), c.ChildEncryptionKeyLens...)
 	}
-	if err := validateEncryptionKeyLens("child encryption key lengths", cfg.ChildEncryptionKeyLens); err != nil {
+	if err := validateEncryptionKeyLens("child encryption key lengths", c.ChildEncryptionKeyLens); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.ChildEncryptionAESCTRKeyLens) == 0 {
-		cfg.ChildEncryptionAESCTRKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
+	if len(c.ChildEncryptionAESCTRKeyLens) == 0 {
+		c.ChildEncryptionAESCTRKeyLens = append([]uint16(nil), defaultEncryptionKeyLens...)
 	} else {
-		cfg.ChildEncryptionAESCTRKeyLens = append([]uint16(nil), cfg.ChildEncryptionAESCTRKeyLens...)
+		c.ChildEncryptionAESCTRKeyLens = append([]uint16(nil), c.ChildEncryptionAESCTRKeyLens...)
 	}
-	if err := validateEncryptionKeyLens("child AES-CTR key lengths", cfg.ChildEncryptionAESCTRKeyLens); err != nil {
+	if err := validateEncryptionKeyLens("child AES-CTR key lengths", c.ChildEncryptionAESCTRKeyLens); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if len(cfg.ChildIntegrity) == 0 {
-		cfg.ChildIntegrity = append([]uint16(nil), defaultChildIntegrity...)
+	if len(c.ChildIntegrity) == 0 {
+		c.ChildIntegrity = append([]uint16(nil), defaultChildIntegrity...)
 	} else {
-		cfg.ChildIntegrity = append([]uint16(nil), cfg.ChildIntegrity...)
+		c.ChildIntegrity = append([]uint16(nil), c.ChildIntegrity...)
 	}
-	if err := validateIntegrityTransforms("child integrity transforms", cfg.ChildIntegrity); err != nil {
+	if err := validateIntegrityTransforms("child integrity transforms", c.ChildIntegrity); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if cfg.PCSCFIPv4ConfigAttribute == 0 {
-		cfg.PCSCFIPv4ConfigAttribute = configAttrPCSCFIPv4Address
+	if c.PCSCFIPv4ConfigAttribute == 0 {
+		c.PCSCFIPv4ConfigAttribute = configAttrPCSCFIPv4Address
 	}
-	if cfg.PCSCFIPv6ConfigAttribute == 0 {
-		cfg.PCSCFIPv6ConfigAttribute = configAttrPCSCFIPv6Address
+	if c.PCSCFIPv6ConfigAttribute == 0 {
+		c.PCSCFIPv6ConfigAttribute = configAttrPCSCFIPv6Address
 	}
-	if cfg.NATKeepaliveInterval == 0 {
-		cfg.NATKeepaliveInterval = defaultNATKeepaliveInterval
+	if c.NATKeepaliveInterval == 0 {
+		c.NATKeepaliveInterval = defaultNATKeepaliveInterval
 	}
-	if cfg.NATKeepaliveInterval < 0 {
+	if c.NATKeepaliveInterval < 0 {
 		return Config{}, errors.New("normalizing swu config: natt keepalive interval must be >= 0")
 	}
-	if cfg.LivenessTimeout < 0 {
+	if c.LivenessTimeout < 0 {
 		return Config{}, errors.New("normalizing swu config: liveness timeout must be >= 0")
 	}
-	if cfg.LivenessTimeout == 0 {
-		cfg.LivenessTimeout = defaultLivenessTimeout
+	if c.LivenessTimeout == 0 {
+		c.LivenessTimeout = defaultLivenessTimeout
 	}
-	if len(cfg.IKERetransmitDelays) == 0 {
-		cfg.IKERetransmitDelays = append([]time.Duration(nil), defaultIKERetransmitDelays...)
+	if len(c.IKERetransmitDelays) == 0 {
+		c.IKERetransmitDelays = append([]time.Duration(nil), defaultIKERetransmitDelays...)
 	} else {
-		cfg.IKERetransmitDelays = append([]time.Duration(nil), cfg.IKERetransmitDelays...)
+		c.IKERetransmitDelays = append([]time.Duration(nil), c.IKERetransmitDelays...)
 	}
-	if err := validateRetransmitDelays("ike retransmit delays", cfg.IKERetransmitDelays); err != nil {
+	if err := validateRetransmitDelays("ike retransmit delays", c.IKERetransmitDelays); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := normalizeSALifetime("ike sa", &cfg.IKESALifetime, &cfg.IKESARekeyMargin, defaultIKESARekeyHardTimer, defaultIKESARekeyHardTimer-defaultIKESARekeySoftTimer); err != nil {
+	if err := normalizeSALifetime("ike sa", &c.IKESALifetime, &c.IKESARekeyMargin, defaultIKESARekeyHardTimer, defaultIKESARekeyHardTimer-defaultIKESARekeySoftTimer); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := normalizeSAByteLifetime("ike sa", &cfg.IKESAByteLifetime, &cfg.IKESAByteRekeyMargin); err != nil {
+	if err := normalizeSAByteLifetime("ike sa", &c.IKESAByteLifetime, &c.IKESAByteRekeyMargin); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := normalizeSALifetime("child sa", &cfg.ChildSALifetime, &cfg.ChildSARekeyMargin, defaultChildSARekeyHardTimer, defaultChildSARekeyHardTimer-defaultChildSARekeySoftTimer); err != nil {
+	if err := normalizeSALifetime("child sa", &c.ChildSALifetime, &c.ChildSARekeyMargin, defaultChildSARekeyHardTimer, defaultChildSARekeyHardTimer-defaultChildSARekeySoftTimer); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := normalizeSAByteLifetime("child sa", &cfg.ChildSAByteLifetime, &cfg.ChildSAByteRekeyMargin); err != nil {
+	if err := normalizeSAByteLifetime("child sa", &c.ChildSAByteLifetime, &c.ChildSAByteRekeyMargin); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := validatePortRange("natt port", cfg.NATTPort); err != nil {
+	if err := validatePortRange("natt port", c.NATTPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	if err := validatePortRange("sip port", cfg.SIPPort); err != nil {
+	if err := validatePortRange("sip port", c.SIPPort); err != nil {
 		return Config{}, fmt.Errorf("normalizing swu config: %w", err)
 	}
-	return cfg, nil
+	return c, nil
 }
 
-func handshakeConfig(cfg Config) handshake.Config {
+func handshakeConfig(c Config) handshake.Config {
 	return handshake.Config{
-		LocalAddr:                    cfg.LocalAddr,
-		RemoteAddr:                   cfg.RemoteAddr,
-		APN:                          cfg.APN,
-		RequestDefaultAPN:            cfg.RequestDefaultAPN,
-		PDNType:                      cfg.PDNType,
-		InitialPort:                  cfg.InitialPort,
-		NATTPort:                     cfg.NATTPort,
-		DHGroups:                     append([]uint16(nil), cfg.DHGroups...),
-		IKEEncryption:                append([]uint16(nil), cfg.IKEEncryption...),
-		IKEEncryptionKeyLens:         append([]uint16(nil), cfg.IKEEncryptionKeyLens...),
-		IKEEncryptionAESCTRKeyLens:   append([]uint16(nil), cfg.IKEEncryptionAESCTRKeyLens...),
-		IKEIntegrity:                 append([]uint16(nil), cfg.IKEIntegrity...),
-		IKEPRF:                       append([]uint16(nil), cfg.IKEPRF...),
-		ChildEncryption:              append([]uint16(nil), cfg.ChildEncryption...),
-		ChildEncryptionKeyLens:       append([]uint16(nil), cfg.ChildEncryptionKeyLens...),
-		ChildEncryptionAESCTRKeyLens: append([]uint16(nil), cfg.ChildEncryptionAESCTRKeyLens...),
-		ChildIntegrity:               append([]uint16(nil), cfg.ChildIntegrity...),
-		PCSCFIPv4ConfigAttribute:     cfg.PCSCFIPv4ConfigAttribute,
-		PCSCFIPv6ConfigAttribute:     cfg.PCSCFIPv6ConfigAttribute,
-		PCSCFRestoration:             !cfg.DisablePCSCFRestoration,
-		PDUSessionID:                 cfg.PDUSessionID,
-		IPMSIndication:               cfg.EnableIPMSIndication,
-		NATKeepaliveInterval:         cfg.NATKeepaliveInterval,
-		LivenessTimeout:              cfg.LivenessTimeout,
-		IKERetransmitDelays:          append([]time.Duration(nil), cfg.IKERetransmitDelays...),
+		LocalAddr:                    c.LocalAddr,
+		RemoteAddr:                   c.RemoteAddr,
+		APN:                          c.APN,
+		RequestDefaultAPN:            c.RequestDefaultAPN,
+		PDNType:                      c.PDNType,
+		InitialPort:                  c.InitialPort,
+		NATTPort:                     c.NATTPort,
+		DHGroups:                     append([]uint16(nil), c.DHGroups...),
+		IKEEncryption:                append([]uint16(nil), c.IKEEncryption...),
+		IKEEncryptionKeyLens:         append([]uint16(nil), c.IKEEncryptionKeyLens...),
+		IKEEncryptionAESCTRKeyLens:   append([]uint16(nil), c.IKEEncryptionAESCTRKeyLens...),
+		IKEIntegrity:                 append([]uint16(nil), c.IKEIntegrity...),
+		IKEPRF:                       append([]uint16(nil), c.IKEPRF...),
+		ChildEncryption:              append([]uint16(nil), c.ChildEncryption...),
+		ChildEncryptionKeyLens:       append([]uint16(nil), c.ChildEncryptionKeyLens...),
+		ChildEncryptionAESCTRKeyLens: append([]uint16(nil), c.ChildEncryptionAESCTRKeyLens...),
+		ChildIntegrity:               append([]uint16(nil), c.ChildIntegrity...),
+		PCSCFIPv4ConfigAttribute:     c.PCSCFIPv4ConfigAttribute,
+		PCSCFIPv6ConfigAttribute:     c.PCSCFIPv6ConfigAttribute,
+		PCSCFRestoration:             !c.DisablePCSCFRestoration,
+		PDUSessionID:                 c.PDUSessionID,
+		IPMSIndication:               c.EnableIPMSIndication,
+		NATKeepaliveInterval:         c.NATKeepaliveInterval,
+		LivenessTimeout:              c.LivenessTimeout,
+		IKERetransmitDelays:          append([]time.Duration(nil), c.IKERetransmitDelays...),
 	}
 }
 
-func validPDNType(pdnType PDNType) bool {
+func validPDNType(pdnType handshake.PDNType) bool {
 	switch pdnType {
 	case PDNTypeUnspecified, PDNTypeIPv4, PDNTypeIPv6, PDNTypeIPv4v6:
 		return true

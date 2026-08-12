@@ -24,6 +24,7 @@ func (e *pcscfReselectionError) Info() Info {
 }
 
 type pcscfReselectionInfoCarrier interface {
+	error
 	Info() Info
 }
 
@@ -32,8 +33,8 @@ func PCSCFReselectionRequested(err error) bool {
 }
 
 func PCSCFReselectionInfo(err error) (Info, bool) {
-	var carrier pcscfReselectionInfoCarrier
-	if !errors.As(err, &carrier) {
+	carrier, ok := errors.AsType[pcscfReselectionInfoCarrier](err)
+	if !ok {
 		return Info{}, false
 	}
 	return carrier.Info(), true

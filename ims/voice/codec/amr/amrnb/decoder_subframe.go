@@ -153,31 +153,31 @@ func (s *decoderCoreState) decodeSubframeFixed(mode Mode, subframe int, params [
 		if len(params) < 2 {
 			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
-		s.decodeFixed2i40_9bits(int16(subframe), params[1], params[0])
+		s.decodeFixed2I40At9Bits(int16(subframe), params[1], params[0])
 		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode590:
 		if len(params) < 2 {
 			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
-		s.decodeFixed2i40_11bits(params[1], params[0])
+		s.decodeFixed2I40At11Bits(params[1], params[0])
 		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode670:
 		if len(params) < 2 {
 			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
-		s.decodeFixed3i40_14bits(params[1], params[0])
+		s.decodeFixed3I40At14Bits(params[1], params[0])
 		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode740, Mode795:
 		if len(params) < 2 {
 			return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook needs 2 params for mode %d", mode)
 		}
-		s.decodeFixed4i40_17bits(params[1], params[0])
+		s.decodeFixed4I40At17Bits(params[1], params[0])
 		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 2}, nil
 	case Mode1020:
 		if len(params) < 7 {
 			return decodedFixedCodebook{}, errors.New("AMR-NB MR102 fixed codebook needs 7 params")
 		}
-		s.decodeFixed8i40_31bits(params[:7])
+		s.decodeFixed8I40At31Bits(params[:7])
 		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(s.sharp, 1), consumed: 7}, nil
 	case Mode1220:
 		if len(params) < 11 {
@@ -189,7 +189,7 @@ func (s *decoderCoreState) decodeSubframeFixed(mode Mode, subframe int, params [
 		} else {
 			gainPit = dGainPitch(mode, params[0])
 		}
-		s.decodeFixed10i40_35bits(params[1:11])
+		s.decodeFixed10I40At35Bits(params[1:11])
 		return decodedFixedCodebook{pitchSharpness: fxp.Shl16(gainPit, 1), pitchGain: gainPit, consumed: 11}, nil
 	default:
 		return decodedFixedCodebook{}, fmt.Errorf("AMR-NB fixed codebook mode %d is not supported", mode)

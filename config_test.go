@@ -14,7 +14,7 @@ import (
 func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 	tests := []struct {
 		name           string
-		cfg            IMSConfig
+		cfg            ServiceConfig
 		wantIntegrity  []string
 		wantEncryption []string
 		wantModes      []string
@@ -22,17 +22,17 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 	}{
 		{
 			name:    "requires integrity algorithms",
-			cfg:     IMSConfig{IPSecEncryptionAlgorithms: []string{"null"}},
+			cfg:     ServiceConfig{IPSecEncryptionAlgorithms: []string{"null"}},
 			wantErr: "IPsec integrity algorithms are required",
 		},
 		{
 			name:    "requires encryption algorithms",
-			cfg:     IMSConfig{IPSecIntegrityAlgorithms: []string{"hmac-sha-1-96"}},
+			cfg:     ServiceConfig{IPSecIntegrityAlgorithms: []string{"hmac-sha-1-96"}},
 			wantErr: "IPsec encryption algorithms are required",
 		},
 		{
 			name: "normalizes and deduplicates",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				IPSecIntegrityAlgorithms:  []string{" HMAC-SHA1-96 ", "hmac-sha-1-96", "HMAC-SHA2-256-128", "AES-GMAC-US", "null"},
 				IPSecEncryptionAlgorithms: []string{" AES-CBC ", "null", "aes-cbc", "AES-GCM-US"},
 				IPSecModes:                []string{"trans", "UDP-enc-tun"},
@@ -43,7 +43,7 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		},
 		{
 			name: "requires modes",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
 				IPSecEncryptionAlgorithms: []string{"null"},
 			},
@@ -51,7 +51,7 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		},
 		{
 			name: "normalizes configured modes",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
 				IPSecEncryptionAlgorithms: []string{"null"},
 				IPSecModes:                []string{" UDP-ENC-TUN ", "udp-enc-tun"},
@@ -62,7 +62,7 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		},
 		{
 			name: "rejects unsupported integrity",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				IPSecIntegrityAlgorithms:  []string{"hmac-sha-2-512-256"},
 				IPSecEncryptionAlgorithms: []string{"null"},
 			},
@@ -70,7 +70,7 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		},
 		{
 			name: "rejects unsupported encryption",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
 				IPSecEncryptionAlgorithms: []string{"des-ede3-cbc"},
 			},
@@ -78,7 +78,7 @@ func TestIMSConfigNormalizedIPSecAlgorithms(t *testing.T) {
 		},
 		{
 			name: "rejects unsupported mode",
-			cfg: IMSConfig{
+			cfg: ServiceConfig{
 				IPSecIntegrityAlgorithms:  []string{"hmac-sha-1-96"},
 				IPSecEncryptionAlgorithms: []string{"null"},
 				IPSecModes:                []string{"tun"},
@@ -140,7 +140,7 @@ func TestConfigNormalized(t *testing.T) {
 				Logger:   logger,
 				Terminal: TerminalInfo{ID: " 12345 "},
 				Access:   VoWiFi(VoWiFiConfig{}),
-				IMS:      IMSConfig{},
+				IMS:      ServiceConfig{},
 			},
 			wantTerminalID:   "12345",
 			wantEPDG:         "epdg.epc.mnc001.mcc001.pub.3gppnetwork.org",
@@ -206,7 +206,7 @@ func TestConfigNormalized(t *testing.T) {
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					Transport: "udp",
 				},
 			},
@@ -230,7 +230,7 @@ func TestConfigNormalized(t *testing.T) {
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					AccessNetworkInfo:        "IEEE-802.11ac;i-wlan-node-id=aabbcc",
 					PhoneContextDomain:       "ims.example",
 					SIPServerPort:            5070,
@@ -292,7 +292,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "negative sip timer fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					SIPTimers: imssession.TransactionTimers{T1: -time.Second},
 				},
 			},
@@ -302,7 +302,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "negative ims registration retry base fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					RegistrationRetryBase: -time.Second,
 				},
 			},
@@ -312,7 +312,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "negative ims registration retry max fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					RegistrationRetryMax: -time.Second,
 				},
 			},
@@ -322,7 +322,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "ims registration retry max before base fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					RegistrationRetryBase: 10 * time.Second,
 					RegistrationRetryMax:  5 * time.Second,
 				},
@@ -333,7 +333,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "negative sms delivery report timeout fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					SMSDeliveryReportTimeout: -time.Second,
 				},
 			},
@@ -343,7 +343,7 @@ func TestConfigNormalized(t *testing.T) {
 			name: "invalid sip server port fails",
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					SIPServerPort: 70000,
 				},
 			},
@@ -434,7 +434,7 @@ func TestIMSConfigNormalizedUSSDDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := withTestIMSIPSecAlgorithms(IMSConfig{USSDDomain: tt.domain}).Normalized()
+			got, err := withTestIMSIPSecAlgorithms(ServiceConfig{USSDDomain: tt.domain}).Normalized()
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Normalized() error = nil, want non-nil")
@@ -504,7 +504,7 @@ func TestConfigNormalizedIMSUsesTerminalInfo(t *testing.T) {
 					Vendor: "Samsung",
 					Model:  "SM-S921B",
 				},
-				IMS: IMSConfig{
+				IMS: ServiceConfig{
 					UserAgent: "explicit-agent",
 				},
 			},

@@ -29,8 +29,7 @@ func (c *Client) openVoWiFiAccess(ctx context.Context, setup *connectSetup) (*vo
 	}
 	netstack, err := ipsectransport.NewNetstack(setup.tunnel)
 	if err != nil {
-		_ = setup.tunnel.Close()
-		return nil, fmt.Errorf("opening VoWiFi userspace network stack: %w", err)
+		return nil, errors.Join(fmt.Errorf("opening VoWiFi userspace network stack: %w", err), setup.tunnel.Close())
 	}
 	return &voWiFiAccess{
 		session:   setup.tunnel,

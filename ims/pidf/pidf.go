@@ -63,5 +63,6 @@ func Build(entity string, country string) []byte {
 }
 
 func escapeXML(b *bytes.Buffer, text string) {
+	// bytes.Buffer.Write never returns an error.
 	_ = xml.EscapeText(b, []byte(text))
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 	ts43 "github.com/damonto/ts43-go"
 )
 
-const nsdsDefaultEAPAkaRealm = "nai.epc"
+const nsdsDefaultEAPAKARealm = "nai.epc"
 const nsdsActivationRecheckMaxAttempts = 6
 const nsdsActivationRecheckInterval = 5 * time.Second
 
@@ -110,6 +111,7 @@ func (f nsdsFlow) checkOnce(ctx context.Context) (Result, error) {
 		authenticateAKA: f.req.AuthenticateAKA,
 		userAgent:       nsdsUserAgent(device),
 		httpClient:      f.req.HTTPClient,
+		logger:          f.req.logger(),
 	}
 
 	checkCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
@@ -227,7 +229,7 @@ func nsdsIMSIEAP(card Card) (string, error) {
 		}
 		mnc = formatted
 	}
-	return ts43.IMSIEAPIdentity(mcc+mnc, card.IMSI(), nsdsDefaultEAPAkaRealm)
+	return ts43.IMSIEAPIdentity(mcc+mnc, card.IMSI(), nsdsDefaultEAPAKARealm)
 }
 
 func nsdsFormatMNC(imsi string, mncLength int) (string, error) {
@@ -252,6 +254,7 @@ type nsdsClient struct {
 	authenticateAKA AKAAuthenticator
 	userAgent       string
 	httpClient      *http.Client
+	logger          *slog.Logger
 }
 
 const (
@@ -384,8 +387,8 @@ type nsdsStatus struct {
 	LocationChecked bool
 }
 
-func (status nsdsStatus) LocationTCOK() bool {
-	return status.LocationTC.LocationTCOK()
+func (s nsdsStatus) LocationTCOK() bool {
+	return s.LocationTC.LocationTCOK()
 }
 
 func (c nsdsClient) checkLocationAndTC(ctx context.Context, purpose Purpose) (nsdsStatus, error) {
@@ -408,7 +411,7 @@ func (c nsdsClient) checkLocationAndTC(ctx context.Context, purpose Purpose) (ns
 		c.serviceEntitlementRequest(nsdsMessageIDServiceEntitlement),
 	}
 	if purpose != PurposeActivation {
-		requests = append(requests, c.getMSISDNRequest(nsdsMessageIDGetMSISDN))
+		requests = append(requests, c.msisdnRequest(nsdsMessageIDGetMSISDN))
 	}
 
 	responses, err := c.post(ctx, requests)
@@ -498,7 +501,7 @@ func (c nsdsClient) serviceEntitlementRequest(messageID int) nsdsRequest {
 	}
 }
 
-func (c nsdsClient) getMSISDNRequest(messageID int) nsdsRequest {
+func (c nsdsClient) msisdnRequest(messageID int) nsdsRequest {
 	return nsdsRequest{
 		MessageID: messageID,
 		Method:    nsdsMethodGetMSISDN,
@@ -517,8 +520,8 @@ func (c nsdsClient) manageLocationAndTCRequest(messageID int, fingerprint string
 
 type nsdsResponses []nsdsResponse
 
-func (responses nsdsResponses) response(messageID int) nsdsResponse {
-	for _, response := range responses {
+func (rs nsdsResponses) response(messageID int) nsdsResponse {
+	for _, response := range rs {
 		if response.MessageID == messageID {
 			return response
 		}
@@ -530,8 +533,10 @@ func (c nsdsClient) post(ctx context.Context, payload []nsdsRequest) (nsdsRespon
 	var raw bytes.Buffer
 	encoder := gzip.NewWriter(&raw)
 	if err := json.NewEncoder(encoder).Encode(payload); err != nil {
-		_ = encoder.Close()
-		return nil, fmt.Errorf("encoding nsds request: %w", err)
+		return nil, errors.Join(
+			fmt.Errorf("encoding nsds request: %w", err),
+			closeGZIPEncoder(encoder),
+		)
 	}
 	if err := encoder.Close(); err != nil {
 		return nil, fmt.Errorf("compressing nsds request: %w", err)
@@ -557,16 +562,18 @@ func (c nsdsClient) post(ctx context.Context, payload []nsdsRequest) (nsdsRespon
 	if err != nil {
 		return nil, fmt.Errorf("posting nsds request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer logCloseError(c.logger, "closing nsds response body failed", resp.Body)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("posting nsds request: status %s", resp.Status)
 	}
 
-	body, err := nsdsResponseBody(resp)
+	body, bodyCloser, err := nsdsResponseBody(resp)
 	if err != nil {
 		return nil, err
 	}
-	defer body.Close()
+	if bodyCloser != nil {
+		defer logCloseError(c.logger, "closing nsds response decompressor failed", bodyCloser)
+	}
 	var responses nsdsResponses
 	if err := json.NewDecoder(body).Decode(&responses); err != nil {
 		return nil, fmt.Errorf("decoding nsds response: %w", err)
@@ -574,15 +581,22 @@ func (c nsdsClient) post(ctx context.Context, payload []nsdsRequest) (nsdsRespon
 	return responses, nil
 }
 
-func nsdsResponseBody(resp *http.Response) (io.ReadCloser, error) {
+func closeGZIPEncoder(encoder *gzip.Writer) error {
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("closing nsds request encoder: %w", err)
+	}
+	return nil
+}
+
+func nsdsResponseBody(resp *http.Response) (io.Reader, io.Closer, error) {
 	if !strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-		return io.NopCloser(resp.Body), nil
+		return resp.Body, nil, nil
 	}
 	reader, err := gzip.NewReader(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("decompressing nsds response: %w", err)
+		return nil, nil, fmt.Errorf("decompressing nsds response: %w", err)
 	}
-	return reader, nil
+	return reader, reader, nil
 }
 
 func nsdsRequireResponseCode(response nsdsResponse, want int, method string) error {
@@ -613,8 +627,8 @@ func nsdsActivationCheckOptional(purpose Purpose, err error) bool {
 	if purpose != PurposeActivation {
 		return false
 	}
-	var codeErr nsdsResponseCodeError
-	return errors.As(err, &codeErr) &&
+	codeErr, ok := errors.AsType[nsdsResponseCodeError](err)
+	return ok &&
 		!codeErr.Missing &&
 		codeErr.Method == nsdsMethod3GPPAuthentication &&
 		codeErr.Got == nsdsResponseInvalidRequest
@@ -779,8 +793,8 @@ func (a nsdsAIDExpiration) AppendText(dst []byte) ([]byte, error) {
 	return append(dst, a.Time.Format(time.RFC3339Nano)...), nil
 }
 
-func (response nsdsResponse) LocationTCOK() bool {
-	return nsdsBoolOK(response.LocationStatus) && nsdsBoolOK(response.TCStatus)
+func (r nsdsResponse) LocationTCOK() bool {
+	return nsdsBoolOK(r.LocationStatus) && nsdsBoolOK(r.TCStatus)
 }
 
 func nsdsBoolOK(value *bool) bool {

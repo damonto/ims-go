@@ -16,15 +16,16 @@ import (
 )
 
 type Session struct {
-	conn                      net.PacketConn
-	owned                     bool
-	outerRemote               *net.UDPAddr
-	outerNAT                  *net.UDPAddr
-	useNATT                   bool
-	ikeFragmentationSupported bool
-	cfg                       Config
-	logger                    *slog.Logger
-	outerWriteMu              sync.Mutex
+	conn                          net.PacketConn
+	owned                         bool
+	outerRemote                   *net.UDPAddr
+	outerNAT                      *net.UDPAddr
+	useNATT                       bool
+	ikeFragmentationSupported     bool
+	cfg                           Config
+	logger                        *slog.Logger
+	invalidMessageIDNotifyTimeout time.Duration
+	outerWriteMu                  sync.Mutex
 
 	mu sync.RWMutex
 	tunnelConnection
@@ -128,7 +129,7 @@ func ensureDialContext(ctx context.Context, conn net.PacketConn, owned bool) err
 	select {
 	case <-ctx.Done():
 		if owned && conn != nil {
-			_ = conn.Close()
+			return errors.Join(ctx.Err(), conn.Close())
 		}
 		return ctx.Err()
 	default:
@@ -139,14 +140,15 @@ func ensureDialContext(ctx context.Context, conn net.PacketConn, owned bool) err
 func newSession(cfg Config, conn net.PacketConn, owned bool, remote *net.UDPAddr) *Session {
 	useNATT := remote.Port == cfg.NATTPort
 	return &Session{
-		conn:        conn,
-		owned:       owned,
-		outerRemote: remote,
-		outerNAT:    &net.UDPAddr{IP: append(net.IP(nil), remote.IP...), Port: cfg.NATTPort, Zone: remote.Zone},
-		useNATT:     useNATT,
-		cfg:         cfg,
-		logger:      cfg.Logger.With("component", "swu"),
-		closeCh:     make(chan struct{}),
+		conn:                          conn,
+		owned:                         owned,
+		outerRemote:                   remote,
+		outerNAT:                      &net.UDPAddr{IP: append(net.IP(nil), remote.IP...), Port: cfg.NATTPort, Zone: remote.Zone},
+		useNATT:                       useNATT,
+		cfg:                           cfg,
+		logger:                        cfg.Logger.With("component", "swu"),
+		closeCh:                       make(chan struct{}),
+		invalidMessageIDNotifyTimeout: defaultInvalidMessageIDNotifyTimeout,
 		ikeExchangeState: ikeExchangeState{
 			ikeRequestGate: make(chan struct{}, 1),
 			rekeyWake:      make(chan struct{}, 1),
@@ -255,9 +257,9 @@ func (s *Session) isClosed() bool {
 }
 
 func (s *Session) closeSession() {
-	s.closeOnce.Do(func() {
-		close(s.closeCh)
-	})
+	s.attachmentsMu.Lock()
+	defer s.attachmentsMu.Unlock()
+	s.closeOnce.Do(func() { close(s.closeCh) })
 }
 
 func resolveUDPAddr(value string, defaultPort int) (*net.UDPAddr, error) {

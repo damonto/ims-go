@@ -3,6 +3,8 @@ package wfcsetup
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 )
 
 type flow interface {
@@ -11,6 +13,15 @@ type flow interface {
 }
 
 type flowFactory func(Request) (flow, bool, error)
+
+func logCloseError(logger *slog.Logger, action string, closer io.Closer) {
+	if err := closer.Close(); err != nil {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Debug(action, "err", err)
+	}
+}
 
 var flowFactories = []flowFactory{
 	newVZWFlow,
@@ -97,8 +108,7 @@ func wrapResultError(result Result, err error) error {
 	if err == nil {
 		return resultError(result)
 	}
-	var setupErr *Error
-	if errors.As(err, &setupErr) {
+	if _, ok := errors.AsType[*Error](err); ok {
 		return err
 	}
 	return &Error{Err: err, Result: result}

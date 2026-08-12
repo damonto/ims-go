@@ -8,7 +8,7 @@ import (
 
 const natKeepaliveWriteTimeout = 2 * time.Second
 
-var livenessCheckTimeout = 30 * time.Second
+const livenessCheckTimeout = 30 * time.Second
 
 func (s *Session) livenessLoop() {
 	defer s.wg.Done()

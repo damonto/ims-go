@@ -24,7 +24,7 @@ func TestVoWiFiMediaReady(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			if tt.cancel {
 				cancel()
@@ -55,7 +55,7 @@ func TestVoLTEMediaReady(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			if tt.cancel {
 				cancel()
@@ -160,7 +160,7 @@ func TestConfigNormalizedAccess(t *testing.T) {
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoLTE(lte.Config{}),
-				IMS:      IMSConfig{AccessNetworkInfo: testVoLTEPANI},
+				IMS:      ServiceConfig{AccessNetworkInfo: testVoLTEPANI},
 			},
 			wantVoLTE:      true,
 			wantAPN:        lte.DefaultAPN,
@@ -173,7 +173,7 @@ func TestConfigNormalizedAccess(t *testing.T) {
 			cfg: Config{
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoLTE(lte.Config{}),
-				IMS:      IMSConfig{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbccddeeff"},
+				IMS:      ServiceConfig{AccessNetworkInfo: "IEEE-802.11;i-wlan-node-id=aabbccddeeff"},
 			},
 			wantErr: true,
 		},
@@ -338,11 +338,9 @@ func TestLTEInfoFromIMSPDN(t *testing.T) {
 }
 
 func TestOpenVoLTEAccessRequiresReadyIMSPDN(t *testing.T) {
-	previousInterfaceByName := voLTEInterfaceByName
-	voLTEInterfaceByName = func(name string) (*net.Interface, error) {
+	interfaceByName := func(name string) (*net.Interface, error) {
 		return &net.Interface{Name: name, Index: 1}, nil
 	}
-	t.Cleanup(func() { voLTEInterfaceByName = previousInterfaceByName })
 
 	tests := []struct {
 		name    string
@@ -371,13 +369,16 @@ func TestOpenVoLTEAccessRequiresReadyIMSPDN(t *testing.T) {
 						AccessNetworkInfo: testVoLTEPANI,
 					}),
 				},
-				reader: &imsPDNReaderStub{session: session},
+				reader:          &imsPDNReaderStub{session: session},
+				interfaceByName: interfaceByName,
 			}
 
-			access, err := client.openVoLTEAccess(context.Background(), &connectSetup{})
+			access, err := client.openVoLTEAccess(t.Context(), &connectSetup{})
 			if tt.wantErr {
 				if err == nil {
-					_ = access.Close()
+					if closeErr := access.Close(); closeErr != nil {
+						t.Errorf("Close() error = %v", closeErr)
+					}
 					t.Fatal("openVoLTEAccess() error = nil, want non-nil")
 				}
 				if session.closeCalls != 1 {
@@ -409,10 +410,12 @@ func TestVoLTEMediaRejectsKnownUnsupportedVoPS(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			access := &voLTEAccess{info: tt.info}
-			transport, err := access.openMedia(context.Background(), imsvoice.MediaConfig{})
+			transport, err := access.openMedia(t.Context(), imsvoice.MediaConfig{})
 			if err == nil {
 				if transport != nil {
-					_ = transport.Close()
+					if closeErr := transport.Close(); closeErr != nil {
+						t.Errorf("Close() error = %v", closeErr)
+					}
 				}
 				t.Fatal("openMedia() error = nil, want VoPS unavailable error")
 			}
@@ -451,10 +454,12 @@ func TestVoLTEMediaUsesRegisteredSIPFamily(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			access := &voLTEAccess{info: tt.info, sipLocalIP: tt.sipLocalIP}
-			transport, err := access.openMedia(context.Background(), imsvoice.MediaConfig{RemoteIP: tt.remoteIP})
+			transport, err := access.openMedia(t.Context(), imsvoice.MediaConfig{RemoteIP: tt.remoteIP})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				if transport != nil {
-					_ = transport.Close()
+					if closeErr := transport.Close(); closeErr != nil {
+						t.Errorf("Close() error = %v", closeErr)
+					}
 				}
 				t.Fatalf("openMedia() error = %v, want containing %q", err, tt.wantErr)
 			}

@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"encoding"
+	"errors"
 	"fmt"
 )
 
@@ -12,15 +13,15 @@ var (
 	_ encoding.BinaryAppender    = n1ModeInformationNotifyData{}
 	_ encoding.BinaryMarshaler   = n1ModeInformationNotifyData{}
 	_ encoding.BinaryUnmarshaler = (*n1ModeInformationNotifyData)(nil)
-	_ encoding.BinaryAppender    = n1ModeSNSSAIPlmnIDNotifyData{}
-	_ encoding.BinaryMarshaler   = n1ModeSNSSAIPlmnIDNotifyData{}
-	_ encoding.BinaryUnmarshaler = (*n1ModeSNSSAIPlmnIDNotifyData)(nil)
+	_ encoding.BinaryAppender    = n1ModeSNSSAIPLMNIDNotifyData{}
+	_ encoding.BinaryMarshaler   = n1ModeSNSSAIPLMNIDNotifyData{}
+	_ encoding.BinaryUnmarshaler = (*n1ModeSNSSAIPLMNIDNotifyData)(nil)
 )
 
 const (
 	n1ModeValueLenFieldLen = 1
 	n1ModePDUSessionIDLen  = 1
-	n1ModePlmnIDLen        = 3
+	n1ModePLMNIDLen        = 3
 )
 
 type n1ModeCapabilityNotifyData struct {
@@ -33,7 +34,7 @@ func (d n1ModeCapabilityNotifyData) MarshalBinary() ([]byte, error) {
 
 func (d n1ModeCapabilityNotifyData) AppendBinary(dst []byte) ([]byte, error) {
 	if d.PDUSessionID == 0 {
-		return nil, fmt.Errorf("encoding N1_MODE_CAPABILITY notify: pdu session id is unset")
+		return nil, errors.New("encoding N1_MODE_CAPABILITY notify: pdu session id is unset")
 	}
 	return append(dst, n1ModePDUSessionIDLen, d.PDUSessionID), nil
 }
@@ -46,7 +47,7 @@ func (d *n1ModeCapabilityNotifyData) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("parsing N1_MODE_CAPABILITY notify: value length %d does not match %d", data[0], n1ModePDUSessionIDLen)
 	}
 	if data[1] == 0 {
-		return fmt.Errorf("parsing N1_MODE_CAPABILITY notify: pdu session id is unset")
+		return errors.New("parsing N1_MODE_CAPABILITY notify: pdu session id is unset")
 	}
 	d.PDUSessionID = data[1]
 	return nil
@@ -81,29 +82,29 @@ func (d *n1ModeInformationNotifyData) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-type n1ModeSNSSAIPlmnIDNotifyData struct {
+type n1ModeSNSSAIPLMNIDNotifyData struct {
 	PLMNID []byte
 }
 
-func (d n1ModeSNSSAIPlmnIDNotifyData) MarshalBinary() ([]byte, error) {
+func (d n1ModeSNSSAIPLMNIDNotifyData) MarshalBinary() ([]byte, error) {
 	return d.AppendBinary(nil)
 }
 
-func (d n1ModeSNSSAIPlmnIDNotifyData) AppendBinary(dst []byte) ([]byte, error) {
-	if len(d.PLMNID) != n1ModePlmnIDLen {
-		return nil, fmt.Errorf("encoding N1_MODE_S_NSSAI_PLMN_ID notify: plmn id length %d does not match %d", len(d.PLMNID), n1ModePlmnIDLen)
+func (d n1ModeSNSSAIPLMNIDNotifyData) AppendBinary(dst []byte) ([]byte, error) {
+	if len(d.PLMNID) != n1ModePLMNIDLen {
+		return nil, fmt.Errorf("encoding N1_MODE_S_NSSAI_PLMN_ID notify: plmn id length %d does not match %d", len(d.PLMNID), n1ModePLMNIDLen)
 	}
-	dst = append(dst, n1ModePlmnIDLen)
+	dst = append(dst, n1ModePLMNIDLen)
 	dst = append(dst, d.PLMNID...)
 	return dst, nil
 }
 
-func (d *n1ModeSNSSAIPlmnIDNotifyData) UnmarshalBinary(data []byte) error {
-	if len(data) != n1ModeValueLenFieldLen+n1ModePlmnIDLen {
-		return fmt.Errorf("parsing N1_MODE_S_NSSAI_PLMN_ID notify: data length %d does not match %d", len(data), n1ModeValueLenFieldLen+n1ModePlmnIDLen)
+func (d *n1ModeSNSSAIPLMNIDNotifyData) UnmarshalBinary(data []byte) error {
+	if len(data) != n1ModeValueLenFieldLen+n1ModePLMNIDLen {
+		return fmt.Errorf("parsing N1_MODE_S_NSSAI_PLMN_ID notify: data length %d does not match %d", len(data), n1ModeValueLenFieldLen+n1ModePLMNIDLen)
 	}
-	if data[0] != n1ModePlmnIDLen {
-		return fmt.Errorf("parsing N1_MODE_S_NSSAI_PLMN_ID notify: value length %d does not match %d", data[0], n1ModePlmnIDLen)
+	if data[0] != n1ModePLMNIDLen {
+		return fmt.Errorf("parsing N1_MODE_S_NSSAI_PLMN_ID notify: value length %d does not match %d", data[0], n1ModePLMNIDLen)
 	}
 	d.PLMNID = append([]byte(nil), data[n1ModeValueLenFieldLen:]...)
 	return nil

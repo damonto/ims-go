@@ -186,17 +186,17 @@ func ispToAzOrder(isp []int16, order int, adaptiveScaling bool) ([lpcOrder16k + 
 	nc := order / 2
 
 	if nc > lpcOrder/2 {
-		f1 = getISPPolynomial16k(isp, nc)
+		f1 = ispPolynomial16k(isp, nc)
 		for i := 0; i <= nc; i++ {
 			f1[i] = fxp.Shl32(f1[i], 2)
 		}
-		f2 = getISPPolynomial16k(isp[1:], nc-1)
+		f2 = ispPolynomial16k(isp[1:], nc-1)
 		for i := 0; i <= nc-1; i++ {
 			f2[i] = fxp.Shl32(f2[i], 2)
 		}
 	} else {
-		f1 = getISPPolynomial(isp, nc)
-		f2 = getISPPolynomial(isp[1:], nc-1)
+		f1 = ispPolynomial(isp, nc)
+		f2 = ispPolynomial(isp[1:], nc-1)
 	}
 	for i := nc - 1; i > 1; i-- {
 		f2[i] -= f2[i-2]
@@ -248,7 +248,7 @@ func ispToAzOrder(isp []int16, order int, adaptiveScaling bool) ([lpcOrder16k + 
 	return a, nil
 }
 
-func getISPPolynomial(isp []int16, n int) [lpcOrder16k/2 + 1]int32 {
+func ispPolynomial(isp []int16, n int) [lpcOrder16k/2 + 1]int32 {
 	var f [lpcOrder16k/2 + 1]int32
 	f[0] = 0x00800000
 	f[1] = -int32(isp[0]) << 9
@@ -271,7 +271,7 @@ func getISPPolynomial(isp []int16, n int) [lpcOrder16k/2 + 1]int32 {
 	return f
 }
 
-func getISPPolynomial16k(isp []int16, n int) [lpcOrder16k/2 + 1]int32 {
+func ispPolynomial16k(isp []int16, n int) [lpcOrder16k/2 + 1]int32 {
 	var f [lpcOrder16k/2 + 1]int32
 	f[0] = 0x00200000
 	f[1] = -int32(isp[0]) << 7

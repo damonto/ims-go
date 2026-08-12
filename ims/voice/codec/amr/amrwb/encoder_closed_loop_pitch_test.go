@@ -59,7 +59,7 @@ func TestPitchFR4FindsSyntheticLag(t *testing.T) {
 		period+8,
 		0,
 		pitchMin,
-		pitchFrac1_9b,
+		pitchFrac1At9Bits,
 	)
 
 	if err != nil {

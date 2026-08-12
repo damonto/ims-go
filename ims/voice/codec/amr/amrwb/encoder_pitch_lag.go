@@ -11,19 +11,19 @@ func encodePitchLag(t0 int16, t0Frac int16, nbits int16, pitFlag int16, state pi
 	var index int16
 	if pitFlag == 0 {
 		if nbits <= nBits885 {
-			if t0 < pitchFrac1_8b {
+			if t0 < pitchFrac1At8Bits {
 				index = (t0 << 1) + (t0Frac >> 1) - (pitchMin << 1)
 			} else {
-				index = (t0 - pitchFrac1_8b) + ((pitchFrac1_8b - pitchMin) * 2)
+				index = (t0 - pitchFrac1At8Bits) + ((pitchFrac1At8Bits - pitchMin) * 2)
 			}
 		} else if t0 < pitchFrac2 {
 			index = ((t0 << 2) + t0Frac) - (pitchMin << 2)
-		} else if t0 < pitchFrac1_9b {
+		} else if t0 < pitchFrac1At9Bits {
 			index = ((t0 << 1) + (t0Frac >> 1)) - (pitchFrac2 << 1)
 			index += (pitchFrac2 - pitchMin) << 2
 		} else {
-			index = (t0 - pitchFrac1_9b) + ((pitchFrac2 - pitchMin) << 2)
-			index += (pitchFrac1_9b - pitchFrac2) << 1
+			index = (t0 - pitchFrac1At9Bits) + ((pitchFrac2 - pitchMin) << 2)
+			index += (pitchFrac1At9Bits - pitchFrac2) << 1
 		}
 
 		state.t0Min = t0 - 8

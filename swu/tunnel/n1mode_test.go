@@ -85,7 +85,7 @@ func TestN1ModeInformationNotifyDataBinary(t *testing.T) {
 	}
 }
 
-func TestN1ModeSNSSAIPlmnIDNotifyDataBinary(t *testing.T) {
+func TestN1ModeSNSSAIPLMNIDNotifyDataBinary(t *testing.T) {
 	tests := []struct {
 		name    string
 		wire    []byte
@@ -99,7 +99,7 @@ func TestN1ModeSNSSAIPlmnIDNotifyDataBinary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got n1ModeSNSSAIPlmnIDNotifyData
+			var got n1ModeSNSSAIPLMNIDNotifyData
 			err := got.UnmarshalBinary(tt.wire)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {

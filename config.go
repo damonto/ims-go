@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/damonto/ims-go/ims/pidf"
+	"github.com/damonto/ims-go/ims/registration"
 	"github.com/damonto/ims-go/ims/security"
 	imssession "github.com/damonto/ims-go/ims/session"
 	imssms "github.com/damonto/ims-go/ims/sms"
@@ -23,7 +24,7 @@ type Config struct {
 	ReconnectMaxDelay time.Duration
 	Terminal          TerminalInfo
 	Access            AccessConfig
-	IMS               IMSConfig
+	IMS               ServiceConfig
 
 	smsRequestStatusReport bool
 }
@@ -38,18 +39,18 @@ type TerminalInfo struct {
 	HardwareSKU     string
 }
 
-func (terminal TerminalInfo) trimmed() TerminalInfo {
-	terminal.ID = strings.TrimSpace(terminal.ID)
-	terminal.Vendor = strings.TrimSpace(terminal.Vendor)
-	terminal.Model = strings.TrimSpace(terminal.Model)
-	terminal.SoftwareVersion = strings.TrimSpace(terminal.SoftwareVersion)
-	terminal.Build = strings.TrimSpace(terminal.Build)
-	terminal.Type = strings.TrimSpace(terminal.Type)
-	terminal.HardwareSKU = strings.TrimSpace(terminal.HardwareSKU)
-	return terminal
+func (ti TerminalInfo) trimmed() TerminalInfo {
+	ti.ID = strings.TrimSpace(ti.ID)
+	ti.Vendor = strings.TrimSpace(ti.Vendor)
+	ti.Model = strings.TrimSpace(ti.Model)
+	ti.SoftwareVersion = strings.TrimSpace(ti.SoftwareVersion)
+	ti.Build = strings.TrimSpace(ti.Build)
+	ti.Type = strings.TrimSpace(ti.Type)
+	ti.HardwareSKU = strings.TrimSpace(ti.HardwareSKU)
+	return ti
 }
 
-type IMSConfig struct {
+type ServiceConfig struct {
 	Transport             string
 	PrivateIdentity       string
 	PublicIdentity        string
@@ -66,7 +67,7 @@ type IMSConfig struct {
 	RegistrationRetryMax  time.Duration
 	// RegistrationGroup enables RFC 5626 multiple registration. Share the
 	// same group between Clients that use the same USIM and IMS identity.
-	RegistrationGroup *RegistrationGroup
+	RegistrationGroup *registration.Group
 	// RegistrationID is the stable reg-id for this access flow.
 	RegistrationID uint32
 	// RegistrationPreference is both the local queue priority and Contact q
@@ -86,65 +87,65 @@ type IMSConfig struct {
 	Voice                     imsvoice.Config
 }
 
-func cloneConfig(cfg *Config) Config {
-	if cfg == nil {
+func cloneConfig(c *Config) Config {
+	if c == nil {
 		return Config{}
 	}
-	cloned := *cfg
-	cloned.Access = cfg.Access.clone()
+	cloned := *c
+	cloned.Access = c.Access.clone()
 	return cloned
 }
 
-func (cfg AccessConfig) clone() AccessConfig {
-	if cfg.VoWiFi != nil {
-		wifi := *cfg.VoWiFi
-		cfg.VoWiFi = &wifi
+func (c AccessConfig) clone() AccessConfig {
+	if c.VoWiFi != nil {
+		wifi := *c.VoWiFi
+		c.VoWiFi = &wifi
 	}
-	if cfg.VoLTE != nil {
-		volte := *cfg.VoLTE
-		cfg.VoLTE = &volte
+	if c.VoLTE != nil {
+		volte := *c.VoLTE
+		c.VoLTE = &volte
 	}
-	return cfg
+	return c
 }
 
-func (cfg Config) normalized(card Card) (Config, error) {
-	cfg = cfg.trimmed()
+func (c Config) normalized(card Card) (Config, error) {
+	c = c.trimmed()
 
-	if err := cfg.validate(); err != nil {
+	if err := c.validate(); err != nil {
 		return Config{}, err
 	}
 
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+	if c.Logger == nil {
+		c.Logger = slog.Default()
 	}
-	if cfg.ReconnectDelay == 0 {
-		cfg.ReconnectDelay = defaultReconnectDelay
+	if c.ReconnectDelay == 0 {
+		c.ReconnectDelay = defaultReconnectDelay
 	}
-	if cfg.ReconnectMaxDelay == 0 {
-		cfg.ReconnectMaxDelay = max(defaultReconnectMaxDelay, cfg.ReconnectDelay)
+	if c.ReconnectMaxDelay == 0 {
+		c.ReconnectMaxDelay = max(defaultReconnectMaxDelay, c.ReconnectDelay)
 	}
-	if cfg.ReconnectDelay > cfg.ReconnectMaxDelay {
+	if c.ReconnectDelay > c.ReconnectMaxDelay {
 		return Config{}, errors.New("normalizing client config: reconnect max delay must be >= reconnect delay")
 	}
 
-	cfg.Terminal = cfg.Terminal.trimmed()
-	if cfg.Terminal.ID == "" {
+	c.Terminal = c.Terminal.trimmed()
+	if c.Terminal.ID == "" {
 		return Config{}, errors.New("normalizing client config: terminal id is empty")
 	}
-	cfg.smsRequestStatusReport = true
-	accessCfg, err := cfg.Access.normalized()
+	c.smsRequestStatusReport = true
+	accessCfg, err := c.Access.normalized()
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.Access = accessCfg
+	c.Access = accessCfg
 
 	profile, ok, err := loadIMSProfile(card)
 	if err != nil {
 		return Config{}, err
 	}
 	if ok {
-		cfg = cfg.withIMSProfile(profile, card)
-		cfg.Logger.Debug(
+		c = c.withIMSProfile(profile, card)
+		c.Logger.Debug(
 			"IMS carrier profile selected",
 			"mcc", profile.MCC,
 			"mnc", profile.MNC,
@@ -157,63 +158,63 @@ func (cfg Config) normalized(card Card) (Config, error) {
 		)
 	}
 
-	if cfg.usesVoWiFi() {
-		if cfg.Access.VoWiFi.EPDG == "" {
+	if c.usesVoWiFi() {
+		if c.Access.VoWiFi.EPDG == "" {
 			epdg, err := defaultEPDGAddress(card)
 			if err != nil {
 				return Config{}, err
 			}
-			cfg.Access.VoWiFi.EPDG = epdg
+			c.Access.VoWiFi.EPDG = epdg
 		}
 	}
 
-	imsCfg, err := cfg.normalizedIMS()
+	imsCfg, err := c.normalizedIMS()
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.IMS = imsCfg
+	c.IMS = imsCfg
 
-	if cfg.usesVoWiFi() {
-		tunnelCfg, err := cfg.normalizedTunnel()
+	if c.usesVoWiFi() {
+		tunnelCfg, err := c.normalizedTunnel()
 		if err != nil {
 			return Config{}, err
 		}
-		cfg.Access.VoWiFi.Tunnel = tunnelCfg
+		c.Access.VoWiFi.Tunnel = tunnelCfg
 	}
 
-	return cfg, nil
+	return c, nil
 }
 
-func (cfg Config) trimmed() Config {
-	cfg.Terminal = cfg.Terminal.trimmed()
-	if cfg.Access.VoWiFi != nil {
-		wifi := *cfg.Access.VoWiFi
+func (c Config) trimmed() Config {
+	c.Terminal = c.Terminal.trimmed()
+	if c.Access.VoWiFi != nil {
+		wifi := *c.Access.VoWiFi
 		wifi.EPDG = strings.TrimSpace(wifi.EPDG)
-		cfg.Access.VoWiFi = &wifi
+		c.Access.VoWiFi = &wifi
 	}
-	return cfg
+	return c
 }
 
-func (cfg Config) validate() error {
-	if cfg.ReconnectDelay < 0 {
+func (c Config) validate() error {
+	if c.ReconnectDelay < 0 {
 		return errors.New("normalizing client config: reconnect delay must be >= 0")
 	}
-	if cfg.ReconnectMaxDelay < 0 {
+	if c.ReconnectMaxDelay < 0 {
 		return errors.New("normalizing client config: reconnect max delay must be >= 0")
 	}
 	return nil
 }
 
-func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
-	tunnelCfg := cfg.Access.VoWiFi.Tunnel
-	if cfg.Access.VoWiFi.Underlay != nil && tunnelCfg.PacketConn == nil && tunnelCfg.ListenPacket == nil {
-		tunnelCfg.ListenPacket = cfg.Access.VoWiFi.Underlay.ListenPacket
+func (c Config) normalizedTunnel() (tunnel.Config, error) {
+	tunnelCfg := c.Access.VoWiFi.Tunnel
+	if c.Access.VoWiFi.Underlay != nil && tunnelCfg.PacketConn == nil && tunnelCfg.ListenPacket == nil {
+		tunnelCfg.ListenPacket = c.Access.VoWiFi.Underlay.ListenPacket
 	}
 	if tunnelCfg.Logger == nil {
-		tunnelCfg.Logger = cfg.Logger
+		tunnelCfg.Logger = c.Logger
 	}
-	if tunnelCfg.SIPPort == 0 && cfg.IMS.SIPServerPort != 0 {
-		tunnelCfg.SIPPort = cfg.IMS.SIPServerPort
+	if tunnelCfg.SIPPort == 0 && c.IMS.SIPServerPort != 0 {
+		tunnelCfg.SIPPort = c.IMS.SIPServerPort
 	}
 	tunnelCfg, err := tunnelCfg.Normalized()
 	if err != nil {
@@ -222,36 +223,36 @@ func (cfg Config) normalizedTunnel() (tunnel.Config, error) {
 	return tunnelCfg, nil
 }
 
-func (cfg Config) normalizedIMS() (IMSConfig, error) {
-	imsCfg := cfg.IMS
+func (c Config) normalizedIMS() (ServiceConfig, error) {
+	imsCfg := c.IMS
 	if imsCfg.IMEI == "" {
-		imsCfg.IMEI = cfg.Terminal.trimmed().ID
+		imsCfg.IMEI = c.Terminal.trimmed().ID
 	}
 	var epdg string
-	if cfg.usesVoWiFi() {
-		epdg = strings.TrimSpace(cfg.Access.VoWiFi.EPDG)
+	if c.usesVoWiFi() {
+		epdg = strings.TrimSpace(c.Access.VoWiFi.EPDG)
 	}
 	// Over ePDG/SWu we default to TCP for SIP, matching the pre-refactor
 	// behavior and avoiding large initial REGISTER requests over UDP.
 	if strings.TrimSpace(imsCfg.Transport) == "" && epdg != "" {
 		imsCfg.Transport = "tcp"
 	}
-	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && cfg.usesVoLTE() {
-		imsCfg.AccessNetworkInfo = cfg.Access.VoLTE.AccessNetworkInfo
+	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && c.usesVoLTE() {
+		imsCfg.AccessNetworkInfo = c.Access.VoLTE.AccessNetworkInfo
 	}
 	if strings.TrimSpace(imsCfg.AccessNetworkInfo) == "" && strings.TrimSpace(imsCfg.WLANNodeID) == "" && epdg != "" {
 		imsCfg.AccessNetworkInfo = "IEEE-802.11"
 	}
 	if imsCfg.RegistrationGroup != nil {
 		switch {
-		case cfg.usesVoWiFi():
+		case c.usesVoWiFi():
 			if imsCfg.RegistrationID == 0 {
 				imsCfg.RegistrationID = defaultVoWiFiRegistrationID
 			}
 			if imsCfg.RegistrationPreference == 0 {
 				imsCfg.RegistrationPreference = defaultVoWiFiRegistrationPreference
 			}
-		case cfg.usesVoLTE():
+		case c.usesVoLTE():
 			if imsCfg.RegistrationID == 0 {
 				imsCfg.RegistrationID = defaultVoLTERegistrationID
 			}
@@ -262,156 +263,156 @@ func (cfg Config) normalizedIMS() (IMSConfig, error) {
 	}
 	imsCfg, err := imsCfg.Normalized()
 	if err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	if cfg.usesVoLTE() && imsCfg.AccessNetworkInfo == "" {
-		return IMSConfig{}, errors.New("normalizing ims config: access network info is required for VoLTE")
+	if c.usesVoLTE() && imsCfg.AccessNetworkInfo == "" {
+		return ServiceConfig{}, errors.New("normalizing ims config: access network info is required for VoLTE")
 	}
-	if cfg.usesVoLTE() {
+	if c.usesVoLTE() {
 		imsCfg.AccessNetworkInfo, err = lte.NormalizeAccessNetworkInfo(imsCfg.AccessNetworkInfo)
 		if err != nil {
-			return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+			return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 		}
 	}
 	return imsCfg, nil
 }
 
-func (cfg IMSConfig) Normalized() (IMSConfig, error) {
-	cfg.Transport = strings.ToLower(strings.TrimSpace(cfg.Transport))
-	cfg.PrivateIdentity = strings.TrimSpace(cfg.PrivateIdentity)
-	cfg.PublicIdentity = strings.TrimSpace(cfg.PublicIdentity)
-	cfg.HomeDomain = strings.TrimSpace(cfg.HomeDomain)
-	cfg.PhoneContextDomain = strings.TrimSpace(cfg.PhoneContextDomain)
-	cfg.USSDLanguage = strings.TrimSpace(cfg.USSDLanguage)
-	cfg.USSDDomain = strings.ToLower(strings.TrimSpace(cfg.USSDDomain))
-	cfg.UserAgent = strings.TrimSpace(cfg.UserAgent)
-	cfg.AccessNetworkInfo = strings.TrimSpace(cfg.AccessNetworkInfo)
-	cfg.WLANNodeID = strings.TrimSpace(cfg.WLANNodeID)
-	cfg.ServiceCenter = strings.TrimSpace(cfg.ServiceCenter)
-	cfg.IMEI = strings.TrimSpace(cfg.IMEI)
-	cfg.AuthAlgorithm = strings.TrimSpace(cfg.AuthAlgorithm)
+func (c ServiceConfig) Normalized() (ServiceConfig, error) {
+	c.Transport = strings.ToLower(strings.TrimSpace(c.Transport))
+	c.PrivateIdentity = strings.TrimSpace(c.PrivateIdentity)
+	c.PublicIdentity = strings.TrimSpace(c.PublicIdentity)
+	c.HomeDomain = strings.TrimSpace(c.HomeDomain)
+	c.PhoneContextDomain = strings.TrimSpace(c.PhoneContextDomain)
+	c.USSDLanguage = strings.TrimSpace(c.USSDLanguage)
+	c.USSDDomain = strings.ToLower(strings.TrimSpace(c.USSDDomain))
+	c.UserAgent = strings.TrimSpace(c.UserAgent)
+	c.AccessNetworkInfo = strings.TrimSpace(c.AccessNetworkInfo)
+	c.WLANNodeID = strings.TrimSpace(c.WLANNodeID)
+	c.ServiceCenter = strings.TrimSpace(c.ServiceCenter)
+	c.IMEI = strings.TrimSpace(c.IMEI)
+	c.AuthAlgorithm = strings.TrimSpace(c.AuthAlgorithm)
 	var err error
-	cfg.IPSecIntegrityAlgorithms, err = security.NormalizeIPSecIntegrityAlgorithms(cfg.IPSecIntegrityAlgorithms)
+	c.IPSecIntegrityAlgorithms, err = security.NormalizeIPSecIntegrityAlgorithms(c.IPSecIntegrityAlgorithms)
 	if err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	cfg.IPSecEncryptionAlgorithms, err = security.NormalizeIPSecEncryptionAlgorithms(cfg.IPSecEncryptionAlgorithms)
+	c.IPSecEncryptionAlgorithms, err = security.NormalizeIPSecEncryptionAlgorithms(c.IPSecEncryptionAlgorithms)
 	if err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	cfg.IPSecModes, err = security.NormalizeIPSecModes(cfg.IPSecModes)
+	c.IPSecModes, err = security.NormalizeIPSecModes(c.IPSecModes)
 	if err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	cfg.GeolocationPIDFRegister = pidf.NormalizeTypes(cfg.GeolocationPIDFRegister)
-	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
-	cfg.Voice.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.Voice.GeolocationCountry))
-	if cfg.GeolocationCountry == "" {
-		cfg.GeolocationCountry = cfg.Voice.GeolocationCountry
+	c.GeolocationPIDFRegister = pidf.NormalizeTypes(c.GeolocationPIDFRegister)
+	c.GeolocationCountry = strings.ToUpper(strings.TrimSpace(c.GeolocationCountry))
+	c.Voice.GeolocationCountry = strings.ToUpper(strings.TrimSpace(c.Voice.GeolocationCountry))
+	if c.GeolocationCountry == "" {
+		c.GeolocationCountry = c.Voice.GeolocationCountry
 	}
-	if cfg.Voice.GeolocationCountry == "" {
-		cfg.Voice.GeolocationCountry = cfg.GeolocationCountry
+	if c.Voice.GeolocationCountry == "" {
+		c.Voice.GeolocationCountry = c.GeolocationCountry
 	}
-	if cfg.UseTelURIForPIDFXML {
-		cfg.Voice.UseTelURIForPIDFXML = true
+	if c.UseTelURIForPIDFXML {
+		c.Voice.UseTelURIForPIDFXML = true
 	}
-	if geolocationPIDFConfigured(cfg) && cfg.GeolocationCountry == "" {
-		cfg.GeolocationCountry = "US"
-		cfg.Voice.GeolocationCountry = "US"
+	if geolocationPIDFConfigured(c) && c.GeolocationCountry == "" {
+		c.GeolocationCountry = "US"
+		c.Voice.GeolocationCountry = "US"
 	}
-	if cfg.GeolocationCountry != "" && len(cfg.GeolocationCountry) != 2 {
-		return IMSConfig{}, errors.New("normalizing ims config: geolocation country must be two letters")
+	if c.GeolocationCountry != "" && len(c.GeolocationCountry) != 2 {
+		return ServiceConfig{}, errors.New("normalizing ims config: geolocation country must be two letters")
 	}
-	timers, err := cfg.SIPTimers.Normalized()
+	timers, err := c.SIPTimers.Normalized()
 	if err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	cfg.SIPTimers = timers
-	if cfg.Transport == "" {
-		cfg.Transport = "udp"
+	c.SIPTimers = timers
+	if c.Transport == "" {
+		c.Transport = "udp"
 	}
-	switch cfg.Transport {
+	switch c.Transport {
 	case "udp", "tcp":
 	default:
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported transport %q", cfg.Transport)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: unsupported transport %q", c.Transport)
 	}
-	if cfg.RegisterExpires < 0 {
-		return IMSConfig{}, errors.New("normalizing ims config: register expires must be >= 0")
+	if c.RegisterExpires < 0 {
+		return ServiceConfig{}, errors.New("normalizing ims config: register expires must be >= 0")
 	}
-	if cfg.RegisterExpires == 0 {
-		cfg.RegisterExpires = 600000 * time.Second
+	if c.RegisterExpires == 0 {
+		c.RegisterExpires = 600000 * time.Second
 	}
-	if cfg.USSDDomain == "" {
-		cfg.USSDDomain = string(imsussd.DomainIMS)
+	if c.USSDDomain == "" {
+		c.USSDDomain = string(imsussd.DomainIMS)
 	}
-	switch imsussd.Domain(cfg.USSDDomain) {
+	switch imsussd.Domain(c.USSDDomain) {
 	case imsussd.DomainIMS, imsussd.DomainCS, imsussd.DomainDisabled:
 	default:
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported ussd domain %q", cfg.USSDDomain)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: unsupported ussd domain %q", c.USSDDomain)
 	}
-	if cfg.AuthAlgorithm == "" {
-		cfg.AuthAlgorithm = security.AlgorithmAKAv1MD5
+	if c.AuthAlgorithm == "" {
+		c.AuthAlgorithm = security.AlgorithmAKAv1MD5
 	} else {
-		algorithm, ok := security.NormalizeAKAAlgorithm(cfg.AuthAlgorithm)
+		algorithm, ok := security.NormalizeAKAAlgorithm(c.AuthAlgorithm)
 		if !ok {
-			return IMSConfig{}, fmt.Errorf("normalizing ims config: unsupported AKA algorithm %q", cfg.AuthAlgorithm)
+			return ServiceConfig{}, fmt.Errorf("normalizing ims config: unsupported AKA algorithm %q", c.AuthAlgorithm)
 		}
 		if algorithm == security.AlgorithmAKAv2MD5 {
-			return IMSConfig{}, errors.New("normalizing ims config: AKAv2-MD5 is not a valid IMS REGISTER bootstrap algorithm")
+			return ServiceConfig{}, errors.New("normalizing ims config: AKAv2-MD5 is not a valid IMS REGISTER bootstrap algorithm")
 		}
-		cfg.AuthAlgorithm = algorithm
+		c.AuthAlgorithm = algorithm
 	}
-	if cfg.RegistrationRetryBase < 0 {
-		return IMSConfig{}, errors.New("normalizing ims config: registration retry base must be >= 0")
+	if c.RegistrationRetryBase < 0 {
+		return ServiceConfig{}, errors.New("normalizing ims config: registration retry base must be >= 0")
 	}
-	if cfg.RegistrationRetryMax < 0 {
-		return IMSConfig{}, errors.New("normalizing ims config: registration retry max must be >= 0")
+	if c.RegistrationRetryMax < 0 {
+		return ServiceConfig{}, errors.New("normalizing ims config: registration retry max must be >= 0")
 	}
-	if cfg.RegistrationRetryBase == 0 {
-		cfg.RegistrationRetryBase = defaultIMSRegistrationRetryBase
+	if c.RegistrationRetryBase == 0 {
+		c.RegistrationRetryBase = defaultIMSRegistrationRetryBase
 	}
-	if cfg.RegistrationRetryMax == 0 {
-		cfg.RegistrationRetryMax = max(defaultIMSRegistrationRetryMax, cfg.RegistrationRetryBase)
+	if c.RegistrationRetryMax == 0 {
+		c.RegistrationRetryMax = max(defaultIMSRegistrationRetryMax, c.RegistrationRetryBase)
 	}
-	if cfg.RegistrationRetryBase > cfg.RegistrationRetryMax {
-		return IMSConfig{}, errors.New("normalizing ims config: registration retry max must be >= registration retry base")
+	if c.RegistrationRetryBase > c.RegistrationRetryMax {
+		return ServiceConfig{}, errors.New("normalizing ims config: registration retry max must be >= registration retry base")
 	}
-	if cfg.RegistrationGroup == nil {
-		if cfg.RegistrationID != 0 || cfg.RegistrationPreference != 0 {
-			return IMSConfig{}, errors.New("normalizing ims config: registration group is required for multiple registration settings")
+	if c.RegistrationGroup == nil {
+		if c.RegistrationID != 0 || c.RegistrationPreference != 0 {
+			return ServiceConfig{}, errors.New("normalizing ims config: registration group is required for multiple registration settings")
 		}
 	} else {
-		if cfg.RegistrationID == 0 {
-			return IMSConfig{}, errors.New("normalizing ims config: registration id must be greater than zero")
+		if c.RegistrationID == 0 {
+			return ServiceConfig{}, errors.New("normalizing ims config: registration id must be greater than zero")
 		}
-		if cfg.RegistrationPreference < 1 || cfg.RegistrationPreference > 1000 {
-			return IMSConfig{}, errors.New("normalizing ims config: registration preference must be between 1 and 1000")
+		if c.RegistrationPreference < 1 || c.RegistrationPreference > 1000 {
+			return ServiceConfig{}, errors.New("normalizing ims config: registration preference must be between 1 and 1000")
 		}
-		if cfg.IMEI == "" {
-			return IMSConfig{}, errors.New("normalizing ims config: imei is required for multiple registration")
+		if c.IMEI == "" {
+			return ServiceConfig{}, errors.New("normalizing ims config: imei is required for multiple registration")
 		}
 	}
-	if cfg.SIPServerPort < 0 || cfg.SIPServerPort > 65535 {
-		return IMSConfig{}, errors.New("normalizing ims config: sip server port must be between 0 and 65535")
+	if c.SIPServerPort < 0 || c.SIPServerPort > 65535 {
+		return ServiceConfig{}, errors.New("normalizing ims config: sip server port must be between 0 and 65535")
 	}
-	if cfg.SMSDeliveryReportTimeout < 0 {
-		return IMSConfig{}, errors.New("normalizing ims config: sms delivery report timeout must be >= 0")
+	if c.SMSDeliveryReportTimeout < 0 {
+		return ServiceConfig{}, errors.New("normalizing ims config: sms delivery report timeout must be >= 0")
 	}
-	if cfg.SMSDeliveryReportTimeout == 0 {
-		cfg.SMSDeliveryReportTimeout = imssms.DefaultDeliveryReportTimeout()
+	if c.SMSDeliveryReportTimeout == 0 {
+		c.SMSDeliveryReportTimeout = imssms.DefaultDeliveryReportTimeout()
 	}
-	voiceCfg, err := cfg.Voice.Normalized()
+	voiceCfg, err := c.Voice.Normalized()
 	if err != nil {
-		return IMSConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
 	}
-	cfg.Voice = voiceCfg
-	return cfg, nil
+	c.Voice = voiceCfg
+	return c, nil
 }
 
-func geolocationPIDFConfigured(cfg IMSConfig) bool {
-	return len(cfg.GeolocationPIDFRegister) > 0 ||
-		len(cfg.Voice.GeolocationPIDFInvite) > 0 ||
-		len(cfg.Voice.PIDFShortCodes) > 0
+func geolocationPIDFConfigured(c ServiceConfig) bool {
+	return len(c.GeolocationPIDFRegister) > 0 ||
+		len(c.Voice.GeolocationPIDFInvite) > 0 ||
+		len(c.Voice.PIDFShortCodes) > 0
 }
 
 func defaultEPDGAddress(card Card) (string, error) {
@@ -432,8 +433,8 @@ func defaultEPDGAddress(card Card) (string, error) {
 	return fmt.Sprintf("epdg.epc.mnc%s.mcc%s.pub.3gppnetwork.org", mnc, mcc), nil
 }
 
-func renderIMSUserAgent(template string, cfg Config, profile imsProfile) string {
-	terminal := cfg.Terminal.trimmed()
+func renderIMSUserAgent(template string, c Config, profile imsProfile) string {
+	terminal := c.Terminal.trimmed()
 	replacer := strings.NewReplacer(
 		"#MANUFACTURE#", terminal.Vendor,
 		"#MANUFACTURER#", terminal.Vendor,

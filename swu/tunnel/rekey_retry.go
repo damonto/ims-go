@@ -7,14 +7,16 @@ import (
 	"github.com/damonto/ims-go/swu/ike"
 )
 
-var (
-	rekeyTemporaryFailureRetryDelay  = 30 * time.Second
-	rekeyTemporaryFailureMaxDuration = 3 * time.Minute
+const (
+	defaultRekeyTemporaryFailureRetryDelay  = 30 * time.Second
+	defaultRekeyTemporaryFailureMaxDuration = 3 * time.Minute
 )
 
 type rekeyTemporaryFailureBackoff struct {
-	first   time.Time
-	retryAt time.Time
+	first       time.Time
+	retryAt     time.Time
+	retryDelay  time.Duration
+	maxDuration time.Duration
 }
 
 func (b *rekeyTemporaryFailureBackoff) waiting(now time.Time) bool {
@@ -25,15 +27,24 @@ func (b *rekeyTemporaryFailureBackoff) record(now time.Time) bool {
 	if b.first.IsZero() {
 		b.first = now
 	}
-	if now.Sub(b.first) >= rekeyTemporaryFailureMaxDuration {
+	maxDuration := b.maxDuration
+	if maxDuration == 0 {
+		maxDuration = defaultRekeyTemporaryFailureMaxDuration
+	}
+	if now.Sub(b.first) >= maxDuration {
 		return false
 	}
-	b.retryAt = now.Add(rekeyTemporaryFailureRetryDelay)
+	retryDelay := b.retryDelay
+	if retryDelay == 0 {
+		retryDelay = defaultRekeyTemporaryFailureRetryDelay
+	}
+	b.retryAt = now.Add(retryDelay)
 	return true
 }
 
 func (b *rekeyTemporaryFailureBackoff) reset() {
-	*b = rekeyTemporaryFailureBackoff{}
+	b.first = time.Time{}
+	b.retryAt = time.Time{}
 }
 
 func rekeyHardLifetimeExpired(expiresAt, now time.Time) bool {
@@ -41,7 +52,7 @@ func rekeyHardLifetimeExpired(expiresAt, now time.Time) bool {
 }
 
 func nextRekeyRetryAt(now, expiresAt time.Time) time.Time {
-	retryAt := now.Add(rekeyTemporaryFailureRetryDelay)
+	retryAt := now.Add(defaultRekeyTemporaryFailureRetryDelay)
 	if !expiresAt.IsZero() && expiresAt.Before(retryAt) {
 		return expiresAt
 	}

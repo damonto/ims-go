@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"context"
 	"errors"
 	"net"
 	"slices"
@@ -281,7 +280,7 @@ func TestAuthenticationFailureAdvancesAKAIdentityOnNextConnect(t *testing.T) {
 			session := mustDialSession(t, conn)
 			session.cfg.IKERetransmitDelays = []time.Duration{time.Second}
 
-			exchangeErr := session.exchangeIKEAuth(context.Background(), state)
+			exchangeErr := session.exchangeIKEAuth(t.Context(), state)
 			if exchangeErr == nil || !strings.Contains(exchangeErr.Error(), "protected ike_auth notify AUTHENTICATION_FAILED (24)") {
 				t.Fatalf("exchangeIKEAuth() error = %v, want protected AUTHENTICATION_FAILED", exchangeErr)
 			}
@@ -295,7 +294,7 @@ func TestAuthenticationFailureAdvancesAKAIdentityOnNextConnect(t *testing.T) {
 			}
 			request := append([]byte(nil), conn.writes[0]...)
 			conn.mu.Unlock()
-			var packet ike.IKEPacket
+			var packet ike.Packet
 			if err := packet.UnmarshalBinary(request); err != nil {
 				t.Fatalf("IKE_AUTH request UnmarshalBinary() error = %v", err)
 			}
@@ -807,7 +806,7 @@ func TestDefaultIKEAuthInitPayloadsUsesConfiguredPCSCFAttributes(t *testing.T) {
 func TestDefaultIKEAuthInitPayloadsRequestsPDNTypeFamilies(t *testing.T) {
 	tests := []struct {
 		name    string
-		pdnType PDNType
+		pdnType handshake.PDNType
 		want    []uint16
 		absent  []uint16
 	}{
@@ -943,7 +942,7 @@ func TestApplyN1ModeInfoStoresNegotiatedSliceData(t *testing.T) {
 	tunnel := Info{}
 	payloads := []ike.Payload{
 		&ike.NotifyPayload{NotifyType: notifyTypeN1ModeInformation, Data: []byte{0x04, 0x11, 0x22, 0x33, 0x44}},
-		&ike.NotifyPayload{NotifyType: notifyTypeN1ModeSNSSAIPlmnID, Data: []byte{0x03, 0x13, 0x10, 0x01}},
+		&ike.NotifyPayload{NotifyType: notifyTypeN1ModeSNSSAIPLMNID, Data: []byte{0x03, 0x13, 0x10, 0x01}},
 	}
 	if err := applyN1ModeInfo(&tunnel, payloads, handshake.Config{PDUSessionID: 0x01}); err != nil {
 		t.Fatalf("applyN1ModeInfo() error = %v", err)
@@ -954,8 +953,8 @@ func TestApplyN1ModeInfoStoresNegotiatedSliceData(t *testing.T) {
 	if string(tunnel.SNSSAI) != string([]byte{0x11, 0x22, 0x33, 0x44}) {
 		t.Fatalf("SNSSAI = % X, want 11 22 33 44", tunnel.SNSSAI)
 	}
-	if string(tunnel.SNSSAIPlmnID) != string([]byte{0x13, 0x10, 0x01}) {
-		t.Fatalf("SNSSAIPlmnID = % X, want 13 10 01", tunnel.SNSSAIPlmnID)
+	if string(tunnel.SNSSAIPLMNID) != string([]byte{0x13, 0x10, 0x01}) {
+		t.Fatalf("SNSSAIPLMNID = % X, want 13 10 01", tunnel.SNSSAIPLMNID)
 	}
 }
 
@@ -976,7 +975,7 @@ func TestPDNTypeRestrictionParsesStatusNotify(t *testing.T) {
 	tests := []struct {
 		name     string
 		payloads []ike.Payload
-		want     PDNType
+		want     handshake.PDNType
 	}{
 		{
 			name:     "ipv4 only allowed",
@@ -1588,7 +1587,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 			name: "cookie response retries with cookie payload first",
 			readResults: []readResult{
 				{
-					data: mustIKEPacket(t, ike.IKEHeader{
+					data: mustIKEPacket(t, ike.Header{
 						InitiatorSPI: 0x0102030405060708,
 						Version:      ikeVersion20,
 						ExchangeType: exchangeTypeIKESAInit,
@@ -1603,7 +1602,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 					addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500},
 				},
 				{
-					data: mustIKEPacket(t, ike.IKEHeader{
+					data: mustIKEPacket(t, ike.Header{
 						InitiatorSPI: 0x0102030405060708,
 						ResponderSPI: 0x1112131415161718,
 						Version:      ikeVersion20,
@@ -1651,7 +1650,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 			name: "invalid cookie length fails fast",
 			readResults: []readResult{
 				{
-					data: mustIKEPacket(t, ike.IKEHeader{
+					data: mustIKEPacket(t, ike.Header{
 						InitiatorSPI: 0x0102030405060708,
 						Version:      ikeVersion20,
 						ExchangeType: exchangeTypeIKESAInit,
@@ -1680,7 +1679,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 			name: "generic ike_sa_init error notify is surfaced",
 			readResults: []readResult{
 				{
-					data: mustIKEPacket(t, ike.IKEHeader{
+					data: mustIKEPacket(t, ike.Header{
 						InitiatorSPI: 0x0102030405060708,
 						Version:      ikeVersion20,
 						ExchangeType: exchangeTypeIKESAInit,
@@ -1706,7 +1705,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 			name: "invalid ke group outside configured policy fails",
 			readResults: []readResult{
 				{
-					data: mustIKEPacket(t, ike.IKEHeader{
+					data: mustIKEPacket(t, ike.Header{
 						InitiatorSPI: 0x0102030405060708,
 						Version:      ikeVersion20,
 						ExchangeType: exchangeTypeIKESAInit,
@@ -1743,7 +1742,7 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 			defer finish()
 			state.initiatorSPI = 0x0102030405060708
 			state.saInit.InitiatorSPI = state.initiatorSPI
-			err = session.exchangeIKESAInit(context.Background(), state)
+			err = session.exchangeIKESAInit(t.Context(), state)
 			tt.check(t, conn, err)
 		})
 	}
@@ -1764,7 +1763,7 @@ func TestExchangeIKESAInitClassifiesNoResponse(t *testing.T) {
 			readResults: func(t *testing.T, initiatorSPI uint64) []readResult {
 				t.Helper()
 				return []readResult{{
-					data: mustIKEPacket(t, ike.IKEHeader{
+					data: mustIKEPacket(t, ike.Header{
 						InitiatorSPI: initiatorSPI,
 						ResponderSPI: 0x1112131415161718,
 						Version:      ikeVersion20,
@@ -1793,7 +1792,7 @@ func TestExchangeIKESAInitClassifiesNoResponse(t *testing.T) {
 				conn.readResults = tt.readResults(t, state.initiatorSPI)
 			}
 
-			err = session.exchangeIKESAInit(context.Background(), state)
+			err = session.exchangeIKESAInit(t.Context(), state)
 			if err == nil {
 				t.Fatal("exchangeIKESAInit() error = nil, want non-nil")
 			}
@@ -1928,10 +1927,10 @@ func TestMatchesIKEMessageRequiresResponseContext(t *testing.T) {
 		exchangeType: exchangeTypeIKEAuth,
 		messageID:    2,
 	}
-	packet := func(header ike.IKEHeader) []byte {
+	packet := func(header ike.Header) []byte {
 		return mustIKEPacket(t, header, nil)
 	}
-	validHeader := ike.IKEHeader{
+	validHeader := ike.Header{
 		InitiatorSPI: expected.initiatorSPI,
 		ResponderSPI: expected.responderSPI,
 		Version:      ikeVersion20,
@@ -1941,15 +1940,15 @@ func TestMatchesIKEMessageRequiresResponseContext(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
-		header ike.IKEHeader
+		header ike.Header
 		peer   *net.UDPAddr
 		want   bool
 	}{
 		{name: "valid response", header: validHeader, peer: peer, want: true},
-		{name: "same id request is rejected", header: func() ike.IKEHeader { h := validHeader; h.Flags = flagInitiator; return h }(), peer: peer},
-		{name: "initiator response is rejected", header: func() ike.IKEHeader { h := validHeader; h.Flags = flagResponse | flagInitiator; return h }(), peer: peer},
-		{name: "wrong exchange is rejected", header: func() ike.IKEHeader { h := validHeader; h.ExchangeType = exchangeTypeInformational; return h }(), peer: peer},
-		{name: "wrong responder spi is rejected", header: func() ike.IKEHeader { h := validHeader; h.ResponderSPI++; return h }(), peer: peer},
+		{name: "same id request is rejected", header: func() ike.Header { h := validHeader; h.Flags = flagInitiator; return h }(), peer: peer},
+		{name: "initiator response is rejected", header: func() ike.Header { h := validHeader; h.Flags = flagResponse | flagInitiator; return h }(), peer: peer},
+		{name: "wrong exchange is rejected", header: func() ike.Header { h := validHeader; h.ExchangeType = exchangeTypeInformational; return h }(), peer: peer},
+		{name: "wrong responder spi is rejected", header: func() ike.Header { h := validHeader; h.ResponderSPI++; return h }(), peer: peer},
 		{name: "wrong peer is rejected", header: validHeader, peer: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 4500}},
 	}
 	for _, tt := range tests {
@@ -1962,7 +1961,7 @@ func TestMatchesIKEMessageRequiresResponseContext(t *testing.T) {
 }
 
 func TestNormalizeIKEPacketOnlyStripsMarkerForUDPEncapsulation(t *testing.T) {
-	raw := mustIKEPacket(t, ike.IKEHeader{
+	raw := mustIKEPacket(t, ike.Header{
 		InitiatorSPI: 0x0000000005060708,
 		ResponderSPI: 0x1112131415161718,
 		Version:      ikeVersion20,
@@ -2075,7 +2074,7 @@ func selectedChildProposal(request ike.Proposal) ike.Proposal {
 	return selected
 }
 
-func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectState, ike.IKEPacket, []byte, []byte, *net.UDPAddr, *net.UDPAddr) {
+func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectState, ike.Packet, []byte, []byte, *net.UDPAddr, *net.UDPAddr) {
 	t.Helper()
 	local := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 40000}
 	remote := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 500}
@@ -2113,8 +2112,8 @@ func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectS
 	if fragmentationSupported {
 		payloads = append(payloads, &ike.NotifyPayload{NotifyType: notifyTypeIKEV2FragmentationSupported})
 	}
-	responseRaw, err := (ike.IKEPacket{
-		Header: ike.IKEHeader{
+	responseRaw, err := (ike.Packet{
+		Header: ike.Header{
 			InitiatorSPI: state.initiatorSPI,
 			ResponderSPI: responderSPI,
 			Version:      ikeVersion20,
@@ -2134,19 +2133,19 @@ func testIKESAInitResponse(t *testing.T, fragmentationSupported bool) (*connectS
 	return state, response, request, responseRaw, local, remote
 }
 
-func mustIKEPacket(t *testing.T, header ike.IKEHeader, payloads []ike.Payload) []byte {
+func mustIKEPacket(t *testing.T, header ike.Header, payloads []ike.Payload) []byte {
 	t.Helper()
-	wire, err := (ike.IKEPacket{Header: header, Payloads: payloads}).MarshalBinary()
+	wire, err := (ike.Packet{Header: header, Payloads: payloads}).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	return wire
 }
 
-func mustUnmarshalIKEPacket(t *testing.T, wire []byte) ike.IKEPacket {
+func mustUnmarshalIKEPacket(t *testing.T, wire []byte) ike.Packet {
 	t.Helper()
 	wire = normalizeIKEPacket(wire, true)
-	var packet ike.IKEPacket
+	var packet ike.Packet
 	if err := packet.UnmarshalBinary(wire); err != nil {
 		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}

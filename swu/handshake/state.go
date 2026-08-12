@@ -84,7 +84,7 @@ type Info struct {
 	ResponderTrafficSelectors []ike.TrafficSelector
 	PDUSessionID              byte
 	SNSSAI                    []byte
-	SNSSAIPlmnID              []byte
+	SNSSAIPLMNID              []byte
 }
 
 type PDNType uint8

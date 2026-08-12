@@ -70,35 +70,34 @@ func decodeMultipartMessagePayload(msg sip.Message, params map[string]string) (m
 		mediaType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
 		if err != nil {
 			if isOptionalBodyPart(part.Header.Get("Content-Disposition")) {
-				_ = part.Close()
+				if closeErr := part.Close(); closeErr != nil {
+					return messagePayload{}, errors.Join(fmt.Errorf("parsing multipart sms part content type: %w", err), closeErr)
+				}
 				continue
 			}
-			_ = part.Close()
-			return messagePayload{}, fmt.Errorf("parsing multipart sms part content type: %w", err)
+			return messagePayload{}, errors.Join(fmt.Errorf("parsing multipart sms part content type: %w", err), part.Close())
 		}
 		switch {
 		case strings.EqualFold(mediaType, messageContentType):
 			if err := validateBinaryTransferEncoding(part.Header.Get("Content-Transfer-Encoding")); err != nil {
-				_ = part.Close()
-				return messagePayload{}, err
+				return messagePayload{}, errors.Join(err, part.Close())
 			}
 		case strings.EqualFold(mediaType, xmlContentType):
 			if err := validateXMLDisposition(part.Header.Get("Content-Disposition")); err != nil {
-				_ = part.Close()
-				return messagePayload{}, err
+				return messagePayload{}, errors.Join(err, part.Close())
 			}
 		default:
 			if isOptionalBodyPart(part.Header.Get("Content-Disposition")) {
-				_ = part.Close()
+				if closeErr := part.Close(); closeErr != nil {
+					return messagePayload{}, fmt.Errorf("closing optional multipart sms part: %w", closeErr)
+				}
 				continue
 			}
-			_ = part.Close()
-			return messagePayload{}, fmt.Errorf("unsupported multipart sms part content type: %s", mediaType)
+			return messagePayload{}, errors.Join(fmt.Errorf("unsupported multipart sms part content type: %s", mediaType), part.Close())
 		}
 		data, err := io.ReadAll(part)
 		if err != nil {
-			_ = part.Close()
-			return messagePayload{}, fmt.Errorf("reading multipart sms part: %w", err)
+			return messagePayload{}, errors.Join(fmt.Errorf("reading multipart sms part: %w", err), part.Close())
 		}
 		if err := part.Close(); err != nil {
 			return messagePayload{}, fmt.Errorf("closing multipart sms part: %w", err)

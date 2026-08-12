@@ -25,6 +25,52 @@ type interruptedReadConn struct {
 	interrupted chan struct{}
 }
 
+type blockingWriteConn struct {
+	started     chan struct{}
+	interrupted chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+}
+
+func newBlockingWriteConn() *blockingWriteConn {
+	return &blockingWriteConn{
+		started:     make(chan struct{}),
+		interrupted: make(chan struct{}),
+	}
+}
+
+func (c *blockingWriteConn) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (c *blockingWriteConn) Write([]byte) (int, error) {
+	c.startOnce.Do(func() { close(c.started) })
+	<-c.interrupted
+	return 0, net.ErrClosed
+}
+
+func (c *blockingWriteConn) Close() error {
+	c.stopOnce.Do(func() { close(c.interrupted) })
+	return nil
+}
+
+func (*blockingWriteConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+}
+
+func (*blockingWriteConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5060}
+}
+
+func (*blockingWriteConn) SetDeadline(time.Time) error { return nil }
+
+func (c *blockingWriteConn) SetReadDeadline(time.Time) error { return nil }
+
+func (c *blockingWriteConn) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		c.stopOnce.Do(func() { close(c.interrupted) })
+	}
+	return nil
+}
+
 func newInterruptedReadConn() *interruptedReadConn {
 	return &interruptedReadConn{
 		started:     make(chan struct{}),
@@ -65,6 +111,20 @@ func (c *interruptedReadConn) SetReadDeadline(deadline time.Time) error {
 }
 
 func (*interruptedReadConn) SetWriteDeadline(time.Time) error { return nil }
+
+func closeTestResource(t *testing.T, closer io.Closer) {
+	t.Helper()
+	if err := closer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Errorf("Close() error = %v", err)
+	}
+}
+
+func closeAfterTest(t *testing.T, closer io.Closer) {
+	t.Helper()
+	t.Cleanup(func() {
+		closeTestResource(t, closer)
+	})
+}
 
 func TestNetstackLoopback(t *testing.T) {
 	tests := []struct {
@@ -144,7 +204,7 @@ func TestNetstackUDPEncTunnelSeparatesInnerAndOuterAddresses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			if err := n.writePacket(context.Background(), inner, wire); !errors.Is(err, stopWrite) {
+			if err := n.writePacket(t.Context(), inner, wire); !errors.Is(err, stopWrite) {
 				t.Fatalf("writePacket() error = %v, want %v", err, stopWrite)
 			}
 			writes := clientSession.snapshotWrites()
@@ -188,11 +248,11 @@ func TestNetstackRejectsPlaintextForProtectedUDPFlow(t *testing.T) {
 			server := newTestNetstack(t, serverSession)
 			_, serverConfig := testSecureUDPConfigs()
 			serverConfig.Mode = tt.mode
-			conn, err := server.ListenSecureUDP(context.Background(), serverConfig)
+			conn, err := server.ListenSecureUDP(t.Context(), serverConfig)
 			if err != nil {
 				t.Fatalf("ListenSecureUDP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = conn.Close() })
+			closeAfterTest(t, conn)
 
 			if !server.HandleInnerPacket(packet.InnerPacket{UDP: &packet.UDPSegment{
 				Src:     &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000},
@@ -202,11 +262,11 @@ func TestNetstackRejectsPlaintextForProtectedUDPFlow(t *testing.T) {
 				t.Fatal("HandleInnerPacket() = false, want protected flow consumed")
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 			defer cancel()
 			_, _, err = conn.ReadPacket(ctx)
-			var netErr net.Error
-			if !errors.As(err, &netErr) || !netErr.Timeout() {
+			netErr, ok := errors.AsType[net.Error](err)
+			if !ok || !netErr.Timeout() {
 				t.Fatalf("ReadPacket() error = %v, want timeout", err)
 			}
 		})
@@ -245,11 +305,11 @@ func TestNetstackRejectsPlaintextOnProtectedPortFromUnexpectedTuple(t *testing.T
 			server := newTestNetstack(t, serverSession)
 			_, cfg := testSecureTCPConfigs()
 			cfg.Mode = tt.mode
-			conn, err := server.ListenSecureTCP(context.Background(), cfg)
+			conn, err := server.ListenSecureTCP(t.Context(), cfg)
 			if err != nil {
 				t.Fatalf("ListenSecureTCP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = conn.Close() })
+			closeAfterTest(t, conn)
 
 			if !server.HandleInnerPacket(tt.packet) {
 				t.Fatal("HandleInnerPacket() = false, want protected port packet consumed")
@@ -290,16 +350,16 @@ func TestNetstackRejectsPlaintextOutboundFromProtectedPort(t *testing.T) {
 			_, serverSession := newLoopbackPacketSessions()
 			server := newTestNetstack(t, serverSession)
 			_, cfg := testSecureTCPConfigs()
-			conn, err := server.ListenSecureTCP(context.Background(), cfg)
+			conn, err := server.ListenSecureTCP(t.Context(), cfg)
 			if err != nil {
 				t.Fatalf("ListenSecureTCP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = conn.Close() })
+			closeAfterTest(t, conn)
 			wire, err := tt.packet.MarshalBinary()
 			if err != nil {
 				t.Fatalf("MarshalBinary() error = %v", err)
 			}
-			if err := server.writePacket(context.Background(), tt.packet, wire); err == nil {
+			if err := server.writePacket(t.Context(), tt.packet, wire); err == nil {
 				t.Fatal("writePacket() error = nil, want protected port plaintext rejection")
 			}
 			if got := len(serverSession.snapshotWrites()); got != 0 {
@@ -314,11 +374,11 @@ func TestNetstackIgnoresUDPEncapsulatedESPKeepalive(t *testing.T) {
 	server := newTestNetstack(t, serverSession)
 	_, cfg := testSecureUDPConfigs()
 	cfg.Mode = SecureModeUDPEncTunnel
-	conn, err := server.ListenSecureUDP(context.Background(), cfg)
+	conn, err := server.ListenSecureUDP(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("ListenSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
+	closeAfterTest(t, conn)
 
 	keepalive, err := udpEncTunnelKeepalivePacket(serverSession.remoteIP, serverSession.localIP)
 	if err != nil {
@@ -340,11 +400,11 @@ func TestNetstackSharesUDPEncapsulatedESPKeepaliveByPeer(t *testing.T) {
 	_, udpCfg := testSecureUDPConfigs()
 	tcpCfg.Mode = SecureModeUDPEncTunnel
 	udpCfg.Mode = SecureModeUDPEncTunnel
-	tcpConn, err := server.ListenSecureTCP(context.Background(), tcpCfg)
+	tcpConn, err := server.ListenSecureTCP(t.Context(), tcpCfg)
 	if err != nil {
 		t.Fatalf("ListenSecureTCP() error = %v", err)
 	}
-	udpConn, err := server.ListenSecureUDP(context.Background(), udpCfg)
+	udpConn, err := server.ListenSecureUDP(t.Context(), udpCfg)
 	if err != nil {
 		t.Fatalf("ListenSecureUDP() error = %v", err)
 	}
@@ -364,14 +424,14 @@ func TestNetstackSharesUDPEncapsulatedESPKeepaliveByPeer(t *testing.T) {
 		t.Fatalf("UDP-enc-tun keepalive refs = %d, want 2", refs)
 	}
 
-	_ = tcpConn.Close()
+	closeTestResource(t, tcpConn)
 	server.mu.Lock()
 	refs = keepalive.refs
 	server.mu.Unlock()
 	if refs != 1 {
 		t.Fatalf("UDP-enc-tun keepalive refs after TCP close = %d, want 1", refs)
 	}
-	_ = udpConn.Close()
+	closeTestResource(t, udpConn)
 	server.mu.Lock()
 	remaining := len(server.udpKeepalives)
 	server.mu.Unlock()
@@ -390,7 +450,7 @@ func TestNetstackUDPEncapsulatedTransportsSupportSIPKeepalive(t *testing.T) {
 			open: func(n *Netstack) (imssession.Transport, error) {
 				_, cfg := testSecureTCPConfigs()
 				cfg.Mode = SecureModeUDPEncTunnel
-				return n.ListenSecureTCP(context.Background(), cfg)
+				return n.ListenSecureTCP(t.Context(), cfg)
 			},
 		},
 		{
@@ -398,7 +458,7 @@ func TestNetstackUDPEncapsulatedTransportsSupportSIPKeepalive(t *testing.T) {
 			open: func(n *Netstack) (imssession.Transport, error) {
 				_, cfg := testSecureUDPConfigs()
 				cfg.Mode = SecureModeUDPEncTunnel
-				return n.ListenSecureUDP(context.Background(), cfg)
+				return n.ListenSecureUDP(t.Context(), cfg)
 			},
 		},
 	}
@@ -415,7 +475,11 @@ func TestNetstackUDPEncapsulatedTransportsSupportSIPKeepalive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("session.Open() error = %v", err)
 			}
-			defer sess.Close()
+			defer func() {
+				if err := sess.Close(); err != nil {
+					t.Errorf("Stack.Close() error = %v", err)
+				}
+			}()
 			if !sess.SupportsKeepAlive() {
 				t.Fatal("SupportsKeepAlive() = false, want RFC 6223 keepalive enabled")
 			}
@@ -480,7 +544,7 @@ func TestNetstackSharedESPAssociationDispatchesByTransport(t *testing.T) {
 				}
 			}
 			codec := secureESPCodec(inboundSPI, base.encryption, nil, base.integrity, base.integrityKey, [4]byte{})
-			sealed, err := codec.Encode(esp.ESPPacket{SPI: inboundSPI, Sequence: 1, NextHeader: nextHeader, Payload: payload})
+			sealed, err := codec.Encode(esp.Packet{SPI: inboundSPI, Sequence: 1, NextHeader: nextHeader, Payload: payload})
 			if err != nil {
 				t.Fatalf("ESP Encode() error = %v", err)
 			}
@@ -573,18 +637,18 @@ func TestNetstackProtectedIPv6UDPLargerThanMinimumMTU(t *testing.T) {
 			clientConfig.Mode = tt.mode
 			serverConfig.Mode = tt.mode
 
-			clientConn, err := client.DialSecureUDP(context.Background(), clientConfig)
+			clientConn, err := client.DialSecureUDP(t.Context(), clientConfig)
 			if err != nil {
 				t.Fatalf("DialSecureUDP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = clientConn.Close() })
-			serverConn, err := server.ListenSecureUDP(context.Background(), serverConfig)
+			closeAfterTest(t, clientConn)
+			serverConn, err := server.ListenSecureUDP(t.Context(), serverConfig)
 			if err != nil {
 				t.Fatalf("ListenSecureUDP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = serverConn.Close() })
+			closeAfterTest(t, serverConn)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			want := bytes.Repeat([]byte("R"), 2048)
 			if err := clientConn.WritePacket(ctx, want); err != nil {
@@ -632,20 +696,20 @@ func TestNetstackTCPUsesTunnelSafeMSS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	closeAfterTest(t, listener)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	conn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
 	if err != nil {
 		t.Fatalf("DialTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
+	closeAfterTest(t, conn)
 	accepted, err := listener.Accept()
 	if err != nil {
 		t.Fatalf("Accept() error = %v", err)
 	}
-	t.Cleanup(func() { _ = accepted.Close() })
+	closeAfterTest(t, accepted)
 
 	synFound := false
 	for _, pkt := range clientSession.snapshotWrites() {
@@ -684,22 +748,22 @@ func TestNetstackWriteUsesCallerContextWithoutClosingStack(t *testing.T) {
 	clientSession, serverSession := newLoopbackPacketSessions()
 	client := newTestNetstack(t, clientSession)
 	server := newTestNetstack(t, serverSession)
-	clientConn, err := client.DialUDP(context.Background(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
+	clientConn, err := client.DialUDP(t.Context(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
 	if err != nil {
 		t.Fatalf("DialUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn.Close() })
-	serverConn, err := server.DialUDP(context.Background(), UDPConfig{LocalPort: 5060, RemotePort: 40000})
+	closeAfterTest(t, clientConn)
+	serverConn, err := server.DialUDP(t.Context(), UDPConfig{LocalPort: 5060, RemotePort: 40000})
 	if err != nil {
 		t.Fatalf("DialUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	closeAfterTest(t, serverConn)
 
 	clientSession.setWriteHook(func(ctx context.Context, _ packet.InnerPacket) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	err = clientConn.WritePacket(ctx, []byte("blocked"))
 	cancel()
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -710,7 +774,7 @@ func TestNetstackWriteUsesCallerContextWithoutClosingStack(t *testing.T) {
 	}
 
 	clientSession.setWriteHook(nil)
-	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel = context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	if err := clientConn.WritePacket(ctx, []byte("after failure")); err != nil {
 		t.Fatalf("WritePacket() after failure error = %v", err)
@@ -724,17 +788,219 @@ func TestNetstackWriteUsesCallerContextWithoutClosingStack(t *testing.T) {
 	}
 }
 
+func TestNetstackWriteContextRemovalHandlesOutOfOrderCompletion(t *testing.T) {
+	tests := []struct {
+		name string
+		key  netstackFlowKey
+	}{
+		{
+			name: "same UDP flow",
+			key:  netstackFlowKeyForAddresses(packet.ProtocolUDP, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), 40000, 5060),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Netstack{
+				writeContexts: make(map[netstackFlowKey][]netstackWriteContext),
+				writeErrors:   make(map[netstackFlowKey]error),
+			}
+			firstStarted := make(chan struct{})
+			secondStarted := make(chan struct{})
+			releaseFirst := make(chan struct{})
+			releaseSecond := make(chan struct{})
+			firstDone := make(chan error, 1)
+			secondDone := make(chan error, 1)
+
+			go func() {
+				firstDone <- n.withWriteContext(t.Context(), tt.key, func() error {
+					close(firstStarted)
+					<-releaseFirst
+					return nil
+				})
+			}()
+			<-firstStarted
+			go func() {
+				secondDone <- n.withWriteContext(t.Context(), tt.key, func() error {
+					close(secondStarted)
+					<-releaseSecond
+					return nil
+				})
+			}()
+			<-secondStarted
+
+			close(releaseFirst)
+			if err := <-firstDone; err != nil {
+				t.Fatalf("first withWriteContext() error = %v", err)
+			}
+			n.mu.Lock()
+			remaining := append([]netstackWriteContext(nil), n.writeContexts[tt.key]...)
+			n.mu.Unlock()
+			if len(remaining) != 1 || remaining[0].id != 2 {
+				t.Fatalf("remaining write contexts = %+v, want only second context", remaining)
+			}
+
+			close(releaseSecond)
+			if err := <-secondDone; err != nil {
+				t.Fatalf("second withWriteContext() error = %v", err)
+			}
+			n.mu.Lock()
+			remaining = append(remaining[:0], n.writeContexts[tt.key]...)
+			n.mu.Unlock()
+			if len(remaining) != 0 {
+				t.Fatalf("remaining write contexts = %+v, want none", remaining)
+			}
+		})
+	}
+}
+
+func TestNetstackWriteContextLifecycle(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "link uses original context",
+			run: func(t *testing.T) {
+				n := &Netstack{
+					writeContexts: make(map[netstackFlowKey][]netstackWriteContext),
+					writeErrors:   make(map[netstackFlowKey]error),
+				}
+				key := netstackFlowKeyForAddresses(packet.ProtocolTCP, net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2), 40000, 5060)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				started := make(chan struct{})
+				finished := make(chan struct{})
+				go func() {
+					_ = n.withWriteContext(ctx, key, func() error {
+						close(started)
+						<-ctx.Done()
+						return ctx.Err()
+					})
+					close(finished)
+				}()
+				<-started
+				got, stop := n.writeContext(key)
+				defer stop()
+				if got != ctx {
+					t.Fatalf("writeContext() returned %p, want original context %p", got, ctx)
+				}
+				cancel()
+				select {
+				case <-got.Done():
+				case <-time.After(time.Second):
+					t.Fatal("original context did not observe cancellation")
+				}
+				select {
+				case <-finished:
+				case <-time.After(time.Second):
+					t.Fatal("withWriteContext() did not finish after cancellation")
+				}
+			},
+		},
+		{
+			name: "TCP close interrupts blocked write",
+			run: func(t *testing.T) {
+				raw := newBlockingWriteConn()
+				n := &Netstack{
+					writeContexts: make(map[netstackFlowKey][]netstackWriteContext),
+					writeErrors:   make(map[netstackFlowKey]error),
+				}
+				conn := &NetstackTCPConn{
+					netstack: n,
+					local:    raw.LocalAddr().(*net.TCPAddr),
+					remote:   raw.RemoteAddr().(*net.TCPAddr),
+					conn:     raw,
+					done:     make(chan struct{}),
+				}
+
+				writeDone := make(chan error, 1)
+				go func() { writeDone <- conn.WritePacket(t.Context(), []byte("blocked")) }()
+				<-raw.started
+				closeDone := make(chan error, 1)
+				go func() { closeDone <- conn.Close() }()
+
+				select {
+				case err := <-writeDone:
+					if err == nil {
+						t.Fatal("WritePacket() error = nil, want close cancellation")
+					}
+				case <-time.After(time.Second):
+					t.Fatal("WritePacket() did not stop after Close()")
+				}
+				select {
+				case err := <-closeDone:
+					if err != nil {
+						t.Fatalf("Close() error = %v", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("Close() did not finish")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestNetstackLifetimeEndsOnClose(t *testing.T) {
+	tests := []struct {
+		name string
+		stop func(*Netstack) error
+	}{
+		{
+			name: "explicit close",
+			stop: func(n *Netstack) error {
+				return n.Close()
+			},
+		},
+		{
+			name: "packet session failure",
+			stop: func(n *Netstack) error {
+				n.HandleError(errors.New("packet session stopped"))
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session, _ := newLoopbackPacketSessions()
+			n, err := NewNetstack(session)
+			if err != nil {
+				t.Fatalf("NewNetstack() error = %v", err)
+			}
+			closeAfterTest(t, n)
+			select {
+			case <-n.done:
+				t.Fatal("Netstack lifetime ended before termination")
+			default:
+			}
+			if err := tt.stop(n); err != nil {
+				t.Fatalf("stopping Netstack error = %v", err)
+			}
+			select {
+			case <-n.done:
+			case <-time.After(time.Second):
+				t.Fatal("Netstack lifetime did not end after termination")
+			}
+		})
+	}
+}
+
 func TestNetstackSecureTCPCloseProtectsFIN(t *testing.T) {
 	clientSession, serverSession := newLoopbackPacketSessions()
 	client := newTestNetstack(t, clientSession)
 	server := newTestNetstack(t, serverSession)
 	clientConfig, serverConfig := testSecureTCPConfigs()
-	serverConn, err := server.ListenSecureTCP(context.Background(), serverConfig)
+	serverConn, err := server.ListenSecureTCP(t.Context(), serverConfig)
 	if err != nil {
 		t.Fatalf("ListenSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	closeAfterTest(t, serverConn)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	clientConn, err := client.DialSecureTCP(ctx, clientConfig)
 	if err != nil {
@@ -777,23 +1043,23 @@ func TestNetstackTCPReadReportsPacketSessionCause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	closeAfterTest(t, listener)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	conn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
 	if err != nil {
 		t.Fatalf("DialTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
+	closeAfterTest(t, conn)
 	accepted, err := listener.Accept()
 	if err != nil {
 		t.Fatalf("Accept() error = %v", err)
 	}
-	t.Cleanup(func() { _ = accepted.Close() })
+	closeAfterTest(t, accepted)
 
 	want := errors.New("packet session stopped")
 	clientSession.fail(want)
-	_, _, err = conn.ReadPacket(context.Background())
+	_, _, err = conn.ReadPacket(t.Context())
 	if !errors.Is(err, want) {
 		t.Fatalf("ReadPacket() error = %v, want %v", err, want)
 	}
@@ -808,14 +1074,14 @@ func TestNetstackTCPReadCancellationReleasesConnection(t *testing.T) {
 		{
 			name: "explicit cancellation without deadline",
 			readContext: func() (context.Context, context.CancelFunc) {
-				return context.WithCancel(context.Background())
+				return context.WithCancel(t.Context())
 			},
 			wantErr: context.Canceled,
 		},
 		{
 			name: "parent context cancellation without deadline",
 			readContext: func() (context.Context, context.CancelFunc) {
-				parent, cancelParent := context.WithCancel(context.Background())
+				parent, cancelParent := context.WithCancel(t.Context())
 				ctx, cancelChild := context.WithCancel(parent)
 				return ctx, func() {
 					cancelParent()
@@ -839,20 +1105,20 @@ func TestNetstackTCPReadCancellationReleasesConnection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListenTCP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = listener.Close() })
+			closeAfterTest(t, listener)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			conn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
 			if err != nil {
 				t.Fatalf("DialTCP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = conn.Close() })
+			closeAfterTest(t, conn)
 			accepted, err := listener.Accept()
 			if err != nil {
 				t.Fatalf("Accept() error = %v", err)
 			}
-			t.Cleanup(func() { _ = accepted.Close() })
+			closeAfterTest(t, accepted)
 
 			readCtx, stopRead := tt.readContext()
 			readErr := make(chan error, 1)
@@ -882,7 +1148,7 @@ func TestNetstackTCPReadCancellationReleasesConnection(t *testing.T) {
 			if _, err := accepted.Write([]byte("\r\n")); err != nil {
 				t.Fatalf("Write() error = %v", err)
 			}
-			nextCtx, stopNext := context.WithTimeout(context.Background(), time.Second)
+			nextCtx, stopNext := context.WithTimeout(t.Context(), time.Second)
 			defer stopNext()
 			packet, _, err := conn.ReadPacket(nextCtx)
 			if err != nil {
@@ -912,7 +1178,7 @@ func TestNetstackTCPReadCancellationPreservesReceivedData(t *testing.T) {
 				conn:   raw,
 				done:   make(chan struct{}),
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			readErr := make(chan error, 1)
 			go func() {
 				_, _, err := conn.ReadPacket(ctx)
@@ -924,7 +1190,7 @@ func TestNetstackTCPReadCancellationPreservesReceivedData(t *testing.T) {
 				t.Fatalf("ReadPacket() error = %v, want context.Canceled", err)
 			}
 
-			packet, _, err := conn.ReadPacket(context.Background())
+			packet, _, err := conn.ReadPacket(t.Context())
 			if err != nil {
 				t.Fatalf("ReadPacket() after cancellation error = %v", err)
 			}
@@ -939,26 +1205,26 @@ func TestNetstackUDPReadReportsCloseCause(t *testing.T) {
 	packetSessionErr := errors.New("packet session stopped")
 	tests := []struct {
 		name string
-		stop func(*loopbackPacketSession, *Netstack, *NetstackUDPConn)
+		stop func(*testing.T, *loopbackPacketSession, *Netstack, *NetstackUDPConn)
 		want error
 	}{
 		{
 			name: "connection closed",
-			stop: func(_ *loopbackPacketSession, _ *Netstack, conn *NetstackUDPConn) {
-				_ = conn.Close()
+			stop: func(t *testing.T, _ *loopbackPacketSession, _ *Netstack, conn *NetstackUDPConn) {
+				closeTestResource(t, conn)
 			},
 			want: net.ErrClosed,
 		},
 		{
 			name: "netstack closed",
-			stop: func(_ *loopbackPacketSession, netstack *Netstack, _ *NetstackUDPConn) {
-				_ = netstack.Close()
+			stop: func(t *testing.T, _ *loopbackPacketSession, netstack *Netstack, _ *NetstackUDPConn) {
+				closeTestResource(t, netstack)
 			},
 			want: errNetstackClosed,
 		},
 		{
 			name: "packet session failed",
-			stop: func(session *loopbackPacketSession, _ *Netstack, _ *NetstackUDPConn) {
+			stop: func(_ *testing.T, session *loopbackPacketSession, _ *Netstack, _ *NetstackUDPConn) {
 				session.fail(packetSessionErr)
 			},
 			want: packetSessionErr,
@@ -969,14 +1235,14 @@ func TestNetstackUDPReadReportsCloseCause(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			clientSession, _ := newLoopbackPacketSessions()
 			client := newTestNetstack(t, clientSession)
-			conn, err := client.DialUDP(context.Background(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
+			conn, err := client.DialUDP(t.Context(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
 			if err != nil {
 				t.Fatalf("DialUDP() error = %v", err)
 			}
-			t.Cleanup(func() { _ = conn.Close() })
+			closeAfterTest(t, conn)
 
-			tt.stop(clientSession, client, conn)
-			_, _, err = conn.ReadPacket(context.Background())
+			tt.stop(t, clientSession, client, conn)
+			_, _, err = conn.ReadPacket(t.Context())
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("ReadPacket() error = %v, want %v", err, tt.want)
 			}
@@ -997,20 +1263,20 @@ func testNetstackPlainTCP(t *testing.T, client, server *Netstack) {
 	if err != nil {
 		t.Fatalf("gonet.ListenTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	closeAfterTest(t, listener)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	clientConn, err := client.DialTCP(ctx, TCPConfig{LocalPort: 40000, RemotePort: 5060})
 	if err != nil {
 		t.Fatalf("DialTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn.Close() })
+	closeAfterTest(t, clientConn)
 	serverConn, err := listener.Accept()
 	if err != nil {
 		t.Fatalf("Accept() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	closeAfterTest(t, serverConn)
 
 	wantRequest := []byte("OPTIONS sip:ims.example SIP/2.0\r\nContent-Length: 0\r\n\r\n")
 	if err := clientConn.WritePacket(ctx, wantRequest); err != nil {
@@ -1040,19 +1306,19 @@ func testNetstackPlainTCP(t *testing.T, client, server *Netstack) {
 func testNetstackProtectedTCP(t *testing.T, client, server *Netstack) {
 	t.Helper()
 	clientConfig, serverConfig := testSecureTCPConfigs()
-	serverConn, err := server.ListenSecureTCP(context.Background(), serverConfig)
+	serverConn, err := server.ListenSecureTCP(t.Context(), serverConfig)
 	if err != nil {
 		t.Fatalf("ListenSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	closeAfterTest(t, serverConn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	clientConn, err := client.DialSecureTCP(ctx, clientConfig)
 	if err != nil {
 		t.Fatalf("DialSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn.Close() })
+	closeAfterTest(t, clientConn)
 
 	want := []byte("MESSAGE tel:+12245550100 SIP/2.0\r\nContent-Length: 0\r\n\r\n")
 	if err := clientConn.WritePacket(ctx, want); err != nil {
@@ -1069,18 +1335,18 @@ func testNetstackProtectedTCP(t *testing.T, client, server *Netstack) {
 
 func testNetstackPlainUDP(t *testing.T, client, server *Netstack) {
 	t.Helper()
-	clientConn, err := client.DialUDP(context.Background(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
+	clientConn, err := client.DialUDP(t.Context(), UDPConfig{LocalPort: 40000, RemotePort: 5060})
 	if err != nil {
 		t.Fatalf("client DialUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn.Close() })
-	serverConn, err := server.DialUDP(context.Background(), UDPConfig{LocalPort: 5060, RemotePort: 40000})
+	closeAfterTest(t, clientConn)
+	serverConn, err := server.DialUDP(t.Context(), UDPConfig{LocalPort: 5060, RemotePort: 40000})
 	if err != nil {
 		t.Fatalf("server DialUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	closeAfterTest(t, serverConn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	want := []byte("plain UDP")
 	if err := clientConn.WritePacket(ctx, want); err != nil {
@@ -1098,18 +1364,18 @@ func testNetstackPlainUDP(t *testing.T, client, server *Netstack) {
 func testNetstackProtectedUDP(t *testing.T, client, server *Netstack) {
 	t.Helper()
 	clientConfig, serverConfig := testSecureUDPConfigs()
-	clientConn, err := client.DialSecureUDP(context.Background(), clientConfig)
+	clientConn, err := client.DialSecureUDP(t.Context(), clientConfig)
 	if err != nil {
 		t.Fatalf("client DialSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn.Close() })
-	serverConn, err := server.ListenSecureUDP(context.Background(), serverConfig)
+	closeAfterTest(t, clientConn)
+	serverConn, err := server.ListenSecureUDP(t.Context(), serverConfig)
 	if err != nil {
 		t.Fatalf("server ListenSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn.Close() })
+	closeAfterTest(t, serverConn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	want := []byte("protected UDP")
 	if err := clientConn.WritePacket(ctx, want); err != nil {
@@ -1137,29 +1403,29 @@ func testNetstackSecureTCPServerPortReuse(t *testing.T, client, server *Netstack
 	serverConfig2.InboundSPI = clientConfig2.OutboundSPI
 	serverConfig2.Associations = NewSecurityAssociations()
 
-	serverConn1, err := server.ListenSecureTCP(context.Background(), serverConfig1)
+	serverConn1, err := server.ListenSecureTCP(t.Context(), serverConfig1)
 	if err != nil {
 		t.Fatalf("first ListenSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn1.Close() })
-	serverConn2, err := server.ListenSecureTCP(context.Background(), serverConfig2)
+	closeAfterTest(t, serverConn1)
+	serverConn2, err := server.ListenSecureTCP(t.Context(), serverConfig2)
 	if err != nil {
 		t.Fatalf("second ListenSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn2.Close() })
+	closeAfterTest(t, serverConn2)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	clientConn1, err := client.DialSecureTCP(ctx, clientConfig1)
 	if err != nil {
 		t.Fatalf("first DialSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn1.Close() })
+	closeAfterTest(t, clientConn1)
 	clientConn2, err := client.DialSecureTCP(ctx, clientConfig2)
 	if err != nil {
 		t.Fatalf("second DialSecureTCP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn2.Close() })
+	closeAfterTest(t, clientConn2)
 
 	tests := []struct {
 		name   string
@@ -1172,7 +1438,7 @@ func testNetstackSecureTCPServerPortReuse(t *testing.T, client, server *Netstack
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			writeCtx, writeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			writeCtx, writeCancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer writeCancel()
 			if err := tt.client.WritePacket(writeCtx, []byte(tt.want)); err != nil {
 				t.Fatalf("WritePacket() error = %v", err)
@@ -1186,8 +1452,8 @@ func testNetstackSecureTCPServerPortReuse(t *testing.T, client, server *Netstack
 			}
 		})
 	}
-	_ = clientConn1.Close()
-	_ = serverConn1.Close()
+	closeTestResource(t, clientConn1)
+	closeTestResource(t, serverConn1)
 	want := "OPTIONS sip:remaining.example SIP/2.0\r\nContent-Length: 0\r\n\r\n"
 	if err := clientConn2.WritePacket(ctx, []byte(want)); err != nil {
 		t.Fatalf("new SA WritePacket() after old SA close error = %v", err)
@@ -1214,28 +1480,28 @@ func testNetstackSecureUDPServerPortReuse(t *testing.T, client, server *Netstack
 	serverConfig2.InboundSPI = clientConfig2.OutboundSPI
 	serverConfig2.Associations = NewSecurityAssociations()
 
-	serverConn1, err := server.ListenSecureUDP(context.Background(), serverConfig1)
+	serverConn1, err := server.ListenSecureUDP(t.Context(), serverConfig1)
 	if err != nil {
 		t.Fatalf("first ListenSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn1.Close() })
-	serverConn2, err := server.ListenSecureUDP(context.Background(), serverConfig2)
+	closeAfterTest(t, serverConn1)
+	serverConn2, err := server.ListenSecureUDP(t.Context(), serverConfig2)
 	if err != nil {
 		t.Fatalf("second ListenSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = serverConn2.Close() })
-	clientConn1, err := client.DialSecureUDP(context.Background(), clientConfig1)
+	closeAfterTest(t, serverConn2)
+	clientConn1, err := client.DialSecureUDP(t.Context(), clientConfig1)
 	if err != nil {
 		t.Fatalf("first DialSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn1.Close() })
-	clientConn2, err := client.DialSecureUDP(context.Background(), clientConfig2)
+	closeAfterTest(t, clientConn1)
+	clientConn2, err := client.DialSecureUDP(t.Context(), clientConfig2)
 	if err != nil {
 		t.Fatalf("second DialSecureUDP() error = %v", err)
 	}
-	t.Cleanup(func() { _ = clientConn2.Close() })
+	closeAfterTest(t, clientConn2)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	tests := []struct {
 		name   string
@@ -1260,8 +1526,8 @@ func testNetstackSecureUDPServerPortReuse(t *testing.T, client, server *Netstack
 			}
 		})
 	}
-	_ = clientConn1.Close()
-	_ = serverConn1.Close()
+	closeTestResource(t, clientConn1)
+	closeTestResource(t, serverConn1)
 	want := "remaining security association"
 	if err := clientConn2.WritePacket(ctx, []byte(want)); err != nil {
 		t.Fatalf("new SA WritePacket() after old SA close error = %v", err)
@@ -1307,13 +1573,13 @@ func testSecureUDPConfigs() (SecureUDPConfig, SecureUDPConfig) {
 	return client, server
 }
 
-func newTestNetstack(t *testing.T, session PacketSession) *Netstack {
+func newTestNetstack(t *testing.T, session ipsecbase.PacketSession) *Netstack {
 	t.Helper()
 	n, err := NewNetstack(session)
 	if err != nil {
 		t.Fatalf("NewNetstack() error = %v", err)
 	}
-	t.Cleanup(func() { _ = n.Close() })
+	closeAfterTest(t, n)
 	return n
 }
 
@@ -1321,11 +1587,11 @@ func newLoopbackPacketSessions() (*loopbackPacketSession, *loopbackPacketSession
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := &loopbackPacketSession{
 		localIP: net.ParseIP("2001:db8::1"), remoteIP: net.ParseIP("2001:db8::2"),
-		logger: logger, handlers: make(map[*loopbackAttachment]ipsecbase.InnerHandler),
+		logger: logger, processors: make(map[*loopbackAttachment]ipsecbase.InnerPacketProcessor),
 	}
 	server := &loopbackPacketSession{
 		localIP: net.ParseIP("2001:db8::2"), remoteIP: net.ParseIP("2001:db8::1"),
-		logger: logger, handlers: make(map[*loopbackAttachment]ipsecbase.InnerHandler),
+		logger: logger, processors: make(map[*loopbackAttachment]ipsecbase.InnerPacketProcessor),
 	}
 	client.peer = server
 	server.peer = client
@@ -1333,15 +1599,15 @@ func newLoopbackPacketSessions() (*loopbackPacketSession, *loopbackPacketSession
 }
 
 type loopbackPacketSession struct {
-	mu        sync.RWMutex
-	localIP   net.IP
-	remoteIP  net.IP
-	peer      *loopbackPacketSession
-	logger    *slog.Logger
-	handlers  map[*loopbackAttachment]ipsecbase.InnerHandler
-	writes    []packet.InnerPacket
-	writeHook func(context.Context, packet.InnerPacket) error
-	closed    bool
+	mu         sync.RWMutex
+	localIP    net.IP
+	remoteIP   net.IP
+	peer       *loopbackPacketSession
+	logger     *slog.Logger
+	processors map[*loopbackAttachment]ipsecbase.InnerPacketProcessor
+	writes     []packet.InnerPacket
+	writeHook  func(context.Context, packet.InnerPacket) error
+	closed     bool
 }
 
 func (s *loopbackPacketSession) InnerIPsForRemote(remoteIP net.IP) (net.IP, net.IP, error) {
@@ -1351,17 +1617,17 @@ func (s *loopbackPacketSession) InnerIPsForRemote(remoteIP net.IP) (net.IP, net.
 	return append(net.IP(nil), s.localIP...), append(net.IP(nil), s.remoteIP...), nil
 }
 
-func (s *loopbackPacketSession) Attach(handler ipsecbase.InnerHandler) (ipsecbase.Attachment, error) {
-	if handler == nil {
-		return nil, errors.New("attaching loopback handler: handler is nil")
+func (s *loopbackPacketSession) Attach(processor ipsecbase.InnerPacketProcessor) (ipsecbase.Attachment, error) {
+	if processor == nil {
+		return nil, errors.New("attaching loopback processor: processor is nil")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, errors.New("attaching loopback handler: session is closed")
+		return nil, errors.New("attaching loopback processor: session is closed")
 	}
 	attachment := &loopbackAttachment{session: s}
-	s.handlers[attachment] = handler
+	s.processors[attachment] = processor
 	return attachment, nil
 }
 
@@ -1415,13 +1681,13 @@ func (s *loopbackPacketSession) dispatch(pkt packet.InnerPacket) error {
 		s.mu.RUnlock()
 		return net.ErrClosed
 	}
-	handlers := make([]ipsecbase.InnerHandler, 0, len(s.handlers))
-	for _, handler := range s.handlers {
-		handlers = append(handlers, handler)
+	processors := make([]ipsecbase.InnerPacketProcessor, 0, len(s.processors))
+	for _, processor := range s.processors {
+		processors = append(processors, processor)
 	}
 	s.mu.RUnlock()
-	for _, handler := range handlers {
-		if handler.HandleInnerPacket(pkt) {
+	for _, processor := range processors {
+		if processor.HandleInnerPacket(pkt) {
 			return nil
 		}
 	}
@@ -1430,13 +1696,13 @@ func (s *loopbackPacketSession) dispatch(pkt packet.InnerPacket) error {
 
 func (s *loopbackPacketSession) fail(err error) {
 	s.mu.RLock()
-	handlers := make([]ipsecbase.InnerHandler, 0, len(s.handlers))
-	for _, handler := range s.handlers {
-		handlers = append(handlers, handler)
+	processors := make([]ipsecbase.InnerPacketProcessor, 0, len(s.processors))
+	for _, processor := range s.processors {
+		processors = append(processors, processor)
 	}
 	s.mu.RUnlock()
-	for _, handler := range handlers {
-		handler.HandleError(err)
+	for _, processor := range processors {
+		processor.HandleError(err)
 	}
 }
 
@@ -1445,7 +1711,7 @@ func (s *loopbackPacketSession) Logger() *slog.Logger { return s.logger }
 func (s *loopbackPacketSession) Close() error {
 	s.mu.Lock()
 	s.closed = true
-	s.handlers = nil
+	s.processors = nil
 	s.mu.Unlock()
 	return nil
 }
@@ -1458,7 +1724,7 @@ type loopbackAttachment struct {
 func (a *loopbackAttachment) Close() error {
 	a.once.Do(func() {
 		a.session.mu.Lock()
-		delete(a.session.handlers, a)
+		delete(a.session.processors, a)
 		a.session.mu.Unlock()
 	})
 	return nil

@@ -37,11 +37,11 @@ func (s *Registrar) State() State {
 
 // RequestContactURI returns the registered contact address with the flow
 // marker required for requests sent over an outbound registration.
-func (state State) RequestContactURI() string {
-	if !state.Flow.Outbound {
-		return state.ContactURI
+func (s State) RequestContactURI() string {
+	if !s.Flow.Outbound {
+		return s.ContactURI
 	}
-	return state.ContactURI + ";ob"
+	return s.ContactURI + ";ob"
 }
 
 func (s *Registrar) CurrentFlow() Flow {

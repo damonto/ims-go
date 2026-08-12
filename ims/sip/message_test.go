@@ -132,9 +132,9 @@ func TestResponseError(t *testing.T) {
 				t.Fatalf("Error() = %q, want %q", got, tt.wantError)
 			}
 			wrapped := errors.Join(err)
-			var responseErr *ResponseError
-			if !errors.As(wrapped, &responseErr) {
-				t.Fatal("errors.As() = false, want true")
+			responseErr, ok := errors.AsType[*ResponseError](wrapped)
+			if !ok {
+				t.Fatal("errors.AsType() = false, want true")
 			}
 			if responseErr.StatusCode != tt.message.StatusCode() {
 				t.Fatalf("ResponseError.StatusCode = %d, want %d", responseErr.StatusCode, tt.message.StatusCode())
@@ -955,7 +955,7 @@ func TestSetResponseViaPeer(t *testing.T) {
 	}
 }
 
-func TestResponseHelpers(t *testing.T) {
+func TestResponseHeadersAndTag(t *testing.T) {
 	req := NewRequest("MESSAGE", "sip:+123@example.com")
 	req.Headers = Headers{
 		{Name: "Via", Value: "SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-1"},
@@ -978,7 +978,7 @@ func TestResponseHelpers(t *testing.T) {
 	}
 }
 
-func TestHelpers(t *testing.T) {
+func TestMessageAccessors(t *testing.T) {
 	msg := NewRequest("INFO", "sip:service@example.com")
 	msg.Headers = Headers{
 		{Name: "To", Value: "<sip:alice@example.com>;tag=remote"},

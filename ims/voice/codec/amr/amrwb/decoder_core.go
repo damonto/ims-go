@@ -125,7 +125,7 @@ func (s *decoderCoreState) decodeCore(
 		nbits:  int16(frameBits[mode]),
 	}
 	dtx := s.dtx
-	frame.dtxState = dtx.rxHandler(frameType)
+	frame.dtxState = dtx.nextRXState(frameType)
 	var sid dtxSIDData
 	if frame.dtxState != dtxStateSpeech && dtx.sidFrame && dtx.validData {
 		var err error

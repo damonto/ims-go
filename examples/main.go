@@ -225,7 +225,7 @@ func run(opt options) error {
 				IKERetransmitDelays:  ikeRetransmit,
 			},
 		}),
-		IMS: ims.IMSConfig{
+		IMS: ims.ServiceConfig{
 			Transport:          opt.transport,
 			PrivateIdentity:    opt.privateID,
 			PublicIdentity:     opt.publicID,
@@ -353,8 +353,8 @@ func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context
 }
 
 func wfcRetryAfter(err error, fallback time.Duration) time.Duration {
-	var setupErr *wfcsetup.Error
-	if errors.As(err, &setupErr) && setupErr.Result.RetryAfter > 0 {
+	setupErr, ok := errors.AsType[*wfcsetup.Error](err)
+	if ok && setupErr.Result.RetryAfter > 0 {
 		return setupErr.Result.RetryAfter
 	}
 	return fallback
@@ -378,14 +378,18 @@ func consoleWFCServiceFlow(ctx context.Context, action wfcUserAction) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("waiting for wfc service flow callback: %w", err)
 		}
-		fmt.Fprint(os.Stdout, "wfc-flow> ")
+		if _, err := fmt.Fprint(os.Stdout, "wfc-flow> "); err != nil {
+			return fmt.Errorf("writing wfc service flow prompt: %w", err)
+		}
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("reading wfc service flow callback: %w", err)
 		}
 		done, err := parseWFCServiceFlowCallback(line)
 		if err != nil {
-			fmt.Fprintf(os.Stdout, "invalid wfc callback: %v\n", err)
+			if _, writeErr := fmt.Fprintf(os.Stdout, "invalid wfc callback: %v\n", err); writeErr != nil {
+				return fmt.Errorf("writing invalid wfc callback: %w", writeErr)
+			}
 			continue
 		}
 		if !done {
@@ -477,8 +481,8 @@ func wfcUserActionFromError(err error) (wfcUserAction, bool) {
 		return wfcUserAction{}, false
 	}
 
-	var setupErr *wfcsetup.Error
-	if errors.As(err, &setupErr) {
+	setupErr, ok := errors.AsType[*wfcsetup.Error](err)
+	if ok {
 		websheet := setupErr.Result.Websheet
 		if websheet == nil {
 			return wfcUserAction{Source: string(setupErr.Result.Scheme), Carrier: setupErr.Result.Carrier}, true
@@ -523,7 +527,9 @@ func runUSSD(ctx context.Context, client *ims.Client, code string) error {
 		default:
 		}
 
-		fmt.Fprint(os.Stdout, "ussd> ")
+		if _, err := fmt.Fprint(os.Stdout, "ussd> "); err != nil {
+			return fmt.Errorf("writing USSD prompt: %w", err)
+		}
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("reading USSD input: %w", err)
@@ -717,7 +723,7 @@ func openTCPAPDUReader(ctx context.Context, addr string, timeout time.Duration) 
 	})
 }
 
-func (t *tcpAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, error) {
+func (t *tcpAPDUTransmitter) Transmit(ctx context.Context, req []byte) (_ []byte, resultErr error) {
 	if len(req) == 0 {
 		return nil, errors.New("transmitting APDU: request is empty")
 	}
@@ -730,7 +736,9 @@ func (t *tcpAPDUTransmitter) Transmit(ctx context.Context, req []byte) ([]byte, 
 		return nil, err
 	}
 	defer func() {
-		_ = t.conn.SetDeadline(time.Time{})
+		if err := t.conn.SetDeadline(time.Time{}); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("clearing APDU TCP deadline: %w", err))
+		}
 	}()
 
 	if err := writeTCPAPDUFrame(t.conn, req); err != nil {
@@ -823,7 +831,7 @@ func writeAll(w io.Writer, data []byte) error {
 
 var _ usimcard.Transmitter = (*tcpAPDUTransmitter)(nil)
 
-func serveTCPAPDUServer(ctx context.Context, opt options) error {
+func serveTCPAPDUServer(ctx context.Context, opt options) (resultErr error) {
 	addr := strings.TrimSpace(opt.ccidTCPListen)
 	if addr == "" {
 		return errors.New("serving CCID TCP: listen address is empty")
@@ -853,11 +861,17 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 	if err != nil {
 		return fmt.Errorf("listening for CCID TCP: %w", err)
 	}
-	defer ln.Close()
+	defer func() {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("closing CCID TCP listener: %w", err))
+		}
+	}()
 
 	go func() {
 		<-ctx.Done()
-		_ = ln.Close()
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			slog.Warn("close CCID TCP listener", "err", err)
+		}
 	}()
 
 	timeout := opt.apduTimeout
@@ -884,7 +898,7 @@ func serveTCPAPDUServer(ctx context.Context, opt options) error {
 	}
 }
 
-func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimcard.Transmitter, timeout time.Duration) error {
+func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimcard.Transmitter, timeout time.Duration) (resultErr error) {
 	if timeout <= 0 {
 		timeout = defaultAPDUTimeout
 	}
@@ -892,12 +906,18 @@ func serveTCPAPDUConn(ctx context.Context, conn net.Conn, tx usimcard.Transmitte
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close()
+			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				slog.Warn("close CCID TCP connection", "err", err)
+			}
 		case <-done:
 		}
 	}()
 	defer close(done)
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("closing CCID TCP connection: %w", err))
+		}
+	}()
 
 	for {
 		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {

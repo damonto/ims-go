@@ -290,7 +290,6 @@ func (s *clientState) waitCloseTasks(timeout time.Duration) bool {
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
 	select {
 	case <-done:
 		return true

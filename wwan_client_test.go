@@ -21,7 +21,7 @@ type fakeIMSPDNNetwork struct {
 	closeCalls int
 }
 
-func (n *fakeIMSPDNNetwork) Replace(context.Context, IMSPDNNetworkInfo) (string, error) {
+func (n *fakeIMSPDNNetwork) Replace(context.Context, PDNNetworkInfo) (string, error) {
 	return "test0", n.replaceErr
 }
 func (n *fakeIMSPDNNetwork) Close() error {
@@ -49,14 +49,14 @@ func TestConfigureIMSPDNNetworkLifecycle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			session := &fakeIMSPDNSession{}
 			var fakeNetwork *fakeIMSPDNNetwork
-			var network IMSPDNNetwork
+			var network PDNNetwork
 			if tt.withNetwork {
 				fakeNetwork = &fakeIMSPDNNetwork{replaceErr: tt.replaceErr}
 				network = fakeNetwork
 			}
-			configured, err := configureIMSPDNNetwork(context.Background(), session, network, IMSPDNNetworkInfo{})
+			configured, err := configurePDNNetwork(t.Context(), session, network, PDNNetworkInfo{})
 			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("configureIMSPDNNetwork() error = %v, want %v", err, tt.wantErr)
+				t.Fatalf("configurePDNNetwork() error = %v, want %v", err, tt.wantErr)
 			}
 			if err == nil {
 				if got := configured.Info().InterfaceName; got != tt.wantInterface {

@@ -10,8 +10,8 @@ import (
 	"github.com/damonto/ims-go/swu/ike"
 )
 
-func (state informationalState) sealDeleteRequest(messageID uint32) ([][]byte, error) {
-	return state.sealInitiatorRequest(messageID, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}})
+func (s informationalState) sealDeleteRequest(messageID uint32) ([][]byte, error) {
+	return s.sealInitiatorRequest(messageID, []ike.Payload{&ike.DeletePayload{ProtocolID: protocolIDIKE}})
 }
 
 func (s *Session) sendDeleteRequest(ctx context.Context) error {
@@ -131,24 +131,24 @@ func recognizedESPDeleteResponse(state informationalState, deletePayloads []*ike
 	return responseSPIs, action, nil
 }
 
-func (state informationalState) activeESPDeleteResponseSPI(requestSPI uint32) (uint32, bool) {
-	if !esp.ValidSPI(requestSPI) || !esp.ValidSPI(state.outboundSPI) || requestSPI != state.outboundSPI {
+func (s informationalState) activeESPDeleteResponseSPI(requestSPI uint32) (uint32, bool) {
+	if !esp.ValidSPI(requestSPI) || !esp.ValidSPI(s.outboundSPI) || requestSPI != s.outboundSPI {
 		return 0, false
 	}
-	if state.pendingChild {
-		if !esp.ValidSPI(state.oldInboundSPI) {
+	if s.pendingChild {
+		if !esp.ValidSPI(s.oldInboundSPI) {
 			return 0, false
 		}
-		return state.oldInboundSPI, true
+		return s.oldInboundSPI, true
 	}
-	if !esp.ValidSPI(state.inboundSPI) {
+	if !esp.ValidSPI(s.inboundSPI) {
 		return 0, false
 	}
-	return state.inboundSPI, true
+	return s.inboundSPI, true
 }
 
-func (state informationalState) retiredESPDeleteResponseSPI(spi uint32) (uint32, bool) {
-	for _, child := range state.retiredChildSAs {
+func (s informationalState) retiredESPDeleteResponseSPI(spi uint32) (uint32, bool) {
+	for _, child := range s.retiredChildSAs {
 		if esp.ValidSPI(child.inboundSPI) && esp.ValidSPI(child.outboundSPI) && spi == child.outboundSPI {
 			return child.inboundSPI, true
 		}

@@ -27,8 +27,8 @@ func contextDeadline(ctx context.Context) (time.Time, bool) {
 }
 
 func isNetworkTimeout(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	netErr, ok := errors.AsType[net.Error](err)
+	return ok && netErr.Timeout()
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {

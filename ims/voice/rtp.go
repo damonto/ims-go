@@ -200,9 +200,7 @@ func (p *RTPPacket) UnmarshalBinary(data []byte) error {
 
 func randomRTCPSSRC() uint32 {
 	var data [4]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		panic(err)
-	}
+	_, _ = rand.Read(data[:])
 	if ssrc := binary.BigEndian.Uint32(data[:]); ssrc != 0 {
 		return ssrc
 	}
@@ -406,7 +404,10 @@ func (c AMRPayloadCodec) unmarshalBandwidthEfficient(codec AudioCodec, payload [
 		more = toc.Follow
 	}
 	for i := range result.Frames {
-		frameBits, _ := amrFrameBitLen(codec, result.Frames[i].FrameType)
+		frameBits, err := amrFrameBitLen(codec, result.Frames[i].FrameType)
+		if err != nil {
+			return AMRPayload{}, fmt.Errorf("unmarshaling AMR bandwidth-efficient payload: frame %d: %w", i, err)
+		}
 		if !reader.readBytes(result.Frames[i].Data, frameBits) {
 			return AMRPayload{}, errors.New("unmarshaling AMR bandwidth-efficient payload: speech data is truncated")
 		}
@@ -429,8 +430,11 @@ func (c AMRPayloadCodec) appendBandwidthEfficient(dst []byte, codec AudioCodec, 
 		}
 		toc.writeBits(&writer)
 	}
-	for _, frame := range payload.Frames {
-		frameBits, _ := amrFrameBitLen(codec, frame.FrameType)
+	for i, frame := range payload.Frames {
+		frameBits, err := amrFrameBitLen(codec, frame.FrameType)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling AMR bandwidth-efficient payload: frame %d: %w", i, err)
+		}
 		writer.writeBytes(frame.Data, frameBits)
 	}
 	return writer.bytes(), nil
@@ -486,7 +490,7 @@ func (e *AMRToCEntry) UnmarshalBinary(data []byte) error {
 	}
 	toc := data[0]
 	if toc&amrToCReservedBits != 0 {
-		return fmt.Errorf("unmarshaling AMR ToC entry: reserved bits are set")
+		return errors.New("unmarshaling AMR ToC entry: reserved bits are set")
 	}
 	e.Follow = toc&amrToCFollowFlag != 0
 	e.FrameType = int((toc >> amrToCFrameTypeShift) & amrToCFrameTypeMask)

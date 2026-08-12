@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/damonto/ims-go/ims/pidf"
 	"log/slog"
 	"net"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/damonto/ims-go/ims/pidf"
 )
 
 type AudioCodec string
@@ -59,12 +60,12 @@ type Config struct {
 	AudioInactivityCallEndReasons []AudioInactivityCallEndReason
 	LocalRTPPortMin               int
 	LocalRTPPortMax               int
-	PrepareMedia                  func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
-	OpenMedia                     func(ctx context.Context, cfg MediaConfig) (MediaTransport, error)
+	PrepareMedia                  func(ctx context.Context, c MediaConfig) (MediaTransport, error)
+	OpenMedia                     func(ctx context.Context, c MediaConfig) (MediaTransport, error)
 	// WaitMediaReady confirms that the network resources for the negotiated
 	// media are available. A successful packet transport alone does not satisfy
 	// IMS QoS preconditions. When nil, local QoS preconditions remain unmet.
-	WaitMediaReady func(ctx context.Context, cfg MediaConfig) error
+	WaitMediaReady func(ctx context.Context, c MediaConfig) error
 	OnIncomingCall func(IncomingCall)
 	OnCallEvent    func(CallEvent)
 	OnMedia        func(MediaEvent)
@@ -141,7 +142,7 @@ type rtcpWriter interface {
 // MediaTransportConfigurer updates an existing transport after SDP negotiation
 // or renegotiation changes the remote media description.
 type MediaTransportConfigurer interface {
-	ConfigureRemote(ctx context.Context, cfg MediaConfig) error
+	ConfigureRemote(ctx context.Context, c MediaConfig) error
 }
 
 const (
@@ -170,131 +171,131 @@ const (
 	GeolocationPIDFEmergencyCell    = pidf.GeolocationPIDFEmergencyCell
 )
 
-func (cfg Config) Normalized() (Config, error) {
-	cfg.RequestURIFormat = RequestURIFormat(strings.ToLower(strings.TrimSpace(string(cfg.RequestURIFormat))))
-	cfg.PhoneContextDomain = strings.TrimSpace(cfg.PhoneContextDomain)
-	if cfg.RequestURIFormat == "" {
-		cfg.RequestURIFormat = RequestURIFormatSIP
+func (c Config) Normalized() (Config, error) {
+	c.RequestURIFormat = RequestURIFormat(strings.ToLower(strings.TrimSpace(string(c.RequestURIFormat))))
+	c.PhoneContextDomain = strings.TrimSpace(c.PhoneContextDomain)
+	if c.RequestURIFormat == "" {
+		c.RequestURIFormat = RequestURIFormatSIP
 	}
-	switch cfg.RequestURIFormat {
+	switch c.RequestURIFormat {
 	case RequestURIFormatSIP, RequestURIFormatTEL:
 	default:
-		return Config{}, fmt.Errorf("normalizing voice config: unsupported request URI format %q", cfg.RequestURIFormat)
+		return Config{}, fmt.Errorf("normalizing voice config: unsupported request URI format %q", c.RequestURIFormat)
 	}
-	cfg.RTPProfile = strings.TrimSpace(cfg.RTPProfile)
-	if cfg.RTPProfile == "" {
-		cfg.RTPProfile = defaultRTPProfile
+	c.RTPProfile = strings.TrimSpace(c.RTPProfile)
+	if c.RTPProfile == "" {
+		c.RTPProfile = defaultRTPProfile
 	}
-	if cfg.Preconditions {
-		cfg.ReliableProvisional = true
+	if c.Preconditions {
+		c.ReliableProvisional = true
 	}
-	cfg.GeolocationPIDFInvite = pidf.NormalizeTypes(cfg.GeolocationPIDFInvite)
-	cfg.GeolocationCountry = strings.ToUpper(strings.TrimSpace(cfg.GeolocationCountry))
-	cfg.PIDFShortCodes = normalizeShortCodes(cfg.PIDFShortCodes)
-	if (len(cfg.GeolocationPIDFInvite) > 0 || len(cfg.PIDFShortCodes) > 0) && cfg.GeolocationCountry == "" {
-		cfg.GeolocationCountry = "US"
+	c.GeolocationPIDFInvite = pidf.NormalizeTypes(c.GeolocationPIDFInvite)
+	c.GeolocationCountry = strings.ToUpper(strings.TrimSpace(c.GeolocationCountry))
+	c.PIDFShortCodes = normalizeShortCodes(c.PIDFShortCodes)
+	if (len(c.GeolocationPIDFInvite) > 0 || len(c.PIDFShortCodes) > 0) && c.GeolocationCountry == "" {
+		c.GeolocationCountry = "US"
 	}
-	if cfg.GeolocationCountry != "" && len(cfg.GeolocationCountry) != 2 {
+	if c.GeolocationCountry != "" && len(c.GeolocationCountry) != 2 {
 		return Config{}, errors.New("normalizing voice config: geolocation country must be two letters")
 	}
-	if !strings.EqualFold(cfg.RTPProfile, "RTP/AVP") {
-		return Config{}, fmt.Errorf("normalizing voice config: unsupported rtp profile %q", cfg.RTPProfile)
+	if !strings.EqualFold(c.RTPProfile, "RTP/AVP") {
+		return Config{}, fmt.Errorf("normalizing voice config: unsupported rtp profile %q", c.RTPProfile)
 	}
-	if cfg.PTime < 0 {
+	if c.PTime < 0 {
 		return Config{}, errors.New("normalizing voice config: ptime must be >= 0")
 	}
-	if cfg.PTime == 0 {
-		cfg.PTime = defaultPTime
+	if c.PTime == 0 {
+		c.PTime = defaultPTime
 	}
-	if cfg.MaxPTime < 0 {
+	if c.MaxPTime < 0 {
 		return Config{}, errors.New("normalizing voice config: maxptime must be >= 0")
 	}
-	if cfg.MaxPTime == 0 {
-		cfg.MaxPTime = defaultMaxPTime
+	if c.MaxPTime == 0 {
+		c.MaxPTime = defaultMaxPTime
 	}
-	if cfg.MaxPTime < cfg.PTime {
+	if c.MaxPTime < c.PTime {
 		return Config{}, errors.New("normalizing voice config: maxptime must be >= ptime")
 	}
-	if cfg.AudioASBandwidthKbps < 0 {
+	if c.AudioASBandwidthKbps < 0 {
 		return Config{}, errors.New("normalizing voice config: audio AS bandwidth must be >= 0")
 	}
-	if cfg.SessionExpires < 0 {
+	if c.SessionExpires < 0 {
 		return Config{}, errors.New("normalizing voice config: session expires must be >= 0")
 	}
-	if cfg.SessionExpires > 0 && cfg.SessionExpires < time.Second {
+	if c.SessionExpires > 0 && c.SessionExpires < time.Second {
 		return Config{}, errors.New("normalizing voice config: session expires must be at least 1s")
 	}
-	if cfg.MinSessionExpires < 0 {
+	if c.MinSessionExpires < 0 {
 		return Config{}, errors.New("normalizing voice config: min session expires must be >= 0")
 	}
-	if cfg.MinSessionExpires > 0 && cfg.MinSessionExpires < time.Second {
+	if c.MinSessionExpires > 0 && c.MinSessionExpires < time.Second {
 		return Config{}, errors.New("normalizing voice config: min session expires must be at least 1s")
 	}
-	if cfg.SessionExpires > 0 && cfg.MinSessionExpires > cfg.SessionExpires {
-		cfg.SessionExpires = cfg.MinSessionExpires
+	if c.SessionExpires > 0 && c.MinSessionExpires > c.SessionExpires {
+		c.SessionExpires = c.MinSessionExpires
 	}
-	cfg.SessionRefresher = strings.ToLower(strings.TrimSpace(cfg.SessionRefresher))
-	if cfg.SessionRefresher == "" {
-		cfg.SessionRefresher = sessionRefresherNone
+	c.SessionRefresher = strings.ToLower(strings.TrimSpace(c.SessionRefresher))
+	if c.SessionRefresher == "" {
+		c.SessionRefresher = sessionRefresherNone
 	}
-	switch cfg.SessionRefresher {
+	switch c.SessionRefresher {
 	case sessionRefresherNone, sessionRefresherUAC, sessionRefresherUAS:
 	default:
-		return Config{}, fmt.Errorf("normalizing voice config: unsupported session refresher %q", cfg.SessionRefresher)
+		return Config{}, fmt.Errorf("normalizing voice config: unsupported session refresher %q", c.SessionRefresher)
 	}
-	if cfg.MOCallRequestTimeout < 0 {
+	if c.MOCallRequestTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: mo call request timeout must be >= 0")
 	}
-	if cfg.RingbackTimeout < 0 {
+	if c.RingbackTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: ringback timeout must be >= 0")
 	}
-	if cfg.RingingTimeout < 0 {
+	if c.RingingTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: ringing timeout must be >= 0")
 	}
-	if cfg.IncomingPreconditionTimeout < 0 {
+	if c.IncomingPreconditionTimeout < 0 {
 		return Config{}, errors.New("normalizing voice config: incoming precondition timeout must be >= 0")
 	}
-	if cfg.IncomingPreconditionTimeout == 0 {
-		cfg.IncomingPreconditionTimeout = defaultIncomingPreconditionTimeout
+	if c.IncomingPreconditionTimeout == 0 {
+		c.IncomingPreconditionTimeout = defaultIncomingPreconditionTimeout
 	}
 	var err error
-	if cfg.RTPInactivityTimeout, err = normalizeDurationSetting(cfg.RTPInactivityTimeout, defaultRTPInactivity, durationSettingRTPInactivityTimeout); err != nil {
+	if c.RTPInactivityTimeout, err = normalizeDurationSetting(c.RTPInactivityTimeout, defaultRTPInactivity, durationSettingRTPInactivityTimeout); err != nil {
 		return Config{}, err
 	}
-	if cfg.RTCPInactivityTimeout, err = normalizeDurationSetting(cfg.RTCPInactivityTimeout, defaultRTCPInactivity, durationSettingRTCPInactivityTimeout); err != nil {
+	if c.RTCPInactivityTimeout, err = normalizeDurationSetting(c.RTCPInactivityTimeout, defaultRTCPInactivity, durationSettingRTCPInactivityTimeout); err != nil {
 		return Config{}, err
 	}
-	if cfg.AudioInactivityCallEndReasons == nil {
-		cfg.AudioInactivityCallEndReasons = append([]AudioInactivityCallEndReason(nil), defaultAudioInactivityCallEndReasons...)
+	if c.AudioInactivityCallEndReasons == nil {
+		c.AudioInactivityCallEndReasons = append([]AudioInactivityCallEndReason(nil), defaultAudioInactivityCallEndReasons...)
 	}
-	for _, reason := range cfg.AudioInactivityCallEndReasons {
+	for _, reason := range c.AudioInactivityCallEndReasons {
 		switch reason {
 		case AudioInactivityRTCPOnHold, AudioInactivityRTCPOnConnected, AudioInactivityRTPOnConnected, AudioInactivityE911RTCP, AudioInactivityE911RTP:
 		default:
 			return Config{}, fmt.Errorf("normalizing voice config: unsupported audio inactivity call end reason %d", reason)
 		}
 	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+	if c.Logger == nil {
+		c.Logger = slog.Default()
 	}
-	if cfg.LocalRTPPortMin == 0 {
-		cfg.LocalRTPPortMin = defaultLocalRTPPortMin
+	if c.LocalRTPPortMin == 0 {
+		c.LocalRTPPortMin = defaultLocalRTPPortMin
 	}
-	if cfg.LocalRTPPortMax == 0 {
-		cfg.LocalRTPPortMax = defaultLocalRTPPortMax
+	if c.LocalRTPPortMax == 0 {
+		c.LocalRTPPortMax = defaultLocalRTPPortMax
 	}
-	if cfg.LocalRTPPortMin < 1 || cfg.LocalRTPPortMin > 65535 || cfg.LocalRTPPortMax < 1 || cfg.LocalRTPPortMax > 65535 {
+	if c.LocalRTPPortMin < 1 || c.LocalRTPPortMin > 65535 || c.LocalRTPPortMax < 1 || c.LocalRTPPortMax > 65535 {
 		return Config{}, errors.New("normalizing voice config: local rtp port range must be between 1 and 65535")
 	}
-	if cfg.LocalRTPPortMin > cfg.LocalRTPPortMax {
+	if c.LocalRTPPortMin > c.LocalRTPPortMax {
 		return Config{}, errors.New("normalizing voice config: local rtp port min must be <= max")
 	}
-	codecs, err := normalizeCodecs(cfg.Codecs)
+	codecs, err := normalizeCodecs(c.Codecs)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.Codecs = codecs
-	return cfg, nil
+	c.Codecs = codecs
+	return c, nil
 }
 
 // Duration returns a configured duration value. Passing zero explicitly disables timers that use nil for defaults.
@@ -330,8 +331,8 @@ func normalizeDurationSetting(value *time.Duration, fallback time.Duration, sett
 	return Duration(*value), nil
 }
 
-func (cfg Config) endsCallOnAudioInactivity(reason AudioInactivityCallEndReason) bool {
-	return slices.Contains(cfg.AudioInactivityCallEndReasons, reason)
+func (c Config) endsCallOnAudioInactivity(reason AudioInactivityCallEndReason) bool {
+	return slices.Contains(c.AudioInactivityCallEndReasons, reason)
 }
 
 func normalizeShortCodes(values []string) []string {

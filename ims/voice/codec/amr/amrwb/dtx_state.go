@@ -49,7 +49,7 @@ const (
 	dtxStateMute
 )
 
-func (s *dtxDecState) rxHandler(frameType RXFrameType) dtxStateType {
+func (s *dtxDecState) nextRXState(frameType RXFrameType) dtxStateType {
 	newState := dtxStateSpeech
 	if frameType == rxSIDFirst ||
 		frameType == rxSIDUpdate ||

@@ -77,7 +77,7 @@ func TestBuildCode2i40RoundTripsThroughDecoder(t *testing.T) {
 
 	got := buildCode2i40(0, codvec, dnSign, code, h, y)
 
-	decoded := decode2i40_9bits(0, got.sign, got.index)
+	decoded := decode2I40At9Bits(0, got.sign, got.index)
 	if decoded[10] != 8191 || decoded[17] != -8192 {
 		t.Fatalf("decoded pulses = %d/%d, want 8191/-8192", decoded[10], decoded[17])
 	}
@@ -98,9 +98,9 @@ func TestCode2i409BitsSelectsStrongTargetPulses(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := code2i40_9bits(0, x, h, subframeSamples, 0, code, y)
+	got := code2I40At9Bits(0, x, h, subframeSamples, 0, code, y)
 
-	decoded := decode2i40_9bits(0, got.sign, got.index)
+	decoded := decode2I40At9Bits(0, got.sign, got.index)
 	if decoded[10] != 8191 || decoded[17] != -8192 {
 		t.Fatalf("decoded pulses = %d/%d, want target pulse positions", decoded[10], decoded[17])
 	}
@@ -112,7 +112,7 @@ func TestCode2i409BitsSelectsStrongTargetPulses(t *testing.T) {
 	}
 }
 
-func TestBuildCode2i40_11RoundTripsThroughDecoder(t *testing.T) {
+func TestBuildCode2I40At11BitsRoundTripsThroughDecoder(t *testing.T) {
 	codvec := [pulseCount2]int16{11, 22}
 	dnSign := make([]int16, subframeSamples)
 	for i := range dnSign {
@@ -124,9 +124,9 @@ func TestBuildCode2i40_11RoundTripsThroughDecoder(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := buildCode2i40_11(codvec, dnSign, code, h, y)
+	got := buildCode2I40At11Bits(codvec, dnSign, code, h, y)
 
-	decoded := decode2i40_11bits(got.sign, got.index)
+	decoded := decode2I40At11Bits(got.sign, got.index)
 	if decoded[11] != 8191 || decoded[22] != -8192 {
 		t.Fatalf("decoded pulses = %d/%d, want 8191/-8192", decoded[11], decoded[22])
 	}
@@ -147,9 +147,9 @@ func TestCode2i4011BitsSelectsStrongTargetPulses(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := code2i40_11bits(x, h, subframeSamples, 0, code, y)
+	got := code2I40At11Bits(x, h, subframeSamples, 0, code, y)
 
-	decoded := decode2i40_11bits(got.sign, got.index)
+	decoded := decode2I40At11Bits(got.sign, got.index)
 	if decoded[11] != 8191 || decoded[22] != -8192 {
 		t.Fatalf("decoded pulses = %d/%d, want target pulse positions", decoded[11], decoded[22])
 	}
@@ -175,7 +175,7 @@ func TestBuildCode3i40RoundTripsThroughDecoder(t *testing.T) {
 
 	got := buildCode3i40(codvec, dnSign, code, h, y)
 
-	decoded := decode3i40_14bits(got.sign, got.index)
+	decoded := decode3I40At14Bits(got.sign, got.index)
 	if decoded[10] != 8191 || decoded[16] != -8192 || decoded[22] != 8191 {
 		t.Fatalf(
 			"decoded pulses = %d/%d/%d, want 8191/-8192/8191",
@@ -202,9 +202,9 @@ func TestCode3i4014BitsSelectsStrongTargetPulses(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := code3i40_14bits(x, h, subframeSamples, 0, code, y)
+	got := code3I40At14Bits(x, h, subframeSamples, 0, code, y)
 
-	decoded := decode3i40_14bits(got.sign, got.index)
+	decoded := decode3I40At14Bits(got.sign, got.index)
 	if decoded[10] != 8191 || decoded[16] != -8192 || decoded[22] != 8191 {
 		t.Fatalf(
 			"decoded pulses = %d/%d/%d, want target pulse positions",
@@ -235,7 +235,7 @@ func TestBuildCode4i40RoundTripsThroughDecoder(t *testing.T) {
 
 	got := buildCode4i40(codvec, dnSign, code, h, y)
 
-	decoded := decode4i40_17bits(got.sign, got.index)
+	decoded := decode4I40At17Bits(got.sign, got.index)
 	if decoded[10] != 8191 || decoded[16] != -8192 || decoded[22] != 8191 || decoded[33] != 8191 {
 		t.Fatalf(
 			"decoded pulses = %d/%d/%d/%d, want 8191/-8192/8191/8191",
@@ -270,9 +270,9 @@ func TestCode4i4017BitsSelectsStrongTargetPulses(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := code4i40_17bits(x, h, subframeSamples, 0, code, y)
+	got := code4I40At17Bits(x, h, subframeSamples, 0, code, y)
 
-	decoded := decode4i40_17bits(got.sign, got.index)
+	decoded := decode4I40At17Bits(got.sign, got.index)
 	if decoded[10] != 8191 || decoded[16] != -8192 || decoded[22] != 8191 || decoded[33] != 8191 {
 		t.Fatalf(
 			"decoded pulses = %d/%d/%d/%d, want target pulse positions",
@@ -311,7 +311,7 @@ func TestBuildCode8i40RoundTripsThroughDecoder(t *testing.T) {
 
 	got := buildCode8i40(codvec, dnSign, code, h, y)
 
-	decoded := decode8i40_31bits(got.params[:])
+	decoded := decode8I40At31Bits(got.params[:])
 	for i := range code {
 		if decoded[i] != code[i] {
 			t.Fatalf("decoded[%d] = %d, want %d", i, decoded[i], code[i])
@@ -347,9 +347,9 @@ func TestCode8i4031BitsSelectsStrongTargetPulses(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := code8i40_31bits(x, cn, h, code, y)
+	got := code8I40At31Bits(x, cn, h, code, y)
 
-	decoded := decode8i40_31bits(got.params[:])
+	decoded := decode8I40At31Bits(got.params[:])
 	for _, target := range targets {
 		if decoded[target.pos] == 0 {
 			t.Fatalf("decoded[%d] = 0, want selected target pulse", target.pos)
@@ -378,7 +378,7 @@ func TestBuildCode10i40RoundTripsThroughDecoder(t *testing.T) {
 
 	got := buildCode10i40(codvec, dnSign, code, h, y)
 
-	decoded := decode10i40_35bits(got.params[:])
+	decoded := decode10I40At35Bits(got.params[:])
 	for i := range code {
 		if decoded[i] != code[i] {
 			t.Fatalf("decoded[%d] = %d, want %d", i, decoded[i], code[i])
@@ -416,9 +416,9 @@ func TestCode10i4035BitsSelectsStrongTargetPulses(t *testing.T) {
 	code := make([]int16, subframeSamples)
 	y := make([]int16, subframeSamples)
 
-	got := code10i40_35bits(x, cn, h, code, y)
+	got := code10I40At35Bits(x, cn, h, code, y)
 
-	decoded := decode10i40_35bits(got.params[:])
+	decoded := decode10I40At35Bits(got.params[:])
 	for _, target := range targets {
 		if decoded[target.pos] == 0 {
 			t.Fatalf("decoded[%d] = 0, want selected target pulse", target.pos)

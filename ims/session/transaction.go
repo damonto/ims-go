@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ type TransactionTimers struct {
 }
 
 type clientTransaction struct {
-	session   *Session
+	session   *Stack
 	transport Transport
 	request   sip.Message
 	key       string
@@ -69,8 +70,8 @@ func (e *TransactionTimeoutError) Error() string {
 }
 
 func TransactionTimerExpired(err error, timer string) bool {
-	var timeout *TransactionTimeoutError
-	if !errors.As(err, &timeout) {
+	timeout, ok := errors.AsType[*TransactionTimeoutError](err)
+	if !ok {
 		return false
 	}
 	return strings.EqualFold(timeout.Timer, timer)
@@ -109,6 +110,7 @@ func (e *transportFailureError) TransportFailed() bool {
 }
 
 type transportFailure interface {
+	error
 	TransportFailed() bool
 }
 
@@ -125,8 +127,8 @@ func TransportFailed(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var failure transportFailure
-	return errors.As(err, &failure) && failure.TransportFailed()
+	failure, ok := errors.AsType[transportFailure](err)
+	return ok && failure.TransportFailed()
 }
 
 var defaultTransactionTimers = TransactionTimers{
@@ -146,72 +148,72 @@ func DefaultTransactionTimers() TransactionTimers {
 	return defaultTransactionTimers
 }
 
-func (timers TransactionTimers) Normalized() (TransactionTimers, error) {
-	if timers.T1 < 0 {
+func (tt TransactionTimers) Normalized() (TransactionTimers, error) {
+	if tt.T1 < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: T1 must be >= 0")
 	}
-	if timers.T2 < 0 {
+	if tt.T2 < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: T2 must be >= 0")
 	}
-	if timers.T4 < 0 {
+	if tt.T4 < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: T4 must be >= 0")
 	}
-	if timers.TB < 0 {
+	if tt.TB < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer B must be >= 0")
 	}
-	if timers.TD < 0 {
+	if tt.TD < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer D must be >= 0")
 	}
-	if timers.TF < 0 {
+	if tt.TF < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer F must be >= 0")
 	}
-	if timers.TH < 0 {
+	if tt.TH < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer H must be >= 0")
 	}
-	if timers.TJ < 0 {
+	if tt.TJ < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer J must be >= 0")
 	}
-	if timers.TL < 0 {
+	if tt.TL < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer L must be >= 0")
 	}
-	if timers.TM < 0 {
+	if tt.TM < 0 {
 		return TransactionTimers{}, errors.New("normalizing transaction timers: Timer M must be >= 0")
 	}
 	defaults := DefaultTransactionTimers()
-	if timers.T1 == 0 {
-		timers.T1 = defaults.T1
+	if tt.T1 == 0 {
+		tt.T1 = defaults.T1
 	}
-	if timers.T2 == 0 {
-		timers.T2 = defaults.T2
+	if tt.T2 == 0 {
+		tt.T2 = defaults.T2
 	}
-	if timers.T4 == 0 {
-		timers.T4 = defaults.T4
+	if tt.T4 == 0 {
+		tt.T4 = defaults.T4
 	}
-	if timers.TB == 0 {
-		timers.TB = 64 * timers.T1
+	if tt.TB == 0 {
+		tt.TB = 64 * tt.T1
 	}
-	if timers.TD == 0 {
-		timers.TD = defaults.TD
+	if tt.TD == 0 {
+		tt.TD = defaults.TD
 	}
-	if timers.TF == 0 {
-		timers.TF = 64 * timers.T1
+	if tt.TF == 0 {
+		tt.TF = 64 * tt.T1
 	}
-	if timers.TH == 0 {
-		timers.TH = 64 * timers.T1
+	if tt.TH == 0 {
+		tt.TH = 64 * tt.T1
 	}
-	if timers.TJ == 0 {
-		timers.TJ = 64 * timers.T1
+	if tt.TJ == 0 {
+		tt.TJ = 64 * tt.T1
 	}
-	if timers.TL == 0 {
-		timers.TL = 64 * timers.T1
+	if tt.TL == 0 {
+		tt.TL = 64 * tt.T1
 	}
-	if timers.TM == 0 {
-		timers.TM = 64 * timers.T1
+	if tt.TM == 0 {
+		tt.TM = 64 * tt.T1
 	}
-	return timers, nil
+	return tt, nil
 }
 
-func newClientTransaction(s *Session, transport Transport, req sip.Message, opts ExchangeOptions) *clientTransaction {
+func newClientTransaction(s *Stack, transport Transport, req sip.Message, opts ExchangeOptions) *clientTransaction {
 	return &clientTransaction{
 		session:    s,
 		transport:  transport,
@@ -443,7 +445,7 @@ func (tx *clientTransaction) runInvite(deadline time.Time) {
 				tx.deliverResponse(resp)
 				if err := tx.sendACK(ack); err != nil {
 					tx.abort(nil)
-					tx.session.notifyHandlers(err)
+					tx.session.notifyProcessors(err)
 					return
 				}
 				if tx.reliable {
@@ -512,7 +514,7 @@ func (tx *clientTransaction) resend(reportFailure bool) bool {
 	return true
 }
 
-func (s *Session) reportTransportFailure(transport Transport, err error) {
+func (s *Stack) reportTransportFailure(transport Transport, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.running {
@@ -533,7 +535,7 @@ func (s *Session) reportTransportFailure(transport Transport, err error) {
 	}
 }
 
-func (s *Session) nextTransportFailure() (inboundMessage, bool) {
+func (s *Stack) nextTransportFailure() (inboundMessage, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.transportQueue) == 0 {
@@ -592,7 +594,7 @@ func (tx *clientTransaction) awaitInviteCompleted(ack sip.Message, timeout time.
 			if resp.StatusCode() >= 300 && resp.StatusCode() < 700 {
 				if err := tx.sendACK(ack); err != nil {
 					tx.abort(nil)
-					tx.session.notifyHandlers(err)
+					tx.session.notifyProcessors(err)
 					return
 				}
 			}
@@ -619,7 +621,7 @@ func (tx *clientTransaction) timerD() time.Duration {
 	return 32 * time.Second
 }
 
-func (s *Session) registerTransaction(tx *clientTransaction) error {
+func (s *Stack) registerTransaction(tx *clientTransaction) error {
 	if tx.key == "" {
 		return errors.New("registering transaction: key is empty")
 	}
@@ -638,7 +640,7 @@ func (s *Session) registerTransaction(tx *clientTransaction) error {
 	return nil
 }
 
-func (s *Session) unregisterTransaction(tx *clientTransaction) {
+func (s *Stack) unregisterTransaction(tx *clientTransaction) {
 	s.mu.Lock()
 	if current, ok := s.transactions[tx.key]; ok && current == tx {
 		delete(s.transactions, tx.key)
@@ -647,7 +649,7 @@ func (s *Session) unregisterTransaction(tx *clientTransaction) {
 	s.mu.Unlock()
 }
 
-func (s *Session) abortTransactions(err error) {
+func (s *Stack) abortTransactions(err error) {
 	s.mu.Lock()
 	transactions := make([]*clientTransaction, 0, len(s.transactions))
 	for _, tx := range s.transactions {
@@ -659,11 +661,11 @@ func (s *Session) abortTransactions(err error) {
 	}
 }
 
-func (s *Session) abortTransportTransactions(transport Transport, err error) {
+func (s *Stack) abortTransportTransactions(transport Transport, err error) {
 	s.mu.Lock()
 	clientTxs := make([]*clientTransaction, 0)
 	for _, tx := range s.transactions {
-		if tx.transport == transport {
+		if tx.transport == transport || slices.Contains(tx.opts.ResponseTransports, transport) {
 			clientTxs = append(clientTxs, tx)
 		}
 	}

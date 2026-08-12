@@ -237,7 +237,7 @@ func ikeNotifyName(notifyType uint16) string {
 		return "N1_MODE_CAPABILITY"
 	case notifyTypeN1ModeInformation:
 		return "N1_MODE_INFORMATION"
-	case notifyTypeN1ModeSNSSAIPlmnID:
+	case notifyTypeN1ModeSNSSAIPLMNID:
 		return "N1_MODE_S_NSSAI_PLMN_ID"
 	default:
 		return "UNKNOWN_NOTIFY"
