@@ -40,6 +40,7 @@ type imsProfile struct {
 	ChildEncryptionKeyLens       []uint16                  `json:"childEncryptionKeyLens"`
 	ChildEncryptionAESCTRKeyLens []uint16                  `json:"childEncryptionAESCTRKeyLens"`
 	ChildIntegrity               []uint16                  `json:"childIntegrity"`
+	ChildSAMultipleProposals     bool                      `json:"enableChildSAMultipleProposals"`
 	PCSCFIPv4ConfigAttribute     uint16                    `json:"pcscfIPv4ConfigAttribute"`
 	PCSCFIPv6ConfigAttribute     uint16                    `json:"pcscfIPv6ConfigAttribute"`
 	NATKeepaliveInterval         imsProfileDuration        `json:"natKeepaliveInterval"`
@@ -400,6 +401,9 @@ func (c Config) withIMSProfile(profile imsProfile, card Card) Config {
 		}
 		if len(wifi.Tunnel.ChildIntegrity) == 0 {
 			wifi.Tunnel.ChildIntegrity = cloneUint16s(profile.ChildIntegrity)
+		}
+		if profile.ChildSAMultipleProposals {
+			wifi.Tunnel.ChildSAMultipleProposals = true
 		}
 		if wifi.Tunnel.PCSCFIPv4ConfigAttribute == 0 {
 			wifi.Tunnel.PCSCFIPv4ConfigAttribute = profile.PCSCFIPv4ConfigAttribute

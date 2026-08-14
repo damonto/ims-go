@@ -160,11 +160,12 @@ func (s *Stack) PromotePrimary(t Transport) (Attachment, error) {
 	s.primary = t
 	s.primaryErr = nil
 	s.aux = removeTransport(s.aux, t)
-	var oldAttachment *transportAttachment
+	var oldAttachment Attachment
 	if _, ok := s.active[old]; old != nil && ok {
 		s.aux = append(s.aux, old)
-		oldAttachment = &transportAttachment{session: s, transport: old}
-		s.attachments[old] = oldAttachment
+		attachment := &transportAttachment{session: s, transport: old}
+		s.attachments[old] = attachment
+		oldAttachment = attachment
 	}
 	return oldAttachment, nil
 }

@@ -40,6 +40,7 @@ type Config struct {
 	ChildEncryptionKeyLens           []uint16
 	ChildEncryptionAESCTRKeyLens     []uint16
 	ChildIntegrity                   []uint16
+	ChildSAMultipleProposals         bool
 	PCSCFIPv4ConfigAttribute         uint16
 	PCSCFIPv6ConfigAttribute         uint16
 	DisablePCSCFRestoration          bool
@@ -275,6 +276,7 @@ func handshakeConfig(c Config) handshake.Config {
 		ChildEncryptionKeyLens:       append([]uint16(nil), c.ChildEncryptionKeyLens...),
 		ChildEncryptionAESCTRKeyLens: append([]uint16(nil), c.ChildEncryptionAESCTRKeyLens...),
 		ChildIntegrity:               append([]uint16(nil), c.ChildIntegrity...),
+		ChildSAMultipleProposals:     c.ChildSAMultipleProposals,
 		PCSCFIPv4ConfigAttribute:     c.PCSCFIPv4ConfigAttribute,
 		PCSCFIPv6ConfigAttribute:     c.PCSCFIPv6ConfigAttribute,
 		PCSCFRestoration:             !c.DisablePCSCFRestoration,

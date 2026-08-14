@@ -264,6 +264,41 @@ func TestPromotePrimaryTransfersAttachmentOwnership(t *testing.T) {
 	}
 }
 
+func TestPromotePrimaryReturnsNilWithoutActivePreviousTransport(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldPrimary bool
+	}{
+		{name: "no previous primary"},
+		{name: "inactive previous primary", oldPrimary: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := newStubTransport(5062, 5060)
+			next := newStubTransport(15062, 15060)
+			sess := &Stack{
+				primary:        nil,
+				aux:            []Transport{next},
+				active:         map[Transport]struct{}{next: {}},
+				attachments:    map[Transport]*transportAttachment{next: {session: nil, transport: next}},
+				responseRoutes: make(map[Transport]Transport),
+			}
+			sess.attachments[next].session = sess
+			if tt.oldPrimary {
+				sess.primary = primary
+			}
+
+			oldAttachment, err := sess.PromotePrimary(next)
+			if err != nil {
+				t.Fatalf("PromotePrimary() error = %v", err)
+			}
+			if oldAttachment != nil {
+				t.Fatalf("PromotePrimary() old attachment = %#v, want nil", oldAttachment)
+			}
+		})
+	}
+}
+
 func TestDialogAttachmentCloseConcurrentWithLookup(t *testing.T) {
 	tests := []struct {
 		name string

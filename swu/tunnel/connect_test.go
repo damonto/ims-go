@@ -1179,6 +1179,64 @@ func TestChildSAProposalsGroupTransformAlternatives(t *testing.T) {
 	}
 }
 
+func TestChildSAProposalsAddSupportedFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		want    int
+	}{
+		{name: "disabled", want: 1},
+		{name: "enabled", enabled: true, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proposals := childSAProposals(handshake.Config{
+				ChildEncryptionKeyLens:   []uint16{256},
+				ChildIntegrity:           []uint16{transformINTEGHMACSHA256},
+				ChildSAMultipleProposals: tt.enabled,
+			}, 0x01020304)
+			if len(proposals) != tt.want {
+				t.Fatalf("len(proposals) = %d, want %d", len(proposals), tt.want)
+			}
+			if got := proposalKeyLengths(t, proposals[0]); !slices.Equal(got, []uint16{256}) {
+				t.Fatalf("preferred key lengths = %v, want [256]", got)
+			}
+			if got := proposalTransformIDs(proposals[0], transformTypeINTEG); !slices.Equal(got, []uint16{transformINTEGHMACSHA256}) {
+				t.Fatalf("preferred integrities = %v, want [%d]", got, transformINTEGHMACSHA256)
+			}
+			if !tt.enabled {
+				return
+			}
+
+			fallback := proposals[1]
+			if fallback.Number != 2 {
+				t.Fatalf("fallback proposal number = %d, want 2", fallback.Number)
+			}
+			if got := proposalTransformIDs(fallback, transformTypeENCR); !slices.Equal(got, []uint16{
+				transformENCRAESCBC, transformENCRAESCBC, transformENCRAESCBC,
+				transformENCRAESCTR, transformENCRAESCTR, transformENCRAESCTR,
+			}) {
+				t.Fatalf("fallback encryption transforms = %v", got)
+			}
+			if got := proposalKeyLengths(t, fallback); !slices.Equal(got, []uint16{256, 192, 128, 256, 192, 128}) {
+				t.Fatalf("fallback key lengths = %v, want [256 192 128 256 192 128]", got)
+			}
+			if got := proposalTransformIDs(fallback, transformTypeINTEG); !slices.Equal(got, []uint16{
+				transformINTEGHMACSHA512,
+				transformINTEGHMACSHA384,
+				transformINTEGHMACSHA256,
+				transformINTEGHMACSHA196,
+				transformINTEGAESXCBC96,
+			}) {
+				t.Fatalf("fallback integrities = %v", got)
+			}
+			if err := validateNegotiatedProposalFromRequests(selectedChildProposal(fallback), proposals); err != nil {
+				t.Fatalf("validating fallback selection: %v", err)
+			}
+		})
+	}
+}
+
 func TestNegotiatedIKESAInitProposalValidation(t *testing.T) {
 	const dhGroup = transformDH2048MODP
 	validProposal := func() ike.Proposal {

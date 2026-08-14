@@ -40,6 +40,7 @@ type Config struct {
 	ChildEncryptionKeyLens       []uint16
 	ChildEncryptionAESCTRKeyLens []uint16
 	ChildIntegrity               []uint16
+	ChildSAMultipleProposals     bool
 	PCSCFIPv4ConfigAttribute     uint16
 	PCSCFIPv6ConfigAttribute     uint16
 	PCSCFRestoration             bool

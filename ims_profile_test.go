@@ -195,6 +195,7 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
     "ikePRF": [5],
     "childEncryptionKeyLens": [128],
     "childIntegrity": [2],
+    "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 16384,
     "pcscfIPv6ConfigAttribute": 16386,
     "natKeepaliveInterval": "60s",
@@ -316,6 +317,9 @@ func TestConfigNormalizedWFCProfile(t *testing.T) {
 				}
 				if !tunnel.AddKEToChildSARekey {
 					t.Fatal("Tunnel AddKEToChildSARekey = false, want profile value")
+				}
+				if !tunnel.ChildSAMultipleProposals {
+					t.Fatal("Tunnel ChildSAMultipleProposals = false, want profile value")
 				}
 				if got.IMS.Transport != "tcp" || got.IMS.HomeDomain != "ims.mnc024.mcc530.3gppnetwork.org" {
 					t.Fatalf("IMS transport/domain = %q/%q, want profile values", got.IMS.Transport, got.IMS.HomeDomain)
@@ -791,6 +795,76 @@ func TestEmbeddedIMSProfilesHaveSupportedTunnelConfig(t *testing.T) {
 			cfg := Config{Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, wfcTestCard{})
 			if _, err := cfg.normalizedTunnel(); err != nil {
 				t.Fatalf("profile[%d] tunnel config: %v", i, err)
+			}
+		})
+	}
+}
+
+func TestEmbeddedIMSProfilesExplicitlyConfigureChildSAMultipleProposals(t *testing.T) {
+	type profileConfig struct {
+		MCC                      string          `json:"mcc"`
+		MNC                      string          `json:"mnc"`
+		IMSIPrefix               string          `json:"imsiPrefix"`
+		GID1                     string          `json:"gid1"`
+		ChildSAMultipleProposals json.RawMessage `json:"enableChildSAMultipleProposals"`
+	}
+
+	var profiles []profileConfig
+	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	for i, profile := range profiles {
+		name := profile.MCC + "-" + profile.MNC + "-" + profile.GID1 + "-" + profile.IMSIPrefix
+		t.Run(name, func(t *testing.T) {
+			if len(profile.ChildSAMultipleProposals) == 0 {
+				t.Fatalf("profile[%d] enableChildSAMultipleProposals is missing", i)
+			}
+			var enabled bool
+			if err := json.Unmarshal(profile.ChildSAMultipleProposals, &enabled); err != nil {
+				t.Fatalf("profile[%d] enableChildSAMultipleProposals: %v", i, err)
+			}
+		})
+	}
+}
+
+func TestIMSProfileMapsChildSAMultipleProposals(t *testing.T) {
+	tests := []struct {
+		name string
+		card plmnWFCCard
+		want bool
+	}{
+		{
+			name: "Pixel default enables Vodafone Germany",
+			card: plmnWFCCard{mcc: "262", mnc: "02", mncLength: 2},
+			want: true,
+		},
+		{
+			name: "Pixel override disables T-Mobile US",
+			card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3},
+		},
+		{
+			name: "Pixel override disables Metro by GID",
+			card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, gid1: "6D38"},
+		},
+		{
+			name: "Pixel default remains enabled for another T-Mobile MVNO",
+			card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3, gid1: "2AC9"},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			got := Config{Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, tt.card)
+			if got.Access.VoWiFi.Tunnel.ChildSAMultipleProposals != tt.want {
+				t.Fatalf("ChildSAMultipleProposals = %t, want %t", got.Access.VoWiFi.Tunnel.ChildSAMultipleProposals, tt.want)
 			}
 		})
 	}

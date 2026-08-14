@@ -396,6 +396,36 @@ func childSAProposals(cfg handshake.Config, espSPI uint32) []ike.Proposal {
 }
 
 func childSAProposalsWithDH(cfg handshake.Config, espSPI uint32, dhGroup uint16) []ike.Proposal {
+	proposals := []ike.Proposal{{
+		Number:     1,
+		ProtocolID: proposalProtocolESP,
+		SPI:        uint32Bytes(espSPI),
+		Transforms: childSATransforms(cfg, dhGroup),
+	}}
+	if !cfg.ChildSAMultipleProposals {
+		return proposals
+	}
+	fallback := handshake.Config{
+		ChildEncryption:              []uint16{transformENCRAESCBC, transformENCRAESCTR},
+		ChildEncryptionKeyLens:       []uint16{transformKeyLenAES256, transformKeyLenAES192, transformKeyLenAES128},
+		ChildEncryptionAESCTRKeyLens: []uint16{transformKeyLenAES256, transformKeyLenAES192, transformKeyLenAES128},
+		ChildIntegrity: []uint16{
+			transformINTEGHMACSHA512,
+			transformINTEGHMACSHA384,
+			transformINTEGHMACSHA256,
+			transformINTEGHMACSHA196,
+			transformINTEGAESXCBC96,
+		},
+	}
+	return append(proposals, ike.Proposal{
+		Number:     2,
+		ProtocolID: proposalProtocolESP,
+		SPI:        uint32Bytes(espSPI),
+		Transforms: childSATransforms(fallback, dhGroup),
+	})
+}
+
+func childSATransforms(cfg handshake.Config, dhGroup uint16) []ike.Transform {
 	encryption := encryptionTransforms(
 		uint16ValuesOrDefault(cfg.ChildEncryption, defaultEncryption),
 		uint16ValuesOrDefault(cfg.ChildEncryptionKeyLens, defaultEncryptionKeyLens),
@@ -411,14 +441,7 @@ func childSAProposalsWithDH(cfg handshake.Config, espSPI uint32, dhGroup uint16)
 		transforms = append(transforms, ike.Transform{TransformType: transformTypeDH, ID: dhGroup})
 	}
 	transforms = append(transforms, ike.Transform{TransformType: transformTypeESN, ID: transformESNNoESN})
-	return []ike.Proposal{
-		{
-			Number:     1,
-			ProtocolID: proposalProtocolESP,
-			SPI:        uint32Bytes(espSPI),
-			Transforms: transforms,
-		},
-	}
+	return transforms
 }
 
 func aesCBCTransform(keyLen uint16) ike.Transform {
