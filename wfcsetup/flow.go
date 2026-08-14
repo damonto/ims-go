@@ -23,15 +23,6 @@ func logCloseError(logger *slog.Logger, action string, closer io.Closer) {
 	}
 }
 
-var flowFactories = []flowFactory{
-	newVZWFlow,
-	newCanadaFlow,
-	newTelusFlow,
-	newO2UKFlow,
-	newNSDSFlow,
-	newTS43Flow,
-}
-
 func Check(ctx context.Context, req Request) (Result, error) {
 	if err := req.validate(); err != nil {
 		return Result{}, err
@@ -65,7 +56,15 @@ func CheckE911UpdateSupport(ctx context.Context, req Request) (E911UpdateSupport
 }
 
 func resolve(req Request) (flow, Result, error) {
-	for _, factory := range flowFactories {
+	factories := [...]flowFactory{
+		newVZWFlow,
+		newCanadaFlow,
+		newTelusFlow,
+		newO2UKFlow,
+		newNSDSFlow,
+		newTS43Flow,
+	}
+	for _, factory := range factories {
 		f, ok, err := factory(req)
 		if err != nil {
 			return nil, Result{}, err

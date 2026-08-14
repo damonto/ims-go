@@ -2798,15 +2798,15 @@ func TestInviteServerTransactionRetransmitsFinalResponseOverUDP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useTransactionTimers(t, TransactionTimers{
+			timers := TransactionTimers{
 				T1: 10 * time.Millisecond,
 				T2: 20 * time.Millisecond,
 				T4: 10 * time.Millisecond,
 				TH: 80 * time.Millisecond,
-			})
+			}
 
 			transport := newStubTransport(5062, 5060)
-			sess, err := Open(Config{}, transport)
+			sess, err := Open(Config{TransactionTimers: timers}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
@@ -2871,15 +2871,15 @@ func TestInviteServerTransactionAbsorbsDuplicateACKDuringTimerI(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useTransactionTimers(t, TransactionTimers{
+			timers := TransactionTimers{
 				T1: 100 * time.Millisecond,
 				T2: 100 * time.Millisecond,
 				T4: 50 * time.Millisecond,
 				TH: 200 * time.Millisecond,
-			})
+			}
 
 			transport := newStubTransport(5062, 5060)
-			sess, err := Open(Config{}, transport)
+			sess, err := Open(Config{TransactionTimers: timers}, transport)
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
@@ -3432,15 +3432,6 @@ func extractStubTransport(t Transport) *stubTransport {
 	}
 }
 
-func useTransactionTimers(t *testing.T, timers TransactionTimers) {
-	t.Helper()
-	previous := defaultTransactionTimers
-	defaultTransactionTimers = timers
-	t.Cleanup(func() {
-		defaultTransactionTimers = previous
-	})
-}
-
 func TestTransactionTimersNormalizeDefaults(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -3473,14 +3464,14 @@ func TestTransactionTimersNormalizeDefaults(t *testing.T) {
 }
 
 func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
-	useTransactionTimers(t, TransactionTimers{
+	timers := TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
-	})
+	}
 
 	transport := newStubTransport(5062, 5060)
-	sess, err := Open(Config{}, transport)
+	sess, err := Open(Config{TransactionTimers: timers}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -3523,14 +3514,14 @@ func TestExchangeAfterRunRetransmitsNonInviteOverUDP(t *testing.T) {
 }
 
 func TestExchangeAfterRunTimesOutTransaction(t *testing.T) {
-	useTransactionTimers(t, TransactionTimers{
+	timers := TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
-	})
+	}
 
 	transport := newStubTransport(5062, 5060)
-	sess, err := Open(Config{}, transport)
+	sess, err := Open(Config{TransactionTimers: timers}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -3793,15 +3784,15 @@ func TestExchangeReturnsUnreliableTransportSendError(t *testing.T) {
 }
 
 func TestInviteTransactionSendsACKForNon2xx(t *testing.T) {
-	useTransactionTimers(t, TransactionTimers{
+	timers := TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
 		TD: 30 * time.Millisecond,
-	})
+	}
 
 	transport := newStubTransport(5062, 5060)
-	sess, err := Open(Config{}, transport)
+	sess, err := Open(Config{TransactionTimers: timers}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -3917,15 +3908,15 @@ func TestInviteTransactionReportsACKTransportFailure(t *testing.T) {
 }
 
 func TestInviteTransactionRetransmitsACKForRepeatedNon2xx(t *testing.T) {
-	useTransactionTimers(t, TransactionTimers{
+	timers := TransactionTimers{
 		T1: 10 * time.Millisecond,
 		T2: 20 * time.Millisecond,
 		T4: 10 * time.Millisecond,
 		TD: 40 * time.Millisecond,
-	})
+	}
 
 	transport := newStubTransport(5062, 5060)
-	sess, err := Open(Config{}, transport)
+	sess, err := Open(Config{TransactionTimers: timers}, transport)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
