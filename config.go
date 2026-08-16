@@ -263,7 +263,7 @@ func (c Config) normalizedIMS() (ServiceConfig, error) {
 	}
 	imsCfg, err := imsCfg.Normalized()
 	if err != nil {
-		return ServiceConfig{}, fmt.Errorf("normalizing ims config: %w", err)
+		return ServiceConfig{}, err
 	}
 	if c.usesVoLTE() && imsCfg.AccessNetworkInfo == "" {
 		return ServiceConfig{}, errors.New("normalizing ims config: access network info is required for VoLTE")

@@ -294,7 +294,7 @@ func (c *Client) ensureReady(ctx context.Context) error {
 	}
 	readyCfg, err := cfg.normalized(card)
 	if err != nil {
-		return fmt.Errorf("normalizing client config: %w", err)
+		return err
 	}
 	if readyCfg.usesVoWiFi() {
 		if err := c.checkWFCSetup(ctx, &readyCfg, card); err != nil {
@@ -557,10 +557,7 @@ func deregisterRegistrar(reg *registration.Registrar) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()
-	if err := reg.Deregister(ctx); err != nil {
-		return fmt.Errorf("deregistering IMS before close: %w", err)
-	}
-	return nil
+	return reg.Deregister(ctx)
 }
 
 func (c *Client) closeActiveConnection(active *activeConn) error {
@@ -968,7 +965,7 @@ func (r *connectionRunner) runIMS() error {
 
 func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error) (*activeConn, error) {
 	if active.tunnel == nil {
-		return nil, errors.New("restoring IMS after P-CSCF reselection: tunnel is missing")
+		return nil, errors.New("tunnel is missing")
 	}
 	tunnelInfo, ok := swutunnel.PCSCFReselectionInfo(cause)
 	if !ok {
@@ -979,7 +976,7 @@ func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error
 
 func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn) (*activeConn, error) {
 	if active.tunnel == nil {
-		return nil, errors.New("restoring IMS after registration P-CSCF reselection: tunnel is missing")
+		return nil, errors.New("tunnel is missing")
 	}
 	tunnelInfo := active.tunnel.Info()
 	if access, ok := active.access.(*voWiFiAccess); ok {
@@ -988,7 +985,7 @@ func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn)
 	current := pcscfIPFromAddr(active.ims.sip.RemoteAddr())
 	tunnelInfo, ok := nextPCSCFInfo(tunnelInfo, current)
 	if !ok {
-		return nil, errors.New("restoring IMS after registration P-CSCF reselection: no alternate P-CSCF")
+		return nil, errors.New("no alternate P-CSCF")
 	}
 	return c.restoreIMSWithTunnelInfo(active, tunnelInfo)
 }
@@ -996,7 +993,7 @@ func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn)
 func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunnel.Info) (*activeConn, error) {
 	wifiAccess, ok := active.access.(*voWiFiAccess)
 	if !ok || wifiAccess.netstack == nil {
-		return nil, errors.New("restoring IMS after P-CSCF reselection: VoWiFi userspace network stack is missing")
+		return nil, errors.New("VoWiFi userspace network stack is missing")
 	}
 	closeErr := c.closeIMS(active)
 	if closeErr != nil {

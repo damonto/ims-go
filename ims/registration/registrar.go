@@ -289,10 +289,16 @@ func contextWithDoneTimeout(done <-chan struct{}, timeout time.Duration) (contex
 	}
 }
 
-func (s *Registrar) Register(ctx context.Context) error {
+func (s *Registrar) Register(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("registering IMS: %w", retErr)
+		}
+	}()
+
 	release, err := s.beginRegistration(ctx)
 	if err != nil {
-		return fmt.Errorf("registering IMS: %w", err)
+		return err
 	}
 	defer func() {
 		if !s.isRegistered() {
@@ -304,12 +310,12 @@ func (s *Registrar) Register(ctx context.Context) error {
 	s.logger.Info("registering IMS", "public_identity", s.State().PublicIdentity)
 	challengeMsg, err := s.awaitRegisterChallenge(ctx)
 	if err != nil {
-		return fmt.Errorf("registering IMS: %w", err)
+		return err
 	}
 	challenge, err := s.applyRegisterChallenge(challengeMsg)
 	if err != nil {
 		if !errors.Is(err, errSecurityAgreementInvalid) {
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 		s.logger.Info("retrying initial IMS registration after invalid Security-Server", "err", err)
 		s.resetRegisterTransaction()
@@ -319,7 +325,7 @@ func (s *Registrar) Register(ctx context.Context) error {
 		}
 		challenge, err = s.applyRegisterChallenge(challengeMsg)
 		if err != nil {
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 	}
 	var initialAuth *security.Authorization
@@ -331,19 +337,19 @@ func (s *Registrar) Register(ctx context.Context) error {
 		}
 		resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), s.CurrentFlow(), err)
 		if err != nil {
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 		if resynchronized {
-			return errors.New("registering IMS: repeated AKA synchronization failure")
+			return errors.New("repeated AKA synchronization failure")
 		}
 		challenge, err = s.applyRegisterChallenge(resp)
 		if err != nil {
-			return fmt.Errorf("registering IMS: %w", err)
+			return err
 		}
 		resynchronized = true
 	}
 	if err := s.completeRegistration(ctx, challenge, initialAuth); err != nil {
-		return fmt.Errorf("registering IMS: %w", err)
+		return err
 	}
 	state := s.State()
 	s.logger.Info("IMS registration established", "public_identity", state.PublicIdentity, "register_expires", state.RegisterExpires, "service_routes", len(state.ServiceRoutes))
@@ -521,12 +527,12 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	}
 	parsed, err := parseRegisterChallenge(challengeResp, proposedFlow.SecurityClients, requiredMode)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	challenge := parsed.challenge
 	verify := parsed.verify
 	if err := validateReauthenticationSecurityServer(currentFlow, verify); err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	raw := parsed.rawSecurityServer
 	authorizationHeader := parsed.authorizationHeader
@@ -541,19 +547,19 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		}
 		resp, err := s.exchangeAKAFailure(ctx, challenge, authorizationHeader, proposedFlow, err)
 		if err != nil {
-			return fmt.Errorf("refreshing IMS registration: %w", err)
+			return err
 		}
 		if resynchronized {
-			return errors.New("refreshing IMS registration: repeated AKA synchronization failure")
+			return errors.New("repeated AKA synchronization failure")
 		}
 		parsed, err = parseRegisterChallenge(resp, proposedFlow.SecurityClients, requiredMode)
 		if err != nil {
-			return fmt.Errorf("refreshing IMS registration: %w", err)
+			return err
 		}
 		challenge = parsed.challenge
 		verify = parsed.verify
 		if err := validateReauthenticationSecurityServer(currentFlow, verify); err != nil {
-			return fmt.Errorf("refreshing IMS registration: %w", err)
+			return err
 		}
 		raw = parsed.rawSecurityServer
 		authorizationHeader = parsed.authorizationHeader
@@ -572,22 +578,22 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
 			if registrationTimeoutRequiresInitial(err) {
-				return fmt.Errorf("refreshing IMS registration: completing AKAv2 re-authentication: %w", initialRegistrationRequiredAfterError(err))
+				return fmt.Errorf("completing AKAv2 re-authentication: %w", initialRegistrationRequiredAfterError(err))
 			}
-			return fmt.Errorf("refreshing IMS registration: completing AKAv2 re-authentication: %w", err)
+			return fmt.Errorf("completing AKAv2 re-authentication: %w", err)
 		}
 		if resp.StatusCode() != sipStatusOK {
 			if resp.StatusCode() == sipStatusUseProxy {
-				return fmt.Errorf("refreshing IMS registration: %w", pcscfReselectionRequiredError(resp))
+				return pcscfReselectionRequiredError(resp)
 			}
 			if reregistrationInitialRequiredStatus(resp.StatusCode()) {
-				return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
+				return initialRegistrationRequiredError(resp)
 			}
-			return fmt.Errorf("refreshing IMS registration: expected 200 after AKAv2 re-authentication, got %w", sip.NewResponseError(resp))
+			return fmt.Errorf("expected 200 after AKAv2 re-authentication, got %w", sip.NewResponseError(resp))
 		}
 		singleRegistration, err := s.validateRegisterSuccessForFlow(resp, nextFlow)
 		if err != nil {
-			return fmt.Errorf("refreshing IMS registration: %w", err)
+			return err
 		}
 		s.registrationCommitMu.Lock()
 		if channelClosed(s.registrationMaintenanceStop) {
@@ -604,11 +610,11 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 
 	outbound, err := s.dialSecureTransport(ctx, verify, nextFlow, ck, ik)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	outboundAttachment, err := s.sess.AddTransport(outbound)
 	if err != nil {
-		return errors.Join(fmt.Errorf("refreshing IMS registration: adding secure IMS transport: %w", err), outbound.Close())
+		return errors.Join(fmt.Errorf("adding secure IMS transport: %w", err), outbound.Close())
 	}
 	cleanup := []session.Attachment{outboundAttachment}
 	committed := false
@@ -622,16 +628,16 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 
 	inboundTransports, inboundAttachments, err := s.startSecureServerTransportsWithKeys(ctx, verify, nextFlow, ck, ik)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	if len(inboundTransports) == 0 {
-		return errors.New("refreshing IMS registration: secure inbound transport is not configured")
+		return errors.New("secure inbound transport is not configured")
 	}
 	cleanup = append(cleanup, inboundAttachments...)
 
 	responseAttachments, err := s.startSecureResponseTransportsWithKeys(ctx, verify, nextFlow, outbound, inboundTransports, ck, ik)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	cleanup = append(cleanup, responseAttachments...)
 
@@ -642,7 +648,7 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	newTransports = uniqueSessionTransports(newTransports)
 	inboundWatch, err := s.sess.WatchTransportsInboundExcept(req, newTransports...)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: watching new security associations: %w", err)
+		return fmt.Errorf("watching new security associations: %w", err)
 	}
 	defer func() {
 		if !committed {
@@ -655,22 +661,22 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	})
 	if err != nil {
 		if registrationTimeoutRequiresInitial(err) {
-			return fmt.Errorf("refreshing IMS registration: completing re-authentication: %w", initialRegistrationRequiredAfterError(err))
+			return fmt.Errorf("completing re-authentication: %w", initialRegistrationRequiredAfterError(err))
 		}
-		return fmt.Errorf("refreshing IMS registration: completing re-authentication: %w", err)
+		return fmt.Errorf("completing re-authentication: %w", err)
 	}
 	if resp.StatusCode() != sipStatusOK {
 		if resp.StatusCode() == sipStatusUseProxy {
-			return fmt.Errorf("refreshing IMS registration: %w", pcscfReselectionRequiredError(resp))
+			return pcscfReselectionRequiredError(resp)
 		}
 		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
-			return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
+			return initialRegistrationRequiredError(resp)
 		}
-		return fmt.Errorf("refreshing IMS registration: expected 200 after re-authentication, got %w", sip.NewResponseError(resp))
+		return fmt.Errorf("expected 200 after re-authentication, got %w", sip.NewResponseError(resp))
 	}
 	singleRegistration, err := s.validateRegisterSuccessForFlow(resp, nextFlow)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	s.registrationCommitMu.Lock()
 	if channelClosed(s.registrationMaintenanceStop) {
@@ -681,7 +687,7 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 	oldAttachment, err := s.sess.PromotePrimary(outbound)
 	if err != nil {
 		s.registrationCommitMu.Unlock()
-		return fmt.Errorf("refreshing IMS registration: promoting secure IMS transport: %w", err)
+		return fmt.Errorf("promoting secure IMS transport: %w", err)
 	}
 	oldServerAttachments := s.replaceSecureServerAttachments(inboundAttachments)
 	oldResponseAttachments := s.replaceSecureResponseAttachments(responseAttachments)
@@ -699,19 +705,25 @@ func (s *Registrar) reauthenticateRefresh(ctx context.Context, challengeResp sip
 }
 
 func (s *Registrar) Refresh(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("refreshing IMS registration: %w", retErr)
+		}
+	}()
+
 	release, err := s.beginRegistration(ctx)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	defer release()
 	operationCtx, finishOperation, err := s.beginMaintenanceOperation(ctx)
 	if err != nil {
-		return fmt.Errorf("refreshing IMS registration: %w", err)
+		return err
 	}
 	defer func() {
 		finishOperation()
 		if errors.Is(context.Cause(operationCtx), errRegistrationStopped) {
-			retErr = fmt.Errorf("refreshing IMS registration: %w", errRegistrationStopped)
+			retErr = errRegistrationStopped
 		}
 	}()
 	ctx = operationCtx
@@ -721,7 +733,7 @@ func (s *Registrar) Refresh(ctx context.Context) (retErr error) {
 		flow.SecurityClient = reauthSecurityClient(flow.SecurityClient, *flow.SecurityVerify, flow.RegisterPort)
 		flow.SecurityClients, err = reauthenticationSecurityClientCapabilities(flow.SecurityClient, ipsecAlgorithmsFromConfig(s.cfg))
 		if err != nil {
-			return fmt.Errorf("refreshing IMS registration: %w", err)
+			return err
 		}
 	}
 	state := refreshRegisterState{flow: flow}
@@ -730,7 +742,7 @@ func (s *Registrar) Refresh(ctx context.Context) (retErr error) {
 		if err != nil {
 			resp, err := s.exchangeCurrentAKAFailure(ctx, err)
 			if err != nil {
-				return fmt.Errorf("refreshing IMS registration: %w", err)
+				return err
 			}
 			done, err := s.handleRefreshRegistration(ctx, resp, &state, nil)
 			if err != nil {
@@ -744,9 +756,9 @@ func (s *Registrar) Refresh(ctx context.Context) (retErr error) {
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
 			if registrationTimeoutRequiresInitial(err) {
-				return fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredAfterError(err))
+				return initialRegistrationRequiredAfterError(err)
 			}
-			return fmt.Errorf("refreshing IMS registration: %w", err)
+			return err
 		}
 		done, err := s.handleRefreshRegistration(ctx, resp, &state, auth)
 		if err != nil {
@@ -756,7 +768,7 @@ func (s *Registrar) Refresh(ctx context.Context) (retErr error) {
 			return nil
 		}
 	}
-	return errors.New("refreshing IMS registration: exhausted retries")
+	return errors.New("exhausted retries")
 }
 
 func (s *Registrar) Maintain(ctx context.Context) error {
@@ -820,10 +832,16 @@ func (s *Registrar) Deregister(ctx context.Context) error {
 	return s.deregister(ctx)
 }
 
-func (s *Registrar) deregister(ctx context.Context) error {
+func (s *Registrar) deregister(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("deregistering IMS: %w", retErr)
+		}
+	}()
+
 	release, ownsRegistration, err := s.beginDeregistration(ctx)
 	if err != nil {
-		return fmt.Errorf("deregistering IMS: %w", err)
+		return err
 	}
 	defer release()
 	return s.deregisterCurrent(ctx, ownsRegistration)
@@ -835,7 +853,7 @@ func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool
 	}
 	if !ownsRegistration {
 		if err := s.clearRegistrationState(); err != nil {
-			return fmt.Errorf("deregistering IMS: deleting replaced registration state: %w", err)
+			return fmt.Errorf("deleting replaced registration state: %w", err)
 		}
 		s.logger.Info("IMS registration already replaced by preferred flow")
 		return nil
@@ -846,25 +864,25 @@ func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool
 	for range 2 {
 		req, err := s.buildDeregisterMessage(ctx, verify, challenge)
 		if err != nil {
-			return fmt.Errorf("deregistering IMS: %w", err)
+			return err
 		}
 		resp, err := s.sess.Exchange(ctx, req)
 		if err != nil {
-			return fmt.Errorf("deregistering IMS: %w", err)
+			return err
 		}
 		done, err := s.handleDeregisterResponse(resp, &challenged, &challenge)
 		if err != nil {
-			return fmt.Errorf("deregistering IMS: %w", err)
+			return err
 		}
 		if done {
 			if err := s.clearRegistrationState(); err != nil {
-				return fmt.Errorf("deregistering IMS: deleting registration security state: %w", err)
+				return fmt.Errorf("deleting registration security state: %w", err)
 			}
 			s.logger.Info("IMS deregistered")
 			return nil
 		}
 	}
-	return errors.New("deregistering IMS: exhausted retries")
+	return errors.New("exhausted retries")
 }
 
 func (s *Registrar) retireSingleRegistration() {

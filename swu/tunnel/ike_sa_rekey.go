@@ -66,7 +66,13 @@ type simultaneousIKESARekey struct {
 	peer  ikeSARekeyResult
 }
 
-func (s *Session) RekeyIKESA(ctx context.Context) error {
+func (s *Session) RekeyIKESA(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("rekeying ike sa: %w", retErr)
+		}
+	}()
+
 	state, release, err := s.beginIKESARekey()
 	if err != nil {
 		return err
@@ -75,7 +81,7 @@ func (s *Session) RekeyIKESA(ctx context.Context) error {
 
 	result, err := s.initiatedIKESARekeyResult(ctx, state, s.exchangeInitiatedIKESARekey)
 	if err != nil {
-		return fmt.Errorf("rekeying ike sa: %w", err)
+		return err
 	}
 	decision := s.finishInitiatedIKESARekey(result)
 	if decision.installLocal {
@@ -129,7 +135,7 @@ func (s *Session) exchangeInitiatedIKESARekey(ctx context.Context, state ikeSARe
 
 	messageID, err := s.allocateMessageID()
 	if err != nil {
-		return nil, fmt.Errorf("rekeying ike sa: %w", err)
+		return nil, fmt.Errorf("allocating message id: %w", err)
 	}
 	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, exchangeTypeCreateChildSA, ikeMessageFlags(!state.localInitiator, true), messageID)
 	waiter := s.registerInformationalWaiter(key)
@@ -137,7 +143,7 @@ func (s *Session) exchangeInitiatedIKESARekey(ctx context.Context, state ikeSARe
 
 	wires, err := state.sealIKESARekeyRequest(messageID, next)
 	if err != nil {
-		return nil, fmt.Errorf("rekeying ike sa: %w", err)
+		return nil, err
 	}
 	return s.exchangeProtected(ctx, protectedExchange{
 		action:          ikeActionRekeyIKESA,
@@ -153,7 +159,7 @@ func (s *Session) exchangeInitiatedIKESARekey(ctx context.Context, state ikeSARe
 }
 
 func (s *Session) installInitiatedIKESARekey(ctx context.Context, state ikeSARekeyState, result ikeSARekeyResult, decision ikeSARekeyDecision) error {
-	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionRekeyIKESA)
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionDeleteOldIKESA)
 	if err != nil {
 		return err
 	}
@@ -161,11 +167,11 @@ func (s *Session) installInitiatedIKESARekey(ctx context.Context, state ikeSARek
 
 	deleteMessageID, err := s.allocateMessageID()
 	if err != nil {
-		return fmt.Errorf("rekeying ike sa: %w", err)
+		return fmt.Errorf("allocating old ike sa delete message id: %w", err)
 	}
 	deleteWires, err := state.sealOldIKESADelete(deleteMessageID)
 	if err != nil {
-		return fmt.Errorf("rekeying ike sa: sealing old delete: %w", err)
+		return fmt.Errorf("sealing old ike sa delete: %w", err)
 	}
 	s.installSurvivingIKESARekey(result, decision, state.peer)
 	key := state.informationalState().responseMessageKey(deleteMessageID, exchangeTypeInformational)
@@ -183,7 +189,7 @@ func (s *Session) installInitiatedIKESARekey(ctx context.Context, state ikeSARek
 
 func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 	if s.isClosed() {
-		return ikeSARekeyState{}, nil, errors.New("rekeying ike sa: session is closed")
+		return ikeSARekeyState{}, nil, errors.New("session is closed")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,7 +200,7 @@ func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 		return ikeSARekeyState{}, nil, errChildSARekeyInProgress
 	}
 	if s.ikeSAExpired(time.Now()) {
-		return ikeSARekeyState{}, nil, fmt.Errorf("rekeying ike sa: %w", errIKESAExpired)
+		return ikeSARekeyState{}, nil, errIKESAExpired
 	}
 	state := ikeSARekeyState{
 		ike:                       s.ike,
@@ -206,7 +212,7 @@ func (s *Session) beginIKESARekey() (ikeSARekeyState, func(), error) {
 		useNATT:                   s.useNATT,
 	}
 	if !state.available() {
-		return ikeSARekeyState{}, nil, errors.New("rekeying ike sa: ike state is unavailable")
+		return ikeSARekeyState{}, nil, errors.New("ike state is unavailable")
 	}
 	s.ikeSARekeying = true
 	s.simultaneousIKESA = simultaneousIKESARekey{}
@@ -438,7 +444,7 @@ func (r ikeSARekeyResult) initiatorFlag() byte {
 }
 
 func (s *Session) deleteRedundantIKESA(ctx context.Context, peer *net.UDPAddr, result ikeSARekeyResult) error {
-	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionRekeyIKESA)
+	releaseRequest, err := s.acquireIKERequest(ctx, ikeActionDeleteRedundantIKESA)
 	if err != nil {
 		return err
 	}
@@ -691,21 +697,18 @@ func (s *Session) ikeSARekeyLoop() {
 		}
 		if errors.Is(err, errIKETemporaryFailure) {
 			if !temporaryFailure.record(now) {
-				cause := fmt.Errorf("ike sa rekey: %w", err)
-				s.failSecurityAssociations(cause)
+				s.failSecurityAssociations(err)
 				return
 			}
 			s.logger.Debug("ike sa rekey deferred after temporary failure", "retry_at", temporaryFailure.retryAt, "err", err)
 			continue
 		}
 		if errors.Is(err, errIKERequestIncomplete) {
-			cause := fmt.Errorf("ike sa rekey: %w", err)
-			s.failSecurityAssociations(cause)
+			s.failSecurityAssociations(err)
 			return
 		}
 		if rekeyHardLifetimeExpired(expiresAt, time.Now()) {
-			cause := fmt.Errorf("ike sa rekey: %w", err)
-			s.failSecurityAssociations(cause)
+			s.failSecurityAssociations(err)
 			return
 		}
 		retryAt := s.deferIKESARekey(time.Now(), expiresAt)

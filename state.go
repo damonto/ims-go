@@ -37,9 +37,6 @@ func (e *ConnectionError) Error() string {
 	if e.State.Status == "" {
 		return e.Err.Error()
 	}
-	if e.State.LastError != nil {
-		return fmt.Sprintf("%s: status %s: last error: %v", e.Err, e.State.Status, e.State.LastError)
-	}
 	return fmt.Sprintf("%s: status %s", e.Err, e.State.Status)
 }
 
@@ -313,7 +310,7 @@ func (s *clientState) restoreIMS(active *activeConn, ims imsStack, access access
 		return fmt.Errorf("connecting client: %w", ErrClientClosed)
 	}
 	if s.active != active {
-		return errors.New("restoring IMS after P-CSCF reselection: active connection changed")
+		return errors.New("active connection changed")
 	}
 	active.ims = ims
 	if access != nil {

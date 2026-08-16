@@ -78,6 +78,38 @@ func TestReadMessageIgnoresLeadingCRLF(t *testing.T) {
 	}
 }
 
+func TestReadMessageCRLFErrorContextIsNotRepeated(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "start line",
+			data: "SIP/2.0 200 OK\n",
+			want: "parsing SIP message: line is not terminated by CRLF",
+		},
+		{
+			name: "header line",
+			data: "SIP/2.0 200 OK\r\nContent-Length: 0\n",
+			want: "parsing SIP headers: line is not terminated by CRLF",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var msg Message
+			_, err := msg.ReadMessage(strings.NewReader(tt.data))
+			if err == nil {
+				t.Fatal("ReadMessage() error = nil, want non-nil")
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("ReadMessage() error = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResponseError(t *testing.T) {
 	tests := []struct {
 		name       string

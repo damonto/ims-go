@@ -65,7 +65,7 @@ func (s *Session) sendInvalidMessageIDNotification(state informationalState, inv
 	if err != nil {
 		return fmt.Errorf("sending invalid message id notification: sealing request: %w", err)
 	}
-	if _, err := s.exchangeInformational(ctx, state, messageID, wires, waiter); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := s.exchangeInformationalRequest(ctx, state, messageID, wires, waiter, ikeActionSendInvalidMessageIDNotification, false); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	return nil

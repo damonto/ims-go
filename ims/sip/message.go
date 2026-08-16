@@ -875,7 +875,7 @@ func readLine(br *bufio.Reader) (string, int64, error) {
 		return "", consumed, err
 	}
 	if !strings.HasSuffix(line, "\r\n") {
-		return "", consumed, errors.New("parsing SIP message: line is not terminated by CRLF")
+		return "", consumed, errors.New("line is not terminated by CRLF")
 	}
 	return strings.TrimSuffix(line, "\r\n"), consumed, nil
 }

@@ -40,9 +40,9 @@ func (a ikeAction) String() string {
 	case ikeActionDeleteRedundantIKESA:
 		return "deleting redundant ike sa"
 	case ikeActionRekeyIKESA:
-		return "rekeying ike sa"
+		return "exchanging ike sa rekey"
 	case ikeActionRekeyChildSA:
-		return "rekeying child sa"
+		return "exchanging child sa rekey"
 	case ikeActionCreateChildSA:
 		return "creating child sa"
 	case ikeActionWriteInformationalResponse:

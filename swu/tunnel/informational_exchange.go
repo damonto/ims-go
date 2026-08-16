@@ -64,7 +64,7 @@ func (s *Session) exchangeInformationalRequest(ctx context.Context, state inform
 		if err := s.writeInformationalRequest(ctx, state, wires, action, skipIKESAByteAccounting); err != nil {
 			return nil, err
 		}
-		payloads, received, err := s.awaitInformationalResponse(ctx, state, waiter, delay)
+		payloads, received, err := s.awaitInformationalResponse(ctx, state, waiter, delay, action)
 		if err != nil {
 			return nil, err
 		}
@@ -80,22 +80,22 @@ func (s *Session) writeInformationalRequest(ctx context.Context, state informati
 	return s.writeProtectedWires(ctx, action, state.ike, buildIKEWires(wires, state.useNATT), state.peer, skipIKESAByteAccounting)
 }
 
-func (s *Session) awaitInformationalResponse(ctx context.Context, state informationalState, waiter <-chan inboundIKE, delay time.Duration) ([]ike.Payload, bool, error) {
+func (s *Session) awaitInformationalResponse(ctx context.Context, state informationalState, waiter <-chan inboundIKE, delay time.Duration, action ikeAction) ([]ike.Payload, bool, error) {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return nil, false, fmt.Errorf("%w: %w", errIKERequestIncomplete, ctx.Err())
 	case <-s.closeDone():
-		return nil, false, errors.New("sending informational: session is closed")
+		return nil, false, fmt.Errorf("%s: session is closed", action)
 	case response := <-waiter:
 		if response.err != nil {
-			return nil, false, fmt.Errorf("sending informational: %w", response.err)
+			return nil, false, fmt.Errorf("%s: %w", action, response.err)
 		}
 		if response.payloads != nil {
 			return response.payloads, true, nil
 		}
-		payloads, err := s.openInformationalResponse(state, response.data)
+		payloads, err := s.openInformationalResponse(state, response.data, action)
 		if err != nil {
 			return nil, false, err
 		}
@@ -105,14 +105,14 @@ func (s *Session) awaitInformationalResponse(ctx context.Context, state informat
 	}
 }
 
-func (s *Session) openInformationalResponse(state informationalState, data []byte) ([]ike.Payload, error) {
+func (s *Session) openInformationalResponse(state informationalState, data []byte, action ikeAction) ([]ike.Payload, error) {
 	var packet ike.Packet
 	if err := packet.UnmarshalBinary(data); err != nil {
-		return nil, fmt.Errorf("sending informational: parsing response: %w", err)
+		return nil, fmt.Errorf("%s: parsing response: %w", action, err)
 	}
 	payloads, err := state.ike.OpenIKE(packet, state.peerInitiator())
 	if err != nil {
-		return nil, fmt.Errorf("sending informational: opening response: %w", err)
+		return nil, fmt.Errorf("%s: opening response: %w", action, err)
 	}
 	return payloads, nil
 }

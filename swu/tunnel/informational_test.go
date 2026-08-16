@@ -110,6 +110,59 @@ func TestEstablishedIKEExchangesUseConfiguredRetransmitSchedule(t *testing.T) {
 	}
 }
 
+func TestAwaitInformationalResponseUsesActualAction(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     ikeAction
+		response   inboundIKE
+		want       string
+		wantPrefix string
+	}{
+		{
+			name:     "close transport error",
+			action:   ikeActionCloseSWUSession,
+			response: inboundIKE{err: errors.New("peer rejected request")},
+			want:     "closing swu session: peer rejected request",
+		},
+		{
+			name:       "delete old ike sa parse error",
+			action:     ikeActionDeleteOldIKESA,
+			response:   inboundIKE{data: []byte{0x01}},
+			wantPrefix: "deleting old ike sa: parsing response:",
+		},
+		{
+			name:     "invalid message id transport error",
+			action:   ikeActionSendInvalidMessageIDNotification,
+			response: inboundIKE{err: errors.New("peer rejected request")},
+			want:     "sending invalid message id notification: peer rejected request",
+		},
+	}
+
+	session := mustDialSession(t, &fakePacketConn{local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}})
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Errorf("Session.Close() error = %v", err)
+		}
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			waiter := make(chan inboundIKE, 1)
+			waiter <- tt.response
+			_, _, err := session.awaitInformationalResponse(t.Context(), informationalState{}, waiter, time.Second, tt.action)
+			if err == nil {
+				t.Fatal("awaitInformationalResponse() error = nil, want non-nil")
+			}
+			if tt.want != "" && err.Error() != tt.want {
+				t.Fatalf("awaitInformationalResponse() error = %q, want %q", err, tt.want)
+			}
+			if tt.wantPrefix != "" && !strings.HasPrefix(err.Error(), tt.wantPrefix) {
+				t.Fatalf("awaitInformationalResponse() error = %q, want prefix %q", err, tt.wantPrefix)
+			}
+		})
+	}
+}
+
 func TestSendDeleteRequestWaitsForIKEDeleteResponse(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -727,6 +780,7 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 		prepare   func(*Session)
 		rekey     func(context.Context, *Session) error
 		rekeyFlag func(*Session) bool
+		want      string
 	}{
 		{
 			name: "child sa",
@@ -749,6 +803,7 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 			rekeyFlag: func(session *Session) bool {
 				return session.childSARekeying
 			},
+			want: "rekeying child sa: exchanging child sa rekey: context deadline exceeded",
 		},
 		{
 			name: "ike sa",
@@ -758,6 +813,7 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 			rekeyFlag: func(session *Session) bool {
 				return session.ikeSARekeying
 			},
+			want: "rekeying ike sa: exchanging ike sa rekey: context deadline exceeded",
 		},
 	}
 	for _, tt := range tests {
@@ -788,8 +844,12 @@ func TestRekeyDoesNotAllocateMessageIDBeforeOutboundWindow(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 			defer cancel()
-			if err := tt.rekey(ctx, session); !errors.Is(err, context.DeadlineExceeded) {
+			err = tt.rekey(ctx, session)
+			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("rekey error = %v, want context deadline exceeded", err)
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("rekey error = %q, want %q", got, tt.want)
 			}
 
 			session.mu.RLock()

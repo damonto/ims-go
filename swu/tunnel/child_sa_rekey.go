@@ -79,7 +79,13 @@ type simultaneousChildSARekey struct {
 	peer  childSARekeyResult
 }
 
-func (s *Session) RekeyChildSA(ctx context.Context) error {
+func (s *Session) RekeyChildSA(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("rekeying child sa: %w", retErr)
+		}
+	}()
+
 	state, release, err := s.beginChildSARekey()
 	if err != nil {
 		return err
@@ -98,7 +104,7 @@ func (s *Session) RekeyChildSA(ctx context.Context) error {
 			}
 			return s.createChildSAReplacement(ctx, state)
 		}
-		return fmt.Errorf("rekeying child sa: %w", err)
+		return err
 	}
 	decision := s.finishInitiatedChildSARekey(result)
 	if decision.installLocal {
@@ -169,7 +175,7 @@ func (s *Session) exchangeInitiatedChildSARekey(ctx context.Context, state child
 
 	messageID, err := s.allocateMessageID()
 	if err != nil {
-		return nil, fmt.Errorf("rekeying child sa: %w", err)
+		return nil, fmt.Errorf("allocating message id: %w", err)
 	}
 	key := ikeMessageKeyForSPIs(state.initiatorSPI, state.responderSPI, exchangeTypeCreateChildSA, ikeMessageFlags(!state.localInitiator, true), messageID)
 	waiter := s.registerInformationalWaiter(key)
@@ -177,7 +183,7 @@ func (s *Session) exchangeInitiatedChildSARekey(ctx context.Context, state child
 
 	wires, err := state.sealChildSARekeyRequest(messageID, newInboundSPI, nonceI, pfs)
 	if err != nil {
-		return nil, fmt.Errorf("rekeying child sa: %w", err)
+		return nil, err
 	}
 	return s.exchangeProtected(ctx, protectedExchange{
 		action:          ikeActionRekeyChildSA,
@@ -241,7 +247,7 @@ func (s *Session) exchangeInitiatedChildSACreate(ctx context.Context, state chil
 
 func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 	if s.isClosed() {
-		return childSARekeyState{}, nil, errors.New("rekeying child sa: session is closed")
+		return childSARekeyState{}, nil, errors.New("session is closed")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -253,15 +259,15 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 		return childSARekeyState{}, nil, errChildSARekeyInProgress
 	case childSAStateNone:
 		if err := s.disconnectedTunnelErr(); err != nil {
-			return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", err)
+			return childSARekeyState{}, nil, err
 		}
-		return childSARekeyState{}, nil, errors.New("rekeying child sa: child sa is not established")
+		return childSARekeyState{}, nil, errors.New("child sa is not established")
 	}
 	if s.ikeSAExpired(time.Now()) {
-		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errIKESAExpired)
+		return childSARekeyState{}, nil, errIKESAExpired
 	}
 	if s.childSAExpired(time.Now()) {
-		return childSARekeyState{}, nil, fmt.Errorf("rekeying child sa: %w", errChildSAExpired)
+		return childSARekeyState{}, nil, errChildSAExpired
 	}
 	state := childSARekeyState{
 		connected:                 s.connected,
@@ -279,7 +285,7 @@ func (s *Session) beginChildSARekey() (childSARekeyState, func(), error) {
 		addKE:                     s.cfg.AddKEToChildSARekey,
 	}
 	if !state.available() {
-		return childSARekeyState{}, nil, errors.New("rekeying child sa: ike or child sa state is unavailable")
+		return childSARekeyState{}, nil, errors.New("ike or child sa state is unavailable")
 	}
 	s.childSARekeying = true
 	s.simultaneousChildSA = simultaneousChildSARekey{}
@@ -410,7 +416,7 @@ func childSARekeyPFS(state childSARekeyState) (*ikeCrypto, error) {
 	}
 	pfs, err := newIKECrypto(dhGroup)
 	if err != nil {
-		return nil, fmt.Errorf("rekeying child sa: creating child pfs dh: %w", err)
+		return nil, fmt.Errorf("creating child pfs dh: %w", err)
 	}
 	return pfs, nil
 }
@@ -798,26 +804,22 @@ func (s *Session) childSARekeyLoop() {
 		}
 		if errors.Is(err, errIKETemporaryFailure) {
 			if !temporaryFailure.record(now) {
-				cause := fmt.Errorf("child sa rekey: %w", err)
-				s.failSecurityAssociations(cause)
+				s.failSecurityAssociations(err)
 				return
 			}
 			s.logger.Debug("child sa rekey deferred after temporary failure", "retry_at", temporaryFailure.retryAt, "err", err)
 			continue
 		}
 		if errors.Is(err, errChildSANotFound) {
-			cause := fmt.Errorf("child sa rekey: %w", err)
-			s.failSecurityAssociations(cause)
+			s.failSecurityAssociations(err)
 			return
 		}
 		if errors.Is(err, errIKERequestIncomplete) {
-			cause := fmt.Errorf("child sa rekey: %w", err)
-			s.failSecurityAssociations(cause)
+			s.failSecurityAssociations(err)
 			return
 		}
 		if rekeyHardLifetimeExpired(expiresAt, time.Now()) {
-			cause := fmt.Errorf("child sa rekey: %w", err)
-			s.failSecurityAssociations(cause)
+			s.failSecurityAssociations(err)
 			return
 		}
 		retryAt := s.deferChildSARekey(time.Now(), expiresAt)

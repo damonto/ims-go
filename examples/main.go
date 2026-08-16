@@ -259,7 +259,7 @@ func run(opt options) error {
 	go logSMSEvents(smsEvents)
 
 	if err := connectWithWFCUserActionPolling(ctx, client.Connect, wfcUserActionPoll); err != nil {
-		return fmt.Errorf("connecting client: %w", err)
+		return err
 	}
 	slog.Info("registered to IMS")
 	if tunnel := client.Tunnel(); len(tunnel.DefaultPCSCFIP()) > 0 {
@@ -271,7 +271,7 @@ func run(opt options) error {
 		defer cancel()
 		submission, err := client.SMS().Send(sendCtx, opt.sendTo, opt.sendText)
 		if err != nil {
-			return fmt.Errorf("sending SMS: %w", err)
+			return err
 		}
 		defer submission.Close()
 		go logSMSSubmissionUpdates(submission)
@@ -503,14 +503,14 @@ func wfcUserActionFromError(err error) (wfcUserAction, bool) {
 func runUSSD(ctx context.Context, client *ims.Client, code string) error {
 	session, err := client.USSD().Start()
 	if err != nil {
-		return fmt.Errorf("starting USSD: %w", err)
+		return err
 	}
 
 	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	result, err := session.Send(sendCtx, code)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("sending USSD: %w", err)
+		return err
 	}
 	slog.Info("started USSD", "code", code)
 
@@ -541,7 +541,7 @@ func runUSSD(ctx context.Context, client *ims.Client, code string) error {
 			result, err = session.Close(closeCtx)
 			closeCancel()
 			if err != nil {
-				return fmt.Errorf("closing USSD: %w", err)
+				return err
 			}
 			continue
 		}
@@ -550,7 +550,7 @@ func runUSSD(ctx context.Context, client *ims.Client, code string) error {
 		result, err = session.Reply(replyCtx, line)
 		replyCancel()
 		if err != nil {
-			return fmt.Errorf("replying USSD: %w", err)
+			return err
 		}
 	}
 }

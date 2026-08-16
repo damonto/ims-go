@@ -567,6 +567,124 @@ func TestCurrentServicesReturnConnectionErrorStatus(t *testing.T) {
 	}
 }
 
+func TestConnectionErrorErrorUsesCurrentCauseAndStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		err   error
+		state ClientState
+		want  string
+	}{
+		{
+			name:  "without status",
+			err:   errors.New("client is not connected"),
+			state: ClientState{LastError: errors.New("stale transport error")},
+			want:  "client is not connected",
+		},
+		{
+			name: "with status",
+			err:  errors.New("client is not connected"),
+			state: ClientState{
+				Status:    StatusReconnecting,
+				LastError: errors.New("stale transport error"),
+			},
+			want: "client is not connected: status reconnecting",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&ConnectionError{Err: tt.err, State: tt.state}).Error()
+			if err != tt.want {
+				t.Fatalf("ConnectionError.Error() = %q, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureReadyConfigErrorContextIsNotRepeated(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "reconnect max before initial delay",
+			cfg: Config{
+				Logger:            testLogger(),
+				Terminal:          TerminalInfo{ID: testIMEI},
+				ReconnectDelay:    10 * time.Second,
+				ReconnectMaxDelay: 5 * time.Second,
+			},
+			want: "normalizing client config: reconnect max delay must be >= reconnect delay",
+		},
+		{
+			name: "empty terminal id",
+			cfg:  Config{Logger: testLogger()},
+			want: "normalizing client config: terminal id is empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newClient(tt.cfg)
+			client.reader = newReaderStubForUSIMLoad()
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Errorf("Client.Close() error = %v", err)
+				}
+			})
+
+			err := client.ensureReady(t.Context())
+			if err == nil {
+				t.Fatal("ensureReady() error = nil, want non-nil")
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("ensureReady() error = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRestoreIMSAfterSWUPCSCFErrorContextIsNotRepeated(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+		want  string
+	}{
+		{
+			name:  "direct reselection request",
+			cause: swutunnel.ErrPCSCFReselectionRequested,
+			want:  "restoring IMS after P-CSCF reselection: VoWiFi userspace network stack is missing",
+		},
+		{
+			name:  "wrapped reselection request",
+			cause: fmt.Errorf("handling tunnel notification: %w", swutunnel.ErrPCSCFReselectionRequested),
+			want:  "restoring IMS after P-CSCF reselection: VoWiFi userspace network stack is missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := connectionRunner{
+				client: newClient(Config{Logger: testLogger()}),
+				active: &activeConn{
+					tunnel: &swutunnel.Session{},
+				},
+			}
+			restored, err := runner.restoreIMSAfterSWUPCSCF(tt.cause)
+			if restored {
+				t.Fatal("restoreIMSAfterSWUPCSCF() restored = true, want false")
+			}
+			if err == nil {
+				t.Fatal("restoreIMSAfterSWUPCSCF() error = nil, want non-nil")
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("restoreIMSAfterSWUPCSCF() error = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCurrentVoiceClientRejectsInactiveTunnel(t *testing.T) {
 	tests := []struct {
 		name string

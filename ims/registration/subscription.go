@@ -46,14 +46,20 @@ type regInfoRegistrationEntry struct {
 }
 
 func (s *Registrar) Subscribe(ctx context.Context) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = fmt.Errorf("subscribing IMS registration: %w", retErr)
+		}
+	}()
+
 	operationCtx, finishOperation, err := s.beginMaintenanceOperation(ctx)
 	if err != nil {
-		return fmt.Errorf("subscribing IMS registration: %w", err)
+		return err
 	}
 	defer func() {
 		finishOperation()
 		if errors.Is(context.Cause(operationCtx), errRegistrationStopped) {
-			retErr = fmt.Errorf("subscribing IMS registration: %w", errRegistrationStopped)
+			retErr = errRegistrationStopped
 		}
 	}()
 	return s.subscribe(operationCtx, false)
@@ -82,7 +88,7 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 			s.resetSubscription()
 			s.resetRegInfoState()
 		}
-		return fmt.Errorf("subscribing IMS registration: %w", err)
+		return err
 	}
 	s.registrationCommitMu.Lock()
 	if channelClosed(s.registrationMaintenanceStop) {
@@ -114,12 +120,12 @@ func (s *Registrar) subscribe(ctx context.Context, retried bool) error {
 	if resp.StatusCode() == sipStatusServiceUnavailable {
 		if retryAfter, ok := retryAfterDelay(resp); ok {
 			s.registrationCommitMu.Unlock()
-			return fmt.Errorf("subscribing IMS registration: %w after %w", &subscriptionRetryAfter{retryAfter: retryAfter}, sip.NewResponseError(resp))
+			return fmt.Errorf("%w after %w", &subscriptionRetryAfter{retryAfter: retryAfter}, sip.NewResponseError(resp))
 		}
 	}
 	if resp.StatusCode() != sipStatusOK {
 		s.registrationCommitMu.Unlock()
-		return fmt.Errorf("subscribing IMS registration: expected 200, got %w", sip.NewResponseError(resp))
+		return fmt.Errorf("expected 200, got %w", sip.NewResponseError(resp))
 	}
 	s.setSubscribeUnsupported(false)
 	s.applySubscribeExpires(resp)

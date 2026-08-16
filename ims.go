@@ -45,13 +45,13 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 
 	reg, err := registration.New(c.buildRegistrationConfig(setup.imsCfg, accessIMS.Security), imsSession, c.card)
 	if err != nil {
-		return fmt.Errorf("creating IMS registrar: %w", err)
+		return err
 	}
 	setup.ims.reg = reg
 
 	c.logger.Info("registering IMS")
 	if err := reg.Establish(ctx); err != nil {
-		return fmt.Errorf("establishing IMS registration: %w", err)
+		return err
 	}
 	if err := reg.Subscribe(ctx); err != nil {
 		return err
@@ -67,7 +67,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 		Logger:                c.cfg.Logger,
 	}, imsSession, reg, c.card)
 	if err != nil {
-		return fmt.Errorf("creating SMS endpoint: %w", err)
+		return err
 	}
 	setup.ims.sms = sms
 
@@ -79,7 +79,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 		Logger:             c.cfg.Logger,
 	}, imsSession, reg)
 	if err != nil {
-		return fmt.Errorf("creating USSD endpoint: %w", err)
+		return err
 	}
 	setup.ims.ussd = ussd
 
@@ -100,7 +100,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	voiceCfg.Logger = c.cfg.Logger
 	voice, err := imsvoice.New(voiceCfg, imsSession, reg)
 	if err != nil {
-		return fmt.Errorf("creating voice endpoint: %w", err)
+		return err
 	}
 	setup.ims.voice = voice
 	return nil

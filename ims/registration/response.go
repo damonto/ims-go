@@ -137,7 +137,7 @@ func (s *Registrar) buildRefreshRegister(ctx context.Context, flow Flow) (sip.Me
 func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Message, state *refreshRegisterState, auth *security.Authorization) (bool, error) {
 	if incompatibleNetworkAddressResponse(resp) && state.flow.SecurityVerify != nil && strings.EqualFold(state.flow.SecurityVerify.Mod, "UDP-enc-tun") {
 		if state.natPortAdjusted {
-			return false, errors.New("refreshing IMS registration: repeated incompatible network address response")
+			return false, errors.New("repeated incompatible network address response")
 		}
 		rotateNATProtectedPorts(&state.flow, false)
 		state.natPortAdjusted = true
@@ -146,11 +146,11 @@ func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Mess
 	switch resp.StatusCode() {
 	case sipStatusOK:
 		if err := s.verifyAuthenticationInfo(resp, auth); err != nil {
-			return false, fmt.Errorf("refreshing IMS registration: %w", err)
+			return false, err
 		}
 		singleRegistration, err := s.validateRegisterSuccessForFlow(resp, state.flow)
 		if err != nil {
-			return false, fmt.Errorf("refreshing IMS registration: %w", err)
+			return false, err
 		}
 		s.registrationCommitMu.Lock()
 		if channelClosed(s.registrationMaintenanceStop) {
@@ -168,17 +168,17 @@ func (s *Registrar) handleRefreshRegistration(ctx context.Context, resp sip.Mess
 		return true, nil
 	case sipStatusIntervalTooBrief:
 		if err := s.adjustRegisterExpiresFrom423(resp, &state.adjustedExpires); err != nil {
-			return false, fmt.Errorf("refreshing IMS registration: %w", err)
+			return false, err
 		}
 		return false, nil
 	default:
 		if resp.StatusCode() == sipStatusUseProxy {
-			return false, fmt.Errorf("refreshing IMS registration: %w", pcscfReselectionRequiredError(resp))
+			return false, pcscfReselectionRequiredError(resp)
 		}
 		if reregistrationInitialRequiredStatus(resp.StatusCode()) {
-			return false, fmt.Errorf("refreshing IMS registration: %w", initialRegistrationRequiredError(resp))
+			return false, initialRegistrationRequiredError(resp)
 		}
-		return false, fmt.Errorf("refreshing IMS registration: unexpected response: %w", sip.NewResponseError(resp))
+		return false, fmt.Errorf("unexpected response: %w", sip.NewResponseError(resp))
 	}
 }
 

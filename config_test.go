@@ -418,6 +418,38 @@ func TestConfigNormalized(t *testing.T) {
 	}
 }
 
+func TestConfigNormalizedIMSErrorContextIsNotRepeated(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ServiceConfig
+		want string
+	}{
+		{
+			name: "unsupported transport",
+			cfg:  ServiceConfig{Transport: "sctp"},
+			want: `normalizing ims config: unsupported transport "sctp"`,
+		},
+		{
+			name: "unsupported ussd domain",
+			cfg:  ServiceConfig{USSDDomain: "ussd-over-sip"},
+			want: `normalizing ims config: unsupported ussd domain "ussd-over-sip"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{IMS: withTestIMSIPSecAlgorithms(tt.cfg)}
+			_, err := cfg.normalizedIMS()
+			if err == nil {
+				t.Fatal("normalizedIMS() error = nil, want non-nil")
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("normalizedIMS() error = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIMSConfigNormalizedUSSDDomain(t *testing.T) {
 	tests := []struct {
 		name    string

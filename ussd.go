@@ -72,7 +72,7 @@ func (s *USSDSession) Send(ctx context.Context, code string) (USSDResult, error)
 	s.client.logger.Info("sending USSD", "code", code)
 	low, err := service.Start(ctx, code)
 	if err != nil {
-		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
+		return USSDResult{}, err
 	}
 	if err := s.attachLowSession(low, false); err != nil {
 		return USSDResult{}, fmt.Errorf("sending USSD: %w", err)
@@ -105,7 +105,7 @@ func (s *USSDSession) Reply(ctx context.Context, text string) (USSDResult, error
 	defer s.finishOperation()
 
 	if err := low.Reply(ctx, text); err != nil {
-		return USSDResult{}, fmt.Errorf("replying USSD: %w", err)
+		return USSDResult{}, err
 	}
 
 	result, err := s.awaitResult(ctx)
@@ -131,7 +131,7 @@ func (s *USSDSession) Close(ctx context.Context) (USSDResult, error) {
 	}
 
 	if err := low.End(ctx, ""); err != nil {
-		return USSDResult{}, fmt.Errorf("closing USSD: %w", err)
+		return USSDResult{}, err
 	}
 
 	s.markClosed(low)
