@@ -4945,7 +4945,13 @@ func TestNotifyRegInfoMatchesTokenizedContactBySIPInstance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newTCPTransport(5062, 5060)
-			svc := newTestService(t, Config{IMEI: "869710031623444"}, transport, stubCard{})
+			svc := newTestService(t, Config{
+				IMEI:                   "869710031623444",
+				RegistrationGroup:      &Group{},
+				RegistrationID:         1,
+				RegistrationPreference: 1000,
+			}, transport, stubCard{})
+			svc.applyRegisterCapability(true)
 			svc.setRegistered(true)
 
 			notify := sip.NewRequest("NOTIFY", "sip:user@example.com")

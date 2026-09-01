@@ -563,6 +563,11 @@ func (s *Registrar) applyRegInfo(info regInfo) (bool, error) {
 
 	s.updateRegInfoTable(info)
 	state := s.state
+	// A registrar that omitted Require: outbound cannot identify the active
+	// binding by reg-id because the network may omit that parameter in reginfo.
+	if !s.flow.Outbound {
+		state.registrationID = 0
+	}
 	port := s.flow.RegisterPort
 	if s.flow.MessagePort != 0 {
 		port = s.flow.MessagePort
