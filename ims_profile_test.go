@@ -800,6 +800,40 @@ func TestEmbeddedIMSProfilesHaveSupportedTunnelConfig(t *testing.T) {
 	}
 }
 
+func TestEmbeddedThreeUKProfilesUseSHA1IKEIntegrity(t *testing.T) {
+	// Three's ePDG accepts HMAC-SHA1-96 (IKE transform ID 2) for IKE_SA_INIT.
+	tests := []struct {
+		name string
+		gid1 string
+	}{
+		{name: "GID1 0305", gid1: "0305"},
+		{name: "GID1 0309", gid1: "0309"},
+		{name: "GID1 030B", gid1: "030B"},
+		{name: "GID1 0310", gid1: "0310"},
+		{name: "fallback", gid1: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok, err := parseIMSProfile(embeddedIMSConfig, plmnWFCCard{
+				mcc:       "234",
+				mnc:       "20",
+				mncLength: 2,
+				gid1:      tt.gid1,
+			})
+			if err != nil {
+				t.Fatalf("parseIMSProfile() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("parseIMSProfile() ok = false, want true")
+			}
+			if !slices.Equal(profile.IKEIntegrity, []uint16{2}) {
+				t.Fatalf("IKEIntegrity = %v, want [2]", profile.IKEIntegrity)
+			}
+		})
+	}
+}
+
 func TestEmbeddedIMSProfilesExplicitlyConfigureChildSAMultipleProposals(t *testing.T) {
 	type profileConfig struct {
 		MCC                      string          `json:"mcc"`

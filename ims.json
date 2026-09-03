@@ -17785,7 +17785,7 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      14
+      2
     ],
     "ikeEncryptionKeyLens": [
       128,
@@ -30699,13 +30699,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
-      256
+      128
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2
@@ -30714,7 +30714,7 @@
       256
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -56991,11 +56991,10 @@
       14
     ],
     "ikeEncryptionKeyLens": [
-      128,
       256
     ],
     "ikeIntegrity": [
-      12
+      14
     ],
     "ikePRF": [
       2,
@@ -57006,7 +57005,7 @@
       256
     ],
     "childIntegrity": [
-      12
+      14
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -64036,7 +64035,7 @@
       128
     ],
     "ikeIntegrity": [
-      12
+      2
     ],
     "ikePRF": [
       2
@@ -64217,7 +64216,7 @@
       128
     ],
     "ikeIntegrity": [
-      12
+      2
     ],
     "ikePRF": [
       2
@@ -64398,7 +64397,7 @@
       128
     ],
     "ikeIntegrity": [
-      12
+      2
     ],
     "ikePRF": [
       2
@@ -64579,7 +64578,7 @@
       128
     ],
     "ikeIntegrity": [
-      12
+      2
     ],
     "ikePRF": [
       2
@@ -64760,7 +64759,7 @@
       128
     ],
     "ikeIntegrity": [
-      12
+      2
     ],
     "ikePRF": [
       2
@@ -82431,13 +82430,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
-      128
+      256
     ],
     "ikeIntegrity": [
-      2
+      14
     ],
     "ikePRF": [
       2
@@ -82446,7 +82445,7 @@
       128
     ],
     "childIntegrity": [
-      2
+      14
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -83473,13 +83472,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
-      128
+      256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2
@@ -83488,7 +83487,7 @@
       128
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -99389,6 +99388,7 @@
       256
     ],
     "ikeIntegrity": [
+      12,
       2,
       1
     ],
@@ -99400,6 +99400,7 @@
       256
     ],
     "childIntegrity": [
+      12,
       2,
       1
     ],
@@ -99599,6 +99600,7 @@
       256
     ],
     "ikeIntegrity": [
+      12,
       2,
       1
     ],
@@ -99610,6 +99612,7 @@
       256
     ],
     "childIntegrity": [
+      12,
       2,
       1
     ],
@@ -100978,13 +100981,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
-      128
+      256
     ],
     "ikeIntegrity": [
-      2
+      14
     ],
     "ikePRF": [
       2
@@ -100993,7 +100996,7 @@
       128
     ],
     "childIntegrity": [
-      2
+      14
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -101371,13 +101374,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
-      128
+      256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2
@@ -101386,7 +101389,7 @@
       128
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -112699,13 +112702,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
       256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2,
@@ -112715,7 +112718,7 @@
       256
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -113053,13 +113056,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
       256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2,
@@ -113069,7 +113072,7 @@
       256
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -113242,13 +113245,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
       256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2,
@@ -113258,7 +113261,7 @@
       256
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -113431,13 +113434,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
       256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2,
@@ -113447,7 +113450,7 @@
       256
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -113811,13 +113814,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
       256
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2,
@@ -113827,7 +113830,7 @@
       256
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 20,
@@ -262779,13 +262782,13 @@
     "nattPort": 4500,
     "sipPort": 5060,
     "dhGroups": [
-      2
+      14
     ],
     "ikeEncryptionKeyLens": [
       128
     ],
     "ikeIntegrity": [
-      2
+      12
     ],
     "ikePRF": [
       2
@@ -262794,7 +262797,7 @@
       128
     ],
     "childIntegrity": [
-      2
+      12
     ],
     "enableChildSAMultipleProposals": true,
     "pcscfIPv4ConfigAttribute": 16384,
@@ -306226,6 +306229,7 @@
       256
     ],
     "ikeIntegrity": [
+      14,
       2,
       1,
       12
@@ -306241,6 +306245,7 @@
       192
     ],
     "childIntegrity": [
+      14,
       2,
       1,
       12
