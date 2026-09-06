@@ -30,7 +30,18 @@ func (s *Endpoint) sdp() string {
 		network = "IP6"
 	}
 	sessionID := sip.RandomUint32()
-	return fmt.Sprintf("v=0\r\no=- %d %d IN %s %s\r\ns=-\r\nc=IN %s %s\r\nt=0 0\r\nm=audio 0 RTP/AVP 97 96\r\na=rtpmap:97 AMR\r\na=fmtp:97 mode-set=0,2,5,7; maxframes=2\r\na=rtpmap:96 telephone-event\r\n", sessionID, sessionID, network, host, network, host)
+	// TS 24.390 reserves no media resources. The zero port does not waive
+	// RFC 8866's clock rate requirement for the rtpmap attributes we include.
+	return fmt.Sprintf("v=0\r\n"+
+		"o=- %d %d IN %s %s\r\n"+
+		"s=-\r\n"+
+		"c=IN %s %s\r\n"+
+		"t=0 0\r\n"+
+		"m=audio 0 RTP/AVP 97 96\r\n"+
+		"a=rtpmap:97 AMR/8000\r\n"+
+		"a=fmtp:97 mode-set=0,2,5,7; maxframes=2\r\n"+
+		"a=rtpmap:96 telephone-event/8000\r\n",
+		sessionID, sessionID, network, host, network, host)
 }
 
 func (s *Endpoint) sdpAnswer(offer []byte) ([]byte, error) {

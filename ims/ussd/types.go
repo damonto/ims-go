@@ -39,6 +39,7 @@ const (
 	ErrorCodeUnspecified         = 1
 	ErrorCodeLanguageUnsupported = 2
 	ErrorCodeUnexpectedDataValue = 3
+	ErrorCodeUSSDBusy            = 4
 )
 
 type Domain string
@@ -161,9 +162,9 @@ type xmlPayload struct {
 }
 
 type payloadPresence struct {
-	language bool
-	text     bool
-	error    bool
+	hasLanguage  bool
+	hasText      bool
+	hasErrorCode bool
 }
 
 type anyExt struct {

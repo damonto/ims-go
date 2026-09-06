@@ -137,11 +137,13 @@ func TestUSSDXMLRoundTrip(t *testing.T) {
 		want Message
 	}{
 		{name: "plain", msg: Message{Text: "*100#", Language: "en"}, want: Message{Text: "*100#", Language: "en"}},
+		{name: "regional language", msg: Message{Text: "*100#", Language: "en-US"}, want: Message{Text: "*100#", Language: "en-US"}},
 		{name: "empty string", msg: Message{Language: "en"}, want: Message{Language: "en"}},
 		{name: "string preserves spaces", msg: Message{Text: " Enter PIN: ", Language: "en"}, want: Message{Text: " Enter PIN: ", Language: "en"}},
 		{name: "request", msg: Message{Text: "Enter PIN", Language: "en", Request: true}, want: Message{Text: "Enter PIN", Language: "en", Request: true}},
 		{name: "notify", msg: Message{Text: "Done", Language: "en", Notify: true}, want: Message{Text: "Done", Language: "en", Notify: true}},
 		{name: "error", msg: Message{Language: "en", ErrorCode: ErrorCodeLanguageUnsupported}, want: Message{Language: "en", ErrorCode: ErrorCodeLanguageUnsupported}},
+		{name: "busy error", msg: Message{Language: "en", ErrorCode: ErrorCodeUSSDBusy}, want: Message{Language: "en", ErrorCode: ErrorCodeUSSDBusy}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -218,9 +220,9 @@ func TestUSSDXMLValidation(t *testing.T) {
 			want: Message{Language: "en", Text: "AT&T"},
 		},
 		{
-			name: "undefined error code treated as unspecified",
+			name: "zero error code means success",
 			body: xml.Header + `<ussd-data><error-code>0</error-code></ussd-data>`,
-			want: Message{ErrorCode: ErrorCodeUnspecified},
+			want: Message{},
 		},
 		{
 			name: "out of range error code treated as unspecified",
@@ -228,13 +230,48 @@ func TestUSSDXMLValidation(t *testing.T) {
 			want: Message{ErrorCode: ErrorCodeUnspecified},
 		},
 		{
+			name: "USSD busy error code preserved",
+			body: xml.Header + `<ussd-data><error-code>4</error-code></ussd-data>`,
+			want: Message{ErrorCode: ErrorCodeUSSDBusy},
+		},
+		{
+			name: "zero error code with result text means success",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>Done</ussd-string><error-code>0</error-code></ussd-data>`,
+			want: Message{Language: "en", Text: "Done"},
+		},
+		{
+			name: "unknown error code with result text remains an error",
+			body: xml.Header + `<ussd-data><language>en</language><ussd-string>Rejected</ussd-string><error-code>9</error-code></ussd-data>`,
+			want: Message{Language: "en", Text: "Rejected", ErrorCode: ErrorCodeUnspecified},
+		},
+		{
 			name:    "duplicate language",
 			body:    xml.Header + `<ussd-data><language>en</language><language>fr</language><ussd-string>*100#</ussd-string></ussd-data>`,
 			wantErr: true,
 		},
 		{
-			name:    "elements out of schema order",
-			body:    xml.Header + `<ussd-data><ussd-string>*100#</ussd-string><language>en</language></ussd-data>`,
+			name: "carrier field order",
+			body: xml.Header + `<ussd-data><ussd-string>*100#</ussd-string><language>en</language></ussd-data>`,
+			want: Message{Language: "en", Text: "*100#"},
+		},
+		{
+			name: "error precedes language and result",
+			body: xml.Header + `<ussd-data><error-code>3</error-code><language>en</language><ussd-string>Rejected</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "Rejected", ErrorCode: ErrorCodeUnexpectedDataValue},
+		},
+		{
+			name: "extension precedes language and string",
+			body: xml.Header + `<ussd-data><anyExt><UnstructuredSS-Request/></anyExt><language>en</language><ussd-string>Enter PIN</ussd-string></ussd-data>`,
+			want: Message{Language: "en", Text: "Enter PIN", Request: true},
+		},
+		{
+			name:    "duplicate string across language",
+			body:    xml.Header + `<ussd-data><ussd-string>1</ussd-string><language>en</language><ussd-string>2</ussd-string></ussd-data>`,
+			wantErr: true,
+		},
+		{
+			name:    "duplicate error across string",
+			body:    xml.Header + `<ussd-data><error-code>0</error-code><ussd-string>Done</ussd-string><error-code>1</error-code></ussd-data>`,
 			wantErr: true,
 		},
 		{
@@ -243,8 +280,23 @@ func TestUSSDXMLValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "language has region subtag",
-			body:    xml.Header + `<ussd-data><language>en-US</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			name: "language has region subtag",
+			body: xml.Header + `<ussd-data><language>en-US</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "en-US", Text: "*100#"},
+		},
+		{
+			name: "language has script and region subtags",
+			body: xml.Header + `<ussd-data><language>zh-Hant-TW</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			want: Message{Language: "zh-Hant-TW", Text: "*100#"},
+		},
+		{
+			name:    "language has empty subtag",
+			body:    xml.Header + `<ussd-data><language>en--US</language><ussd-string>*100#</ussd-string></ussd-data>`,
+			wantErr: true,
+		},
+		{
+			name:    "language uses underscore separator",
+			body:    xml.Header + `<ussd-data><language>en_US</language><ussd-string>*100#</ussd-string></ussd-data>`,
 			wantErr: true,
 		},
 		{
@@ -289,7 +341,9 @@ func TestMarshalUSSDXMLRejectsInvalidLanguage(t *testing.T) {
 	}{
 		{name: "valid", msg: Message{Text: "*100#", Language: "en"}},
 		{name: "undefined", msg: Message{Text: "*100#", Language: "undefined"}, wantErr: true},
-		{name: "region subtag", msg: Message{Text: "*100#", Language: "en-US"}, wantErr: true},
+		{name: "region subtag", msg: Message{Text: "*100#", Language: "en-US"}},
+		{name: "empty subtag", msg: Message{Text: "*100#", Language: "en--US"}, wantErr: true},
+		{name: "underscore separator", msg: Message{Text: "*100#", Language: "en_US"}, wantErr: true},
 		{name: "numeric", msg: Message{Text: "*100#", Language: "123"}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -476,6 +530,20 @@ func TestValidateNetworkInitiatedInboundInfoMarkerRules(t *testing.T) {
 			name: "error only accepted",
 			msg:  Message{Language: "en", ErrorCode: ErrorCodeUnexpectedDataValue},
 		},
+		{
+			name:    "zero error with request accepted",
+			rawBody: `<ussd-data><error-code>0</error-code><language>en-US</language><ussd-string>Enter PIN</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`,
+		},
+		{
+			name:    "zero error does not bypass request marker",
+			rawBody: `<ussd-data><error-code>0</error-code><language>en-US</language><ussd-string>Enter PIN</ussd-string></ussd-data>`,
+			wantErr: true,
+		},
+		{
+			name:    "zero error does not bypass language",
+			rawBody: `<ussd-data><error-code>0</error-code><ussd-string>Enter PIN</ussd-string><anyExt><UnstructuredSS-Request/></anyExt></ussd-data>`,
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -537,7 +605,7 @@ func TestDecodeInvitePayloadRejectsDuplicateBodyParts(t *testing.T) {
 			msg := sip.NewRequest("INVITE", "sip:user@example.com")
 			msg.Headers.Add("Content-Type", "multipart/mixed; boundary=invite")
 			msg.Body = body
-			if _, _, err := decodeInvitePayload(msg); err == nil {
+			if _, _, _, err := decodeInvitePayload(msg); err == nil {
 				t.Fatal("decodeInvitePayload() error = nil, want error")
 			}
 		})
@@ -601,7 +669,7 @@ func TestDecodeInvitePayloadUnsupportedBodyPartHandling(t *testing.T) {
 			msg := sip.NewRequest("INVITE", "sip:user@example.com")
 			msg.Headers.Add("Content-Type", "multipart/mixed; boundary=invite")
 			msg.Body = body
-			got, hasSDP, err := decodeInvitePayload(msg)
+			got, _, _, err := decodeInvitePayload(msg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("decodeInvitePayload() error = nil, want unsupported body part error")
@@ -610,9 +678,6 @@ func TestDecodeInvitePayloadUnsupportedBodyPartHandling(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("decodeInvitePayload() error = %v", err)
-			}
-			if !hasSDP {
-				t.Fatal("decodeInvitePayload() hasSDP = false, want true")
 			}
 			if got.Text != "Enter PIN" || !got.Request {
 				t.Fatalf("decodeInvitePayload() = %+v, want request payload", got)
@@ -706,7 +771,7 @@ func TestHandleInfoMapsPackageAndMediaErrors(t *testing.T) {
 	}
 }
 
-func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
+func TestHandleByeUSSDPayload(t *testing.T) {
 	payload, err := (xmlBody{Message: Message{Text: "Done", Language: "en"}}).MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText() error = %v", err)
@@ -726,8 +791,30 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 		body              []byte
 		wantStatus        int
 		wantClosed        bool
+		wantMessage       bool
+		want              Message
 	}{
-		{name: "single ussd xml", headerContentType: xmlContentType, body: payload, wantStatus: 200, wantClosed: true},
+		{
+			name: "single ussd xml", headerContentType: xmlContentType, body: payload,
+			wantStatus: 200, wantClosed: true, wantMessage: true,
+			want: Message{Language: "en", Text: "Done", Final: true},
+		},
+		{
+			name: "carrier result with zero error and regional language", headerContentType: xmlContentType,
+			body:       []byte("<ussd-data>\r\n<error-code>0</error-code>\r\n<language>en-US</language>\r\n<ussd-string>Request accepted</ussd-string>\r\n</ussd-data>\r\n"),
+			wantStatus: 200, wantClosed: true, wantMessage: true,
+			want: Message{Language: "en-US", Text: "Request accepted", Final: true},
+		},
+		{
+			name: "zero error without language ignored", headerContentType: xmlContentType,
+			body:       []byte(`<ussd-data><error-code>0</error-code><ussd-string>Done</ussd-string></ussd-data>`),
+			wantStatus: 200, wantClosed: true,
+		},
+		{
+			name: "duplicate error ignored", headerContentType: xmlContentType,
+			body:       []byte(`<ussd-data><error-code>0</error-code><language>en</language><ussd-string>Done</ussd-string><error-code>1</error-code></ussd-data>`),
+			wantStatus: 200, wantClosed: true,
+		},
 		{name: "multipart body ignored", headerContentType: "multipart/mixed; boundary=bye", body: multipartPayload, wantStatus: 200, wantClosed: true},
 	}
 	for _, tt := range tests {
@@ -738,6 +825,7 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
+			closeServiceAfterTest(t, svc, reg, sess)
 			us := &Session{
 				endpoint:    svc,
 				callID:      "bye-call",
@@ -765,6 +853,9 @@ func TestHandleByeRejectsMultipartUSSDPayload(t *testing.T) {
 			}
 			if got := us.isClosed(); got != tt.wantClosed {
 				t.Fatalf("isClosed() = %t, want %t", got, tt.wantClosed)
+			}
+			if got, ok := <-us.Events(); ok != tt.wantMessage || got != tt.want {
+				t.Fatalf("Events() = %+v, %t; want %+v, %t", got, ok, tt.want, tt.wantMessage)
 			}
 		})
 	}
@@ -929,6 +1020,55 @@ func TestUSSDExchange481ClosesSession(t *testing.T) {
 	}
 	if svc.hasActiveSession() {
 		t.Fatal("hasActiveSession() = true, want false")
+	}
+}
+
+func TestUSSDInviteSDP(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		network string
+	}{
+		{name: "IPv4", host: "192.0.2.1", network: "IP4"},
+		{name: "IPv6", host: "2001:db8::1", network: "IP6"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newTransport()
+			transport.local = &net.TCPAddr{IP: net.ParseIP(tt.host), Port: 5062}
+			sess, reg := registeredService(t, transport)
+			svc, err := New(Config{Logger: testLogger()}, sess, reg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			closeServiceAfterTest(t, svc, reg, sess)
+
+			_, invite, err := svc.newStart("#225#")
+			if err != nil {
+				t.Fatalf("newStart() error = %v", err)
+			}
+			body, err := messageSDPBody(invite)
+			if err != nil {
+				t.Fatalf("messageSDPBody() error = %v", err)
+			}
+			if err := validateSDPBody(body); err != nil {
+				t.Fatalf("validateSDPBody() error = %v", err)
+			}
+
+			// USSD disables media with port zero, while rtpmap still declares
+			// the clock rates required by RFC 8866.
+			lines := strings.Split(string(body), "\r\n")
+			for _, want := range []string{
+				"c=IN " + tt.network + " " + tt.host,
+				"m=audio 0 RTP/AVP 97 96",
+				"a=rtpmap:97 AMR/8000",
+				"a=rtpmap:96 telephone-event/8000",
+			} {
+				if !slices.Contains(lines, want) {
+					t.Errorf("INVITE SDP missing %q:\n%s", want, body)
+				}
+			}
+		})
 	}
 }
 
@@ -1824,12 +1964,9 @@ func TestStartUSSDSessionUsesDefaultIdentityAndInitialBody(t *testing.T) {
 			if got := req.Header("From"); !strings.Contains(got, "<sip:alice@example.com>;") {
 				t.Fatalf("From = %q, want default public identity", got)
 			}
-			payload, hasSDP, err := decodeInvitePayload(req)
+			payload, _, _, err := decodeInvitePayload(req)
 			if err != nil {
 				t.Fatalf("decodeInvitePayload() error = %v", err)
-			}
-			if !hasSDP {
-				t.Fatal("decodeInvitePayload() missing SDP")
 			}
 			if payload.Text != "*100#" || payload.Language != defaultLang {
 				t.Fatalf("payload = %+v", payload)

@@ -51,13 +51,13 @@ func validateInboundInfo(msg sip.Message, requireRequestMarker bool) (Message, e
 	if err != nil {
 		return Message{}, err
 	}
-	if presence.error {
+	if presence.hasErrorCode && payload.ErrorCode != 0 {
 		return payload, nil
 	}
-	if !presence.text {
+	if !presence.hasText {
 		return Message{}, errors.New("missing ussd-string element")
 	}
-	if !presence.language {
+	if !presence.hasLanguage {
 		return Message{}, errors.New("missing language element")
 	}
 	if requireRequestMarker {
@@ -92,33 +92,22 @@ func readMultipartMessageBody(context payloadContext, params map[string]string, 
 	return body, nil
 }
 
-func decodeMultipartPayload(context payloadContext, body multipartBody) (Message, error) {
-	payload, ok, err := body.payload()
-	if err != nil {
-		return Message{}, err
-	}
-	if !ok {
-		return Message{}, fmt.Errorf("%s: %s part not found", context, xmlContentType)
-	}
-	return payload, nil
-}
-
-func validateOptionalMultipartSDP(body multipartBody) (bool, error) {
-	found := false
+func validateMultipartSDPOffer(body multipartBody) ([]byte, error) {
+	var sdp []byte
 	for _, part := range body.Parts {
 		partType, err := part.mediaType()
 		if err != nil || !strings.EqualFold(partType, sdpContentType) {
 			continue
 		}
-		if found {
-			return true, fmt.Errorf("multiple %s parts", sdpContentType)
+		if sdp != nil {
+			return nil, fmt.Errorf("multiple %s parts", sdpContentType)
 		}
-		found = true
 		if err := validateSDPBody(part.Body); err != nil {
-			return true, err
+			return nil, err
 		}
+		sdp = part.Body
 	}
-	return found, nil
+	return sdp, nil
 }
 
 func validateMultipartMessageSDP(context payloadContext, body multipartBody) error {
@@ -268,7 +257,14 @@ func decodePayload(msg sip.Message) (Message, error) {
 		if err := body.rejectUnsupportedRequiredParts(payloadContextUSSDPayload, xmlContentType, sdpContentType); err != nil {
 			return Message{}, err
 		}
-		return decodeMultipartPayload(payloadContextUSSDPayload, body)
+		payload, ok, err := body.payload()
+		if err != nil {
+			return Message{}, err
+		}
+		if !ok {
+			return Message{}, fmt.Errorf("%s: %s part not found", payloadContextUSSDPayload, xmlContentType)
+		}
+		return payload, nil
 	default:
 		return Message{}, fmt.Errorf("%w: parsing USSD payload: unsupported content type %q", errUnsupportedMediaType, mediaType)
 	}
@@ -300,7 +296,7 @@ func decodeXMLWithPresence(data []byte) (Message, payloadPresence, error) {
 
 func normalizeErrorCode(code int) int {
 	switch code {
-	case ErrorCodeUnspecified, ErrorCodeLanguageUnsupported, ErrorCodeUnexpectedDataValue:
+	case ErrorCodeUnspecified, ErrorCodeLanguageUnsupported, ErrorCodeUnexpectedDataValue, ErrorCodeUSSDBusy:
 		return code
 	default:
 		return ErrorCodeUnspecified

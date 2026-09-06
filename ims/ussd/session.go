@@ -621,7 +621,7 @@ func (s *Session) handleBye(ctx context.Context, req imssession.Request) error {
 			// section 15.1.2 requires a 2xx response and session termination.
 			s.endpoint.logger.Warn("ignoring invalid USSD BYE payload", "call_id", s.callID, "err", err)
 			hasPayload = false
-		} else if !presence.error && (!presence.text || !presence.language) {
+		} else if (!presence.hasErrorCode || decoded.ErrorCode == 0) && (!presence.hasText || !presence.hasLanguage) {
 			s.endpoint.logger.Warn("ignoring incomplete USSD BYE payload", "call_id", s.callID)
 			hasPayload = false
 		} else {

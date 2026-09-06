@@ -570,61 +570,52 @@ func validateIncomingInvite(msg sip.Message) (Message, []byte, error) {
 	if !acceptsMedia(strings.Join(msg.HeadersByName("Accept"), ",")) {
 		return Message{}, nil, errors.New("missing required Accept media types")
 	}
-	payload, hasSDP, err := decodeInvitePayload(msg)
+	payload, presence, offerSDP, err := decodeInvitePayload(msg)
 	if err != nil {
 		return Message{}, nil, err
-	}
-	if !hasSDP {
-		return Message{}, nil, errors.New("missing SDP offer")
 	}
 	if !payload.Request || payload.Notify {
 		return Message{}, nil, errors.New("invalid network initiated USSD request marker")
 	}
-	xmlData, err := messageBodyPart(msg, xmlContentType)
-	if err != nil {
-		return Message{}, nil, err
-	}
-	_, presence, err := decodeXMLWithPresence(xmlData)
-	if err != nil {
-		return Message{}, nil, err
-	}
-	if !presence.text {
+	if !presence.hasText {
 		return Message{}, nil, errors.New("missing ussd-string element")
 	}
-	if presence.error {
+	if payload.ErrorCode != 0 {
 		return Message{}, nil, errors.New("unexpected error-code in network initiated INVITE")
-	}
-	offerSDP, err := messageSDPBody(msg)
-	if err != nil {
-		return Message{}, nil, err
 	}
 	return payload, offerSDP, nil
 }
 
-func decodeInvitePayload(msg sip.Message) (Message, bool, error) {
+func decodeInvitePayload(msg sip.Message) (Message, payloadPresence, []byte, error) {
 	mediaType, params, err := splitContentTypeHeader(payloadContextUSSDInvite, msg.Header("Content-Type"))
 	if err != nil {
-		return Message{}, false, err
+		return Message{}, payloadPresence{}, nil, err
 	}
 	if mediaType != mixedMultipartType {
-		return Message{}, false, fmt.Errorf("%w: parsing USSD INVITE: unsupported content type %q", errUnsupportedMediaType, mediaType)
+		return Message{}, payloadPresence{}, nil, fmt.Errorf("%w: parsing USSD INVITE: unsupported content type %q", errUnsupportedMediaType, mediaType)
 	}
 	body, err := readMultipartMessageBody(payloadContextUSSDInvite, params, msg.Body)
 	if err != nil {
-		return Message{}, false, err
+		return Message{}, payloadPresence{}, nil, err
 	}
 	if err := body.rejectUnsupportedRequiredParts(payloadContextUSSDInvite, xmlContentType, sdpContentType); err != nil {
-		return Message{}, false, err
+		return Message{}, payloadPresence{}, nil, err
 	}
-	payload, err := decodeMultipartPayload(payloadContextUSSDInvite, body)
+	payload, ok, presence, err := body.payloadWithPresence()
 	if err != nil {
-		return Message{}, false, err
+		return Message{}, payloadPresence{}, nil, err
 	}
-	hasSDP, err := validateOptionalMultipartSDP(body)
+	if !ok {
+		return Message{}, payloadPresence{}, nil, fmt.Errorf("%s: %s part not found", payloadContextUSSDInvite, xmlContentType)
+	}
+	offerSDP, err := validateMultipartSDPOffer(body)
 	if err != nil {
-		return Message{}, false, err
+		return Message{}, payloadPresence{}, nil, err
 	}
-	return payload, hasSDP, nil
+	if offerSDP == nil {
+		return Message{}, payloadPresence{}, nil, errors.New("missing SDP offer")
+	}
+	return payload, presence, offerSDP, nil
 }
 
 func looksLikeInvite(msg sip.Message) bool {

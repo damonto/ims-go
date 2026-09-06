@@ -11,6 +11,8 @@ import (
 	"mime/multipart"
 	"strconv"
 	"strings"
+
+	"golang.org/x/text/language"
 )
 
 var (
@@ -84,7 +86,8 @@ func (b *xmlBody) UnmarshalText(text []byte) error {
 		Text:     stringValue(payload.String),
 		Language: strings.TrimSpace(language),
 	}
-	if payload.ErrorCode != nil {
+	// Some networks label a successful textual result with error-code 0.
+	if payload.ErrorCode != nil && *payload.ErrorCode != 0 {
 		msg.ErrorCode = normalizeErrorCode(*payload.ErrorCode)
 	}
 	if payload.AnyExt != nil {
@@ -93,9 +96,9 @@ func (b *xmlBody) UnmarshalText(text []byte) error {
 	}
 	b.Message = msg
 	b.presence = payloadPresence{
-		language: payload.hasLanguage,
-		text:     payload.hasString,
-		error:    payload.hasError,
+		hasLanguage:  payload.hasLanguage,
+		hasText:      payload.hasString,
+		hasErrorCode: payload.hasError,
 	}
 	return nil
 }
@@ -112,6 +115,8 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 		return fmt.Errorf("parsing USSD XML: unexpected root element %q", start.Name.Local)
 	}
 	*p = xmlPayload{XMLName: start.Name}
+	// Carrier replies can reorder the fields. Match names while retaining
+	// the duplicate checks required by TS 24.390 section 5.1.3.2.
 	counts := map[string]int{
 		"language":    0,
 		"ussd-string": 0,
@@ -122,7 +127,6 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 	var fieldText strings.Builder
 	depth := 0
 	inAnyExt := false
-	lastOrder := 0
 	markerCounts := map[string]int{}
 	for {
 		token, err := decoder.Token()
@@ -140,11 +144,6 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 			if depth == 0 && elem.Name.Space == "" {
 				switch elem.Name.Local {
 				case "language", "ussd-string", "error-code":
-					order := map[string]int{"language": 1, "ussd-string": 2, "error-code": 3}[elem.Name.Local]
-					if order < lastOrder {
-						return fmt.Errorf("parsing USSD XML: %s element is out of order", elem.Name.Local)
-					}
-					lastOrder = order
 					counts[elem.Name.Local]++
 					if counts[elem.Name.Local] > 1 {
 						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
@@ -160,7 +159,6 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 						p.hasError = true
 					}
 				case "anyExt":
-					lastOrder = 4
 					counts[elem.Name.Local]++
 					if counts[elem.Name.Local] > 1 {
 						return fmt.Errorf("parsing USSD XML: duplicate %s element", elem.Name.Local)
@@ -218,21 +216,18 @@ func (p *xmlPayload) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 	return errors.New("parsing USSD XML: missing ussd-data root element")
 }
 
-func validateLanguage(language string) error {
-	language = strings.TrimSpace(language)
-	if language == "" {
+func validateLanguage(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return nil
 	}
-	if strings.Contains(language, "-") {
-		return fmt.Errorf("parsing USSD XML: language %q contains more than one subtag", language)
+	// Networks use full RFC 5646 tags such as en-US, including in dialogs
+	// where the received language is reused for subsequent replies.
+	if strings.Contains(value, "_") {
+		return fmt.Errorf("parsing USSD XML: language %q uses an invalid separator", value)
 	}
-	if len(language) < 2 || len(language) > 8 {
-		return fmt.Errorf("parsing USSD XML: language %q is not a single RFC 5646 subtag", language)
-	}
-	for _, r := range language {
-		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
-			return fmt.Errorf("parsing USSD XML: language %q is not a single RFC 5646 subtag", language)
-		}
+	if _, err := language.Parse(value); err != nil {
+		return fmt.Errorf("parsing USSD XML: language %q: %w", value, err)
 	}
 	return nil
 }
@@ -339,6 +334,11 @@ func (p multipartBodyPart) isOptional() bool {
 }
 
 func (b multipartBody) payload() (Message, bool, error) {
+	payload, ok, _, err := b.payloadWithPresence()
+	return payload, ok, err
+}
+
+func (b multipartBody) payloadWithPresence() (Message, bool, payloadPresence, error) {
 	var payloadPart multipartBodyPart
 	found := false
 	for _, part := range b.Parts {
@@ -347,17 +347,17 @@ func (b multipartBody) payload() (Message, bool, error) {
 			continue
 		}
 		if found {
-			return Message{}, false, fmt.Errorf("parsing multipart body: multiple %s parts", xmlContentType)
+			return Message{}, false, payloadPresence{}, fmt.Errorf("parsing multipart body: multiple %s parts", xmlContentType)
 		}
 		payloadPart = part
 		found = true
 	}
 	if !found {
-		return Message{}, false, nil
+		return Message{}, false, payloadPresence{}, nil
 	}
-	var payload xmlBody
-	if err := payload.UnmarshalText(payloadPart.Body); err != nil {
-		return Message{}, false, err
+	payload, presence, err := decodeXMLWithPresence(payloadPart.Body)
+	if err != nil {
+		return Message{}, false, payloadPresence{}, err
 	}
-	return payload.Message, true, nil
+	return payload, true, presence, nil
 }
