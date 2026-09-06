@@ -49,14 +49,6 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	}
 	setup.ims.reg = reg
 
-	c.logger.Info("registering IMS")
-	if err := reg.Establish(ctx); err != nil {
-		return err
-	}
-	if err := reg.Subscribe(ctx); err != nil {
-		return err
-	}
-
 	sms, err := imssms.New(imssms.Config{
 		ServiceCenter:         setup.imsCfg.ServiceCenter,
 		DeliveryReportTimeout: setup.imsCfg.SMSDeliveryReportTimeout,
@@ -69,7 +61,16 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	if err != nil {
 		return err
 	}
+	// Attach before REGISTER so bootstrap SIP reads can dispatch an MT SMS.
 	setup.ims.sms = sms
+
+	c.logger.Info("registering IMS")
+	if err := reg.Establish(ctx); err != nil {
+		return err
+	}
+	if err := reg.Subscribe(ctx); err != nil {
+		return err
+	}
 
 	ussd, err := imsussd.New(imsussd.Config{
 		Language:           setup.imsCfg.USSDLanguage,
