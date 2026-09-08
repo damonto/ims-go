@@ -32,6 +32,7 @@ const (
 	sipStatusServerTimeout               = 504
 )
 
+// Config specifies registration identity, transport security, and notifications.
 type Config struct {
 	PrivateIdentity           string
 	PublicIdentity            string
@@ -52,6 +53,10 @@ type Config struct {
 	GeolocationCountry        string
 	UseTelURIForPIDFXML       bool
 	Logger                    *slog.Logger
+	// OnRegistrationChange must return promptly; consumers read Info for the
+	// latest state. It can run during establishment, refresh, or cleanup.
+	// It must not re-enter registration or cleanup operations on this registrar.
+	OnRegistrationChange func()
 
 	DialSecureTCP   func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
 	DialSecureUDP   func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
@@ -72,8 +77,11 @@ type IdentityProvider interface {
 	HomeDomain() string
 }
 
+// State is a snapshot of the registrar and its current SIP flow.
 type State struct {
-	Registered          bool
+	Registered bool
+	// AssociatedURIs comes from the latest accepted REGISTER response.
+	AssociatedURIs      []string
 	PublicIdentity      string
 	DefaultPublicID     string
 	PrivateIdentity     string

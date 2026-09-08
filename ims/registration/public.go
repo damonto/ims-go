@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/damonto/ims-go/ims/security"
@@ -11,10 +12,12 @@ import (
 	"github.com/damonto/ims-go/ims/sip"
 )
 
+// State returns a detached snapshot of the registrar and its current SIP flow.
 func (s *Registrar) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.state
+	state.AssociatedURIs = slices.Clone(state.AssociatedURIs)
 	state.Flow = s.flow.clone()
 	state.ServiceRoutes = append([]string(nil), state.Flow.ServiceRoutes...)
 	state.SecurityClient = state.Flow.SecurityClient

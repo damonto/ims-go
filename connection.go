@@ -27,7 +27,7 @@ type activeConn struct {
 	scope  *connectionScope
 	access accessSession
 	tunnel *swutunnel.Session
-	ims    imsStack
+	ims    imsStack // Protected by clientState.mu after publication.
 }
 
 type connectSetup struct {
@@ -115,8 +115,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		return err
 	}
 
+	stack := c.state.imsSnapshot(active)
+	if stack.sip == nil {
+		done()
+		return c.connectionError(ErrClientNotConnected)
+	}
 	runDone := c.startConnectionRunner(active, done)
-	if err := active.ims.sip.WaitStarted(ctx); err != nil {
+	if err := stack.sip.WaitStarted(ctx); err != nil {
 		wrapped := fmt.Errorf("connecting client: waiting for IMS session start: %w", err)
 		wrapped = errors.Join(wrapped, c.cancelConnectStart(active, runDone))
 		c.emitConnectFailure(ctx, wrapped)
@@ -348,6 +353,7 @@ func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	if err := c.state.commitActive(active); err != nil {
 		return nil, fmt.Errorf("connecting client: %w", err)
 	}
+	c.notifyRegistrationChange()
 	c.clearUSSDSessionBindings()
 	if setup.setupStop != nil {
 		setup.setupStop()
@@ -449,6 +455,7 @@ func (c *Client) close(waitTimeout time.Duration) error {
 			return
 		}
 		reader := c.reader
+		c.notifyRegistrationChange()
 		c.reader = nil
 
 		if active != nil && active.scope != nil {
@@ -533,9 +540,7 @@ func (c *Client) closeActive(active *activeConn) error {
 	if active == nil {
 		return nil
 	}
-	c.clearUSSDSessionBindings()
-
-	err := active.ims.close()
+	err := c.closeIMS(active)
 	if active.access != nil {
 		err = errors.Join(err, wrapCloseError(closeActionAccess, normalizeCloseError(active.access.Close())))
 	} else if active.tunnel != nil {
@@ -548,7 +553,7 @@ func (c *Client) deregisterActive(active *activeConn) error {
 	if active == nil {
 		return nil
 	}
-	return deregisterRegistrar(active.ims.reg)
+	return deregisterRegistrar(c.state.imsSnapshot(active).reg)
 }
 
 func deregisterRegistrar(reg *registration.Registrar) error {
@@ -574,8 +579,10 @@ func (c *Client) closeActiveConnection(active *activeConn) error {
 }
 
 func (c *Client) closeIMS(active *activeConn) error {
+	stack := c.state.detachIMS(active)
+	c.notifyRegistrationChange()
 	c.clearUSSDSessionBindings()
-	return active.ims.close()
+	return stack.close()
 }
 
 func (s *connectSetup) closeIMS() error {
@@ -940,15 +947,19 @@ func (t imsTask) String() string {
 }
 
 func (r *connectionRunner) runIMS() error {
+	stack := r.client.state.imsSnapshot(r.active)
+	if stack.sip == nil || stack.reg == nil {
+		return r.client.connectionError(ErrClientNotConnected)
+	}
 	runCtx, cancel := r.active.scope.context()
 	defer cancel()
 
 	results := make(chan imsRunResult, 2)
 	go func() {
-		results <- imsRunResult{task: imsTaskRunSession, err: r.active.ims.sip.Run(runCtx)}
+		results <- imsRunResult{task: imsTaskRunSession, err: stack.sip.Run(runCtx)}
 	}()
 	go func() {
-		results <- imsRunResult{task: imsTaskMaintainRegistration, err: r.active.ims.reg.Maintain(runCtx)}
+		results <- imsRunResult{task: imsTaskMaintainRegistration, err: stack.reg.Maintain(runCtx)}
 	}()
 
 	first := <-results
@@ -982,7 +993,11 @@ func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn)
 	if access, ok := active.access.(*voWiFiAccess); ok {
 		tunnelInfo = access.pcscfInfo()
 	}
-	current := pcscfIPFromAddr(active.ims.sip.RemoteAddr())
+	stack := c.state.imsSnapshot(active)
+	if stack.sip == nil {
+		return nil, c.connectionError(ErrClientNotConnected)
+	}
+	current := pcscfIPFromAddr(stack.sip.RemoteAddr())
 	tunnelInfo, ok := nextPCSCFInfo(tunnelInfo, current)
 	if !ok {
 		return nil, errors.New("no alternate P-CSCF")
@@ -1072,6 +1087,7 @@ func (c *Client) commitIMSRestore(active *activeConn, setup *connectSetup) error
 	if err := c.state.restoreIMS(active, setup.ims, setup.access); err != nil {
 		return err
 	}
+	c.notifyRegistrationChange()
 	setup.ims = imsStack{}
 	setup.access = nil
 	c.clearUSSDSessionBindings()
@@ -1091,7 +1107,11 @@ func (c *Client) newIMSRestoreContext(scope *connectionScope) (context.Context, 
 }
 
 func (c *Client) detachActive(active *activeConn) bool {
-	return c.state.detachActive(active)
+	if !c.state.detachActive(active) {
+		return false
+	}
+	c.notifyRegistrationChange()
+	return true
 }
 
 func (c *Client) isClosed() bool {

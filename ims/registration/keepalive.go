@@ -49,11 +49,6 @@ func (s *Registrar) applyRegisterKeepAlive(resp sip.Message) {
 	s.startRegistrationKeepAlive(recommended, interval)
 }
 
-func registerKeepAliveIntervalFromResponse(resp sip.Message) (time.Duration, bool) {
-	_, interval, ok := registerKeepAliveTimingFromResponse(resp, randomizedRegistrationKeepAliveInterval)
-	return interval, ok
-}
-
 func registerKeepAliveTimingFromResponse(resp sip.Message, intervalFor func(time.Duration) time.Duration) (time.Duration, time.Duration, bool) {
 	recommended, ok := parsePositiveSeconds(sip.TopViaKeep(resp.Header("Via")))
 	if !ok {

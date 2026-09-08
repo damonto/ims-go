@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,12 @@ func associatedURIsFromMessage(msg sip.Message) []string {
 	uris := make([]string, 0)
 	for _, value := range msg.HeadersByName("P-Associated-URI") {
 		for _, part := range sip.SplitHeaderList(value) {
-			if uri := strings.TrimSpace(sip.AddressURI(part)); uri != "" {
+			uri := strings.TrimSpace(part)
+			lower := strings.ToLower(uri)
+			if !strings.HasPrefix(lower, "tel:") && !strings.HasPrefix(lower, "sip:") && !strings.HasPrefix(lower, "sips:") {
+				uri = strings.TrimSpace(sip.AddressURI(part))
+			}
+			if uri != "" {
 				uris = append(uris, uri)
 			}
 		}
@@ -286,13 +292,15 @@ func (s *Registrar) registerBindingForFlow(flow Flow) registerBinding {
 	}
 }
 
-func (s *Registrar) applyAssociatedURI(msg sip.Message) {
+func (s *Registrar) applyAssociatedURI(msg sip.Message) bool {
 	uris := associatedURIsFromMessage(msg)
-	if len(uris) == 0 {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	changed := !slices.Equal(s.state.AssociatedURIs, uris)
+	s.state.AssociatedURIs = uris
+	if len(uris) == 0 {
+		return changed
+	}
 	s.state.DefaultPublicID = uris[0]
 	s.state.SIPPublicID = ""
 	s.state.TelPublicID = ""
@@ -305,6 +313,7 @@ func (s *Registrar) applyAssociatedURI(msg sip.Message) {
 			s.state.TelPublicID = uri
 		}
 	}
+	return changed
 }
 
 func (s *Registrar) applyServiceRoutes(msg sip.Message) {
@@ -409,13 +418,16 @@ func (s *Registrar) applyRegisterCapability(singleRegistration bool) {
 func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
 	s.resetRegInfoState()
 	s.rememberRegisterTransaction(msg)
-	s.applyAssociatedURI(msg)
+	identitiesChanged := s.applyAssociatedURI(msg)
 	s.applyServiceRoutes(msg)
 	s.applyAuthenticationInfo(msg)
 	s.applyRegisterExpires(msg)
 	s.extendActiveSecureAssociationLifetime(s.secureAssociationExpiresAt(time.Now()))
 	s.setRegistered(true)
 	s.applyRegisterKeepAlive(msg)
+	if identitiesChanged {
+		s.notifyRegistrationChange()
+	}
 }
 
 func (s *Registrar) clearRegistrationState() error {
@@ -431,6 +443,7 @@ func (s *Registrar) resetRegistrationState() {
 
 	s.mu.Lock()
 	s.state.Registered = false
+	s.state.AssociatedURIs = nil
 	s.state.DefaultPublicID = s.state.PublicIdentity
 	s.state.SIPPublicID = ""
 	s.state.TelPublicID = ""
@@ -470,6 +483,7 @@ func (s *Registrar) resetRegistrationState() {
 	s.regInfoRegistrations = make(map[string]regInfoRegistrationEntry)
 	s.mu.Unlock()
 	s.releaseRegistrationOwnership()
+	s.notifyRegistrationChange()
 }
 
 func (s *Registrar) rememberRegisterTransaction(msg sip.Message) {
@@ -486,10 +500,14 @@ func (s *Registrar) rememberRegisterTransaction(msg sip.Message) {
 
 func (s *Registrar) setRegistered(registered bool) {
 	s.mu.Lock()
+	changed := s.state.Registered != registered
 	s.state.Registered = registered
 	s.mu.Unlock()
 	if !registered {
 		s.releaseRegistrationOwnership()
+	}
+	if changed {
+		s.notifyRegistrationChange()
 	}
 }
 

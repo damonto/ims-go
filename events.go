@@ -4,9 +4,14 @@ import "sync"
 
 const eventBufferSize = 16
 
+// Events provides client state, registration changes, and asynchronous errors.
 type Events struct {
 	State  <-chan ClientState
 	Errors <-chan error
+
+	// RegistrationChanged coalesces changes. Subscribe before calling
+	// Client.Registration, then read a fresh snapshot after each notification.
+	RegistrationChanged <-chan struct{}
 
 	closeOnce sync.Once
 	closeFn   func()
@@ -52,8 +57,9 @@ func (e *VoiceEvents) Close() {
 }
 
 type eventHub struct {
-	state  broadcaster[ClientState]
-	errors broadcaster[error]
+	state               broadcaster[ClientState]
+	errors              broadcaster[error]
+	registrationChanged broadcaster[struct{}]
 
 	smsIncoming broadcaster[SMS]
 	smsReports  broadcaster[SMSReport]
@@ -64,19 +70,21 @@ type eventHub struct {
 
 func newEventHub() eventHub {
 	return eventHub{
-		state:       newBroadcaster[ClientState](),
-		errors:      newBroadcaster[error](),
-		smsIncoming: newBroadcaster[SMS](),
-		smsReports:  newBroadcaster[SMSReport](),
-		ussd:        newBroadcaster[IncomingUSSD](),
-		voiceIn:     newBroadcaster[IncomingCall](),
-		voiceEvents: newBroadcaster[CallEvent](),
+		state:               newBroadcaster[ClientState](),
+		errors:              newBroadcaster[error](),
+		registrationChanged: newBroadcaster[struct{}](),
+		smsIncoming:         newBroadcaster[SMS](),
+		smsReports:          newBroadcaster[SMSReport](),
+		ussd:                newBroadcaster[IncomingUSSD](),
+		voiceIn:             newBroadcaster[IncomingCall](),
+		voiceEvents:         newBroadcaster[CallEvent](),
 	}
 }
 
 func (h *eventHub) close() {
 	h.state.close()
 	h.errors.close()
+	h.registrationChanged.close()
 	h.smsIncoming.close()
 	h.smsReports.close()
 	h.ussd.close()
@@ -174,15 +182,20 @@ func (b *broadcaster[T]) close() {
 	b.mu.Unlock()
 }
 
+// Events subscribes to future changes. Close the subscription when it is no
+// longer needed; registration notifications are paired with Registration reads.
 func (c *Client) Events() *Events {
 	stateSub := c.events.state.subscribe(eventBufferSize)
 	errorSub := c.events.errors.subscribe(eventBufferSize)
+	registrationSub := c.events.registrationChanged.subscribe(1)
 	return &Events{
-		State:  stateSub.channel,
-		Errors: errorSub.channel,
+		State:               stateSub.channel,
+		Errors:              errorSub.channel,
+		RegistrationChanged: registrationSub.channel,
 		closeFn: func() {
 			stateSub.close()
 			errorSub.close()
+			registrationSub.close()
 		},
 	}
 }

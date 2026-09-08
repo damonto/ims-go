@@ -3387,9 +3387,12 @@ func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *t
 		},
 	}
 
+	client := newStandaloneClient(t)
+	setClientActive(t, client, active)
+	closeClientAfterTest(t, client)
 	errCh := make(chan error, 1)
 	go func() {
-		runner := connectionRunner{active: active}
+		runner := connectionRunner{client: client, active: active}
 		errCh <- runner.runIMS()
 	}()
 
@@ -3453,9 +3456,12 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 		},
 	}
 
+	client := newStandaloneClient(t)
+	setClientActive(t, client, active)
+	closeClientAfterTest(t, client)
 	errCh := make(chan error, 1)
 	go func() {
-		runner := connectionRunner{active: active}
+		runner := connectionRunner{client: client, active: active}
 		errCh <- runner.runIMS()
 	}()
 	if err := sess.WaitStarted(t.Context()); err != nil {

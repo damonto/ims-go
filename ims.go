@@ -43,7 +43,9 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	}
 	setup.ims.sip = imsSession
 
-	reg, err := registration.New(c.buildRegistrationConfig(setup.imsCfg, accessIMS.Security), imsSession, c.card)
+	regConfig := c.buildRegistrationConfig(setup.imsCfg, accessIMS.Security)
+	regConfig.OnRegistrationChange = c.notifyRegistrationChange
+	reg, err := registration.New(regConfig, imsSession, c.card)
 	if err != nil {
 		return err
 	}

@@ -303,6 +303,22 @@ func (s *clientState) nextReconnectID() uint64 {
 	return s.reconnectSeq.Add(1)
 }
 
+func (s *clientState) imsSnapshot(active *activeConn) imsStack {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return active.ims
+}
+
+func (s *clientState) detachIMS(active *activeConn) imsStack {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stack := active.ims
+	active.ims = imsStack{}
+	// Resource cleanup can publish callbacks, so the caller closes this copy
+	// only after releasing the client state lock.
+	return stack
+}
+
 func (s *clientState) restoreIMS(active *activeConn, ims imsStack, access accessSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,7 +351,7 @@ func currentIMSEndpoint[T any](c *Client, pick func(imsStack) *T) (*T, error) {
 			return nil, c.connectionError(fmt.Errorf("%w: tunnel not ready: %w", ErrClientNotConnected, err))
 		}
 	}
-	service := pick(active.ims)
+	service := pick(c.state.imsSnapshot(active))
 	if service == nil {
 		return nil, c.connectionError(ErrClientNotConnected)
 	}
