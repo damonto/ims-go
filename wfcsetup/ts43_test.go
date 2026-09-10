@@ -20,33 +20,66 @@ func (t *ts43HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
 		Body: io.NopCloser(strings.NewReader(
-			`{"APPLICATION":{"AppID":"ap2004","EntitlementStatus":"1","TC_Status":"2","AddrStatus":"2","ProvStatus":"2"}}`,
+			`{"APPLICATION":{"AppID":"ap2004","EntitlementStatus":"1","TC_Status":"2","AddrStatus":"2","ProvStatus":"2","ServiceFlow_URL":"https://carrier.example/e911"}}`,
 		)),
 		Request: req,
 	}, nil
 }
 
-func TestTS43FlowUsesRequestHTTPClient(t *testing.T) {
-	transport := &ts43HTTPTransport{}
-	flow := ts43Flow{
-		req: Request{
-			Card:       testCard{mcc: "310", mnc: "260", mncLength: 3},
-			Device:     Device{IMEI: "111111111111111", Vendor: "Google", Model: "Pixel 8 Pro", SoftwareVersion: "15"},
-			Purpose:    PurposeActivation,
-			HTTPClient: &http.Client{Transport: transport},
-		},
-		wfc: ts43.WFCConfig{Server: "https://carrier.example/entitlement"},
+func TestTS43FlowHTTPClient(t *testing.T) {
+	tests := []struct {
+		name         string
+		purpose      Purpose
+		customClient bool
+		wantAction   Action
+	}{
+		{name: "activation with default client", purpose: PurposeActivation, wantAction: ActionAllowActivation},
+		{name: "activation with custom client", purpose: PurposeActivation, customClient: true, wantAction: ActionAllowActivation},
+		{name: "emergency address with default client", purpose: PurposeEmergencyAddressUpdate, wantAction: ActionOpenWebsheet},
+		{name: "emergency address with custom client", purpose: PurposeEmergencyAddressUpdate, customClient: true, wantAction: ActionOpenWebsheet},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defaultTransport := &ts43HTTPTransport{}
+			originalTransport := http.DefaultTransport
+			http.DefaultTransport = defaultTransport
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	result, err := flow.checkOnce(t.Context())
-	if err != nil {
-		t.Fatalf("checkOnce() error = %v", err)
-	}
-	if !transport.called {
-		t.Fatal("custom HTTP client was not used")
-	}
-	if result.Action != ActionAllowActivation || !result.Entitled {
-		t.Fatalf("result = %+v, want entitled activation", result)
+			transport := defaultTransport
+			var client *http.Client
+			if tt.customClient {
+				transport = &ts43HTTPTransport{}
+				client = &http.Client{Transport: transport}
+			}
+			flow := ts43Flow{
+				req: Request{
+					Card:       testCard{mcc: "310", mnc: "260", mncLength: 3},
+					Device:     Device{IMEI: "111111111111111", Vendor: "Google", Model: "Pixel 8 Pro", SoftwareVersion: "15"},
+					Purpose:    tt.purpose,
+					HTTPClient: client,
+				},
+				wfc: ts43.WFCConfig{Server: "https://carrier.example/entitlement"},
+			}
+
+			result, err := flow.Check(t.Context())
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			if !transport.called {
+				t.Fatal("selected HTTP client was not used")
+			}
+			if tt.customClient && defaultTransport.called {
+				t.Fatal("default transport was used instead of the custom HTTP client")
+			}
+			if result.Action != tt.wantAction || !result.Entitled {
+				t.Fatalf("result = %+v, want entitled with action %v", result, tt.wantAction)
+			}
+			if tt.wantAction == ActionOpenWebsheet {
+				if result.Websheet == nil || result.Websheet.URL != "https://carrier.example/e911" {
+					t.Fatalf("Websheet = %+v, want emergency address URL", result.Websheet)
+				}
+			}
+		})
 	}
 }
 
