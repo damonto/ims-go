@@ -7,7 +7,7 @@ require (
 	github.com/damonto/wwan-go v0.0.0-20260907092144-fdeaa8faa8fb
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.42.0
 )
 
 require (
