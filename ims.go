@@ -99,6 +99,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	}
 	voiceCfg.OnIncomingCall = c.handleIncomingVoice
 	voiceCfg.OnCallEvent = c.handleVoiceEvent
+	voiceCfg.OnDTMF = c.handleVoiceDTMF
 	voiceCfg.OnError = c.emitError
 	voiceCfg.Logger = c.cfg.Logger
 	voice, err := imsvoice.New(voiceCfg, imsSession, reg)

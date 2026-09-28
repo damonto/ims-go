@@ -430,6 +430,7 @@ func (c *Call) WriteRTCP(ctx context.Context, data []byte) error {
 }
 
 func (c *Call) recordMediaPacket(packet MediaPacket) {
+	c.receiveDTMF(packet)
 	c.mu.Lock()
 	if !packet.RTCP && packet.RTPPayloadBytes > 0 {
 		c.recordRTPReceiveLocked(packet)
@@ -448,6 +449,7 @@ func (c *Call) recordMediaPacket(packet MediaPacket) {
 func (c *Call) recordRTPReceiveLocked(packet MediaPacket) {
 	r := &c.rtcpRecv
 	now := time.Now()
+	c.dtmfRecv.refreshSource(packet.RTPSSRC, now)
 	rate := c.media.ClockRate
 	arrival := int64(0)
 	if rate > 0 {

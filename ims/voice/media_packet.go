@@ -130,6 +130,10 @@ func MediaPacketFromPayload(rtcp bool, payload []byte) MediaPacket {
 			packet.RTPTimestamp = rtp.Timestamp
 			packet.RTPSSRC = rtp.SSRC
 			packet.RTPPayloadBytes = len(rtp.Payload)
+			packet.RTPPayloadType = rtp.PayloadType
+			// UnmarshalBinary already copied the payload away from the wire buffer.
+			packet.RTPPayload = rtp.Payload
+			packet.RTPMarker = rtp.Marker
 		}
 	}
 	return packet

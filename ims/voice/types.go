@@ -200,6 +200,7 @@ type Call struct {
 	sessionTimerStop      chan struct{}
 	dialogAttachment      session.Attachment
 	media                 NegotiatedMedia
+	dtmfRecv              dtmfReceiveState
 	rtpSend               rtpSendState
 	rtcpSend              rtcpSendState
 	rtcpRecv              rtcpReceiveState

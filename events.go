@@ -1,6 +1,10 @@
 package ims
 
-import "sync"
+import (
+	"sync"
+
+	imsvoice "github.com/damonto/ims-go/ims/voice"
+)
 
 const eventBufferSize = 16
 
@@ -45,6 +49,8 @@ func (e *USSDEvents) Close() {
 }
 
 type VoiceEvents struct {
+	// DTMF reports newly detected remote keys. Slow subscribers may lose events.
+	DTMF     <-chan imsvoice.DTMFEvent
 	Incoming <-chan IncomingCall
 	Events   <-chan CallEvent
 
@@ -66,6 +72,7 @@ type eventHub struct {
 	ussd        broadcaster[IncomingUSSD]
 	voiceIn     broadcaster[IncomingCall]
 	voiceEvents broadcaster[CallEvent]
+	voiceDTMF   broadcaster[imsvoice.DTMFEvent]
 }
 
 func newEventHub() eventHub {
@@ -78,6 +85,7 @@ func newEventHub() eventHub {
 		ussd:                newBroadcaster[IncomingUSSD](),
 		voiceIn:             newBroadcaster[IncomingCall](),
 		voiceEvents:         newBroadcaster[CallEvent](),
+		voiceDTMF:           newBroadcaster[imsvoice.DTMFEvent](),
 	}
 }
 
@@ -90,6 +98,7 @@ func (h *eventHub) close() {
 	h.ussd.close()
 	h.voiceIn.close()
 	h.voiceEvents.close()
+	h.voiceDTMF.close()
 }
 
 type broadcaster[T any] struct {
@@ -224,12 +233,15 @@ func (s *USSDClient) Events() *USSDEvents {
 func (s *VoiceClient) Events() *VoiceEvents {
 	incomingSub := s.client.events.voiceIn.subscribe(eventBufferSize)
 	eventSub := s.client.events.voiceEvents.subscribe(eventBufferSize)
+	dtmfSub := s.client.events.voiceDTMF.subscribe(eventBufferSize)
 	return &VoiceEvents{
+		DTMF:     dtmfSub.channel,
 		Incoming: incomingSub.channel,
 		Events:   eventSub.channel,
 		closeFn: func() {
 			incomingSub.close()
 			eventSub.close()
+			dtmfSub.close()
 		},
 	}
 }
@@ -303,5 +315,11 @@ func (c *Client) emitCallEvent(event CallEvent) {
 	c.logger.Info("call event", "call_id", event.CallID, "state", event.State, "cause", event.Cause)
 	c.events.voiceEvents.publish(event, func() {
 		c.logger.Debug("dropping call event", "call_id", event.CallID, "state", event.State)
+	})
+}
+
+func (c *Client) handleVoiceDTMF(event imsvoice.DTMFEvent) {
+	c.events.voiceDTMF.publish(event, func() {
+		c.logger.Debug("dropping dtmf event", "call_id", event.CallID)
 	})
 }

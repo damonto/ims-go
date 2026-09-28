@@ -68,9 +68,11 @@ type Config struct {
 	WaitMediaReady func(ctx context.Context, c MediaConfig) error
 	OnIncomingCall func(IncomingCall)
 	OnCallEvent    func(CallEvent)
-	OnMedia        func(MediaEvent)
-	OnError        func(error)
-	Logger         *slog.Logger
+	// OnDTMF runs on the media receive path and must not block.
+	OnDTMF  func(DTMFEvent)
+	OnMedia func(MediaEvent)
+	OnError func(error)
+	Logger  *slog.Logger
 }
 
 type AudioCodecConfig struct {
@@ -106,7 +108,9 @@ type MediaConfig struct {
 	RemoteRTCPPort   int
 	RTCPMux          bool
 	Media            NegotiatedMedia
-	OnPacket         func(MediaPacket)
+	// OnPacket must be called once for each incoming packet, independently of
+	// ReadPacket, to deliver DTMF and track media activity. Use MediaPacketFromPayload.
+	OnPacket func(MediaPacket)
 }
 
 type MediaPacket struct {
@@ -116,6 +120,10 @@ type MediaPacket struct {
 	RTPTimestamp      uint32
 	RTPSSRC           uint32
 	RTPPayloadBytes   int
+	RTPPayloadType    int
+	// RTPPayload is an owned copy of the payload. Consumers must not modify it.
+	RTPPayload []byte
+	RTPMarker  bool
 }
 
 type MediaTransport interface {
