@@ -1806,6 +1806,105 @@ func TestExchangeIKESAInitCookieHandling(t *testing.T) {
 	}
 }
 
+func TestExchangeIKESAInitRetriesConfiguredDHGroup(t *testing.T) {
+	tests := []struct {
+		name       string
+		groups     []uint16
+		wantError  bool
+		wantWrites int
+	}{
+		{
+			name:       "DH14 first and DH2 only when requested",
+			groups:     []uint16{transformDH2048MODP, transformDH1024MODP},
+			wantWrites: 2,
+		},
+		{
+			name:       "unconfigured DH2 is rejected",
+			groups:     []uint16{transformDH2048MODP},
+			wantError:  true,
+			wantWrites: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responder, err := newIKECrypto(transformDH1024MODP)
+			if err != nil {
+				t.Fatalf("newIKECrypto() error = %v", err)
+			}
+			const initiatorSPI = 0x0102030405060708
+			header := ike.Header{
+				InitiatorSPI: initiatorSPI,
+				Version:      ikeVersion20,
+				ExchangeType: exchangeTypeIKESAInit,
+				Flags:        flagResponse,
+			}
+			retry := mustIKEPacket(t, header, []ike.Payload{
+				&ike.NotifyPayload{NotifyType: notifyTypeInvalidKEPayload, Data: []byte{0, byte(transformDH1024MODP)}},
+			})
+			header.ResponderSPI = 0x1112131415161718
+			response := mustIKEPacket(t, header, []ike.Payload{
+				&ike.SecurityAssociationPayload{Proposals: []ike.Proposal{{
+					Number:     1,
+					ProtocolID: proposalProtocolIKE,
+					Transforms: []ike.Transform{
+						aesCBCTransform(128),
+						{TransformType: transformTypeINTEG, ID: transformINTEGHMACSHA256},
+						{TransformType: transformTypePRF, ID: transformPRFHMACSHA256},
+						{TransformType: transformTypeDH, ID: transformDH1024MODP},
+					},
+				}}},
+				&ike.KeyExchangePayload{DHGroup: transformDH1024MODP, Data: responder.PublicKey()},
+				&ike.NoncePayload{Data: make([]byte, 32)},
+			})
+			remote := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4500}
+			conn := &fakePacketConn{
+				local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000},
+				readResults: []readResult{
+					{data: retry, addr: remote},
+					{data: response, addr: remote},
+				},
+			}
+			session := mustDialSession(t, conn)
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			})
+			session.cfg.DHGroups = tt.groups
+			state, finish, err := session.prepareConnect(ConnectRequest{
+				IMEI: "356789012345678", Card: sessionTestCard{}, AuthenticateAKA: sessionTestCard{}.AKA,
+			})
+			if err != nil {
+				t.Fatalf("prepareConnect() error = %v", err)
+			}
+			defer finish()
+			state.initiatorSPI = initiatorSPI
+			state.saInit.InitiatorSPI = initiatorSPI
+			err = session.exchangeIKESAInit(t.Context(), state)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("exchangeIKESAInit() error = %v, wantError %t", err, tt.wantError)
+			}
+			if len(conn.writes) != tt.wantWrites {
+				t.Fatalf("writes = %d, want %d", len(conn.writes), tt.wantWrites)
+			}
+			for i, wire := range conn.writes {
+				packet := mustUnmarshalIKEPacket(t, wire)
+				group, size := uint16(transformDH2048MODP), 256
+				if i > 0 {
+					group, size = transformDH1024MODP, 128
+				}
+				ke := ike.FindKEPayload(packet.Payloads, group)
+				if ke == nil {
+					t.Fatalf("request[%d] missing KE group %d", i, group)
+				}
+				if len(ke.Data) != size {
+					t.Errorf("request[%d] KE length = %d, want %d", i, len(ke.Data), size)
+				}
+			}
+		})
+	}
+}
+
 func TestExchangeIKESAInitClassifiesNoResponse(t *testing.T) {
 	tests := []struct {
 		name           string

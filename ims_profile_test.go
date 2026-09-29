@@ -785,6 +785,218 @@ func TestEmbeddedIMSProfilesHaveIPSecAlgorithms(t *testing.T) {
 	}
 }
 
+func TestEmbeddedIMSProfileIKEPRF(t *testing.T) {
+	// Pixel's inherited PRF list includes SHA2-256 (IKE transform ID 5).
+	// Carrier profiles must include it explicitly because nonempty lists replace
+	// the tunnel defaults. Preserve carrier restrictions and caller overrides.
+	tests := []struct {
+		name     string
+		card     plmnWFCCard
+		override []uint16
+		want     []uint16
+	}{
+		{
+			name: "EE",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "EE padded MNC",
+			card: plmnWFCCard{mcc: "234", mnc: "030", mncLength: 2},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "EE 23433",
+			card: plmnWFCCard{mcc: "234", mnc: "33", mncLength: 2},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Lycamobile",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2, spn: "LycaMobile"},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Virgin",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2, gid1: "28000000"},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "EE B2 inherits additional PRFs",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2, gid1: "B2"},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "BT Business",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2, gid1: "B3"},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "BT Consumer",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2, gid1: "C3"},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "giffgaff",
+			card: plmnWFCCard{mcc: "234", mnc: "10", mncLength: 2, spn: "giffgaff"},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Telenet",
+			card: plmnWFCCard{mcc: "206", mnc: "05", mncLength: 2},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Swisscom",
+			card: plmnWFCCard{mcc: "228", mnc: "01", mncLength: 2},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Airtel",
+			card: plmnWFCCard{mcc: "404", mnc: "10", mncLength: 2},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Jio omits legacy MD5",
+			card: plmnWFCCard{mcc: "405", mnc: "854", mncLength: 3},
+			want: []uint16{2, 5, 4, 6, 7},
+		},
+		{
+			name: "Taiwan Mobile explicit SHA1",
+			card: plmnWFCCard{mcc: "466", mnc: "97", mncLength: 2},
+			want: []uint16{2},
+		},
+		{
+			name: "AT&T Mexico explicit SHA1",
+			card: plmnWFCCard{mcc: "334", mnc: "050", mncLength: 3},
+			want: []uint16{2},
+		},
+		{
+			name: "Samsung-only NRJ branch",
+			card: plmnWFCCard{mcc: "208", mnc: "26", mncLength: 2, gid1: "4E524A31"},
+			want: []uint16{2},
+		},
+		{
+			name:     "explicit caller configuration wins",
+			card:     plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2},
+			override: []uint16{2},
+			want:     []uint16{2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access: VoWiFi(VoWiFiConfig{
+					Tunnel: swutunnel.Config{IKEPRF: tt.override},
+				}),
+			}
+			got, err := cfg.normalized(tt.card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+			tunnel, err := got.normalizedTunnel()
+			if err != nil {
+				t.Fatalf("normalizedTunnel() error = %v", err)
+			}
+			if !slices.Equal(tunnel.IKEPRF, tt.want) {
+				t.Errorf("IKEPRF = %v, want %v", tunnel.IKEPRF, tt.want)
+			}
+		})
+	}
+}
+
+func TestEmbeddedIMSProfileTunnelAlgorithms(t *testing.T) {
+	// These cases cover inherited defaults, independent IKE/Child overrides,
+	// and profiles that previously had no non-MD5 integrity alternative.
+	tests := []struct {
+		name string
+		card plmnWFCCard
+		want swutunnel.Config
+	}{
+		{
+			name: "EE",
+			card: plmnWFCCard{mcc: "234", mnc: "30", mncLength: 2},
+			want: swutunnel.Config{
+				DHGroups:               []uint16{14},
+				IKEEncryptionKeyLens:   []uint16{128, 192, 256},
+				IKEIntegrity:           []uint16{2, 12, 5, 13, 14},
+				IKEPRF:                 []uint16{2, 5, 4, 6, 7},
+				ChildEncryptionKeyLens: []uint16{128, 192, 256},
+				ChildIntegrity:         []uint16{2, 12},
+			},
+		},
+		{
+			name: "EE 23433 prefers DH14",
+			card: plmnWFCCard{mcc: "234", mnc: "33", mncLength: 2},
+			want: swutunnel.Config{
+				DHGroups:               []uint16{14, 2},
+				IKEEncryptionKeyLens:   []uint16{128, 192, 256},
+				IKEIntegrity:           []uint16{2, 12, 5, 13, 14},
+				IKEPRF:                 []uint16{2, 5, 4, 6, 7},
+				ChildEncryptionKeyLens: []uint16{128, 192, 256},
+				ChildIntegrity:         []uint16{2, 12},
+			},
+		},
+		{
+			name: "T-Mobile keeps IKE overrides and inherits Child key lengths",
+			card: plmnWFCCard{mcc: "310", mnc: "260", mncLength: 3},
+			want: swutunnel.Config{
+				DHGroups:               []uint16{14},
+				IKEEncryptionKeyLens:   []uint16{128, 256},
+				IKEIntegrity:           []uint16{5, 12},
+				IKEPRF:                 []uint16{2, 4, 5},
+				ChildEncryptionKeyLens: []uint16{128, 256, 192},
+				ChildIntegrity:         []uint16{5, 12},
+			},
+		},
+		{
+			name: "Vodacom retains valid integrity after MD5 removal",
+			card: plmnWFCCard{mcc: "655", mnc: "01", mncLength: 2},
+			want: swutunnel.Config{
+				DHGroups:               []uint16{14, 2},
+				IKEEncryptionKeyLens:   []uint16{128, 192, 256},
+				IKEIntegrity:           []uint16{5, 2, 12, 13, 14},
+				IKEPRF:                 []uint16{5, 2, 4, 6, 7},
+				ChildEncryptionKeyLens: []uint16{128},
+				ChildIntegrity:         []uint16{2},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Terminal: TerminalInfo{ID: testIMEI},
+				Access:   VoWiFi(VoWiFiConfig{}),
+			}
+			normalized, err := cfg.normalized(tt.card)
+			if err != nil {
+				t.Fatalf("normalized() error = %v", err)
+			}
+			got, err := normalized.normalizedTunnel()
+			if err != nil {
+				t.Fatalf("normalizedTunnel() error = %v", err)
+			}
+			checks := []struct {
+				field string
+				got   []uint16
+				want  []uint16
+			}{
+				{"DHGroups", got.DHGroups, tt.want.DHGroups},
+				{"IKEEncryptionKeyLens", got.IKEEncryptionKeyLens, tt.want.IKEEncryptionKeyLens},
+				{"IKEIntegrity", got.IKEIntegrity, tt.want.IKEIntegrity},
+				{"IKEPRF", got.IKEPRF, tt.want.IKEPRF},
+				{"ChildEncryptionKeyLens", got.ChildEncryptionKeyLens, tt.want.ChildEncryptionKeyLens},
+				{"ChildIntegrity", got.ChildIntegrity, tt.want.ChildIntegrity},
+			}
+			for _, check := range checks {
+				if !slices.Equal(check.got, check.want) {
+					t.Errorf("%s = %v, want %v", check.field, check.got, check.want)
+				}
+			}
+		})
+	}
+}
+
 func TestEmbeddedIMSProfilesHaveSupportedTunnelConfig(t *testing.T) {
 	var profiles []imsProfile
 	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
@@ -795,6 +1007,20 @@ func TestEmbeddedIMSProfilesHaveSupportedTunnelConfig(t *testing.T) {
 			cfg := Config{Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, wfcTestCard{})
 			if _, err := cfg.normalizedTunnel(); err != nil {
 				t.Fatalf("profile[%d] tunnel config: %v", i, err)
+			}
+			// MD5 is prohibited by RFC 8247 (IKE) and RFC 8221 (ESP).
+			algorithms := []struct {
+				field  string
+				values []uint16
+			}{
+				{"IKEPRF", profile.IKEPRF},
+				{"IKEIntegrity", profile.IKEIntegrity},
+				{"ChildIntegrity", profile.ChildIntegrity},
+			}
+			for _, algorithm := range algorithms {
+				if slices.Contains(algorithm.values, uint16(1)) {
+					t.Errorf("%s = %v contains MD5", algorithm.field, algorithm.values)
+				}
 			}
 		})
 	}
