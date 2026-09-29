@@ -347,7 +347,7 @@ func (s *Registrar) closeSecureResources() error {
 	s.registrationCommitMu.Unlock()
 	stopErr := resources.stop()
 	s.bgWG.Wait()
-	err := errors.Join(stopErr, resources.close(s.sess))
+	err := errors.Join(stopErr, resources.close(s.sess, secureCleanupShutdown))
 	s.secureCleanupWG.Wait()
 	s.replacementWG.Wait()
 	return err
@@ -361,7 +361,7 @@ func (s *Registrar) clearSecureResources() error {
 	defer s.secureCleanupWG.Done()
 	stopErr := resources.stop()
 	s.bgWG.Wait()
-	return errors.Join(stopErr, resources.close(s.sess))
+	return errors.Join(stopErr, resources.close(s.sess, secureCleanupReset))
 }
 
 func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func()) {
@@ -378,7 +378,7 @@ func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func())
 	s.bgWG.Wait()
 	if delay <= 0 {
 		defer s.secureCleanupWG.Done()
-		if err := resources.close(s.sess); err != nil {
+		if err := resources.close(s.sess, secureCleanupReset); err != nil {
 			s.logger.Error("deleting IMS security association", "err", err)
 		}
 		if after != nil {
@@ -394,7 +394,7 @@ func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func())
 		case <-timer.C:
 		case <-done:
 		}
-		if err := resources.close(s.sess); err != nil {
+		if err := resources.close(s.sess, secureCleanupReset); err != nil {
 			s.logger.Error("deleting IMS security association", "err", err)
 		}
 		if after != nil {
@@ -485,11 +485,27 @@ func (r secureResources) stop() error {
 	return stopErr
 }
 
-func (r secureResources) close(sess *session.Stack) error {
+type secureCleanupMode uint8
+
+const (
+	secureCleanupReset secureCleanupMode = iota
+	secureCleanupShutdown
+)
+
+func (r secureResources) close(sess *session.Stack, mode secureCleanupMode) error {
 	var restoreErr error
 	if r.unprotectedPrimary != nil {
 		securePrimary, err := sess.PromotePrimary(r.unprotectedPrimary)
-		if err != nil {
+		if mode == secureCleanupShutdown && errors.Is(err, session.ErrTransportInactive) {
+			// The original TCP connection may have been closed by the P-CSCF
+			// while IPsec was active. It cannot be promoted during teardown.
+			// Close the protected primary; the caller will create a fresh flow.
+			if primary := sess.PrimaryTransport(); primary != nil {
+				if err := primary.Close(); err != nil {
+					restoreErr = fmt.Errorf("close protected IMS transport: %w", err)
+				}
+			}
+		} else if err != nil {
 			restoreErr = fmt.Errorf("restoring unprotected IMS transport: %w", err)
 		} else if securePrimary != nil {
 			if err := securePrimary.Close(); err != nil {
@@ -606,7 +622,7 @@ func (s *Registrar) expireActiveSecureAssociation(expiry *secureAssociationExpir
 	if !ok {
 		return
 	}
-	if err := errors.Join(resources.stop(), resources.close(s.sess)); err != nil {
+	if err := errors.Join(resources.stop(), resources.close(s.sess, secureCleanupReset)); err != nil {
 		s.logger.Error("deleting expired IMS security association", "err", err)
 	}
 	s.setRegistered(false)

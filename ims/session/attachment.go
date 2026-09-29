@@ -5,6 +5,9 @@ import (
 	"fmt"
 )
 
+// ErrTransportInactive means the transport has already been removed from the stack.
+var ErrTransportInactive = errors.New("transport is not active")
+
 type Attachment interface {
 	Close() error
 }
@@ -147,7 +150,7 @@ func (s *Stack) PromotePrimary(t Transport) (Attachment, error) {
 	// during teardown lets protocol layers restore an unprotected primary before
 	// detaching the protected transport; a closed session owns nothing.
 	if _, ok := s.active[t]; !ok {
-		return nil, errors.New("promoting primary transport: transport is not active")
+		return nil, fmt.Errorf("promoting primary transport: %w", ErrTransportInactive)
 	}
 	old := s.primary
 	if old == t {

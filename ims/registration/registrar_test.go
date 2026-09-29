@@ -6771,3 +6771,42 @@ func transportWriteAt(t *testing.T, transport *stubTransport, index int) []byte 
 	}
 	return append([]byte(nil), transport.writes[index]...)
 }
+
+func TestCloseSecureResourcesWithRetiredUnprotectedTransport(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminal=%t", terminal), func(t *testing.T) {
+			secure := newTCPTransport(45000, 5060)
+			retired := newTCPTransport(5062, 5060)
+			svc := newTestService(t, Config{}, secure, stubCard{})
+			defer func() {
+				if err := svc.Close(); err != nil {
+					t.Error(err)
+				}
+				if err := svc.sess.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			resources := secureResources{unprotectedPrimary: retired}
+			mode := secureCleanupReset
+			if terminal {
+				mode = secureCleanupShutdown
+			}
+			err := resources.close(svc.sess, mode)
+			if terminal && err != nil {
+				t.Fatalf("terminal cleanup: %v", err)
+			}
+			if !terminal && !errors.Is(err, session.ErrTransportInactive) {
+				t.Fatalf("live reset error = %v", err)
+			}
+			secure.mu.Lock()
+			closed := secure.closeCount
+			secure.mu.Unlock()
+			if terminal && closed != 1 {
+				t.Fatalf("secure transport closed %d times, want 1", closed)
+			}
+			if !terminal && closed != 0 {
+				t.Fatalf("live reset closed secure transport")
+			}
+		})
+	}
+}

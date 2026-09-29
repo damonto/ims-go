@@ -143,6 +143,9 @@ func (c Config) normalized(card Card) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if !ok && len(c.IMS.IPSecIntegrityAlgorithms) == 0 {
+		return Config{}, fmt.Errorf("configure IMS for %s-%s: carrier profile not found; explicit IPsec integrity algorithms are required", card.MCC(), card.MNC())
+	}
 	if ok {
 		c = c.withIMSProfile(profile, card)
 		c.Logger.Debug(
