@@ -29,6 +29,7 @@ const (
 	sipStatusRequestTerminated           = 487
 	sipDatagramRequestLimit              = 1300
 	closeWaitTimeout                     = 5 * time.Second
+	sipWriteTimeout                      = 5 * time.Second
 )
 
 type Config struct {
@@ -56,7 +57,7 @@ type Stack struct {
 	logger *slog.Logger
 
 	mu             sync.Mutex
-	sendMu         sync.Mutex
+	sendGate       chan struct{}
 	reliableMu     sync.Mutex
 	readMu         sync.Mutex
 	readWG         sync.WaitGroup
@@ -100,6 +101,7 @@ func Open(c Config, primary Transport) (*Stack, error) {
 		return nil, fmt.Errorf("opening session: %w", err)
 	}
 	stack := &Stack{
+		sendGate:       make(chan struct{}, 1),
 		cfg:            c,
 		logger:         c.Logger.With("component", "ims-session"),
 		transportErrs:  make(chan struct{}, 1),
@@ -1394,19 +1396,21 @@ func (s *Stack) writePacket(ctx context.Context, transport Transport, data []byt
 }
 
 func (s *Stack) writePacketTo(ctx context.Context, transport Transport, data []byte, addr net.Addr) error {
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	for !s.sendMu.TryLock() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
+	// Replies and keepalive responses also run on the inbound dispatcher. Bound
+	// their writes so a stalled peer cannot prevent processing transport errors.
+	ctx, cancel := context.WithTimeout(ctx, sipWriteTimeout)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.closedCh:
+		return errors.New("writing packet: session is closed")
+	case s.sendGate <- struct{}{}:
 	}
-	defer s.sendMu.Unlock()
+	defer func() { <-s.sendGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if addr == nil {
 		return transport.WritePacket(ctx, data)
 	}

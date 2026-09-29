@@ -304,6 +304,7 @@ func (s *Registrar) Register(ctx context.Context) (retErr error) {
 		}
 	}()
 
+	s.logger.Info("waiting for IMS registration slot", "public_identity", s.State().PublicIdentity)
 	release, err := s.beginRegistration(ctx)
 	if err != nil {
 		return err

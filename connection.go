@@ -10,6 +10,7 @@ import (
 
 	"github.com/damonto/ims-go/ims/registration"
 	imssession "github.com/damonto/ims-go/ims/session"
+	imssip "github.com/damonto/ims-go/ims/sip"
 	imssms "github.com/damonto/ims-go/ims/sms"
 	imsussd "github.com/damonto/ims-go/ims/ussd"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
@@ -55,6 +56,7 @@ const defaultReconnectMaxDelay = time.Minute
 const defaultIMSRegistrationRetryBase = 120 * time.Second
 const defaultIMSRegistrationRetryMax = 300 * time.Second
 const reconnectAttemptTimeout = 30 * time.Second
+const initialConnectTimeout = 2 * time.Minute
 
 func newConnectionScope() *connectionScope {
 	return &connectionScope{done: make(chan struct{})}
@@ -397,10 +399,11 @@ func (c *Client) reserveCloseTask() (func(), bool) {
 
 func (c *Client) newSetupContext(ctx context.Context, internal bool) (context.Context, context.CancelFunc) {
 	setupCtx, stop := c.state.context(ctx)
-	if !internal || reconnectAttemptTimeout <= 0 {
-		return setupCtx, stop
+	timeout := initialConnectTimeout
+	if internal {
+		timeout = reconnectAttemptTimeout
 	}
-	timeoutCtx, timeoutCancel := context.WithTimeout(setupCtx, reconnectAttemptTimeout)
+	timeoutCtx, timeoutCancel := context.WithTimeout(setupCtx, timeout)
 	return timeoutCtx, func() {
 		timeoutCancel()
 		stop()
@@ -443,6 +446,8 @@ func (c *Client) waitIMSRunnerStop(ctx context.Context, runDone <-chan struct{})
 	}
 }
 
+// Close releases local resources. A SIP rejection of deregistration is logged;
+// transport, protocol, and local cleanup errors are returned to the caller.
 func (c *Client) Close() error {
 	return c.close(defaultCloseTimeout)
 }
@@ -553,7 +558,14 @@ func (c *Client) deregisterActive(active *activeConn) error {
 	if active == nil {
 		return nil
 	}
-	return deregisterRegistrar(c.state.imsSnapshot(active).reg)
+	err := deregisterRegistrar(c.state.imsSnapshot(active).reg)
+	if _, rejected := errors.AsType[*imssip.ResponseError](err); rejected {
+		// A remote rejection cannot prevent local shutdown. Other failures may
+		// originate in local registration cleanup and must remain observable.
+		c.logger.Warn("IMS deregistration rejected during close", "err", err)
+		return nil
+	}
+	return err
 }
 
 func deregisterRegistrar(reg *registration.Registrar) error {

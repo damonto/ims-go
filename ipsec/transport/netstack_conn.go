@@ -98,7 +98,7 @@ type NetstackTCPConn struct {
 	closed bool
 
 	readMu    sync.Mutex
-	writeMu   sync.Mutex
+	writeGate chan struct{}
 	streamMu  sync.Mutex
 	stream    []byte
 	queued    [][]byte
@@ -156,14 +156,15 @@ func (n *Netstack) ListenSecureTCP(ctx context.Context, cfg SecureTCPConfig) (*N
 		return nil, fmt.Errorf("listening IMS netstack TCP: %w", err)
 	}
 	conn := &NetstackTCPConn{
-		netstack: n,
-		local:    endpoints.local,
-		remote:   endpoints.remote,
-		passive:  true,
-		policy:   policy,
-		done:     make(chan struct{}),
-		accept:   make(chan net.Conn, 1),
-		errCh:    make(chan error, 1),
+		writeGate: make(chan struct{}, 1),
+		netstack:  n,
+		local:     endpoints.local,
+		remote:    endpoints.remote,
+		passive:   true,
+		policy:    policy,
+		done:      make(chan struct{}),
+		accept:    make(chan net.Conn, 1),
+		errCh:     make(chan error, 1),
 	}
 	if err := n.registerTCPListener(conn, endpoints.network); err != nil {
 		n.removeSecurity(policy)
@@ -341,14 +342,15 @@ func (n *Netstack) dialTCP(ctx context.Context, cfg TCPConfig, secure *SecureTCP
 	}
 	local := cloneTCPAddr(conn.LocalAddr().(*net.TCPAddr))
 	return &NetstackTCPConn{
-		netstack: n,
-		local:    local,
-		remote:   endpoints.remote,
-		policy:   policy,
-		conn:     conn,
-		done:     make(chan struct{}),
-		accept:   make(chan net.Conn, 1),
-		errCh:    make(chan error, 1),
+		writeGate: make(chan struct{}, 1),
+		netstack:  n,
+		local:     local,
+		remote:    endpoints.remote,
+		policy:    policy,
+		conn:      conn,
+		done:      make(chan struct{}),
+		accept:    make(chan net.Conn, 1),
+		errCh:     make(chan error, 1),
 	}, nil
 }
 
@@ -501,11 +503,27 @@ func (t *NetstackTCPConn) flowKey() netstackFlowKey {
 	return netstackFlowKeyForAddresses(packet.ProtocolTCP, t.local.IP, t.remote.IP, t.local.Port, t.remote.Port)
 }
 
+// acquireWrite includes queueing behind another write in the operation deadline.
+func (t *NetstackTCPConn) acquireWrite(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case t.writeGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-t.writeGate
+			return err
+		}
+		return nil
+	}
+}
+
 func (t *NetstackTCPConn) WritePacket(ctx context.Context, data []byte) error {
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
 	opCtx, cancel := t.operationContext(ctx)
 	defer cancel()
+	if err := t.acquireWrite(opCtx); err != nil {
+		return err
+	}
+	defer func() { <-t.writeGate }()
 	conn, err := t.awaitConn(opCtx)
 	if err != nil {
 		return err
@@ -570,7 +588,7 @@ func (t *NetstackTCPConn) ReadPacket(ctx context.Context) ([]byte, net.Addr, err
 		if ctxErr := opCtx.Err(); ctxErr != nil {
 			return nil, nil, fmt.Errorf("reading IMS netstack TCP packet: %w", ctxErr)
 		}
-		return nil, nil, t.connectionError("reading IMS netstack TCP packet", conn, netstackReadError(err))
+		return nil, nil, t.connectionError(opCtx, conn, netstackReadError(err))
 	}
 }
 
@@ -686,10 +704,12 @@ func (t *NetstackTCPConn) awaitConn(ctx context.Context) (net.Conn, error) {
 	}
 }
 
-func (t *NetstackTCPConn) connectionError(action string, conn net.Conn, err error) error {
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	return t.connectionErrorLocked(action, conn, err)
+func (t *NetstackTCPConn) connectionError(ctx context.Context, conn net.Conn, err error) error {
+	if lockErr := t.acquireWrite(ctx); lockErr != nil {
+		return lockErr
+	}
+	defer func() { <-t.writeGate }()
+	return t.connectionErrorLocked("reading IMS netstack TCP packet", conn, err)
 }
 
 func (t *NetstackTCPConn) connectionErrorLocked(action string, conn net.Conn, err error) error {
@@ -744,8 +764,9 @@ func (t *NetstackTCPConn) Close() error {
 		t.conn = nil
 		t.mu.Unlock()
 		close(t.done)
-		t.writeMu.Lock()
-		defer t.writeMu.Unlock()
+		// Closing done cancels the writer before waiting for its slot.
+		t.writeGate <- struct{}{}
+		defer func() { <-t.writeGate }()
 		if conn != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), netstackTCPCloseTimeout)
 			t.closeErr = errors.Join(t.closeErr, netstackCloseError(t.netstack.withWriteContext(ctx, t.flowKey(), conn.Close)))

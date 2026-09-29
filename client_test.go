@@ -1903,14 +1903,21 @@ func TestClientCloseForcesCleanupAfterTaskTimeout(t *testing.T) {
 }
 
 func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
+	cleanupErr := errors.New("local transport cleanup")
 	tests := []struct {
-		name          string
-		multiple      bool
-		outbound      bool
-		setupRollback bool
-		wantWrites    int
+		name              string
+		multiple          bool
+		outbound          bool
+		setupRollback     bool
+		wantWrites        int
+		deregisterStatus  int
+		cleanupErr        error
+		wantProtocolError bool
 	}{
 		{name: "single registration keeps existing close behavior", wantWrites: 2},
+		{name: "malformed authentication challenge remains an error", multiple: true, wantWrites: 3, deregisterStatus: 401, wantProtocolError: true},
+		{name: "remote 503 does not fail local close", multiple: true, wantWrites: 3, deregisterStatus: 503},
+		{name: "remote 503 preserves local cleanup failure", multiple: true, wantWrites: 3, deregisterStatus: 503, cleanupErr: cleanupErr},
 		{name: "outbound registration removes its flow", multiple: true, outbound: true, wantWrites: 3},
 		{name: "single-flow fallback removes only its contact", multiple: true, wantWrites: 3},
 		{name: "failed setup removes outbound flow", multiple: true, outbound: true, setupRollback: true, wantWrites: 3},
@@ -1920,6 +1927,7 @@ func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := newGatedCancelTransport(5062, 5060)
+			transport.closeErr = tt.cleanupErr
 			nonce := testNonce()
 			var group *registration.Group
 			if tt.multiple {
@@ -1961,7 +1969,11 @@ func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 					if got := imssip.HeaderParam(params, "expires"); got != "0" {
 						t.Fatalf("deregister expires = %q, want 0", got)
 					}
-					transport.queueRead(newIMSResponse(req, 200, "OK"))
+					status := tt.deregisterStatus
+					if status == 0 {
+						status = 200
+					}
+					transport.queueRead(newIMSResponse(req, status, "test response"))
 				default:
 					t.Fatalf("unexpected write count %d", transport.writeCount())
 				}
@@ -2004,8 +2016,12 @@ func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 					scope: newConnectionScope(),
 					ims:   imsStack{sip: sess, reg: reg},
 				})
-				if err := client.Close(); err != nil {
-					t.Fatalf("Close() error = %v", err)
+				if err := client.Close(); tt.wantProtocolError {
+					if err == nil {
+						t.Fatal("Close() discarded protocol error")
+					}
+				} else if !errors.Is(err, tt.cleanupErr) {
+					t.Fatalf("Close() error = %v, want %v", err, tt.cleanupErr)
 				}
 			}
 			if got := transport.writeCount(); got != tt.wantWrites {

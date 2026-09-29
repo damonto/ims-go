@@ -907,11 +907,12 @@ func TestNetstackWriteContextLifecycle(t *testing.T) {
 					writeErrors:   make(map[netstackFlowKey]error),
 				}
 				conn := &NetstackTCPConn{
-					netstack: n,
-					local:    raw.LocalAddr().(*net.TCPAddr),
-					remote:   raw.RemoteAddr().(*net.TCPAddr),
-					conn:     raw,
-					done:     make(chan struct{}),
+					writeGate: make(chan struct{}, 1),
+					netstack:  n,
+					local:     raw.LocalAddr().(*net.TCPAddr),
+					remote:    raw.RemoteAddr().(*net.TCPAddr),
+					conn:      raw,
+					done:      make(chan struct{}),
 				}
 
 				writeDone := make(chan error, 1)
@@ -1173,10 +1174,11 @@ func TestNetstackTCPReadCancellationPreservesReceivedData(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := newInterruptedReadConn()
 			conn := &NetstackTCPConn{
-				local:  raw.LocalAddr().(*net.TCPAddr),
-				remote: raw.RemoteAddr().(*net.TCPAddr),
-				conn:   raw,
-				done:   make(chan struct{}),
+				writeGate: make(chan struct{}, 1),
+				local:     raw.LocalAddr().(*net.TCPAddr),
+				remote:    raw.RemoteAddr().(*net.TCPAddr),
+				conn:      raw,
+				done:      make(chan struct{}),
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			readErr := make(chan error, 1)
