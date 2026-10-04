@@ -58,7 +58,7 @@ func TestTS43FlowHTTPClient(t *testing.T) {
 					Purpose:    tt.purpose,
 					HTTPClient: client,
 				},
-				wfc: ts43.WFCConfig{Server: "https://carrier.example/entitlement"},
+				wfc: ts43.WFCConfig{Server: "https://carrier.example/entitlement", ShowVoWiFiWebview: true},
 			}
 
 			result, err := flow.Check(t.Context())

@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	ts43 "github.com/damonto/ts43-go"
-	usim "github.com/damonto/wwan-go/sim"
 )
 
 const ts43ActivationRecheckMaxAttempts = 6
@@ -37,7 +37,7 @@ func newTS43Flow(req Request) (flow, bool, error) {
 			req.logger().Debug("wfc setup ts43 config not found", "mcc", identity.MCC, "mnc", identity.MNC)
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("discovering wfc ts43 setup: %w", err)
+		return nil, false, fmt.Errorf("discover wfc ts43 setup: %w", err)
 	}
 	return ts43Flow{req: req, wfc: wfc}, true, nil
 }
@@ -50,18 +50,15 @@ func (f ts43Flow) Check(ctx context.Context) (Result, error) {
 }
 
 func (f ts43Flow) checkActivationRecheck(ctx context.Context) (Result, error) {
-	for attempt := 0; ; attempt++ {
+	for attempt := 1; ; attempt++ {
 		result, err := f.checkOnce(ctx)
 		if err != nil || result.Action != ActionWait || !result.Pending {
 			return result, err
 		}
 		if attempt >= ts43ActivationRecheckMaxAttempts {
-			result.Action = ActionDenied
-			result.Pending = false
-			result.RetryAfter = 0
 			return result, nil
 		}
-		if err := sleepContext(ctx, ts43ActivationRecheckInterval); err != nil {
+		if err := sleepContext(ctx, max(result.RetryAfter, ts43ActivationRecheckInterval)); err != nil {
 			return Result{}, err
 		}
 	}
@@ -113,69 +110,71 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 			req.logger().Info("wfc ts43 setup pending", "retry_after", retryAfter)
 			return result, nil
 		}
-		return Result{}, fmt.Errorf("checking wfc ts43 setup: %w", err)
+		return Result{}, fmt.Errorf("check wfc ts43 setup: %w", err)
 	}
-	status := check.Status
 	ts43StoreToken(tokenKey, check.AuthToken)
-	if status.Entitled() {
-		result.Entitled = true
-		switch req.Purpose {
+	return f.result(check.Status)
+}
+
+// result maps carrier status to an action without performing network requests.
+func (f ts43Flow) result(status ts43.WFCStatus) (Result, error) {
+	mode := status.ActivationMode()
+	result := Result{
+		Scheme:   SchemeTS43,
+		Carrier:  f.wfc.CarrierName,
+		Action:   ActionDenied,
+		Entitled: mode == ts43.WFCActivationAvailable,
+	}
+	kind := WebsheetKindEmergencyAddress
+	switch mode {
+	case ts43.WFCActivationAvailable:
+		switch f.req.Purpose {
 		case PurposeActivation:
 			result.Action = ActionAllowActivation
-		case PurposeActivationRecheck:
+		case PurposeActivationRecheck, PurposeEmergencyAddressRecheck:
 			result.Action = ActionNone
 		case PurposeEmergencyAddressUpdate:
-			result.Action = ActionOpenWebsheet
-			websheet, err := ts43Websheet(status, WebsheetKindEmergencyAddress, f.wfc)
-			if err != nil {
-				return Result{}, err
+			if f.wfc.ShouldShowAddressUpdate(status) {
+				result.Action = ActionOpenWebsheet
 			}
-			result.Websheet = websheet
-		case PurposeEmergencyAddressRecheck:
-			result.Action = ActionNone
 		}
-		return result, nil
-	}
-	if status.NeedsUserWebFlow() {
-		switch req.Purpose {
+	case ts43.WFCActivationWebView:
+		switch f.req.Purpose {
+		case PurposeActivation:
+			if f.wfc.ShouldShowWebFlow(status) {
+				result.Action = ActionOpenWebsheet
+				kind = ts43WebsheetKind(status)
+			}
 		case PurposeActivationRecheck:
 			result.Action = ActionWait
-			result.Pending = true
-			result.RetryAfter = ts43ActivationRecheckInterval
-			return result, nil
-		case PurposeEmergencyAddressUpdate:
-			result.Action = ActionDenied
-			return result, nil
 		case PurposeEmergencyAddressRecheck:
 			result.Action = ActionDisableWFC
-			return result, nil
 		}
-		result.Action = ActionOpenWebsheet
-		websheet, err := ts43Websheet(status, ts43WebsheetKind(status), f.wfc)
+	case ts43.WFCActivationInProgress:
+		result.Action = ActionWait
+	}
+	switch result.Action {
+	case ActionWait:
+		result.Pending = true
+		result.RetryAfter = ts43ActivationRecheckInterval
+	case ActionOpenWebsheet:
+		sheet, err := ts43Websheet(status, kind, f.wfc)
 		if err != nil {
 			return Result{}, err
 		}
-		result.Websheet = websheet
-		return result, nil
+		result.Websheet = sheet
 	}
-	if status.InProgress() {
-		result.Action = ActionWait
-		result.Pending = true
-		return result, nil
-	}
-	result.Action = ActionDenied
 	return result, nil
 }
 
 func (f ts43Flow) E911UpdateSupport(context.Context) (E911UpdateSupport, error) {
-	supported := f.wfc.ShowVoWiFiWebview || f.wfc.SkipActivation
 	reason := "ts43 profile does not expose an emergency address web flow"
-	if supported {
+	if f.wfc.ShowVoWiFiWebview {
 		reason = "ts43 profile exposes a built-in emergency address flow"
 	}
 	return E911UpdateSupport{
-		Supported: supported,
-		BuiltIn:   supported,
+		Supported: f.wfc.ShowVoWiFiWebview,
+		BuiltIn:   f.wfc.ShowVoWiFiWebview,
 		Scheme:    SchemeTS43,
 		Carrier:   f.wfc.CarrierName,
 		Reason:    reason,
@@ -214,7 +213,7 @@ func ts43CachedToken(key string) ts43.AuthToken {
 		delete(ts43Tokens.values, key)
 		return ts43.AuthToken{}
 	}
-	token.Cookies = append([]string(nil), token.Cookies...)
+	token.Cookies = slices.Clone(token.Cookies)
 	return token
 }
 
@@ -225,7 +224,7 @@ func ts43StoreToken(key string, token ts43.AuthToken) {
 		delete(ts43Tokens.values, key)
 		return
 	}
-	token.Cookies = append([]string(nil), token.Cookies...)
+	token.Cookies = slices.Clone(token.Cookies)
 	ts43Tokens.values[key] = token
 }
 
@@ -271,7 +270,10 @@ func (c ts43Channel) Identity(context.Context) (*ts43.Identity, error) {
 }
 
 func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *ts43.AKARequest) (*ts43.AKAResponse, error) {
-	result, err := c.authenticateAKA(ctx, req.Rand, req.Autn)
+	if c.authenticate == nil {
+		return nil, errAKAAuthenticatorRequired
+	}
+	result, err := c.authenticate(ctx, req.Rand, req.Autn)
 	if err != nil {
 		return nil, err
 	}
@@ -286,19 +288,21 @@ func (c ts43Channel) AuthenticateAKA(ctx context.Context, req *ts43.AKARequest) 
 	}, nil
 }
 
-func (c ts43Channel) authenticateAKA(ctx context.Context, rand, autn []byte) (usim.AKAResult, error) {
-	if c.authenticate == nil {
-		return usim.AKAResult{}, errAKAAuthenticatorRequired
-	}
-	return c.authenticate(ctx, rand, autn)
-}
-
 func ts43Identity(card Card) ts43.Identity {
-	return ts43.Identity{
+	identity := ts43.Identity{
 		ICCID: card.ICCID(),
 		IMSI:  card.IMSI(),
 		MCC:   card.MCC(),
 		MNC:   card.MNC(),
 		GID1:  strings.TrimSpace(card.GID1()),
 	}
+	// Card's minimal contract is also used by non-TS.43 transports. Preserve
+	// additional carrier qualifiers when the SIM implementation exposes them.
+	if card, ok := card.(interface{ GID2() string }); ok {
+		identity.GID2 = strings.TrimSpace(card.GID2())
+	}
+	if card, ok := card.(interface{ SPN() string }); ok {
+		identity.SPN = card.SPN()
+	}
+	return identity
 }
