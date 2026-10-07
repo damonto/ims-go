@@ -353,7 +353,7 @@ func (s *Registrar) closeSecureResources() error {
 	return err
 }
 
-func (s *Registrar) clearSecureResources() error {
+func (s *Registrar) clearSecureResources(mode secureCleanupMode) error {
 	resources, _, started := s.beginSecureResourceReset()
 	if !started {
 		return nil
@@ -361,7 +361,7 @@ func (s *Registrar) clearSecureResources() error {
 	defer s.secureCleanupWG.Done()
 	stopErr := resources.stop()
 	s.bgWG.Wait()
-	return errors.Join(stopErr, resources.close(s.sess, secureCleanupReset))
+	return errors.Join(stopErr, resources.close(s.sess, mode))
 }
 
 func (s *Registrar) clearSecureResourcesAfter(delay time.Duration, after func()) {

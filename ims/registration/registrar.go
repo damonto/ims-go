@@ -838,10 +838,17 @@ func (s *Registrar) Maintain(ctx context.Context) error {
 }
 
 func (s *Registrar) Deregister(ctx context.Context) error {
-	return s.deregister(ctx)
+	return s.deregister(ctx, secureCleanupReset)
 }
 
-func (s *Registrar) deregister(ctx context.Context) (retErr error) {
+// DeregisterForShutdown removes the registration without requiring the original
+// unprotected transport to remain usable. The caller must still call Close,
+// including when deregistration fails.
+func (s *Registrar) DeregisterForShutdown(ctx context.Context) error {
+	return s.deregister(ctx, secureCleanupShutdown)
+}
+
+func (s *Registrar) deregister(ctx context.Context, mode secureCleanupMode) (retErr error) {
 	defer func() {
 		if retErr != nil {
 			retErr = fmt.Errorf("deregistering IMS: %w", retErr)
@@ -853,15 +860,15 @@ func (s *Registrar) deregister(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer release()
-	return s.deregisterCurrent(ctx, ownsRegistration)
+	return s.deregisterCurrent(ctx, ownsRegistration, mode)
 }
 
-func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool) error {
+func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool, mode secureCleanupMode) error {
 	if !s.isRegistered() {
 		return nil
 	}
 	if !ownsRegistration {
-		if err := s.clearRegistrationState(); err != nil {
+		if err := s.clearRegistrationState(mode); err != nil {
 			return fmt.Errorf("deleting replaced registration state: %w", err)
 		}
 		s.logger.Info("IMS registration already replaced by preferred flow")
@@ -884,7 +891,7 @@ func (s *Registrar) deregisterCurrent(ctx context.Context, ownsRegistration bool
 			return err
 		}
 		if done {
-			if err := s.clearRegistrationState(); err != nil {
+			if err := s.clearRegistrationState(mode); err != nil {
 				return fmt.Errorf("deleting registration security state: %w", err)
 			}
 			s.logger.Info("IMS deregistered")
@@ -925,7 +932,7 @@ func (s *Registrar) retireSingleRegistration() {
 				s.registrationCommitMu.Unlock()
 				return
 			}
-			err := s.clearRegistrationState()
+			err := s.clearRegistrationState(secureCleanupReset)
 			s.registrationCommitMu.Unlock()
 			if err != nil {
 				s.logger.Error("deleting replaced IMS registration security state", "err", err)

@@ -1789,7 +1789,7 @@ func TestClearRegistrationStateRestoresUnprotectedTransport(t *testing.T) {
 				t.Fatalf("plain closeCount = %d, want retained", got)
 			}
 
-			if err := svc.clearRegistrationState(); err != nil {
+			if err := svc.clearRegistrationState(secureCleanupReset); err != nil {
 				t.Fatalf("clearRegistrationState() error = %v", err)
 			}
 			if sess.LocalAddr() != plain.LocalAddr() {
@@ -4032,6 +4032,84 @@ func TestDeregisterRetriesAfterChallenge(t *testing.T) {
 	}
 	if opaque := svc.currentAuthChallenge().Opaque; opaque != "" {
 		t.Fatalf("auth opaque after deregistration = %q, want empty", opaque)
+	}
+}
+
+func TestDeregisterWithRetainedUnprotectedTransport(t *testing.T) {
+	tests := []struct {
+		name         string
+		retire       bool
+		shutdown     bool
+		status       int
+		wantInactive bool
+	}{
+		{name: "live deregistration restores primary", status: 200},
+		{name: "live deregistration reports retired primary", retire: true, status: 200, wantInactive: true},
+		{name: "shutdown restores active primary", shutdown: true, status: 200},
+		{name: "shutdown accepts retired primary", retire: true, shutdown: true, status: 200},
+		{name: "shutdown preserves rejection", retire: true, shutdown: true, status: 503},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := newTCPTransport(5062, 5060)
+			secure := newTCPTransport(45000, 4060)
+			svc := newTestService(t, Config{}, plain, stubCard{})
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Error(err)
+				}
+				if err := svc.sess.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			registerService(t, svc, plain)
+			if _, err := svc.sess.AddTransport(secure); err != nil {
+				t.Fatal(err)
+			}
+			old, err := svc.sess.PromotePrimary(secure)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !svc.retainUnprotectedPrimary(old) {
+				t.Fatal("unprotected primary was not retained")
+			}
+			if tt.retire {
+				if err := old.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			secure.onWrite = func(data []byte) {
+				req := mustParseMessage(t, data)
+				if req.Method() != "REGISTER" || req.Header("Expires") != "0" {
+					t.Errorf("request = %s, Expires = %q, want deregistration", req.Method(), req.Header("Expires"))
+				}
+				secure.queue(newResponse(req, tt.status, "test response"))
+			}
+			if tt.shutdown {
+				err = svc.DeregisterForShutdown(t.Context())
+			} else {
+				err = svc.Deregister(t.Context())
+			}
+			if tt.status != 200 {
+				if _, ok := errors.AsType[*sip.ResponseError](err); !ok {
+					t.Fatalf("deregister error = %v, want SIP rejection", err)
+				}
+				return
+			}
+			if tt.wantInactive {
+				if !errors.Is(err, session.ErrTransportInactive) {
+					t.Fatalf("deregister error = %v, want inactive transport", err)
+				}
+			} else if err != nil {
+				t.Fatalf("deregister: %v", err)
+			}
+			if svc.State().Registered {
+				t.Error("registration remains active after 200 OK")
+			}
+			if !tt.wantInactive && closeCount(secure) != 1 {
+				t.Errorf("secure close count = %d, want 1", closeCount(secure))
+			}
+		})
 	}
 }
 

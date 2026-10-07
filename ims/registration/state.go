@@ -430,8 +430,8 @@ func (s *Registrar) applyRegisterSuccess(msg sip.Message) {
 	}
 }
 
-func (s *Registrar) clearRegistrationState() error {
-	secureErr := s.clearSecureResources()
+func (s *Registrar) clearRegistrationState(mode secureCleanupMode) error {
+	secureErr := s.clearSecureResources(mode)
 	s.resetRegistrationState()
 	return secureErr
 }

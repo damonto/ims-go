@@ -1902,6 +1902,72 @@ func TestClientCloseForcesCleanupAfterTaskTimeout(t *testing.T) {
 	}
 }
 
+func TestClientClosePreservesResultForAllCallers(t *testing.T) {
+	readerErr := errors.New("reader close")
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "successful close"},
+		{name: "reader cleanup failure", err: readerErr},
+		{name: "reader cleanup timeout", err: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newStandaloneClient(t)
+			reader := &readerStub{closeErr: tt.err}
+			client.reader = reader
+			const callers = 4
+			results := make([]error, callers)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i := range callers {
+				wg.Go(func() {
+					<-start
+					results[i] = client.Close()
+				})
+			}
+			close(start)
+			wg.Wait()
+			for i, err := range results {
+				if !errors.Is(err, tt.err) {
+					t.Errorf("Close() caller %d = %v, want %v", i, err, tt.err)
+				}
+			}
+			if err := client.Close(); !errors.Is(err, tt.err) {
+				t.Errorf("repeated Close() = %v, want %v", err, tt.err)
+			}
+			if reader.closeCalls != 1 {
+				t.Errorf("reader Close() calls = %d, want 1", reader.closeCalls)
+			}
+		})
+	}
+}
+
+func TestNormalizeCloseError(t *testing.T) {
+	resourceErr := errors.New("release resource")
+	mixed := fmt.Errorf("close transport: %w", errors.Join(context.Canceled, resourceErr))
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "success"},
+		{name: "canceled", err: context.Canceled},
+		{name: "wrapped deadline", err: fmt.Errorf("read: %w", context.DeadlineExceeded)},
+		{name: "joined cancellation", err: errors.Join(context.Canceled, context.DeadlineExceeded)},
+		{name: "resource failure", err: resourceErr, want: resourceErr},
+		{name: "cancellation with resource failure", err: mixed, want: mixed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeCloseError(tt.err); got != tt.want {
+				t.Errorf("normalizeCloseError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClientCloseDeregistersOnlyMultipleRegistrationFlow(t *testing.T) {
 	cleanupErr := errors.New("local transport cleanup")
 	tests := []struct {
@@ -2124,7 +2190,7 @@ func TestCancelConnectStartWaitsForIMSLoopExitBeforeCleanup(t *testing.T) {
 	}
 }
 
-func TestCloseActiveConnectionSkipsDeregister(t *testing.T) {
+func TestCloseActiveSkipsDeregister(t *testing.T) {
 	transport := newGatedCancelTransport(5062, 5060)
 	nonce := testNonce()
 	transport.onWrite = func(data []byte) {
@@ -2165,8 +2231,8 @@ func TestCloseActiveConnectionSkipsDeregister(t *testing.T) {
 		Access:   VoWiFi(VoWiFiConfig{}),
 	})
 	active := &activeConn{ims: imsStack{sip: sess, reg: reg, ussd: ussdSvc}}
-	if err := client.closeActiveConnection(active); err != nil {
-		t.Fatalf("closeActiveConnection() error = %v", err)
+	if err := client.closeActive(active); err != nil {
+		t.Fatalf("closeActive() error = %v", err)
 	}
 	if got := transport.writeCount(); got != 2 {
 		t.Fatalf("write count = %d, want registration only", got)

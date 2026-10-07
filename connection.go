@@ -428,36 +428,28 @@ func (c *Client) cancelConnectStart(active *activeConn, runDone <-chan struct{})
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()
-	if c.waitIMSRunnerStop(closeCtx, runDone) {
-		return c.closeActive(active)
+	if runDone != nil {
+		select {
+		case <-runDone:
+		case <-closeCtx.Done():
+		}
 	}
-	return c.closeActiveConnection(active)
-}
-
-func (c *Client) waitIMSRunnerStop(ctx context.Context, runDone <-chan struct{}) bool {
-	if runDone == nil {
-		return true
-	}
-	select {
-	case <-runDone:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	return c.closeActive(active)
 }
 
 // Close releases local resources. A SIP rejection of deregistration is logged;
 // transport, protocol, and local cleanup errors are returned to the caller.
+// Concurrent and repeated calls return the same cleanup result.
 func (c *Client) Close() error {
 	return c.close(defaultCloseTimeout)
 }
 
 func (c *Client) close(waitTimeout time.Duration) error {
-	var err error
-	c.state.doClose(func() {
+	return c.state.doClose(func() error {
+		var err error
 		active, ok := c.state.beginClose()
 		if !ok {
-			return
+			return nil
 		}
 		reader := c.reader
 		c.notifyRegistrationChange()
@@ -470,18 +462,17 @@ func (c *Client) close(waitTimeout time.Duration) error {
 			if c.cfg.IMS.RegistrationGroup != nil {
 				err = errors.Join(err, c.deregisterActive(active))
 			}
-			err = errors.Join(err, c.closeActive(active))
 		} else {
 			err = errors.Join(err, context.DeadlineExceeded)
-			err = errors.Join(err, c.closeActiveConnection(active))
 		}
+		err = errors.Join(err, c.closeActive(active))
 		if reader != nil {
 			err = errors.Join(err, wrapCloseError(closeActionReader, reader.Close()))
 		}
 		c.emitStatus(StatusClosed)
 		c.events.close()
+		return err
 	})
-	return err
 }
 
 func (c *Client) waitCloseTasks(timeout time.Duration) bool {
@@ -489,13 +480,32 @@ func (c *Client) waitCloseTasks(timeout time.Duration) bool {
 }
 
 func normalizeCloseError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if onlyCloseCancellation(err) {
 		return nil
 	}
 	return err
+}
+
+// A joined error may contain both an expected cancellation and a resource
+// failure. Only suppress it when every leaf is a cancellation or deadline.
+func onlyCloseCancellation(err error) bool {
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !onlyCloseCancellation(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return onlyCloseCancellation(wrapped.Unwrap())
+	default:
+		return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	}
 }
 
 type closeAction uint8
@@ -574,20 +584,7 @@ func deregisterRegistrar(reg *registration.Registrar) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCloseTimeout)
 	defer cancel()
-	return reg.Deregister(ctx)
-}
-
-func (c *Client) closeActiveConnection(active *activeConn) error {
-	if active == nil {
-		return nil
-	}
-	err := c.closeIMS(active)
-	if active.access != nil {
-		err = errors.Join(err, wrapCloseError(closeActionAccess, normalizeCloseError(active.access.Close())))
-	} else if active.tunnel != nil {
-		err = errors.Join(err, wrapCloseError(closeActionTunnel, normalizeCloseError(active.tunnel.Close())))
-	}
-	return err
+	return reg.DeregisterForShutdown(ctx)
 }
 
 func (c *Client) closeIMS(active *activeConn) error {
@@ -899,7 +896,7 @@ func (r *connectionRunner) reconnectAfterIMSFailure(cause error) bool {
 		return false
 	}
 
-	runErr = errors.Join(runErr, r.client.closeActiveConnection(r.active))
+	runErr = errors.Join(runErr, r.client.closeActive(r.active))
 	if r.client.cfg.usesVoWiFi() {
 		r.client.clearSWUPDNTypeRestrictionAfterDisconnect(cause)
 	}

@@ -95,6 +95,7 @@ type clientState struct {
 	active       *activeConn
 	closeWG      sync.WaitGroup
 	closeOnce    sync.Once
+	closeErr     error // Published by closeOnce to all concurrent Close callers.
 	swuBackoff   swuBackoffGate
 	swuPDNTypes  swuPDNTypeRestrictionGate
 	reconnectSeq atomic.Uint64
@@ -295,8 +296,11 @@ func (s *clientState) waitCloseTasks(timeout time.Duration) bool {
 	}
 }
 
-func (s *clientState) doClose(fn func()) {
-	s.closeOnce.Do(fn)
+func (s *clientState) doClose(fn func() error) error {
+	s.closeOnce.Do(func() {
+		s.closeErr = fn()
+	})
+	return s.closeErr
 }
 
 func (s *clientState) nextReconnectID() uint64 {

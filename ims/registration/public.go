@@ -156,7 +156,7 @@ func (s *Registrar) HandleRequest(ctx context.Context, req session.Request) (boo
 				s.registrationCommitMu.Unlock()
 				return true, nil
 			}
-			err := s.clearRegistrationState()
+			err := s.clearRegistrationState(secureCleanupReset)
 			s.registrationCommitMu.Unlock()
 			if err != nil {
 				s.publishRegistrationEvent(eventErr)

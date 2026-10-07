@@ -148,8 +148,7 @@ func TestRegistrationConcurrentIMSCleanup(t *testing.T) {
 		close func(*Client, *activeConn) error
 	}{
 		{name: "P-CSCF restoration", close: (*Client).closeIMS},
-		{name: "graceful close", close: (*Client).closeActive},
-		{name: "forced close", close: (*Client).closeActiveConnection},
+		{name: "close active connection", close: (*Client).closeActive},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
