@@ -1,6 +1,6 @@
 github.com/ElMostafaIdrassi/goscard v1.0.0 h1:RDG5QrqrQBUoi5MkzM4zILdYf8qDn62daYZszqvdgx0=
 github.com/ElMostafaIdrassi/goscard v1.0.0/go.mod h1:uGOakQe2fFlW2cVlr9cv6x07uelrf0j0aKPbR7jGgfg=
-github.com/damonto/ts43-go v0.1.0 h1:L+881JqBGt2d8vutyxHGgw+9HMINQzTBEuZ1/tyeKIY=
+github.com/damonto/ts43-go v0.1.0 h1:5FPiKWNm7g67aUUtXtlj0Ue6aYplcMQU7qEIFY3ZpCc=
 github.com/damonto/ts43-go v0.1.0/go.mod h1:4H6zDRbWiHkQNMvoa0dcEnRjBTuKTM3kX89xla9gNa8=
 github.com/damonto/wwan-go v0.0.1 h1:pqds/qJL+CRHAazo9HwpJsOM4byZbKmoscOVZ/Axnow=
 github.com/damonto/wwan-go v0.0.1/go.mod h1:blLeYhBsaZn4N/svAxbcYebPdFO5hUML3CKLViPsp6Q=
