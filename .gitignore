@@ -35,10 +35,7 @@ testdata/
 ims/voice/codec/evs/c/build/
 
 # AI
-AGENTS.md
-CLAUDE.md
 .codex
 .codex*
 .agents
 .cluade
-REVIEW.md
