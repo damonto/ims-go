@@ -24,7 +24,7 @@ Use the Go version required by `go.mod` (currently Go 1.26.3 or newer).
 | `lte` | IMS PDN configuration, addresses, routing, and access information |
 | `wfcsetup` | Carrier Wi-Fi Calling entitlement and activation flows |
 | `examples` | Linux command demonstrating SIM access, VoWiFi registration, SMS, and USSD |
-| `ims.json`, `ims_profile.go` | Embedded carrier profiles, matching, and application of defaults |
+| `carrier_profiles.go`, `ims_profile.go` | Caller-supplied carrier profiles, matching, and application of defaults |
 | `specs` | Local 3GPP/ETSI, GSMA, and RFC specifications |
 
 Keep code in the package that owns its behavior. Lower-level protocol packages
@@ -117,7 +117,7 @@ precedence. Format changed Go files with `gofmt`; avoid unrelated style churn.
   Read `withIMSProfile` before changing precedence: some profile fields replace
   settings rather than only filling zero values. Preserve the distinction
   between an omitted setting and an explicit value.
-- For `ims.json` changes, add focused profile matching/normalization coverage.
+- For carrier profile schema changes, add focused profile matching/normalization coverage.
   Avoid reformatting the full dataset or embedding real subscriber information
   in fixtures or logs.
 - Respect `//go:build` constraints and OS-specific socket files. The QCOM/MBIM
@@ -168,3 +168,5 @@ report the exact limitation. Do not weaken tests or claim unperformed checks.
 In the final response, state what changed, what was verified, and any remaining
 limitations. When teaching a Go idiom, explain the practical reason briefly;
 use before/after examples when they help the requested change.
+
+Carrier catalogs are supplied by the integrating application. Keep synthetic parser and matching tests independent of private files; owner-only catalog regressions may use `SIGMO_CARRIER_CONFIG_DIR`. Do not restore carrier JSON embeds.

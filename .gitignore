@@ -39,3 +39,9 @@ ims/voice/codec/evs/c/build/
 .codex*
 .agents
 .cluade
+
+# Private carrier configuration is supplied by the application.
+/entitlement.json
+/wfc.json
+/ims.json
+/wfc_config.json

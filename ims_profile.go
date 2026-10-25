@@ -10,12 +10,7 @@ import (
 	"time"
 
 	imsvoice "github.com/damonto/ims-go/ims/voice"
-
-	_ "embed"
 )
-
-//go:embed ims.json
-var embeddedIMSConfig []byte
 
 type imsProfile struct {
 	MCC                          string                    `json:"mcc"`
@@ -172,8 +167,8 @@ func (d *imsProfileDuration) UnmarshalJSON(data []byte) error {
 	return d.UnmarshalText([]byte(text))
 }
 
-func loadIMSProfile(card Card) (imsProfile, bool, error) {
-	profile, ok, err := parseIMSProfile(embeddedIMSConfig, card)
+func loadIMSProfile(card Card, configs *CarrierProfiles) (imsProfile, bool, error) {
+	profile, ok, err := parseIMSProfile(configs.json(), card)
 	if err != nil || !ok {
 		return profile, ok, err
 	}

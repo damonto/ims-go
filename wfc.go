@@ -16,6 +16,7 @@ func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) erro
 	}
 	result, err := wfcsetup.Check(ctx, wfcsetup.Request{
 		Card:            card,
+		WFC:             cfg.WFC,
 		AuthenticateAKA: cfg.IMS.coordinatedAKA(card.EAPAKA),
 		Device: wfcsetup.Device{
 			IMEI:            terminal.ID,

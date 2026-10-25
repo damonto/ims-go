@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	ts43 "github.com/damonto/ts43-go"
 	usim "github.com/damonto/wwan-go/sim"
 )
 
@@ -159,6 +160,8 @@ func (d Device) Trimmed() Device {
 }
 
 type Request struct {
+	// WFC supplies TS.43 Wi-Fi Calling discovery records.
+	WFC             *ts43.WFCConfigs
 	Card            Card
 	AuthenticateAKA AKAAuthenticator
 	Device          Device

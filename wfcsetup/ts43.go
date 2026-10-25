@@ -31,7 +31,7 @@ type ts43Flow struct {
 
 func newTS43Flow(req Request) (flow, bool, error) {
 	identity := ts43Identity(req.Card)
-	wfc, err := ts43.DiscoverWFC(identity)
+	wfc, err := req.WFC.Discover(identity)
 	if err != nil {
 		if errors.Is(err, ts43.ErrWFCConfigNotFound) {
 			req.logger().Debug("wfc setup ts43 config not found", "mcc", identity.MCC, "mnc", identity.MNC)

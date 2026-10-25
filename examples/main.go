@@ -10,11 +10,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	ts43 "github.com/damonto/ts43-go"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -42,43 +44,44 @@ const (
 )
 
 type options struct {
-	debug          bool
-	driverKind     string
-	listReaders    bool
-	readerName     string
-	device         string
-	ccidTCPListen  string
-	apduTimeout    time.Duration
-	slot           int
-	imei           string
-	epdgAddr       string
-	transport      string
-	expires        time.Duration
-	privateID      string
-	publicID       string
-	homeDomain     string
-	phoneContext   string
-	userAgent      string
-	pani           string
-	wlanNodeID     string
-	terminalVendor string
-	terminalModel  string
-	terminalSW     string
-	terminalBuild  string
-	sipPort        int
-	sipT1          time.Duration
-	sipT2          time.Duration
-	sipT4          time.Duration
-	sipTimerB      time.Duration
-	sipTimerD      time.Duration
-	sipTimerF      time.Duration
-	sipTimerH      time.Duration
-	sipTimerJ      time.Duration
-	nattKeepalive  time.Duration
-	ikeRetransmit  string
-	sendTo         string
-	sendText       string
-	ussdCode       string
+	carrierConfigDir string
+	debug            bool
+	driverKind       string
+	listReaders      bool
+	readerName       string
+	device           string
+	ccidTCPListen    string
+	apduTimeout      time.Duration
+	slot             int
+	imei             string
+	epdgAddr         string
+	transport        string
+	expires          time.Duration
+	privateID        string
+	publicID         string
+	homeDomain       string
+	phoneContext     string
+	userAgent        string
+	pani             string
+	wlanNodeID       string
+	terminalVendor   string
+	terminalModel    string
+	terminalSW       string
+	terminalBuild    string
+	sipPort          int
+	sipT1            time.Duration
+	sipT2            time.Duration
+	sipT4            time.Duration
+	sipTimerB        time.Duration
+	sipTimerD        time.Duration
+	sipTimerF        time.Duration
+	sipTimerH        time.Duration
+	sipTimerJ        time.Duration
+	nattKeepalive    time.Duration
+	ikeRetransmit    string
+	sendTo           string
+	sendText         string
+	ussdCode         string
 }
 
 func main() {
@@ -99,6 +102,7 @@ func main() {
 
 func parseFlags() options {
 	opt := options{}
+	flag.StringVar(&opt.carrierConfigDir, "carrier-config-dir", "", "directory containing caller-supplied ims.json and wfc.json")
 	flag.BoolVar(&opt.debug, "debug", false, "enable verbose debug logs")
 	flag.StringVar(&opt.driverKind, "driver", "pcsc", "driver kind: pcsc, ccid-tcp, at, qmi, or qrtr")
 	flag.BoolVar(&opt.listReaders, "list-readers", false, "list available PC/SC readers and exit")
@@ -203,12 +207,35 @@ func run(opt options) error {
 		return err
 	}
 
+	var profiles *ims.CarrierProfiles
+	var wfc *ts43.WFCConfigs
+	if opt.carrierConfigDir != "" {
+		data, err := os.ReadFile(filepath.Join(opt.carrierConfigDir, "ims.json"))
+		if err != nil {
+			return err
+		}
+		profiles = new(ims.CarrierProfiles)
+		err = json.Unmarshal(data, profiles)
+		if err != nil {
+			return err
+		}
+		wfcData, err := os.ReadFile(filepath.Join(opt.carrierConfigDir, "wfc.json"))
+		if err != nil {
+			return err
+		}
+		wfc = new(ts43.WFCConfigs)
+		err = json.Unmarshal(wfcData, wfc)
+		if err != nil {
+			return err
+		}
+	}
 	reader, err := openDriver(ctx, opt)
 	if err != nil {
 		return err
 	}
 
 	cfg := &ims.Config{
+		Carriers: profiles, WFC: wfc,
 		Logger: slog.Default(),
 		Terminal: ims.TerminalInfo{
 			ID:              opt.imei,

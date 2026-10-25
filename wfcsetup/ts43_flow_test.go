@@ -160,6 +160,11 @@ func (c ts43QualifiedCard) SPN() string  { return c.spn }
 func (c ts43QualifiedCard) GID2() string { return c.gid2 }
 
 func TestTS43DiscoveryPreservesQualifiers(t *testing.T) {
+	configs := new(ts43.WFCConfigs)
+	err := configs.UnmarshalJSON([]byte(`[{"mccmnc":"311650","spn":"United Wireless","carrierName":"test","entitlementServer":"https://carrier.example"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tt := range []struct {
 		name      string
 		card      Card
@@ -169,7 +174,7 @@ func TestTS43DiscoveryPreservesQualifiers(t *testing.T) {
 		{name: "minimal card does not invent SPN", card: testCard{mcc: "311", mnc: "650"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, matched, err := newTS43Flow(Request{Card: tt.card})
+			_, matched, err := newTS43Flow(Request{Card: tt.card, WFC: configs})
 			if err != nil || matched != tt.wantMatch {
 				t.Fatalf("newTS43Flow() matched = %t, error = %v", matched, err)
 			}

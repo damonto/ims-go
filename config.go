@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	ts43 "github.com/damonto/ts43-go"
+
 	"github.com/damonto/ims-go/ims/pidf"
 	"github.com/damonto/ims-go/ims/registration"
 	"github.com/damonto/ims-go/ims/security"
@@ -19,6 +21,9 @@ import (
 )
 
 type Config struct {
+	// Carriers and WFC supply application-owned discovery data.
+	Carriers          *CarrierProfiles
+	WFC               *ts43.WFCConfigs
 	Logger            *slog.Logger
 	ReconnectDelay    time.Duration
 	ReconnectMaxDelay time.Duration
@@ -139,7 +144,7 @@ func (c Config) normalized(card Card) (Config, error) {
 	}
 	c.Access = accessCfg
 
-	profile, ok, err := loadIMSProfile(card)
+	profile, ok, err := loadIMSProfile(card, c.Carriers)
 	if err != nil {
 		return Config{}, err
 	}

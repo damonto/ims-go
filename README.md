@@ -138,6 +138,7 @@ as above, then run `go run . -reader 'YOUR PC/SC READER' -imei 'YOUR_IMEI'`.
 package main
 
 import (
+	"encoding/json"
 	"context"
 	"errors"
 	"flag"
@@ -161,10 +162,18 @@ func main() {
 func run() (resultErr error) {
 	readerName := flag.String("reader", "", "PC/SC reader name")
 	imei := flag.String("imei", "", "terminal IMEI")
+	profilesPath := flag.String("carrier-profiles", "ims.json", "path to caller-supplied IMS profiles")
 	flag.Parse()
 	if *readerName == "" || *imei == "" {
 		return errors.New("provide -reader and -imei")
 	}
+
+	profileJSON, err := os.ReadFile(*profilesPath)
+	if err != nil {
+		return fmt.Errorf("read carrier profiles: %w", err)
+	}
+ var profiles ims.CarrierProfiles
+ if err := json.Unmarshal(profileJSON, &profiles); err != nil { return err }
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -180,6 +189,7 @@ func run() (resultErr error) {
 
 	// New takes ownership of reader, including on construction failure.
 	client, err := ims.New(reader, &ims.Config{
+		Carriers: &profiles,
 		Terminal: ims.TerminalInfo{ID: *imei},
 		Access:   ims.VoWiFi(ims.VoWiFiConfig{}),
 	})
@@ -250,7 +260,7 @@ via `lte.Config.InterfaceName`.
 SIP identities and transport, registration/security parameters, SMS/USSD, and
 `voice.Config`.
 
-[`ims.json`](ims.json) is embedded at build time, not loaded from a runtime
+Carrier profiles are decoded into `CarrierProfiles` with `json.Unmarshal` or `UnmarshalBinary`, then supplied through `Config.Carriers`. The type implements JSON and binary marshal/unmarshal interfaces; binary encoding is the same UTF-8 JSON array. WFC discovery data is decoded separately into `ts43.WFCConfigs` and supplied through `Config.WFC` or `wfcsetup.Request.WFC`. No carrier catalog is embedded in the library. The application owns loading configuration from a runtime
 configuration file. Profiles are selected by MCC/MNC and optional IMSI/ICCID
 prefix, SPN, and GID selectors. [`ims_profile.go`](ims_profile.go) defines the schema,
 match ranking, and application rules. Most zero-valued settings receive profile
@@ -320,3 +330,15 @@ the [codec notes](ims/voice/codec/evs/README.md); use
 [`evs/wasm.go`](ims/voice/codec/evs/wasm.go) for the current `Engine`/`Codec` API.
 Preserve the netstack license and EVS reference-source notices when modifying
 or redistributing those components.
+
+### Caller-supplied carrier files
+
+The example accepts `-carrier-config-dir /path/to/private-files`. Carrier files are not included in this repository. The integrating application owns loading, authorization and any remote delivery. Public tests use synthetic inputs; owner-only catalog regression tests accept `SIGMO_CARRIER_CONFIG_DIR`.
+
+## License
+
+The original code in this project is licensed under the [GNU General Public
+License v3.0](LICENSE). Third-party components retain their own copyright notices
+and license terms, including the [gVisor netstack](ipsec/transport/netstack/LICENSE)
+and the [EVS reference implementation](ims/voice/codec/evs/README.md).
+The GPL license does not replace those terms or grant codec patent rights.

@@ -624,7 +624,7 @@ func TestIMSProfileMapsIPSecAlgorithms(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -668,7 +668,7 @@ func TestIMSProfileMapsChinaCarrierIPSecCapabilities(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -701,7 +701,7 @@ func TestIMSProfileMapsO2SecurityModes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -725,7 +725,7 @@ func TestIMSProfileMapsO2SecurityModes(t *testing.T) {
 
 func TestIMSProfileDoesNotTieMD5ToTransportMode(t *testing.T) {
 	card := plmnWFCCard{mcc: "238", mnc: "01", mncLength: 2}
-	profile, ok, err := parseIMSProfile(embeddedIMSConfig, card)
+	profile, ok, err := parseIMSProfile(privateIMSConfig(t), card)
 	if err != nil {
 		t.Fatalf("parseIMSProfile() error = %v", err)
 	}
@@ -750,7 +750,7 @@ func TestIMSProfileDoesNotTieMD5ToTransportMode(t *testing.T) {
 
 func TestEmbeddedIMSProfilesHaveIPSecAlgorithms(t *testing.T) {
 	var profiles []imsProfile
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	for i, profile := range profiles {
@@ -884,7 +884,7 @@ func TestEmbeddedIMSProfileIKEPRF(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{
+			cfg := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access: VoWiFi(VoWiFiConfig{
 					Tunnel: swutunnel.Config{IKEPRF: tt.override},
@@ -964,7 +964,7 @@ func TestEmbeddedIMSProfileTunnelAlgorithms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{
+			cfg := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			}
@@ -999,12 +999,12 @@ func TestEmbeddedIMSProfileTunnelAlgorithms(t *testing.T) {
 
 func TestEmbeddedIMSProfilesHaveSupportedTunnelConfig(t *testing.T) {
 	var profiles []imsProfile
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	for i, profile := range profiles {
 		t.Run(profile.MCC+"-"+profile.MNC+"-"+profile.GID1+"-"+profile.IMSIPrefix, func(t *testing.T) {
-			cfg := Config{Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, wfcTestCard{})
+			cfg := Config{Carriers: privateIMSProfiles(t), Access: VoWiFi(VoWiFiConfig{})}.withIMSProfile(profile, wfcTestCard{})
 			if _, err := cfg.normalizedTunnel(); err != nil {
 				t.Fatalf("profile[%d] tunnel config: %v", i, err)
 			}
@@ -1041,7 +1041,7 @@ func TestEmbeddedThreeUKProfilesUseSHA1IKEIntegrity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, plmnWFCCard{
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), plmnWFCCard{
 				mcc:       "234",
 				mnc:       "20",
 				mncLength: 2,
@@ -1070,7 +1070,7 @@ func TestEmbeddedIMSProfilesExplicitlyConfigureChildSAMultipleProposals(t *testi
 	}
 
 	var profiles []profileConfig
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	for i, profile := range profiles {
@@ -1115,7 +1115,7 @@ func TestIMSProfileMapsChildSAMultipleProposals(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -1529,7 +1529,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 	}{
 		{
 			name: "embedded profile fills epdg",
-			cfg: Config{
+			cfg: Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			},
@@ -1538,7 +1538,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		},
 		{
 			name: "explicit epdg still wins",
-			cfg: Config{
+			cfg: Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{EPDG: "epdg.example.com"}),
 			},
@@ -1547,7 +1547,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		},
 		{
 			name: "embedded two digit mnc profile matches padded card mnc",
-			cfg: Config{
+			cfg: Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			},
@@ -1556,7 +1556,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 		},
 		{
 			name: "embedded gid profile wins over base profile",
-			cfg: Config{
+			cfg: Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			},
@@ -1579,7 +1579,7 @@ func TestConfigNormalizedUsesEmbeddedWFCProfile(t *testing.T) {
 }
 
 func TestConfigNormalizedUsesEmbeddedLivenessTimeout(t *testing.T) {
-	cfg := Config{
+	cfg := Config{Carriers: privateIMSProfiles(t),
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
 	}
@@ -1594,7 +1594,7 @@ func TestConfigNormalizedUsesEmbeddedLivenessTimeout(t *testing.T) {
 
 func TestEmbeddedWFCProfilesDeclareLivenessTimeout(t *testing.T) {
 	var profiles []imsProfile
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
@@ -1647,7 +1647,7 @@ func TestEmbeddedWFCConfigGiffgaffSelectors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -1702,7 +1702,7 @@ func TestEmbeddedWFCConfigPixelEPDG(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{
+			got, err := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			}.normalized(tt.card)
@@ -1717,7 +1717,7 @@ func TestEmbeddedWFCConfigPixelEPDG(t *testing.T) {
 }
 
 func TestEmbeddedWFCConfigATTUsesConfiguredPublicIdentity(t *testing.T) {
-	got, err := Config{
+	got, err := Config{Carriers: privateIMSProfiles(t),
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
 	}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
@@ -1760,7 +1760,7 @@ func TestEmbeddedIMSVoiceCarrierCapabilities(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -1793,7 +1793,7 @@ func TestEmbeddedIMSVoicePixelSessionRefresher(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -1809,7 +1809,7 @@ func TestEmbeddedIMSVoicePixelSessionRefresher(t *testing.T) {
 
 func TestEmbeddedIMSProfileCatalogSizeAndKeys(t *testing.T) {
 	var profiles []imsProfile
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	if len(profiles) != 1705 {
@@ -1843,7 +1843,7 @@ func TestEmbeddedPixelIMSIPrefixProfiles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, plmnWFCCard{mcc: "204", mnc: "04", mncLength: 2, imsi: tt.imsi})
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), plmnWFCCard{mcc: "204", mnc: "04", mncLength: 2, imsi: tt.imsi})
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -1886,7 +1886,7 @@ func TestEmbeddedIMSUserAgentTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, tt.card)
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), tt.card)
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -1897,7 +1897,7 @@ func TestEmbeddedIMSUserAgentTemplate(t *testing.T) {
 				t.Fatalf("IMSUserAgent = %q, want %q", profile.IMSUserAgent, tt.wantTemplate)
 			}
 
-			got := renderIMSUserAgent(profile.IMSUserAgent, Config{Terminal: terminal}, profile)
+			got := renderIMSUserAgent(profile.IMSUserAgent, Config{Carriers: privateIMSProfiles(t), Terminal: terminal}, profile)
 			if got != tt.wantRendered {
 				t.Fatalf("renderIMSUserAgent() = %q, want %q", got, tt.wantRendered)
 			}
@@ -1907,7 +1907,7 @@ func TestEmbeddedIMSUserAgentTemplate(t *testing.T) {
 
 func TestEmbeddedIMSUserAgentsUsePixelPlaceholderFormat(t *testing.T) {
 	var profiles []imsProfile
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	samsungPlaceholders := []string{
@@ -1971,7 +1971,7 @@ func TestEmbeddedRequestURIFormatSourcePriority(t *testing.T) {
 		{name: "Pixel and Samsung conflict uses Pixel", key: "310300|", want: imsvoice.RequestURIFormatSIP},
 	}
 	var profiles []imsProfile
-	if err := json.Unmarshal(embeddedIMSConfig, &profiles); err != nil {
+	if err := json.Unmarshal(privateIMSConfig(t), &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	formats := make(map[string]imsvoice.RequestURIFormat, len(profiles))
@@ -2003,7 +2003,7 @@ func TestEmbeddedChinaCarrierVoiceTimers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, ok, err := parseIMSProfile(embeddedIMSConfig, plmnWFCCard{mcc: "460", mnc: tt.mnc, mncLength: 2})
+			profile, ok, err := parseIMSProfile(privateIMSConfig(t), plmnWFCCard{mcc: "460", mnc: tt.mnc, mncLength: 2})
 			if err != nil {
 				t.Fatalf("parseIMSProfile() error = %v", err)
 			}
@@ -2057,7 +2057,7 @@ func TestIMSVoiceProfileOwnsCarrierCapabilities(t *testing.T) {
 }
 
 func TestIMSProfileRejectsUnknownFields(t *testing.T) {
-	unknown := append([]byte(nil), embeddedIMSConfig...)
+	unknown := append([]byte(nil), privateIMSConfig(t)...)
 	var profiles []map[string]json.RawMessage
 	if err := json.Unmarshal(unknown, &profiles); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
@@ -2182,7 +2182,7 @@ func TestWFCVoiceEVSPayloadDescription(t *testing.T) {
 }
 
 func TestEmbeddedWFCConfigUsesPixelIMSVoice(t *testing.T) {
-	got, err := Config{
+	got, err := Config{Carriers: privateIMSProfiles(t),
 		Terminal: TerminalInfo{ID: testIMEI},
 		Access:   VoWiFi(VoWiFiConfig{}),
 	}.normalized(plmnWFCCard{mcc: "310", mnc: "280", mncLength: 3})
@@ -2262,7 +2262,7 @@ func TestEmbeddedWFCConfigUsesWFCWidebandDTMFPayloads(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{
+			got, err := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			}.normalized(tt.card)
@@ -2332,7 +2332,7 @@ func TestEmbeddedWFCConfigUsesAudioInactivityCallEndReasons(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{
+			got, err := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			}.normalized(tt.card)
@@ -2362,7 +2362,7 @@ func TestEmbeddedWFCConfigPreservesDisabledRTCPInactivityTimer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Config{
+			got, err := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			}.normalized(tt.card)
@@ -2402,7 +2402,7 @@ func TestEmbeddedWFCConfigMatchesNSDSProfiles(t *testing.T) {
 				mnc:       profile.MNC,
 				mncLength: len(profile.MNC),
 			}
-			got, err := Config{
+			got, err := Config{Carriers: privateIMSProfiles(t),
 				Terminal: TerminalInfo{ID: testIMEI},
 				Access:   VoWiFi(VoWiFiConfig{}),
 			}.normalized(card)

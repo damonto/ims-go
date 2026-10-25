@@ -16,8 +16,10 @@ func TestEncoderCodebookFallbackPreservesGainInput(t *testing.T) {
 		want       int16
 	}{
 		{
-			name:       "T02 23.85 frame 2 subframe 1 gain",
-			path:       "../testdata/vectors/wb/T/T_inp/T02.inp",
+			name: "T02 23.85 frame 2 subframe 1 gain",
+			// Only the three frames used by this regression are shipped.
+			// The full reference vector corpus remains optional.
+			path:       "fixtures/codebook_gain.pcm",
 			mode:       Mode2385,
 			frame:      2,
 			paramIndex: 30,
