@@ -169,4 +169,4 @@ In the final response, state what changed, what was verified, and any remaining
 limitations. When teaching a Go idiom, explain the practical reason briefly;
 use before/after examples when they help the requested change.
 
-Carrier catalogs are supplied by the integrating application. Keep synthetic parser and matching tests independent of private files; owner-only catalog regressions may use `SIGMO_CARRIER_CONFIG_DIR`. Do not restore carrier JSON embeds.
+Carrier catalogs are supplied by the integrating application. Keep synthetic parser and matching tests independent of private files; owner-only catalog regressions may use `IMS_CARRIER_CONFIG_DIR`. Do not restore carrier JSON embeds.

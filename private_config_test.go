@@ -8,7 +8,7 @@ import (
 )
 
 var loadPrivateIMSConfig = sync.OnceValues(func() ([]byte, error) {
-	return os.ReadFile(filepath.Join(os.Getenv("SIGMO_CARRIER_CONFIG_DIR"), "ims.json"))
+	return os.ReadFile(filepath.Join(os.Getenv("IMS_CARRIER_CONFIG_DIR"), "ims.json"))
 })
 var loadPrivateIMSProfiles = sync.OnceValues(func() (*CarrierProfiles, error) {
 	data, err := loadPrivateIMSConfig()
@@ -24,9 +24,9 @@ var loadPrivateIMSProfiles = sync.OnceValues(func() (*CarrierProfiles, error) {
 
 func privateIMSConfig(t *testing.T) []byte {
 	t.Helper()
-	dir := os.Getenv("SIGMO_CARRIER_CONFIG_DIR")
+	dir := os.Getenv("IMS_CARRIER_CONFIG_DIR")
 	if dir == "" {
-		t.Skip("private carrier catalog regression requires SIGMO_CARRIER_CONFIG_DIR")
+		t.Skip("private carrier catalog regression requires IMS_CARRIER_CONFIG_DIR")
 	}
 	data, err := loadPrivateIMSConfig()
 	if err != nil {

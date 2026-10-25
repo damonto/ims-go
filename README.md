@@ -333,7 +333,7 @@ or redistributing those components.
 
 ### Caller-supplied carrier files
 
-The example accepts `-carrier-config-dir /path/to/private-files`. Carrier files are not included in this repository. The integrating application owns loading, authorization and any remote delivery. Public tests use synthetic inputs; owner-only catalog regression tests accept `SIGMO_CARRIER_CONFIG_DIR`.
+The example accepts `-carrier-config-dir /path/to/private-files`. Carrier files are not included in this repository. The integrating application owns loading, authorization and any remote delivery. Public tests use synthetic inputs; owner-only catalog regression tests accept `IMS_CARRIER_CONFIG_DIR`.
 
 ## License
 
