@@ -17,8 +17,6 @@ const (
 	SampleRateWB  = 16000
 	SampleRateSWB = 32000
 	SampleRateFB  = 48000
-
-	maxFrameBits = 2560
 )
 
 // Format identifies the codec mode carried by an EVS RTP payload frame.

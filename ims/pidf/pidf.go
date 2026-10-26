@@ -1,3 +1,4 @@
+// Package pidf builds IMS geolocation presence documents.
 package pidf
 
 import (

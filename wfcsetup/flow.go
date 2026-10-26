@@ -1,3 +1,4 @@
+// Package wfcsetup implements carrier Wi-Fi Calling entitlement and activation flows.
 package wfcsetup
 
 import (

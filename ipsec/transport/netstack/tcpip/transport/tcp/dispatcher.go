@@ -61,14 +61,6 @@ func (q *epQueue) dequeue() *Endpoint {
 	return nil
 }
 
-// empty returns true if the queue is empty, false otherwise.
-func (q *epQueue) empty() bool {
-	q.mu.Lock()
-	v := q.list.Empty()
-	q.mu.Unlock()
-	return v
-}
-
 // processor is responsible for processing packets queued to a tcp endpoint.
 type processor struct {
 	epQ             epQueue

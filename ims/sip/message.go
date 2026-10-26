@@ -1,3 +1,4 @@
+// Package sip parses and serializes SIP messages and headers.
 package sip
 
 import (

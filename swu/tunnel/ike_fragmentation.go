@@ -119,10 +119,7 @@ func (s *Session) openIKEPacketForState(state informationalState, packet ike.Pac
 func canRetransmitCachedResponse(packet ike.Packet) bool {
 	fragment, _, ok := encryptedFragmentPayload(packet.Payloads)
 	if !ok {
-		if len(packet.Payloads) != 1 {
-			return false
-		}
-		return true
+		return len(packet.Payloads) == 1
 	}
 	return fragment.FragmentNumber == 1
 }

@@ -1,3 +1,4 @@
+// Package lte describes IMS PDN configuration and LTE access information.
 package lte
 
 import (

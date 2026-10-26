@@ -108,12 +108,12 @@ func reverseValues(values []string) []string {
 func dialogContactURI(msg sip.Message) (string, error) {
 	contacts := msg.HeaderList("Contact")
 	if len(contacts) != 1 {
-		return "", fmt.Errorf("Contact field count is %d, want 1", len(contacts))
+		return "", fmt.Errorf("contact field count is %d, want 1", len(contacts))
 	}
 	uri := strings.TrimSpace(sip.AddressURI(contacts[0]))
 	lowerURI := strings.ToLower(uri)
 	if !strings.HasPrefix(lowerURI, "sip:") && !strings.HasPrefix(lowerURI, "sips:") {
-		return "", errors.New("Contact must contain a SIP or SIPS URI")
+		return "", errors.New("contact must contain a SIP or SIPS URI")
 	}
 	return uri, nil
 }

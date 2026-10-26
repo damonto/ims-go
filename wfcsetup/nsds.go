@@ -731,7 +731,7 @@ func nsdsResponseCodeName(code int) string {
 }
 
 func nsdsE911Info(response nsdsResponse) *E911Info {
-	if response.AddressID == "" && response.AIDExpiration.Time.IsZero() && response.ServerURL == "" && response.ServerData == "" {
+	if response.AddressID == "" && response.AIDExpiration.IsZero() && response.ServerURL == "" && response.ServerData == "" {
 		return nil
 	}
 	return &E911Info{
@@ -787,10 +787,10 @@ func (a nsdsAIDExpiration) MarshalText() ([]byte, error) {
 }
 
 func (a nsdsAIDExpiration) AppendText(dst []byte) ([]byte, error) {
-	if a.Time.IsZero() {
+	if a.IsZero() {
 		return dst, nil
 	}
-	return append(dst, a.Time.Format(time.RFC3339Nano)...), nil
+	return append(dst, a.Format(time.RFC3339Nano)...), nil
 }
 
 func (r nsdsResponse) LocationTCOK() bool {

@@ -308,13 +308,13 @@ func (s *pitchFrState) pitch(
 		if t0Max-tmpLag > 4 {
 			tmpLag = t0Max - 4
 		}
-		switch {
-		case lag == tmpLag || lag == tmpLag-1:
+		switch lag {
+		case tmpLag, tmpLag - 1:
 			lag, frac = searchFrac(lag, frac, lastFrac, corr[:], params.flag3)
-		case lag == tmpLag-2:
+		case tmpLag - 2:
 			frac = 0
 			lag, frac = searchFrac(lag, frac, lastFrac, corr[:], params.flag3)
-		case lag == tmpLag+1:
+		case tmpLag + 1:
 			lastFrac = 0
 			lag, frac = searchFrac(lag, frac, lastFrac, corr[:], params.flag3)
 		default:

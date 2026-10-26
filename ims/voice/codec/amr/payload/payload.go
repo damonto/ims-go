@@ -1,3 +1,4 @@
+// Package payload encodes and decodes AMR single-frame payloads.
 package payload
 
 import (

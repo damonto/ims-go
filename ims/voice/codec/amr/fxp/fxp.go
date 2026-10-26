@@ -1,3 +1,4 @@
+// Package fxp provides saturating fixed-point arithmetic for AMR codecs.
 package fxp
 
 import "math/bits"

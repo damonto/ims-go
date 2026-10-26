@@ -1,3 +1,4 @@
+// Package identity constructs and normalizes IMS subscriber identities.
 package identity
 
 import (

@@ -50,14 +50,6 @@ const (
 	gprsTimer3Unit1Minute   byte = 5
 	gprsTimer3Unit320Hours  byte = 6
 	gprsTimer3UnitDisabled  byte = 7
-
-	gprsTimer3Duration10Minutes = 10 * time.Minute
-	gprsTimer3Duration1Hour     = time.Hour
-	gprsTimer3Duration10Hours   = 10 * time.Hour
-	gprsTimer3Duration2Seconds  = 2 * time.Second
-	gprsTimer3Duration30Seconds = 30 * time.Second
-	gprsTimer3Duration1Minute   = time.Minute
-	gprsTimer3Duration320Hours  = 320 * time.Hour
 )
 
 type backoffDelayCarrier interface {
@@ -198,19 +190,19 @@ func gprsTimer3Duration(value byte) (time.Duration, bool) {
 	}
 	switch value >> gprsTimer3UnitShift {
 	case gprsTimer3Unit10Minutes:
-		return time.Duration(timer) * gprsTimer3Duration10Minutes, true
+		return time.Duration(timer) * 10 * time.Minute, true
 	case gprsTimer3Unit1Hour:
-		return time.Duration(timer) * gprsTimer3Duration1Hour, true
+		return time.Duration(timer) * time.Hour, true
 	case gprsTimer3Unit10Hours:
-		return time.Duration(timer) * gprsTimer3Duration10Hours, true
+		return time.Duration(timer) * 10 * time.Hour, true
 	case gprsTimer3Unit2Seconds:
-		return time.Duration(timer) * gprsTimer3Duration2Seconds, true
+		return time.Duration(timer) * 2 * time.Second, true
 	case gprsTimer3Unit30Seconds:
-		return time.Duration(timer) * gprsTimer3Duration30Seconds, true
+		return time.Duration(timer) * 30 * time.Second, true
 	case gprsTimer3Unit1Minute:
-		return time.Duration(timer) * gprsTimer3Duration1Minute, true
+		return time.Duration(timer) * time.Minute, true
 	case gprsTimer3Unit320Hours:
-		return time.Duration(timer) * gprsTimer3Duration320Hours, true
+		return time.Duration(timer) * 320 * time.Hour, true
 	default:
 		return 0, false
 	}

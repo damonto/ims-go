@@ -137,7 +137,7 @@ func (d imsProfileDuration) MarshalText() ([]byte, error) {
 }
 
 func (d imsProfileDuration) AppendText(dst []byte) ([]byte, error) {
-	return append(dst, d.Duration.String()...), nil
+	return append(dst, d.String()...), nil
 }
 
 func (d *imsProfileDuration) UnmarshalText(text []byte) error {

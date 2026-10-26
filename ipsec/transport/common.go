@@ -1,7 +1,7 @@
+// Package transport provides userspace networking over IPsec packet sessions.
 package transport
 
 import (
-	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
@@ -15,11 +15,6 @@ import (
 	"github.com/damonto/ims-go/ipsec/esp"
 	"github.com/damonto/ims-go/ipsec/packet"
 )
-
-func packetStartLine(data []byte) string {
-	line, _, _ := bytes.Cut(data, []byte("\n"))
-	return strings.TrimSpace(string(line))
-}
 
 const (
 	SecureModeTransport    = "trans"

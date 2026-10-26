@@ -219,7 +219,7 @@ func makeRouteInner(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr 
 		routeInfo: routeInfo{
 			NetProto:         netProto,
 			LocalAddress:     localAddr,
-			LocalLinkAddress: outgoingNIC.NetworkLinkEndpoint.LinkAddress(),
+			LocalLinkAddress: outgoingNIC.LinkAddress(),
 			RemoteAddress:    remoteAddr,
 			Loop:             loop,
 		},
@@ -285,7 +285,7 @@ func (r *Route) RequiresTXTransportChecksum() bool {
 	if r.local() {
 		return false
 	}
-	return r.outgoingNIC.NetworkLinkEndpoint.Capabilities()&CapabilityTXChecksumOffload == 0
+	return r.outgoingNIC.Capabilities()&CapabilityTXChecksumOffload == 0
 }
 
 // HasGVisorGSOCapability returns true if the route supports gVisor GSO.
@@ -355,13 +355,6 @@ func (r *Route) resolvedFields(afterResolve func(ResolvedFieldsResult)) (RouteIn
 		afterResolve(ResolvedFieldsResult{RouteInfo: fields, Err: nil})
 	}
 	return fields, nil, nil
-}
-
-func (r *Route) nextHop() tcpip.Address {
-	if r.NextHop().BitLen() == 0 {
-		return r.RemoteAddress()
-	}
-	return r.NextHop()
 }
 
 // local returns true if the route is a local route.

@@ -1,3 +1,4 @@
+// Package ipsec defines the packet-session contracts shared by SWu and LTE access.
 package ipsec
 
 import (

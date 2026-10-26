@@ -1,3 +1,4 @@
+// Package ike encodes and decodes IKEv2 messages and payloads.
 package ike
 
 import (

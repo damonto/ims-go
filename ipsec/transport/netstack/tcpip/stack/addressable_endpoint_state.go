@@ -128,12 +128,6 @@ func (a *AddressableEndpointState) ForEachPrimaryEndpoint(f func(AddressEndpoint
 	}
 }
 
-func (a *AddressableEndpointState) releaseAddressState(addrState *addressState) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.releaseAddressStateLocked(addrState)
-}
-
 // releaseAddressStateLocked removes addrState from a's address state
 // (primary and endpoints list).
 //

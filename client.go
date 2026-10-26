@@ -1,3 +1,4 @@
+// Package ims provides IMS registration, SMS, USSD, and voice over VoWiFi and VoLTE.
 package ims
 
 import (

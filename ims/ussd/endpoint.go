@@ -1,3 +1,4 @@
+// Package ussd implements USSD sessions over IMS.
 package ussd
 
 import (

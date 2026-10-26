@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package ip provides errors and statistics shared by the IPv4 and IPv6 protocols.
 package ip
 
 import (

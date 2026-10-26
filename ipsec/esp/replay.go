@@ -56,10 +56,7 @@ func (w ReplayWindow) WouldAccept(sequence uint32) bool {
 		return false
 	}
 	bit := uint64(1) << delta
-	if w.bitmap&bit != 0 {
-		return false
-	}
-	return true
+	return w.bitmap&bit == 0
 }
 
 func NextSequence(sequence *uint32) (uint32, bool) {

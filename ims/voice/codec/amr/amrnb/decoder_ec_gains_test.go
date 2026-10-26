@@ -49,8 +49,10 @@ func TestECGainCodeResetConcealAndUpdate(t *testing.T) {
 			pred.pastQuaEn[0], pred.pastQuaEnMR122[0], -8192, minEnergyMR122)
 	}
 
-	gain := int16(100)
-	gain = state.update(false, false, gain)
+	gain := state.update(false, false, 100)
+	if gain != 100 {
+		t.Fatalf("good code gain after update = %d, want 100", gain)
+	}
 	if state.prevGC != 100 || state.pastGainCode != 100 || state.gbuf[4] != 100 {
 		t.Fatalf("code update state = %+v, want prev/past/tail 100", state)
 	}

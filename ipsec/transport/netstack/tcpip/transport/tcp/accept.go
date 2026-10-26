@@ -197,7 +197,7 @@ func (l *listenContext) createConnectingEndpoint(s *segment, rcvdSynOpts header.
 	n = newEndpoint(l.stack, l.protocol, netProto, queue)
 	n.mu.Lock()
 	n.ops.SetV6Only(l.v6Only)
-	n.TransportEndpointInfo.ID = s.id
+	n.ID = s.id
 	n.boundNICID = s.pkt.NICID
 	n.route = route
 	n.effectiveNetProtos = []tcpip.NetworkProtocolNumber{s.pkt.NetworkProtocolNumber}
@@ -274,7 +274,7 @@ func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, qu
 	if err := ep.stack.RegisterTransportEndpoint(
 		ep.effectiveNetProtos,
 		ProtocolNumber,
-		ep.TransportEndpointInfo.ID,
+		ep.ID,
 		ep,
 		ep.boundPortFlags,
 		ep.boundBindToDevice,
@@ -371,14 +371,14 @@ func (e *Endpoint) propagateInheritableOptionsLocked(n *Endpoint) {
 // +checklocks:e.mu
 func (e *Endpoint) reserveTupleLocked() bool {
 	dest := tcpip.FullAddress{
-		Addr: e.TransportEndpointInfo.ID.RemoteAddress,
-		Port: e.TransportEndpointInfo.ID.RemotePort,
+		Addr: e.ID.RemoteAddress,
+		Port: e.ID.RemotePort,
 	}
 	portRes := ports.Reservation{
 		Networks:     e.effectiveNetProtos,
 		Transport:    ProtocolNumber,
-		Addr:         e.TransportEndpointInfo.ID.LocalAddress,
-		Port:         e.TransportEndpointInfo.ID.LocalPort,
+		Addr:         e.ID.LocalAddress,
+		Port:         e.ID.LocalPort,
 		Flags:        e.boundPortFlags,
 		BindToDevice: e.boundBindToDevice,
 		Dest:         dest,
@@ -670,7 +670,7 @@ func (e *Endpoint) handleListenSegment(ctx *listenContext, s *segment) tcpip.Err
 		if err := n.stack.RegisterTransportEndpoint(
 			n.effectiveNetProtos,
 			ProtocolNumber,
-			n.TransportEndpointInfo.ID,
+			n.ID,
 			n,
 			n.boundPortFlags,
 			n.boundBindToDevice,

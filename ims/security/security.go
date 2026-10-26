@@ -1,3 +1,4 @@
+// Package security implements IMS AKA authentication and security negotiation.
 package security
 
 import (

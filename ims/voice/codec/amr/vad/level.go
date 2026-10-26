@@ -1,3 +1,4 @@
+// Package vad provides band-level calculations for AMR voice activity detection.
 package vad
 
 import "github.com/damonto/ims-go/ims/voice/codec/amr/fxp"

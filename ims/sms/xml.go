@@ -285,7 +285,7 @@ func decodeXMLCorrelationID(decoder *xml.Decoder, documentNamespace string) (xml
 				}
 				senderSeen = true
 				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return xmlCorrelationID{}, fmt.Errorf("Sender: %w", err)
+					return xmlCorrelationID{}, fmt.Errorf("decoding Sender: %w", err)
 				}
 				out.Sender = strings.TrimSpace(value)
 				if err := validateXMLSIPURI("Correlation-ID Sender", out.Sender); err != nil {
@@ -298,7 +298,7 @@ func decodeXMLCorrelationID(decoder *xml.Decoder, documentNamespace string) (xml
 				}
 				receiverSeen = true
 				if err := decoder.DecodeElement(&value, &tok); err != nil {
-					return xmlCorrelationID{}, fmt.Errorf("Receiver: %w", err)
+					return xmlCorrelationID{}, fmt.Errorf("decoding Receiver: %w", err)
 				}
 				out.Receiver = strings.TrimSpace(value)
 				if err := validateXMLSIPURI("Correlation-ID Receiver", out.Receiver); err != nil {

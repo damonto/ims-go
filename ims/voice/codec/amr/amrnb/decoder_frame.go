@@ -38,9 +38,8 @@ func (s *decoderCoreState) decodeGoodFrame(mode Mode, params []int16, dst []int1
 }
 
 type speechFrameOptions struct {
-	badFrame          bool
-	potentialDegrade  bool
-	carryNoDataParams bool
+	badFrame         bool
+	potentialDegrade bool
 }
 
 func (s *decoderCoreState) decodeSpeechFrame(

@@ -213,7 +213,7 @@ func (h *handshake) resetState() {
 	h.flags = header.TCPFlagSyn
 	h.ackNum = 0
 	h.mss = 0
-	h.iss = generateSecureISN(h.ep.TransportEndpointInfo.ID, h.ep.stack.Clock(), h.ep.protocol.seqnumSecret)
+	h.iss = generateSecureISN(h.ep.ID, h.ep.stack.Clock(), h.ep.protocol.seqnumSecret)
 }
 
 // generateSecureISN generates a secure Initial Sequence number based on the
@@ -275,7 +275,7 @@ func (h *handshake) resetToSynRcvd(iss seqnum.Value, irs seqnum.Value, opts head
 // checkAck checks if the ACK number, if present, of a segment received during
 // a TCP 3-way handshake is valid.
 func (h *handshake) checkAck(s *segment) bool {
-	return !(s.flags.Contains(header.TCPFlagAck) && s.ackNumber != h.iss+1)
+	return !s.flags.Contains(header.TCPFlagAck) || s.ackNumber == h.iss+1
 }
 
 // synSentState handles a segment received when the TCP 3-way handshake is in
@@ -362,7 +362,7 @@ func (h *handshake) synSentState(s *segment) tcpip.Error {
 		ttl = h.ep.route.DefaultTTL()
 	}
 	h.ep.sendSynTCP(h.ep.route, tcpFields{
-		id:        h.ep.TransportEndpointInfo.ID,
+		id:        h.ep.ID,
 		ttl:       ttl,
 		tos:       h.ep.sendTOS,
 		flags:     h.flags,
@@ -450,7 +450,7 @@ func (h *handshake) synRcvdState(s *segment) tcpip.Error {
 			MSS:           h.ep.amss,
 		}
 		h.ep.sendSynTCP(h.ep.route, tcpFields{
-			id:        h.ep.TransportEndpointInfo.ID,
+			id:        h.ep.ID,
 			ttl:       calculateTTL(h.ep.route, h.ep.ipv4TTL, h.ep.ipv6HopLimit),
 			tos:       h.ep.sendTOS,
 			flags:     h.flags,
@@ -590,7 +590,7 @@ func (h *handshake) start() {
 
 	h.sendSYNOpts = synOpts
 	h.ep.sendSynTCP(h.ep.route, tcpFields{
-		id:        h.ep.TransportEndpointInfo.ID,
+		id:        h.ep.ID,
 		ttl:       calculateTTL(h.ep.route, h.ep.ipv4TTL, h.ep.ipv6HopLimit),
 		tos:       h.ep.sendTOS,
 		flags:     h.flags,
@@ -628,7 +628,7 @@ func (h *handshake) retransmitHandlerLocked() tcpip.Error {
 	// retransmitted on their own).
 	if h.active || !h.acked || h.deferAccept != 0 && e.stack.Clock().NowMonotonic().Sub(h.startTime) > h.deferAccept {
 		e.sendSynTCP(e.route, tcpFields{
-			id:        e.TransportEndpointInfo.ID,
+			id:        e.ID,
 			ttl:       calculateTTL(e.route, e.ipv4TTL, e.ipv6HopLimit),
 			tos:       e.sendTOS,
 			flags:     h.flags,
@@ -1034,7 +1034,7 @@ func (e *Endpoint) sendRaw(pkt *stack.PacketBuffer, flags header.TCPFlags, seq, 
 	}
 	pkt.ReserveHeaderBytes(hdrSize)
 	return e.sendTCP(e.route, tcpFields{
-		id:     e.TransportEndpointInfo.ID,
+		id:     e.ID,
 		ttl:    calculateTTL(e.route, e.ipv4TTL, e.ipv6HopLimit),
 		tos:    e.sendTOS,
 		flags:  flags,
@@ -1135,13 +1135,13 @@ func (e *Endpoint) transitionToStateCloseLocked() {
 // only when the endpoint is in StateClose and we want to deliver the segment
 // to any other listening endpoint. We reply with RST if we cannot find one.
 func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
-	ep := e.stack.FindTransportEndpoint(e.NetProto, e.TransProto, e.TransportEndpointInfo.ID, s.pkt.NICID)
-	if ep == nil && e.NetProto == header.IPv6ProtocolNumber && e.TransportEndpointInfo.ID.LocalAddress.To4() != (tcpip.Address{}) {
+	ep := e.stack.FindTransportEndpoint(e.NetProto, e.TransProto, e.ID, s.pkt.NICID)
+	if ep == nil && e.NetProto == header.IPv6ProtocolNumber && e.ID.LocalAddress.To4() != (tcpip.Address{}) {
 		// Dual-stack socket, try IPv4.
 		ep = e.stack.FindTransportEndpoint(
 			header.IPv4ProtocolNumber,
 			e.TransProto,
-			e.TransportEndpointInfo.ID,
+			e.ID,
 			s.pkt.NICID,
 		)
 	}

@@ -134,8 +134,8 @@ func (s *encoderPreprocessState) processFrame(dst []int16, pcm []int16) []int16 
 		decimate16kTo12k8(dst[frameSamples12k8:frameSamples12k8], zeros[:])
 
 	s.highpass50Hz(frame)
-	lookaheadHP := s.hp50Mem
-	lookaheadHP = highpass50HzAt12k8(lookahead, lookaheadHP)
+	// Filter lookahead using a copy of the frame's high-pass filter state.
+	highpass50HzAt12k8(lookahead, s.hp50Mem)
 	out := dst[:len(frame)+len(lookahead)]
 	s.preemphasisAndScale(out)
 	return out

@@ -65,10 +65,7 @@ func (s *backgroundNoiseState) detect(ltpGainHist []int16, speech []int16, voice
 		ltpLimit = 15565
 	}
 
-	prevVoiced := false
-	if len(ltpGainHist) >= ltpGainHistoryLen && gmedN(ltpGainHist[4:9]) > ltpLimit {
-		prevVoiced = true
-	}
+	prevVoiced := len(ltpGainHist) >= ltpGainHistoryLen && gmedN(ltpGainHist[4:9]) > ltpLimit
 	if s.bgHangover > 20 && len(ltpGainHist) >= ltpGainHistoryLen {
 		prevVoiced = gmedN(ltpGainHist[:ltpGainHistoryLen]) > ltpLimit
 	}

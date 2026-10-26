@@ -1,3 +1,4 @@
+// Package bitstream packs and unpacks AMR analysis parameters and speech bits.
 package bitstream
 
 import (

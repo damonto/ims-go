@@ -1,3 +1,4 @@
+// Package esp implements ESP encryption, integrity, and replay protection.
 package esp
 
 import (

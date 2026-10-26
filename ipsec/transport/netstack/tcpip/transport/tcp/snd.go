@@ -422,20 +422,20 @@ func (s *sender) sendAck() {
 // +checklocks:s.ep.mu
 func (s *sender) updateRTO(rtt time.Duration) {
 	s.rtt.Lock()
-	if !s.rtt.TCPRTTState.SRTTInited {
-		s.rtt.TCPRTTState.RTTVar = rtt / 2
-		s.rtt.TCPRTTState.SRTT = rtt
-		s.rtt.TCPRTTState.SRTTInited = true
+	if !s.rtt.SRTTInited {
+		s.rtt.RTTVar = rtt / 2
+		s.rtt.SRTT = rtt
+		s.rtt.SRTTInited = true
 	} else {
-		diff := s.rtt.TCPRTTState.SRTT - rtt
+		diff := s.rtt.SRTT - rtt
 		if diff < 0 {
 			diff = -diff
 		}
 		// Use RFC6298 standard algorithm to update TCPRTTState.RTTVar and TCPRTTState.SRTT when
 		// no timestamps are available.
 		if !s.ep.SendTSOk {
-			s.rtt.TCPRTTState.RTTVar = (3*s.rtt.TCPRTTState.RTTVar + diff) / 4
-			s.rtt.TCPRTTState.SRTT = (7*s.rtt.TCPRTTState.SRTT + rtt) / 8
+			s.rtt.RTTVar = (3*s.rtt.RTTVar + diff) / 4
+			s.rtt.SRTT = (7*s.rtt.SRTT + rtt) / 8
 		} else {
 			// When we are taking RTT measurements of every ACK then
 			// we need to use a modified method as specified in
@@ -457,18 +457,18 @@ func (s *sender) updateRTO(rtt time.Duration) {
 
 			alphaPrime := alpha / expectedSamples
 			betaPrime := beta / expectedSamples
-			rttVar := (1-betaPrime)*s.rtt.TCPRTTState.RTTVar.Seconds() + betaPrime*diff.Seconds()
-			srtt := (1-alphaPrime)*s.rtt.TCPRTTState.SRTT.Seconds() + alphaPrime*rtt.Seconds()
-			s.rtt.TCPRTTState.RTTVar = time.Duration(rttVar * float64(time.Second))
-			s.rtt.TCPRTTState.SRTT = time.Duration(srtt * float64(time.Second))
+			rttVar := (1-betaPrime)*s.rtt.RTTVar.Seconds() + betaPrime*diff.Seconds()
+			srtt := (1-alphaPrime)*s.rtt.SRTT.Seconds() + alphaPrime*rtt.Seconds()
+			s.rtt.RTTVar = time.Duration(rttVar * float64(time.Second))
+			s.rtt.SRTT = time.Duration(srtt * float64(time.Second))
 		}
 	}
 
-	if s.rtt.TCPRTTState.SRTT < MinSRTT {
-		s.rtt.TCPRTTState.SRTT = MinSRTT
+	if s.rtt.SRTT < MinSRTT {
+		s.rtt.SRTT = MinSRTT
 	}
 
-	s.RTO = s.rtt.TCPRTTState.SRTT + 4*s.rtt.TCPRTTState.RTTVar
+	s.RTO = s.rtt.SRTT + 4*s.rtt.RTTVar
 	s.RTTState = s.rtt.TCPRTTState
 	s.rtt.Unlock()
 	if s.RTO < s.minRTO {

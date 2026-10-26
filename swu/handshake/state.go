@@ -1,3 +1,4 @@
+// Package handshake defines configuration and state for SWu IKE handshakes.
 package handshake
 
 import (

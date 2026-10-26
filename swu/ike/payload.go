@@ -288,10 +288,6 @@ func (t Transform) AppendBinary(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
-func (t Transform) marshalBinary(next byte) ([]byte, error) {
-	return t.appendBinary(nil, next)
-}
-
 func (t Transform) appendBinary(dst []byte, next byte) ([]byte, error) {
 	start := len(dst)
 	dst = append(dst, make([]byte, payloadHeaderSize)...)
@@ -372,10 +368,6 @@ func (p Proposal) AppendBinary(dst []byte) ([]byte, error) {
 		}
 	}
 	return dst, nil
-}
-
-func (p Proposal) marshalBinary(next byte) ([]byte, error) {
-	return p.appendBinary(nil, next)
 }
 
 func (p Proposal) appendBinary(dst []byte, next byte) ([]byte, error) {
@@ -1486,10 +1478,6 @@ func MarshalPayloadChain(payloads []Payload) (byte, []byte, error) {
 		}
 	}
 	return first, body, nil
-}
-
-func marshalSinglePayload(payload Payload, next byte) ([]byte, error) {
-	return appendSinglePayload(nil, payload, next)
 }
 
 func appendSinglePayload(dst []byte, payload Payload, next byte) ([]byte, error) {

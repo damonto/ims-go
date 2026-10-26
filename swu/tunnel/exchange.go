@@ -433,48 +433,6 @@ func (s *Session) acceptIKEProtectedBytes(crypto *ikeCrypto, wire []byte, now ti
 	return s.acceptIKESAInboundBytes(protectedBytes, now), nil
 }
 
-func (s *Session) readOuterClosed() error {
-	if s.isClosed() {
-		return errors.New("reading packet: session is closed")
-	}
-	return nil
-}
-
-func (s *Session) readOuterCandidate(buf []byte) ([]byte, net.Addr, error) {
-	if err := s.conn.SetReadDeadline(time.Now().Add(outerReadPollDelay)); err != nil {
-		return nil, nil, fmt.Errorf("setting read deadline: %w", err)
-	}
-	n, addr, err := s.conn.ReadFrom(buf)
-	if err != nil {
-		return nil, nil, err
-	}
-	return append([]byte(nil), buf[:n]...), addr, nil
-}
-
-func (s *Session) readOuterPacket(ctx context.Context) ([]byte, net.Addr, error) {
-	buf := make([]byte, maxUDPPacketSize)
-	for {
-		if err := s.readOuterClosed(); err != nil {
-			return nil, nil, err
-		}
-		packet, addr, err := s.readOuterCandidate(buf)
-		if err == nil {
-			return packet, addr, nil
-		}
-		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-			return nil, nil, fmt.Errorf("reading packet: %w", err)
-		}
-		if err := s.readOuterClosed(); err != nil {
-			return nil, nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		default:
-		}
-	}
-}
-
 func (s *Session) markProtectedRx(now time.Time) {
 	s.mu.Lock()
 	if now.After(s.lastProtectedRx) {

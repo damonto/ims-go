@@ -1,3 +1,4 @@
+// Package eapaka implements EAP-AKA and EAP-AKA' messages and key derivation.
 package eapaka
 
 import "errors"

@@ -1,3 +1,4 @@
+// Package registration implements IMS registration and registration subscriptions.
 package registration
 
 import (

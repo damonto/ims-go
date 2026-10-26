@@ -1,3 +1,4 @@
+// Package sms implements SMS over IMS and its message formats.
 package sms
 
 import (

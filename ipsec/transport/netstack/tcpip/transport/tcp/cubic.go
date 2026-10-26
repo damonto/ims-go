@@ -207,7 +207,7 @@ func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 		}
 	} else {
 		c.s.rtt.Lock()
-		srtt := c.s.rtt.TCPRTTState.SRTT
+		srtt := c.s.rtt.SRTT
 		c.s.rtt.Unlock()
 		c.s.SndCwnd = c.getCwnd(packetsAcked, c.s.SndCwnd, srtt)
 	}

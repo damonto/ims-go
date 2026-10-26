@@ -155,7 +155,7 @@ func (c EVSPayloadCodec) appendHeaderFull(dst []byte, payload EVSPayload) ([]byt
 	for _, frame := range payload.Frames {
 		dst = append(dst, frame.Data...)
 	}
-	if !c.HeaderFullOnly && !(len(dst)-start == 7 && dst[start]&evsHeaderHFlag != 0) {
+	if !c.HeaderFullOnly && (len(dst)-start != 7 || dst[start]&evsHeaderHFlag == 0) {
 		for isEVSProtectedPayloadBits((len(dst) - start) * bitsPerByte) {
 			dst = append(dst, 0)
 		}

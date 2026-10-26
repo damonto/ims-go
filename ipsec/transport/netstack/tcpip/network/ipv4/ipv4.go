@@ -28,7 +28,6 @@ import (
 
 	"github.com/damonto/ims-go/ipsec/transport/netstack/buffer"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip"
-	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/checksum"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/header"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/header/parse"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/network/fragmentation"
@@ -372,40 +371,6 @@ func (e *endpoint) handleFragments(_ *stack.Route, networkMTU uint32, pkt *stack
 			return n, pf.RemainingFragmentCount(), nil
 		}
 	}
-}
-
-// recalculateChecksum recalculates the checksum of a TCP packet.
-func recalculateChecksum(pkt *stack.PacketBuffer, r *stack.Route) tcpip.Error {
-	// RXChecksumValidated indicates that checksum verification may be
-	// safely skipped.
-	if pkt.RXChecksumValidated {
-		return nil
-	}
-	// NeedsCsum is set if the checksum offload is enabled, so no need to
-	// calculate the checksum.
-	if pkt.GSOOptions.Type != stack.GSONone && pkt.GSOOptions.NeedsCsum {
-		return nil
-	}
-	transportHeader := pkt.TransportHeader().Slice()
-	netHdr := header.IPv4(pkt.NetworkHeader().Slice())
-	if len(transportHeader) < header.TCPMinimumSize {
-		return &tcpip.ErrMalformedHeader{}
-	}
-	switch pkt.TransportProtocolNumber {
-	case header.TCPProtocolNumber:
-		tcp := header.TCP(transportHeader)
-		xsum := r.PseudoHeaderChecksum(header.TCPProtocolNumber, netHdr.PayloadLength())
-		xsum = checksum.Combine(xsum, pkt.Data().Checksum())
-		tcp.SetChecksum(0)
-		tcp.SetChecksum(^tcp.CalculateChecksum(xsum))
-	case header.UDPProtocolNumber:
-		udp := header.UDP(transportHeader)
-		xsum := r.PseudoHeaderChecksum(header.UDPProtocolNumber, netHdr.PayloadLength())
-		xsum = checksum.Combine(xsum, pkt.Data().Checksum())
-		udp.SetChecksum(0)
-		udp.SetChecksum(^udp.CalculateChecksum(xsum))
-	}
-	return nil
 }
 
 // WritePacket writes a packet to the given destination address and protocol.
@@ -1090,8 +1055,6 @@ type protocol struct {
 
 	ids    []atomic.Uint32
 	hashIV uint32
-	// idTS is the unix timestamp in milliseconds 'ids' was last accessed.
-	idTS atomic.Int64
 
 	fragmentation *fragmentation.Fragmentation
 
@@ -1156,36 +1119,6 @@ func (*protocol) OnReassemblyTimeout(*stack.PacketBuffer) {}
 
 // Wait implements stack.TransportProtocol.
 func (*protocol) Wait() {}
-
-func (p *protocol) isUnicastAddress(addr tcpip.Address) bool {
-	if addr.BitLen() != header.IPv4AddressSizeBits {
-		return false
-	}
-
-	if addr == header.IPv4Any || addr == header.IPv4Broadcast {
-		return false
-	}
-
-	if p.isSubnetLocalBroadcastAddress(addr) {
-		return false
-	}
-	return !header.IsV4MulticastAddress(addr)
-}
-
-func (p *protocol) isSubnetLocalBroadcastAddress(addr tcpip.Address) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	for _, e := range p.eps {
-		if addressEndpoint := e.AcquireAssignedAddress(addr, false /* createTemp */, stack.NeverPrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
-			subnet := addressEndpoint.Subnet()
-			if subnet.IsBroadcast(addr) {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // parseAndValidate parses the packet (including its transport layer header) and
 // returns the parsed IP header.
@@ -1266,27 +1199,6 @@ func calculateNetworkMTU(linkMTU, networkHeaderSize uint32) (uint32, tcpip.Error
 func packetMustBeFragmented(pkt *stack.PacketBuffer, networkMTU uint32) bool {
 	payload := len(pkt.TransportHeader().Slice()) + pkt.Data().Size()
 	return pkt.GSOOptions.Type == stack.GSONone && uint32(payload) > networkMTU
-}
-
-// addressToUint32 translates an IPv4 address into its little endian uint32
-// representation.
-//
-// This function does the same thing as binary.LittleEndian.Uint32 but operates
-// on a tcpip.Address (a string) without the need to convert it to a byte slice,
-// which would cause an allocation.
-func addressToUint32(addr tcpip.Address) uint32 {
-	addrBytes := addr.As4()
-	_ = addrBytes[3] // bounds check hint to compiler
-	return uint32(addrBytes[0]) | uint32(addrBytes[1])<<8 | uint32(addrBytes[2])<<16 | uint32(addrBytes[3])<<24
-}
-
-// hashRoute calculates a hash value for the given source/destination pair using
-// the addresses, transport protocol number and a 32-bit number to generate the
-// hash.
-func hashRoute(srcAddr, dstAddr tcpip.Address, protocol tcpip.TransportProtocolNumber, hashIV uint32) uint32 {
-	a := addressToUint32(srcAddr)
-	b := addressToUint32(dstAddr)
-	return hash.Hash3Words(a, b, uint32(protocol), hashIV)
 }
 
 // Options holds options to configure a new protocol.
@@ -1430,20 +1342,6 @@ func (*optionUsageForward) actions() optionActions {
 		recordRoute: optionProcess,
 		routerAlert: optionVerify,
 		unknown:     optionPass,
-	}
-}
-
-// optionUsageEcho implements optionsUsage for echo packet processing.
-// Only Timestamp and RecordRoute are processed and sent back.
-type optionUsageEcho struct{}
-
-// actions implements optionsUsage.
-func (*optionUsageEcho) actions() optionActions {
-	return optionActions{
-		timestamp:   optionProcess,
-		recordRoute: optionProcess,
-		routerAlert: optionVerify,
-		unknown:     optionRemove,
 	}
 }
 

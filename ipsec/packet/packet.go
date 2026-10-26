@@ -1,3 +1,4 @@
+// Package packet encodes and decodes IP packets and transport segments.
 package packet
 
 import (
@@ -244,15 +245,6 @@ func (s UDPSegment) AppendBinary(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
-func (s *UDPSegment) decode(data []byte, srcIP, dstIP net.IP) error {
-	segment, err := decodeUDPSegment(srcIP, dstIP, data)
-	if err != nil {
-		return err
-	}
-	*s = segment
-	return nil
-}
-
 func (s TCPSegment) MarshalBinary() ([]byte, error) {
 	return s.AppendBinary(nil)
 }
@@ -304,15 +296,6 @@ func validateTransportPort(name string, port int) error {
 	if port <= 0 || port > maxTransportPort {
 		return fmt.Errorf("%s port %d is out of range", name, port)
 	}
-	return nil
-}
-
-func (s *TCPSegment) decode(data []byte, srcIP, dstIP net.IP) error {
-	segment, err := decodeTCPSegment(srcIP, dstIP, data)
-	if err != nil {
-		return err
-	}
-	*s = segment
 	return nil
 }
 

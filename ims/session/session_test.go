@@ -874,23 +874,6 @@ func stackHasReader(sess *Stack, transport Transport) bool {
 	return ok
 }
 
-func waitForReaderCount(t *testing.T, sess *Stack, want int) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
-		sess.readMu.Lock()
-		got := len(sess.readers)
-		sess.readMu.Unlock()
-		if got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("reader count = %d, want %d", got, want)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func TestSameSIPSentBy(t *testing.T) {
 	tests := []struct {
 		name        string

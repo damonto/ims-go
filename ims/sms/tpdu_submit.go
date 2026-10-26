@@ -27,13 +27,7 @@ type submitTPDUConfig struct {
 }
 
 func newSubmitTPDU(cfg submitTPDUConfig) submitTPDU {
-	return submitTPDU{
-		Reference:           cfg.Reference,
-		Destination:         cfg.Destination,
-		Part:                cfg.Part,
-		RejectDuplicates:    cfg.RejectDuplicates,
-		RequestStatusReport: cfg.RequestStatusReport,
-	}
+	return submitTPDU(cfg)
 }
 
 func (tp submitTPDU) MarshalBinary() ([]byte, error) {

@@ -74,7 +74,6 @@ type dtxDecState struct {
 	trueSIDPeriodInv int16
 	logEnergy        int16
 	oldLogEnergy     int16
-	level            int16
 	isf              [lpcOrder]int16
 	isfOld           [lpcOrder]int16
 	cngSeed          int16

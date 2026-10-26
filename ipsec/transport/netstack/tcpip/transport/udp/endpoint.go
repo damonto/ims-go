@@ -1096,18 +1096,3 @@ func (e *endpoint) SetOwner(owner tcpip.PacketOwner) {
 func (e *endpoint) SocketOptions() *tcpip.SocketOptions {
 	return &e.ops
 }
-
-// freeze prevents any more packets from being delivered to the endpoint.
-func (e *endpoint) freeze() {
-	e.mu.Lock()
-	e.frozen = true
-	e.mu.Unlock()
-}
-
-// thaw unfreezes a previously frozen endpoint using endpoint.freeze() allows
-// new packets to be delivered again.
-func (e *endpoint) thaw() {
-	e.mu.Lock()
-	e.frozen = false
-	e.mu.Unlock()
-}

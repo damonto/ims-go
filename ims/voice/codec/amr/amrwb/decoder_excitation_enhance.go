@@ -55,10 +55,10 @@ func buildEnhancedExcitation(
 	out.scaledGainCode = fxp.Round(fxp.Shl32(gainCode, qNew))
 	for i := range subframeSamples {
 		filtered := int32(code[i]) << 16
-		switch {
-		case i == 0:
+		switch i {
+		case 0:
 			filtered = fxp.Sub32(filtered, fxp.LMult(code[1], pitchFilter))
-		case i == subframeSamples-1:
+		case subframeSamples - 1:
 			filtered = fxp.Sub32(filtered, fxp.LMult(code[i-1], pitchFilter))
 		default:
 			filtered = fxp.LMsu(filtered, code[i+1], pitchFilter)

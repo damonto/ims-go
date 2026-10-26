@@ -1,3 +1,4 @@
+// Package amrnb implements a pure-Go AMR-NB speech codec.
 package amrnb
 
 import (

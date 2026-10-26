@@ -1,3 +1,4 @@
+// Package amrwb implements a pure-Go AMR-WB speech codec.
 package amrwb
 
 import (

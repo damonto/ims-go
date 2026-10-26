@@ -79,9 +79,10 @@ func decode3Residuals(mode Mode, indices []int16) ([lpcOrder]int16, error) {
 
 	cb1 := dico1LSF3[:]
 	cb3 := dico3LSF3[:]
-	if mode == Mode475 || mode == Mode515 {
+	switch mode {
+	case Mode475, Mode515:
 		cb3 = mr5153LSF[:]
-	} else if mode == Mode795 {
+	case Mode795:
 		cb1 = mr7951LSF[:]
 	}
 
@@ -111,10 +112,11 @@ func validatePLSF3Indices(mode Mode, indices []int16) error {
 	cb1Len := len(dico1LSF3)
 	cb3Len := len(dico3LSF3)
 	index2Stride := 3
-	if mode == Mode475 || mode == Mode515 {
+	switch mode {
+	case Mode475, Mode515:
 		cb3Len = len(mr5153LSF)
 		index2Stride = 6
-	} else if mode == Mode795 {
+	case Mode795:
 		cb1Len = len(mr7951LSF)
 	}
 	if err := validateCodebookIndex("PLSF3 codebook 1", indices[0], 3, cb1Len); err != nil {

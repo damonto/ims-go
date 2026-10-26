@@ -823,7 +823,7 @@ func (s *Stack) SetNICAddress(id tcpip.NICID, addr tcpip.LinkAddress) tcpip.Erro
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
-	nic.NetworkLinkEndpoint.SetLinkAddress(addr)
+	nic.SetLinkAddress(addr)
 	return nil
 }
 
@@ -849,7 +849,7 @@ func (s *Stack) SetNICMTU(id tcpip.NICID, mtu uint32) tcpip.Error {
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
-	nic.NetworkLinkEndpoint.SetMTU(mtu)
+	nic.SetMTU(mtu)
 	return nil
 }
 
@@ -922,10 +922,10 @@ func (s *Stack) nicInfo(nic *nic, id tcpip.NICID) *NICInfo {
 
 	info := NICInfo{
 		Name:              nic.name,
-		LinkAddress:       nic.NetworkLinkEndpoint.LinkAddress(),
+		LinkAddress:       nic.LinkAddress(),
 		ProtocolAddresses: nic.primaryAddresses(),
 		Flags:             flags,
-		MTU:               nic.NetworkLinkEndpoint.MTU(),
+		MTU:               nic.MTU(),
 		Stats:             nic.stats.local,
 		NetworkStats:      netStats,
 		Context:           nic.context,
@@ -1263,7 +1263,7 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	isLocalBroadcast := remoteAddr == header.IPv4Broadcast
 	isMulticast := header.IsV4MulticastAddress(remoteAddr) || header.IsV6MulticastAddress(remoteAddr)
 	isLoopback := header.IsV4LoopbackAddress(remoteAddr) || header.IsV6LoopbackAddress(remoteAddr)
-	needRoute := !(isLocalBroadcast || isMulticast || isLinkLocal || isLoopback)
+	needRoute := !isLocalBroadcast && !isMulticast && !isLinkLocal && !isLoopback
 
 	if s.handleLocal && !isMulticast && !isLocalBroadcast {
 		if r := s.findLocalRouteRLocked(id, localAddr, remoteAddr, netProto); r != nil {
@@ -1588,7 +1588,7 @@ func (s *Stack) Wait() {
 		// Remove NIC to ensure that qDisc goroutines are correctly
 		// terminated on stack teardown.
 		act, _ := s.removeNICLocked(id, true /* closeLinkEndpoint */)
-		n.NetworkLinkEndpoint.Wait()
+		n.Wait()
 		if act != nil {
 			deferActs = append(deferActs, act)
 		}
@@ -1606,7 +1606,6 @@ func (s *Stack) Destroy() {
 	s.Wait()
 }
 
-// Pause pauses any protocol level background workers.
 // WritePacketToRemote writes a payload on the specified NIC using the provided
 // network protocol and remote link address.
 func (s *Stack) WritePacketToRemote(nicID tcpip.NICID, remote tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, payload buffer.Buffer) tcpip.Error {

@@ -1,3 +1,4 @@
+// Package ipsec implements the LTE IMS security data plane.
 package ipsec
 
 import (

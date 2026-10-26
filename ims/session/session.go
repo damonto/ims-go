@@ -1,3 +1,4 @@
+// Package session provides SIP transports, transactions, and message dispatch.
 package session
 
 import (

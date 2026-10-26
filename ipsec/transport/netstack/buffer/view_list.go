@@ -1,6 +1,6 @@
 package buffer
 
-// ElementMapper provides an identity mapping by default.
+// ViewElementMapper provides an identity mapping by default.
 //
 // This can be replaced to provide a struct that maps elements to linker
 // objects, if they are not the same. An ElementMapper is not typically
@@ -15,7 +15,7 @@ type ViewElementMapper struct{}
 //go:nosplit
 func (ViewElementMapper) linkerFor(elem *View) *View { return elem }
 
-// List is an intrusive list. Entries can be added to or removed from the list
+// ViewList is an intrusive list. Entries can be added to or removed from the list
 // in O(1) time and with no additional memory allocations.
 //
 // The zero value for List is an empty list ready to use.
@@ -198,7 +198,7 @@ func (l *ViewList) Remove(e *View) {
 	linker.SetPrev(nil)
 }
 
-// Entry is a default implementation of Linker. Users can add anonymous fields
+// ViewEntry is a default implementation of Linker. Users can add anonymous fields
 // of this type to their structs to make them automatically implement the
 // methods needed by List.
 type ViewEntry struct {

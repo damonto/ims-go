@@ -246,16 +246,12 @@ type TCPConn struct {
 	wq *waiter.Queue
 	ep tcpip.Endpoint
 
-	// readMu serializes reads and implicitly protects read.
+	// readMu serializes reads.
 	//
 	// Lock ordering:
 	// If both readMu and deadlineTimer.mu are to be used in a single
 	// request, readMu must be acquired before deadlineTimer.mu.
 	readMu sync.Mutex
-
-	// read contains bytes that have been read from the endpoint,
-	// but haven't yet been returned.
-	read []byte
 }
 
 // NewTCPConn creates a new TCPConn.
@@ -264,7 +260,7 @@ func NewTCPConn(wq *waiter.Queue, ep tcpip.Endpoint) *TCPConn {
 		wq: wq,
 		ep: ep,
 	}
-	c.deadlineTimer.init()
+	c.init()
 	return c
 }
 
@@ -602,7 +598,7 @@ func NewUDPConn(wq *waiter.Queue, ep tcpip.Endpoint) *UDPConn {
 		ep: ep,
 		wq: wq,
 	}
-	c.deadlineTimer.init()
+	c.init()
 	return c
 }
 
