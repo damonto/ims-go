@@ -113,13 +113,13 @@ an empty reply or `/bye`, `/end`, or `/quit` ends the session.
 
 Other SIM access options are:
 
-| Driver | Required options | Purpose |
-| --- | --- | --- |
-| `pcsc` (default) | `-reader` | Local PC/SC reader |
-| `at` | `-device` | Serial modem with AT+CSIM support |
-| `qmi` | `-device`, optional `-slot` | Qualcomm modem through QMI |
-| `qrtr` | Optional `-slot` | Qualcomm modem through QRTR |
-| `ccid-tcp` | `-device host:port` | APDU connection to the example's TCP bridge |
+| Driver           | Required options            | Purpose                                     |
+| ---------------- | --------------------------- | ------------------------------------------- |
+| `pcsc` (default) | `-reader`                   | Local PC/SC reader                          |
+| `at`             | `-device`                   | Serial modem with AT+CSIM support           |
+| `qmi`            | `-device`, optional `-slot` | Qualcomm modem through QMI                  |
+| `qrtr`           | Optional `-slot`            | Qualcomm modem through QRTR                 |
+| `ccid-tcp`       | `-device host:port`         | APDU connection to the example's TCP bridge |
 
 `-slot` defaults to 1. The example always selects `ims.VoWiFi`; choosing QMI or
 QRTR changes SIM access, not the IMS access mode. It has no VoLTE or voice-call
@@ -172,8 +172,8 @@ func run() (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("read carrier profiles: %w", err)
 	}
- var profiles ims.CarrierProfiles
- if err := json.Unmarshal(profileJSON, &profiles); err != nil { return err }
+	var profiles ims.CarrierProfiles
+ 	if err := json.Unmarshal(profileJSON, &profiles); err != nil { return err }
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -219,18 +219,18 @@ example also handles pending activation and web-page completion.
 
 ### Services and events
 
-| Entry point | Usage |
-| --- | --- |
-| `client.State()` | Read the current connection state and last error |
-| `client.Registration()` | Read a detached snapshot of registered public identities |
-| `client.Tunnel()` | Read SWu tunnel information; empty when no SWu tunnel is active |
-| `client.Events()` | Subscribe to state, asynchronous errors, and registration changes |
-| `client.SMS().Send(ctx, to, text)` | Send text and obtain an `SMSSubmission` with per-segment updates |
-| `client.SMS().Events()` | Subscribe to incoming messages and status reports |
-| `client.USSD().Start()` | Create a session; use `Send`, `Reply`, and `Close` with a context |
-| `client.USSD().Events()` | Subscribe to network-initiated USSD sessions |
-| `client.Voice().Dial(ctx, req)` | Dial using a `voice.DialRequest`; the returned call supports hangup, hold/resume, and DTMF |
-| `client.Voice().Events()` | Subscribe to incoming calls, call events, and received DTMF |
+| Entry point                        | Usage                                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------ |
+| `client.State()`                   | Read the current connection state and last error                                           |
+| `client.Registration()`            | Read a detached snapshot of registered public identities                                   |
+| `client.Tunnel()`                  | Read SWu tunnel information; empty when no SWu tunnel is active                            |
+| `client.Events()`                  | Subscribe to state, asynchronous errors, and registration changes                          |
+| `client.SMS().Send(ctx, to, text)` | Send text and obtain an `SMSSubmission` with per-segment updates                           |
+| `client.SMS().Events()`            | Subscribe to incoming messages and status reports                                          |
+| `client.USSD().Start()`            | Create a session; use `Send`, `Reply`, and `Close` with a context                          |
+| `client.USSD().Events()`           | Subscribe to network-initiated USSD sessions                                               |
+| `client.Voice().Dial(ctx, req)`    | Dial using a `voice.DialRequest`; the returned call supports hangup, hold/resume, and DTMF |
+| `client.Voice().Events()`          | Subscribe to incoming calls, call events, and received DTMF                                |
 
 Subscribe before `Connect` when startup events matter. Close every subscription
 when finished and keep consuming its channels: publication is nonblocking, so
@@ -290,18 +290,18 @@ UI; the library does not open a browser automatically.
 
 ## Project layout
 
-| Path | Contents |
-| --- | --- |
-| Root package | Public client, access adapters, lifecycle, configuration, events, and service facades |
-| `ims/` | SIP, transactions, registration, security, identities, SMS, USSD, and voice |
-| `ims/voice/codec/` | AMR, AMR-WB, PCMU, and EVS implementations |
-| `swu/` | IKE wire types, handshake state, and ePDG tunnel management |
-| `eapaka/` | EAP-AKA and AKA' wire messages and key derivation |
-| `ipsec/` | ESP, packet codecs, cryptography, and userspace IP transport |
-| `lte/` | LTE IMS PDN configuration and IPsec data plane |
-| `wfcsetup/` | Wi-Fi Calling entitlement and activation |
-| `examples/` | Linux VoWiFi command and web-flow callback adapters |
-| `specs/` | 3GPP/ETSI, GSMA, and RFC references used for implementation and review |
+| Path               | Contents                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| Root package       | Public client, access adapters, lifecycle, configuration, events, and service facades |
+| `ims/`             | SIP, transactions, registration, security, identities, SMS, USSD, and voice           |
+| `ims/voice/codec/` | AMR, AMR-WB, PCMU, and EVS implementations                                            |
+| `swu/`             | IKE wire types, handshake state, and ePDG tunnel management                           |
+| `eapaka/`          | EAP-AKA and AKA' wire messages and key derivation                                     |
+| `ipsec/`           | ESP, packet codecs, cryptography, and userspace IP transport                          |
+| `lte/`             | LTE IMS PDN configuration and IPsec data plane                                        |
+| `wfcsetup/`        | Wi-Fi Calling entitlement and activation                                              |
+| `examples/`        | Linux VoWiFi command and web-flow callback adapters                                   |
+| `specs/`           | 3GPP/ETSI, GSMA, and RFC references used for implementation and review                |
 
 `refs/` and `scripts/` may exist in a developer checkout but are ignored and are
 not required to build the module.
