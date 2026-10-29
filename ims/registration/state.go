@@ -1,6 +1,8 @@
 package registration
 
 import (
+	"encoding"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -80,9 +82,11 @@ func sameRegisterContactURI(got, want string) bool {
 	if sameContactURI(got, want) {
 		return true
 	}
-	gotURI, gotOK := parseComparableSIPURI(got)
-	wantURI, wantOK := parseComparableSIPURI(want)
-	if !gotOK || !wantOK || gotURI.scheme != wantURI.scheme ||
+	var gotURI, wantURI comparableSIPURI
+	if gotURI.UnmarshalText([]byte(got)) != nil || wantURI.UnmarshalText([]byte(want)) != nil {
+		return false
+	}
+	if gotURI.scheme != wantURI.scheme ||
 		gotURI.userinfo != wantURI.userinfo ||
 		!sameSIPHostPort(gotURI.hostPort, wantURI.hostPort) {
 		return false
@@ -97,9 +101,8 @@ func sameRegisterContactURI(got, want string) bool {
 }
 
 func sameContactURI(got, want string) bool {
-	gotURI, gotOK := parseComparableSIPURI(got)
-	wantURI, wantOK := parseComparableSIPURI(want)
-	if !gotOK || !wantOK {
+	var gotURI, wantURI comparableSIPURI
+	if gotURI.UnmarshalText([]byte(got)) != nil || wantURI.UnmarshalText([]byte(want)) != nil {
 		return false
 	}
 	return gotURI.scheme == wantURI.scheme &&
@@ -130,15 +133,17 @@ type comparableSIPURI struct {
 	headers    map[string]string
 }
 
-func parseComparableSIPURI(value string) (comparableSIPURI, bool) {
-	value = strings.TrimSpace(value)
+var _ encoding.TextUnmarshaler = (*comparableSIPURI)(nil)
+
+func (u *comparableSIPURI) UnmarshalText(text []byte) error {
+	value := strings.TrimSpace(string(text))
 	colon := strings.IndexByte(value, ':')
 	if colon <= 0 {
-		return comparableSIPURI{}, false
+		return errors.New("parsing SIP URI: scheme is missing")
 	}
 	scheme := strings.ToLower(value[:colon])
 	if scheme != "sip" && scheme != "sips" {
-		return comparableSIPURI{}, false
+		return errors.New("parsing SIP URI: scheme must be sip or sips")
 	}
 	rest := value[colon+1:]
 	userinfo := ""
@@ -146,27 +151,31 @@ func parseComparableSIPURI(value string) (comparableSIPURI, bool) {
 		userinfo = normalizeURIPercentEncoding(rest[:at])
 		rest = rest[at+1:]
 		if userinfo == "" || rest == "" {
-			return comparableSIPURI{}, false
+			return errors.New("parsing SIP URI: user or host is empty")
 		}
 	}
 	rest, headerText, _ := strings.Cut(rest, "?")
 	authority, parameterText, _ := strings.Cut(rest, ";")
 	if authority == "" || strings.ContainsAny(authority, " \t\r\n") {
-		return comparableSIPURI{}, false
+		return errors.New("parsing SIP URI: host is empty or contains whitespace")
 	}
 	hostPort := authority
 	parameters, parametersOK := parseURIComponents(parameterText, ";")
-	headers, headersOK := parseURIComponents(headerText, "&")
-	if !parametersOK || !headersOK {
-		return comparableSIPURI{}, false
+	if !parametersOK {
+		return errors.New("parsing SIP URI: invalid parameters")
 	}
-	return comparableSIPURI{
+	headers, headersOK := parseURIComponents(headerText, "&")
+	if !headersOK {
+		return errors.New("parsing SIP URI: invalid headers")
+	}
+	*u = comparableSIPURI{
 		scheme:     scheme,
 		userinfo:   userinfo,
 		hostPort:   hostPort,
 		parameters: parameters,
 		headers:    headers,
-	}, true
+	}
+	return nil
 }
 
 func parseURIComponents(value, separator string) (map[string]string, bool) {

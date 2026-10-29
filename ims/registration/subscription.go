@@ -739,6 +739,17 @@ func contactMatchesCurrentBinding(contact regInfoContact, state State, contactUR
 	if sameRegisterContactURI(contact.URI, contactURI) {
 		return true
 	}
+	// TS 24.229 section 5.1.1.2.1 recommends a globally unique Contact user,
+	// which each Registrar generates. Some IMS proxies preserve that user but
+	// rewrite the host, port and parameters in reginfo. RFC 3680 section 5.1
+	// makes callid, cseq and unknown-param optional, so match the unique user
+	// when those other binding identifiers are unavailable.
+	var got, want comparableSIPURI
+	gotErr := got.UnmarshalText([]byte(contact.URI))
+	wantErr := want.UnmarshalText([]byte(contactURI))
+	if gotErr == nil && wantErr == nil && got.scheme == want.scheme && want.userinfo != "" && got.userinfo == want.userinfo {
+		return true
+	}
 	instance := contactSIPInstance(contact)
 	if instance != "" && strings.EqualFold(instance, currentSIPInstance(state)) {
 		if state.registrationID == 0 || regID == state.registrationID {

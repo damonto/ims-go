@@ -57,8 +57,11 @@ func subscriberNumber(uri string) string {
 	switch strings.ToLower(scheme) {
 	case "tel":
 	case "sip", "sips":
-		parsed, ok := parseComparableSIPURI(uri)
-		if !ok || (parsed.parameters["user"] != "" && parsed.parameters["user"] != "phone") {
+		var parsed comparableSIPURI
+		if err := parsed.UnmarshalText([]byte(uri)); err != nil {
+			return ""
+		}
+		if parsed.parameters["user"] != "" && parsed.parameters["user"] != "phone" {
 			return ""
 		}
 		subscriber = parsed.userinfo

@@ -769,9 +769,9 @@ func TestRegisterUsesIPSecClientAndServerPorts(t *testing.T) {
 				}
 				return
 			}
-			uri, ok := parseComparableSIPURI(sip.AddressURI(contact))
-			if !ok {
-				t.Fatalf("parsing Contact URI %q", contact)
+			var uri comparableSIPURI
+			if err := uri.UnmarshalText([]byte(sip.AddressURI(contact))); err != nil {
+				t.Fatalf("parsing Contact URI %q: %v", contact, err)
 			}
 			if uri.hostPort != tt.wantContact {
 				t.Fatalf("Contact endpoint = %q, want %q", uri.hostPort, tt.wantContact)

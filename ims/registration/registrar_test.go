@@ -711,11 +711,17 @@ func TestContactURIFormatting(t *testing.T) {
 			svc := newTestService(t, tt.cfg, transport, stubCard{})
 
 			registerURI := svc.currentRegisterContactURI()
-			parsed, ok := parseComparableSIPURI(registerURI)
-			if !ok || parsed.userinfo == "" {
+			var parsed comparableSIPURI
+			if err := parsed.UnmarshalText([]byte(registerURI)); err != nil {
+				t.Fatalf("parsing Contact URI: %v", err)
+			}
+			if parsed.userinfo == "" {
 				t.Fatalf("currentRegisterContactURI() = %q, want opaque user", registerURI)
 			}
-			publicIdentity, _ := parseComparableSIPURI(sip.AddressURI(svc.State().PublicIdentity))
+			var publicIdentity comparableSIPURI
+			if err := publicIdentity.UnmarshalText([]byte(sip.AddressURI(svc.State().PublicIdentity))); err != nil {
+				t.Fatalf("parsing public identity: %v", err)
+			}
 			if parsed.userinfo == publicIdentity.userinfo {
 				t.Fatalf("Contact user = %q, want value unrelated to public identity", parsed.userinfo)
 			}
