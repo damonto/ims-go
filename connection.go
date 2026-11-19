@@ -15,6 +15,7 @@ import (
 	imsussd "github.com/damonto/ims-go/ims/ussd"
 	imsvoice "github.com/damonto/ims-go/ims/voice"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
+	"github.com/damonto/ims-go/wfcsetup"
 	usim "github.com/damonto/wwan-go/sim"
 	usimcard "github.com/damonto/wwan-go/sim/card"
 )
@@ -105,13 +106,23 @@ func (s *clientState) context(parent context.Context) (context.Context, context.
 }
 
 func (c *Client) Connect(ctx context.Context) error {
+	return c.connect(ctx, wfcsetup.PurposeActivation)
+}
+
+// ConnectAfterWFCActivation rechecks the carrier entitlement after a successful
+// activation websheet callback before connecting to IMS.
+func (c *Client) ConnectAfterWFCActivation(ctx context.Context) error {
+	return c.connect(ctx, wfcsetup.PurposeActivationRecheck)
+}
+
+func (c *Client) connect(ctx context.Context, purpose wfcsetup.Purpose) error {
 	done, ok := c.reserveCloseTask()
 	if !ok {
 		return fmt.Errorf("connecting client: %w", ErrClientClosed)
 	}
 
 	c.logger.Info("connecting client")
-	active, err := c.connectOnce(ctx, false)
+	active, err := c.connectOnce(ctx, false, purpose)
 	if err != nil {
 		done()
 		return err
@@ -140,8 +151,8 @@ func (c *Client) Tunnel() swutunnel.Info {
 	return active.tunnel.Info()
 }
 
-func (c *Client) connectOnce(ctx context.Context, internal bool) (_ *activeConn, resultErr error) {
-	setup, setupCtx, err := c.prepareConnect(ctx, internal)
+func (c *Client) connectOnce(ctx context.Context, internal bool, purpose wfcsetup.Purpose) (_ *activeConn, resultErr error) {
+	setup, setupCtx, err := c.prepareConnect(ctx, internal, purpose)
 	if err != nil {
 		return nil, err
 	}
@@ -230,14 +241,14 @@ func pcscfFailoverRequired(err error, timerF time.Duration) bool {
 	return ok && netErr.Timeout()
 }
 
-func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSetup, context.Context, error) {
+func (c *Client) prepareConnect(ctx context.Context, internal bool, purpose wfcsetup.Purpose) (*connectSetup, context.Context, error) {
 	if err := c.state.reserveConnect(internal); err != nil {
 		return nil, nil, fmt.Errorf("connecting client: %w", err)
 	}
 
 	setupCtx, setupStop := c.newSetupContext(ctx, internal)
 
-	if err := c.ensureReady(setupCtx); err != nil {
+	if err := c.ensureReady(setupCtx, purpose); err != nil {
 		setupStop()
 		c.finishConnectAttempt()
 		return nil, nil, err
@@ -279,7 +290,7 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool) (*connectSet
 	}, setupCtx, nil
 }
 
-func (c *Client) ensureReady(ctx context.Context) error {
+func (c *Client) ensureReady(ctx context.Context, purpose wfcsetup.Purpose) error {
 	var ready bool
 	var reader usimcard.Reader
 	var cfg Config
@@ -304,7 +315,7 @@ func (c *Client) ensureReady(ctx context.Context) error {
 		return err
 	}
 	if readyCfg.usesVoWiFi() {
-		if err := c.checkWFCSetup(ctx, &readyCfg, card); err != nil {
+		if err := c.checkWFCSetup(ctx, &readyCfg, card, purpose); err != nil {
 			return err
 		}
 	}
@@ -674,7 +685,7 @@ func (c *Client) reconnect(cause error) (*activeConn, error) {
 
 	for attempt := 1; ; attempt++ {
 		c.logger.Info("reconnect attempt started", "reconnect_id", reconnectID, "attempt", attempt)
-		active, err := c.connectOnce(clientCtx, true)
+		active, err := c.connectOnce(clientCtx, true, wfcsetup.PurposeActivation)
 		if err == nil {
 			c.logger.Info("reconnect attempt succeeded", "reconnect_id", reconnectID, "attempt", attempt)
 			return active, nil

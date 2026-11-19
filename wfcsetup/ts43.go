@@ -14,15 +14,30 @@ import (
 	ts43 "github.com/damonto/ts43-go"
 )
 
-const ts43ActivationRecheckMaxAttempts = 6
+const ts43ActivationRecheckMaxRetries = 6
 const ts43ActivationRecheckInterval = 5 * time.Second
 
-var ts43Tokens = struct {
-	mu     sync.Mutex
-	values map[string]ts43.AuthToken
-}{
-	values: make(map[string]ts43.AuthToken),
+type ts43Session struct {
+	token         ts43.AuthToken
+	configuration ts43.WFCConfiguration
 }
+
+type ts43SessionKey struct {
+	iccid, imsi, server, entitlementVersion string
+}
+
+type ts43SessionEntry struct {
+	session    ts43Session
+	generation uint64
+	inFlight   int
+}
+
+type ts43SessionCache struct {
+	mu      sync.Mutex
+	entries map[ts43SessionKey]*ts43SessionEntry // guarded by mu
+}
+
+var ts43Sessions ts43SessionCache
 
 type ts43Flow struct {
 	req Request
@@ -50,12 +65,12 @@ func (f ts43Flow) Check(ctx context.Context) (Result, error) {
 }
 
 func (f ts43Flow) checkActivationRecheck(ctx context.Context) (Result, error) {
-	for attempt := 1; ; attempt++ {
+	for retries := 0; ; retries++ {
 		result, err := f.checkOnce(ctx)
 		if err != nil || result.Action != ActionWait || !result.Pending {
 			return result, err
 		}
-		if attempt >= ts43ActivationRecheckMaxAttempts {
+		if retries >= ts43ActivationRecheckMaxRetries {
 			return result, nil
 		}
 		if err := sleepContext(ctx, max(result.RetryAfter, ts43ActivationRecheckInterval)); err != nil {
@@ -81,11 +96,14 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	tokenKey := ts43TokenKey(identity, f.wfc)
-	cachedToken := ts43CachedToken(tokenKey)
+	key := newTS43SessionKey(identity, f.wfc)
+	session, generation := ts43Sessions.begin(key, req.now())
+	var next *ts43Session
+	defer func() { ts43Sessions.finish(key, generation, next) }()
 	check, err := ts43.CheckWFCEntitlement(checkCtx, ts43.Config{
 		Logger:     req.Logger,
 		HTTPClient: req.HTTPClient,
+		Now:        req.now,
 		Source:     ts43.Endpoint{Channel: ts43Channel{authenticate: req.AuthenticateAKA, identity: identity}},
 	}, ts43.WFCEntitlementRequest{
 		Identity: identity,
@@ -95,15 +113,19 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 			Model:           device.Model,
 			SoftwareVersion: device.SoftwareVersion,
 		},
-		Config:    f.wfc,
-		AuthToken: cachedToken,
+		Config:        f.wfc,
+		AuthToken:     session.token,
+		Configuration: session.configuration,
 	})
 	result := Result{
 		Scheme:  SchemeTS43,
 		Carrier: f.wfc.CarrierName,
 	}
 	if err != nil {
-		if retryAfter, ok := ts43RetryAfter(err); ok {
+		if check.ConfigurationReset {
+			next = &ts43Session{}
+		}
+		if retryAfter, ok := ts43RetryAfter(err, req.now()); ok {
 			result.Action = ActionWait
 			result.Pending = true
 			result.RetryAfter = retryAfter
@@ -112,7 +134,10 @@ func (f ts43Flow) checkOnce(ctx context.Context) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("check wfc ts43 setup: %w", err)
 	}
-	ts43StoreToken(tokenKey, check.AuthToken)
+	next = &ts43Session{token: check.AuthToken}
+	if f.wfc.NeedsIMSProvisioning {
+		next.configuration = check.Configuration
+	}
 	return f.result(check.Status)
 }
 
@@ -151,7 +176,13 @@ func (f ts43Flow) result(status ts43.WFCStatus) (Result, error) {
 			result.Action = ActionDisableWFC
 		}
 	case ts43.WFCActivationInProgress:
-		result.Action = ActionWait
+		if f.req.Purpose == PurposeActivation {
+			result.Action = ActionWait
+		}
+	case ts43.WFCActivationUnavailable:
+		if f.req.Purpose == PurposeEmergencyAddressUpdate && status.Incompatible() {
+			result.Action = ActionDisableWFC
+		}
 	}
 	switch result.Action {
 	case ActionWait:
@@ -201,62 +232,76 @@ func ts43WebsheetKind(status ts43.WFCStatus) WebsheetKind {
 	return WebsheetKindEmergencyAddress
 }
 
-func ts43TokenKey(identity ts43.Identity, cfg ts43.WFCConfig) string {
-	return identity.IMSI + "\x00" + cfg.Server
-}
-
-func ts43CachedToken(key string) ts43.AuthToken {
-	ts43Tokens.mu.Lock()
-	defer ts43Tokens.mu.Unlock()
-	token := ts43Tokens.values[key]
-	if !token.ExpiresAt.IsZero() && !time.Now().Before(token.ExpiresAt) {
-		delete(ts43Tokens.values, key)
-		return ts43.AuthToken{}
+func newTS43SessionKey(identity ts43.Identity, cfg ts43.WFCConfig) ts43SessionKey {
+	return ts43SessionKey{
+		iccid:              identity.ICCID,
+		imsi:               identity.IMSI,
+		server:             cfg.Server,
+		entitlementVersion: cfg.Version,
 	}
-	token.Cookies = slices.Clone(token.Cookies)
-	return token
 }
 
-func ts43StoreToken(key string, token ts43.AuthToken) {
-	ts43Tokens.mu.Lock()
-	defer ts43Tokens.mu.Unlock()
-	if token.Value == "" {
-		delete(ts43Tokens.values, key)
-		return
+// begin takes a snapshot for a carrier check. The caller must call finish.
+func (c *ts43SessionCache) begin(key ts43SessionKey, now time.Time) (ts43Session, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.entries == nil {
+		c.entries = make(map[ts43SessionKey]*ts43SessionEntry)
 	}
-	token.Cookies = slices.Clone(token.Cookies)
-	ts43Tokens.values[key] = token
+	entry := c.entries[key]
+	if entry == nil {
+		entry = &ts43SessionEntry{}
+		c.entries[key] = entry
+	}
+	token := entry.session.token
+	if !token.ExpiresAt.IsZero() && !now.Before(token.ExpiresAt) {
+		entry.session.token = ts43.AuthToken{}
+		entry.generation++
+	}
+	entry.inFlight++
+
+	session := entry.session
+	session.token.Cookies = slices.Clone(session.token.Cookies)
+	return session, entry.generation
 }
 
-func ts43RetryAfter(err error) (time.Duration, bool) {
+// finish applies next only if the cache still reflects the check's snapshot.
+// Keeping the entry while checks are in flight prevents a cleared session from
+// being restored by an older response.
+func (c *ts43SessionCache) finish(key ts43SessionKey, generation uint64, next *ts43Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry := c.entries[key]
+	if next != nil && entry.generation == generation {
+		entry.session = *next
+		entry.session.token.Cookies = slices.Clone(next.token.Cookies)
+		entry.generation++
+	}
+	entry.inFlight--
+	if entry.inFlight == 0 && entry.session.token.Value == "" && !entry.session.configuration.Present {
+		delete(c.entries, key)
+	}
+}
+
+func ts43RetryAfter(err error, now time.Time) (time.Duration, bool) {
 	httpErr, ok := errors.AsType[*ts43.HTTPError](err)
 	if !ok || httpErr.StatusCode != http.StatusServiceUnavailable {
 		return 0, false
 	}
-	return retryAfterDuration(httpErr.Header), true
-}
-
-func retryAfterDuration(header http.Header) time.Duration {
-	value := strings.TrimSpace(header.Get("Retry-After"))
-	if value == "" {
-		return 0
-	}
-	seconds, err := strconv.Atoi(value)
-	if err == nil {
-		if seconds <= 0 {
-			return 0
+	value := strings.TrimSpace(httpErr.Header.Get("Retry-After"))
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 || seconds > int64((1<<63-1)/time.Second) {
+			return 0, false
 		}
-		return time.Duration(seconds) * time.Second
+		return time.Duration(seconds) * time.Second, true
 	}
 	when, err := http.ParseTime(value)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	delay := time.Until(when)
-	if delay <= 0 {
-		return 0
-	}
-	return delay
+	return max(0, when.Sub(now)), true
 }
 
 type ts43Channel struct {

@@ -59,11 +59,12 @@ func CheckE911UpdateSupport(ctx context.Context, req Request) (E911UpdateSupport
 func resolve(req Request) (flow, Result, error) {
 	factories := [...]flowFactory{
 		newVZWFlow,
-		newCanadaFlow,
 		newTelusFlow,
 		newO2UKFlow,
 		newNSDSFlow,
 		newTS43Flow,
+		// A matched TS.43 profile takes precedence over a legacy Canada portal.
+		newCanadaFlow,
 	}
 	for _, factory := range factories {
 		f, ok, err := factory(req)

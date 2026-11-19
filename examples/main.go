@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	ts43 "github.com/damonto/ts43-go"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +25,7 @@ import (
 	imssession "github.com/damonto/ims-go/ims/session"
 	"github.com/damonto/ims-go/swu/tunnel"
 	"github.com/damonto/ims-go/wfcsetup"
+	ts43 "github.com/damonto/ts43-go"
 	wwanat "github.com/damonto/wwan-go/at"
 	wwanccid "github.com/damonto/wwan-go/ccid"
 	qcom "github.com/damonto/wwan-go/qcom"
@@ -39,8 +39,6 @@ const (
 	defaultAPDUTimeout    = 30 * time.Second
 	maxTCPAPDUFrameLength = 64 * 1024
 	wfcUserActionPoll     = 10 * time.Second
-	wfcFlowRecheckDelay   = 5 * time.Second
-	wfcFlowRecheckMax     = 6
 )
 
 type options struct {
@@ -285,7 +283,7 @@ func run(opt options) error {
 	defer smsEvents.Close()
 	go logSMSEvents(smsEvents)
 
-	if err := connectWithWFCUserActionPolling(ctx, client.Connect, wfcUserActionPoll); err != nil {
+	if err := connectWithWFCServiceFlow(ctx, client.Connect, client.ConnectAfterWFCActivation, wfcUserActionPoll, consoleWFCServiceFlow); err != nil {
 		return err
 	}
 	slog.Info("registered to IMS")
@@ -316,25 +314,12 @@ func run(opt options) error {
 	return nil
 }
 
-func connectWithWFCUserActionPolling(ctx context.Context, connect func(context.Context) error, interval time.Duration) error {
-	return connectWithWFCServiceFlow(ctx, connect, interval, consoleWFCServiceFlow)
-}
-
-func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context) error, interval time.Duration, serviceFlow func(context.Context, wfcUserAction) error) error {
+func connectWithWFCServiceFlow(ctx context.Context, connect, reconnectAfterActivation func(context.Context) error, interval time.Duration, serviceFlow func(context.Context, wfcUserAction) error) error {
 	if interval <= 0 {
 		interval = wfcUserActionPoll
 	}
-
-	var lastAction wfcUserAction
-	var logged bool
-	var completedFlow bool
-	var rechecks int
 	for {
 		err := connect(ctx)
-		if err == nil {
-			return nil
-		}
-
 		if errors.Is(err, wfcsetup.ErrPending) {
 			retryAfter := wfcRetryAfter(err, interval)
 			slog.Info("wfc entitlement pending", "retry_after", retryAfter)
@@ -343,39 +328,14 @@ func connectWithWFCServiceFlow(ctx context.Context, connect func(context.Context
 			}
 			continue
 		}
-
 		action, ok := wfcUserActionFromError(err)
 		if !ok {
 			return err
 		}
-		if completedFlow {
-			if rechecks >= wfcFlowRecheckMax {
-				return fmt.Errorf("waiting for wfc entitlement update: %w", wfcsetup.ErrPending)
-			}
-			rechecks++
-			if err := waitForWFCRetry(ctx, wfcFlowRecheckDelay); err != nil {
-				return err
-			}
-			slog.Info("rechecking wfc entitlement after service flow", "attempt", rechecks, "max", wfcFlowRecheckMax)
-			continue
-		}
-		if (!logged || action != lastAction) && serviceFlow == nil {
-			logWFCUserAction(action)
-			lastAction = action
-			logged = true
-		}
-		if serviceFlow != nil {
-			if err := serviceFlow(ctx, action); err != nil {
-				return err
-			}
-			completedFlow = true
-			rechecks = 0
-			continue
-		}
-		if err := waitForWFCRetry(ctx, interval); err != nil {
+		if err := serviceFlow(ctx, action); err != nil {
 			return err
 		}
-		slog.Info("polling wfc entitlement after user action", "interval", interval)
+		return reconnectAfterActivation(ctx)
 	}
 }
 
@@ -427,51 +387,29 @@ func consoleWFCServiceFlow(ctx context.Context, action wfcUserAction) error {
 	}
 }
 
-type wfcServiceFlowCallback struct {
-	Event string `json:"event"`
-}
-
 func parseWFCServiceFlowCallback(line string) (bool, error) {
 	line = strings.TrimSpace(line)
-	if line == "" {
-		return false, errors.New("wfc service flow callback is required")
-	}
-	line = trimWFCServiceFlowPrefix(line)
-	if strings.HasPrefix(line, "{") {
-		var payload wfcServiceFlowCallback
-		if err := json.Unmarshal([]byte(line), &payload); err != nil {
-			return false, fmt.Errorf("parse wfc service flow JSON callback: %w", err)
-		}
-		return wfcServiceFlowDone(payload.Event)
-	}
-	if strings.Contains(line, "VoWiFiWebServiceFlow.") {
-		_, after, _ := strings.Cut(line, "VoWiFiWebServiceFlow.")
-		name, _, ok := strings.Cut(after, "(")
-		if !ok {
-			return false, errors.New("wfc service flow callback argument list is required")
-		}
-		return wfcServiceFlowDone(name)
-	}
-	return wfcServiceFlowDone(line)
-}
-
-func trimWFCServiceFlowPrefix(line string) string {
-	const prefix = "TS43_VOWIFI_CALLBACK"
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, prefix) {
-		return line
-	}
-	return strings.TrimSpace(strings.TrimPrefix(line, prefix))
-}
-
-func wfcServiceFlowDone(event string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(event)) {
-	case "done", "entitlementchanged":
+	switch strings.ToLower(line) {
+	case "done":
 		return true, nil
-	case "dismiss", "dismissflow":
+	case "dismiss":
+		return false, nil
+	}
+	event := ts43.VoWiFiWebsheetEvent(line)
+	if event == ts43.WebsheetEventUnknown {
+		var callback ts43.WebsheetResult
+		if err := callback.UnmarshalText([]byte(line)); err != nil {
+			return false, err
+		}
+		event = callback.Event
+	}
+	switch event {
+	case ts43.WebsheetEventVoWiFiEntitlementChanged, ts43.WebsheetEventFinishFlow:
+		return true, nil
+	case ts43.WebsheetEventVoWiFiDismissFlow, ts43.WebsheetEventDismissFlow:
 		return false, nil
 	default:
-		return false, fmt.Errorf("unknown wfc service flow callback %q", event)
+		return false, errors.New("callback does not complete a WFC flow")
 	}
 }
 
@@ -498,8 +436,8 @@ func logWFCUserAction(action wfcUserAction) {
 		"post_data", action.Data,
 		"title", action.Title,
 		"client", action.ClientName,
-		"adapter", "examples/vowifi_service_flow.js",
-		"next", "open the URL with the shown method; paste DONE or the VoWiFiWebServiceFlow callback when the page completes",
+		"adapter", "examples/callback.js",
+		"next", "open the URL with the shown method; paste the carrier callback or DONE when the page completes",
 	)
 }
 

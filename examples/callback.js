@@ -9,7 +9,7 @@
  * Reference points in refs/:
  * - ImsServiceEntitlement WfcWebPortalFragment:
  *   VoWiFiWebServiceFlow.entitlementChanged(), dismissFlow()
- * - ImsServiceEntitlement WfcQnsWebPortalFragment:
+ * - Google WfcWebPortalFragment:
  *   WiFiCallingWebViewController cancel/status/close callbacks
  */
 (function installVoWiFiCallbackAdapter(global) {
@@ -44,9 +44,7 @@
         return "entitlementChanged";
       case "dismissFlow":
       case "cancelButtonClicked":
-      case "CloseWebView":
-      case "closeWebView":
-      case "onCloseWebView":
+      case "cancelButtonPressed":
         return "dismissFlow";
       default:
         return method;
@@ -56,6 +54,12 @@
   function resultCode(method) {
     switch (eventName(method)) {
       case "entitlementChanged":
+      case "phoneServicesAccountStatusChanged":
+      case "CloseWebView":
+      case "closeWebView":
+      case "onCloseWebView":
+      case "workflowCompleted":
+      case "workflowAbandoned":
         return "success";
       case "dismissFlow":
         return "cancel";
@@ -115,21 +119,7 @@
     return target;
   }
 
-  const voWiFiWebServiceFlow = installObject("VoWiFiWebServiceFlow", [
-    "entitlementChanged",
-    "dismissFlow",
-  ]);
-
-  const wifiCallingWebViewController = installObject("WiFiCallingWebViewController", [
-    "cancelButtonClicked",
-    "cancelButtonPressed",
-    "phoneServicesAccountStatusChanged",
-    "CloseWebView",
-    "closeWebView",
-    "onCloseWebView",
-  ]);
-
-  const nsdsWebSheetController = installObject("NsdsWebSheetController", [
+  const methods = [
     "entitlementChanged",
     "dismissFlow",
     "cancelButtonClicked",
@@ -138,7 +128,12 @@
     "CloseWebView",
     "closeWebView",
     "onCloseWebView",
-  ]);
+    "workflowCompleted",
+    "workflowAbandoned",
+  ];
+  const voWiFiWebServiceFlow = installObject("VoWiFiWebServiceFlow", methods);
+  const wifiCallingWebViewController = installObject("WiFiCallingWebViewController", methods);
+  const nsdsWebSheetController = installObject("NsdsWebSheetController", methods);
 
   global.vowifiCallback = Object.freeze({
     done: voWiFiWebServiceFlow.entitlementChanged,
@@ -161,7 +156,7 @@
     global.console.info(
       "VoWiFi callback adapter installed. Watch for " +
         CALLBACK_LOG_PREFIX +
-        " lines, then let examples/main.go keep polling entitlement.",
+        " lines and paste the callback into the CLI.",
     );
   }
 })(window);

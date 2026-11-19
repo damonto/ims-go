@@ -25,12 +25,12 @@ func TestTS43ResultByPurpose(t *testing.T) {
 		{
 			name:   "provisioning",
 			status: ts43.WFCStatus{EntitlementStatus: ts43.WFCEntitlementProvisioning},
-			want:   [4]Action{ActionWait, ActionWait, ActionWait, ActionWait},
+			want:   [4]Action{ActionWait, ActionDenied, ActionDenied, ActionDenied},
 		},
 		{
 			name:   "incompatible",
 			status: ts43.WFCStatus{EntitlementStatus: ts43.WFCEntitlementIncompatible},
-			want:   [4]Action{ActionDenied, ActionDenied, ActionDenied, ActionDenied},
+			want:   [4]Action{ActionDenied, ActionDenied, ActionDisableWFC, ActionDenied},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

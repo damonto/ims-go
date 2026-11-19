@@ -22,6 +22,7 @@ import (
 	imsvoice "github.com/damonto/ims-go/ims/voice"
 	"github.com/damonto/ims-go/swu/handshake"
 	swutunnel "github.com/damonto/ims-go/swu/tunnel"
+	"github.com/damonto/ims-go/wfcsetup"
 	usim "github.com/damonto/wwan-go/sim"
 	usimcard "github.com/damonto/wwan-go/sim/card"
 	"github.com/damonto/wwan-go/sim/simfile"
@@ -634,7 +635,7 @@ func TestEnsureReadyConfigErrorContextIsNotRepeated(t *testing.T) {
 				}
 			})
 
-			err := client.ensureReady(t.Context())
+			err := client.ensureReady(t.Context(), wfcsetup.PurposeActivation)
 			if err == nil {
 				t.Fatal("ensureReady() error = nil, want non-nil")
 			}

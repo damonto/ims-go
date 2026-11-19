@@ -283,9 +283,10 @@ with `errors.Is`. A typed `*wfcsetup.Error` carries the result, retry interval,
 and any websheet URL and POST data.
 
 The Linux example prints the required flow and accepts `DONE` or a supported
-callback after the page completes, then rechecks entitlement. The
-[`VoWiFiWebServiceFlow` adapter](examples/vowifi_service_flow.js) bridges those
-callbacks for a host-provided web view. Applications supply their own activation
+callback after the page completes, then calls `Client.ConnectAfterWFCActivation`
+to recheck carrier entitlement before connecting. The
+[callback adapter](examples/callback.js) supports both the TS.43 and Google
+carrier webview callbacks. Applications supply their own activation
 UI; the library does not open a browser automatically.
 
 ## Project layout

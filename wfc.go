@@ -2,13 +2,14 @@ package ims
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/damonto/ims-go/wfcsetup"
 )
 
-func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) error {
+func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card, purpose wfcsetup.Purpose) error {
 	terminal := cfg.Terminal.trimmed()
 	var httpClient *http.Client
 	if cfg.Access.VoWiFi != nil && cfg.Access.VoWiFi.Underlay != nil {
@@ -24,11 +25,16 @@ func (c *Client) checkWFCSetup(ctx context.Context, cfg *Config, card Card) erro
 			Model:           terminal.Model,
 			SoftwareVersion: terminal.SoftwareVersion,
 		},
-		Purpose:    wfcsetup.PurposeActivation,
+		Purpose:    purpose,
 		Logger:     cfg.Logger,
 		HTTPClient: httpClient,
 	})
 	if err != nil {
+		if purpose == wfcsetup.PurposeActivationRecheck {
+			if _, ok := errors.AsType[*wfcsetup.Error](err); !ok {
+				return &wfcsetup.Error{Err: err, Result: result}
+			}
+		}
 		return err
 	}
 	applyWFCSetupMSISDN(cfg, result.MSISDN)

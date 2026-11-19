@@ -108,13 +108,14 @@ func TestTS43WebsheetClientName(t *testing.T) {
 	}
 }
 
-func TestTS43CachedToken(t *testing.T) {
-	now := time.Now()
+func TestTS43CachedSession(t *testing.T) {
+	now := time.Unix(1_000, 0)
 	tests := []struct {
-		name      string
-		token     ts43.AuthToken
-		wantValue string
-		wantKept  bool
+		name          string
+		token         ts43.AuthToken
+		configuration ts43.WFCConfiguration
+		wantValue     string
+		wantKept      bool
 	}{
 		{
 			name:      "token without expiry is returned",
@@ -132,35 +133,71 @@ func TestTS43CachedToken(t *testing.T) {
 			name:  "expired token is deleted",
 			token: ts43.AuthToken{Value: "expired", ExpiresAt: now.Add(-time.Second), Cookies: []string{"sid=expired"}},
 		},
+		{
+			name:          "expired token preserves VERS",
+			token:         ts43.AuthToken{Value: "expired", ExpiresAt: now.Add(-time.Second)},
+			configuration: ts43.WFCConfiguration{Present: true, Version: 7, Validity: 300},
+			wantKept:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key := "imsi\x00server"
-			ts43Tokens.mu.Lock()
-			ts43Tokens.values = map[string]ts43.AuthToken{key: tt.token}
-			ts43Tokens.mu.Unlock()
-			t.Cleanup(func() {
-				ts43Tokens.mu.Lock()
-				ts43Tokens.values = make(map[string]ts43.AuthToken)
-				ts43Tokens.mu.Unlock()
-			})
+			var cache ts43SessionCache
+			key := ts43SessionKey{imsi: "test-imsi", server: "https://example.test"}
+			_, generation := cache.begin(key, now)
+			cache.finish(key, generation, &ts43Session{token: tt.token, configuration: tt.configuration})
 
-			got := ts43CachedToken(key)
-			if got.Value != tt.wantValue {
-				t.Fatalf("AuthToken.Value = %q, want %q", got.Value, tt.wantValue)
+			got, generation := cache.begin(key, now)
+			cache.finish(key, generation, nil)
+			if got.configuration != tt.configuration {
+				t.Fatalf("configuration = %+v, want %+v", got.configuration, tt.configuration)
 			}
-			if len(got.Cookies) > 0 {
-				got.Cookies[0] = "mutated"
+			if got.token.Value != tt.wantValue {
+				t.Fatalf("AuthToken.Value = %q, want %q", got.token.Value, tt.wantValue)
+			}
+			if len(got.token.Cookies) > 0 {
+				got.token.Cookies[0] = "mutated"
 			}
 
-			ts43Tokens.mu.Lock()
-			stored, kept := ts43Tokens.values[key]
-			ts43Tokens.mu.Unlock()
+			stored, kept := cache.entries[key]
 			if kept != tt.wantKept {
 				t.Fatalf("cache kept = %t, want %t", kept, tt.wantKept)
 			}
-			if kept && len(stored.Cookies) > 0 && stored.Cookies[0] == "mutated" {
+			if kept && len(stored.session.token.Cookies) > 0 && stored.session.token.Cookies[0] == "mutated" {
 				t.Fatal("cached cookies were not copied")
+			}
+		})
+	}
+}
+
+func TestTS43SessionCacheIgnoresStaleUpdates(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want ts43Session
+		old  ts43Session
+	}{
+		{
+			name: "stale rejection preserves newer configuration",
+			want: ts43Session{token: ts43.AuthToken{Value: "new-token"}},
+		},
+		{
+			name: "stale response cannot restore a cleared configuration",
+			old:  ts43Session{token: ts43.AuthToken{Value: "old-token"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var cache ts43SessionCache
+			key := ts43SessionKey{imsi: "test-imsi", server: "https://example.test"}
+			now := time.Unix(1_000, 0)
+			_, old := cache.begin(key, now)
+			_, current := cache.begin(key, now)
+			cache.finish(key, current, &tt.want)
+			cache.finish(key, old, &tt.old)
+
+			got, generation := cache.begin(key, now)
+			cache.finish(key, generation, nil)
+			if got.token.Value != tt.want.token.Value {
+				t.Errorf("cached token = %q, want %q", got.token.Value, tt.want.token.Value)
 			}
 		})
 	}

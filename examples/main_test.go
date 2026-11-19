@@ -198,12 +198,15 @@ func TestWFCUserActionFromError(t *testing.T) {
 	}
 }
 
-func TestConnectWithWFCUserActionPolling(t *testing.T) {
+func TestConnectWithWFCServiceFlow(t *testing.T) {
+	carrierErr := errors.New("test carrier error")
 	tests := []struct {
-		name      string
-		errors    []error
-		wantCalls int
-		wantErr   string
+		name        string
+		errors      []error
+		wantCalls   int
+		wantErr     error
+		portalErr   error
+		wantRecheck bool
 	}{
 		{
 			name: "polls after user action",
@@ -217,7 +220,26 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 				},
 				nil,
 			},
-			wantCalls: 2,
+			wantCalls:   2,
+			wantRecheck: true,
+		},
+		{
+			name: "pending recheck returns without restarting activation",
+			errors: []error{&wfcsetup.Error{Err: wfcsetup.ErrUserActionRequired, Result: wfcsetup.Result{
+				Websheet: &wfcsetup.Websheet{URL: "https://example.test/e911"},
+			}}, wfcsetup.ErrPending},
+			wantCalls:   2,
+			wantErr:     wfcsetup.ErrPending,
+			wantRecheck: true,
+		},
+		{
+			name: "cancel does not recheck entitlement",
+			errors: []error{&wfcsetup.Error{Err: wfcsetup.ErrUserActionRequired, Result: wfcsetup.Result{
+				Websheet: &wfcsetup.Websheet{URL: "https://example.test/e911"},
+			}}},
+			wantCalls: 1,
+			portalErr: context.Canceled,
+			wantErr:   context.Canceled,
 		},
 		{
 			name: "polls after pending retry",
@@ -235,39 +257,40 @@ func TestConnectWithWFCUserActionPolling(t *testing.T) {
 		},
 		{
 			name:      "returns non user action error",
-			errors:    []error{errors.New("boom")},
+			errors:    []error{carrierErr},
 			wantCalls: 1,
-			wantErr:   "boom",
+			wantErr:   carrierErr,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var calls int
-			err := connectWithWFCServiceFlow(t.Context(), func(context.Context) error {
+			nextError := func() error {
 				if calls >= len(tt.errors) {
 					t.Fatalf("connect calls = %d, want at most %d", calls+1, len(tt.errors))
 				}
 				err := tt.errors[calls]
 				calls++
 				return err
+			}
+			var rechecked bool
+			err := connectWithWFCServiceFlow(t.Context(), func(context.Context) error {
+				return nextError()
+			}, func(context.Context) error {
+				rechecked = true
+				return nextError()
 			}, time.Nanosecond, func(context.Context, wfcUserAction) error {
-				return nil
+				return tt.portalErr
 			})
+			if rechecked != tt.wantRecheck {
+				t.Fatalf("rechecked = %t, want %t", rechecked, tt.wantRecheck)
+			}
 			if calls != tt.wantCalls {
 				t.Fatalf("connect calls = %d, want %d", calls, tt.wantCalls)
 			}
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatal("connectWithWFCUserActionPolling() error = nil")
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("connectWithWFCUserActionPolling() error = %q, want substring %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("connectWithWFCUserActionPolling() error = %v", err)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("connectWithWFCServiceFlow() error = %v, want %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -297,6 +320,20 @@ func TestParseWFCServiceFlowCallback(t *testing.T) {
 		{
 			name: "javascript dismiss",
 			line: "VoWiFiWebServiceFlow.dismissFlow()",
+		},
+		{
+			name: "Google controller close requests recheck",
+			line: "WiFiCallingWebViewController.CloseWebView()",
+			want: true,
+		},
+		{
+			name: "Google controller cancel",
+			line: "WiFiCallingWebViewController.cancelButtonPressed()",
+		},
+		{
+			name: "carrier adapter account status",
+			line: `VOWIFI_CALLBACK {"event":"phoneServicesAccountStatusChanged","resultCode":"success"}`,
+			want: true,
 		},
 		{
 			name: "adapter json",
