@@ -31,7 +31,6 @@ import (
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/header"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/header/parse"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/network/fragmentation"
-	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/network/hash"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/network/ip"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/stack"
 )
@@ -57,9 +56,6 @@ const (
 
 	// DefaultTTL is the default time-to-live value for this endpoint.
 	DefaultTTL = 64
-
-	// buckets is the number of identifier buckets.
-	buckets = 2048
 
 	// The size of a fragment block, in bytes, as per RFC 791 section 3.1,
 	// page 14.
@@ -676,6 +672,11 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 	stats := e.stats.ip
 	stats.PacketsReceived.Increment()
 
+	if !e.isEnabled() {
+		stats.DisabledPacketsReceived.Increment()
+		return
+	}
+
 	pkt = pkt.CloneToInbound()
 	defer pkt.DecRef()
 	pkt.RXChecksumValidated = canSkipRXChecksum
@@ -903,7 +904,13 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 
 		// The reassembler doesn't take care of fixing up the header, so we need
 		// to do it here.
-		h.SetTotalLength(uint16(pkt.Data().Size() + len(h)))
+		totalLength := pkt.Data().Size() + len(h)
+		if totalLength > math.MaxUint16 {
+			stats.ip.MalformedPacketsReceived.Increment()
+			stats.ip.MalformedFragmentsReceived.Increment()
+			return
+		}
+		h.SetTotalLength(uint16(totalLength))
 		h.SetFlagsFragmentOffset(0, 0)
 
 		e.protocol.parseTransport(pkt, tcpip.TransportProtocolNumber(transProtoNum))
@@ -1052,9 +1059,6 @@ type protocol struct {
 	// defaultTTL is the current default TTL for the protocol. Only the
 	// uint8 portion of it is meaningful.
 	defaultTTL atomic.Uint32
-
-	ids    []atomic.Uint32
-	hashIV uint32
 
 	fragmentation *fragmentation.Fragmentation
 
@@ -1210,20 +1214,9 @@ type Options struct {
 
 // NewProtocolWithOptions returns an IPv4 network protocol.
 func NewProtocolWithOptions(opts Options) stack.NetworkProtocolFactory {
-	ids := make([]atomic.Uint32, buckets)
-
-	// Randomly initialize hashIV and the ids.
-	r := hash.RandN32(1 + buckets)
-	for i := range ids {
-		ids[i].Store(r[i])
-	}
-	hashIV := r[buckets]
-
 	return func(s *stack.Stack) stack.NetworkProtocol {
 		p := &protocol{
 			stack:   s,
-			ids:     ids,
-			hashIV:  hashIV,
 			options: opts,
 		}
 		p.defaultTTL.Store(DefaultTTL)

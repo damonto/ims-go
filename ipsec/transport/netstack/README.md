@@ -1,7 +1,7 @@
 # Embedded gVisor netstack
 
 This directory contains the gVisor netstack dependency closure used by IMS.
-It is derived from gVisor commit `57efc92f6df8f530b5cc49cc197077f9c3dafe98`.
+It is derived from [gVisor commit `e0cb0095337340f333b83fb2d81880456d4f65dc`](https://github.com/gvisor/gvisor/commit/e0cb0095337340f333b83fb2d81880456d4f65dc).
 
 Only the userspace IPv4/IPv6, TCP, UDP, channel link endpoint, static address
 and route handling, fragmentation, ICMP echo, inbound ICMP error/PMTU handling,

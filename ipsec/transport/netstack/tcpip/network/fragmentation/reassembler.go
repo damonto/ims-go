@@ -15,8 +15,9 @@
 package fragmentation
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip"
 	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip/stack"
@@ -34,6 +35,9 @@ type hole struct {
 }
 
 type reassembler struct {
+	// reassemblerEntry is protected by the owning Fragmentation.mu. There
+	// is no reference back to that Fragmentation, so checklocks cannot name
+	// its mutex here.
 	reassemblerEntry
 	id        FragmentID
 	memSize   int
@@ -43,7 +47,8 @@ type reassembler struct {
 	filled    int
 	done      bool
 	createdAt tcpip.MonotonicTime
-	pkt       *stack.PacketBuffer
+	// +checklocks:mu
+	pkt *stack.PacketBuffer
 }
 
 func newReassembler(id FragmentID, clock tcpip.Clock) *reassembler {
@@ -60,6 +65,7 @@ func newReassembler(id FragmentID, clock tcpip.Clock) *reassembler {
 	return r
 }
 
+// +checklocksexclude:r.mu
 func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *stack.PacketBuffer) (*stack.PacketBuffer, uint8, bool, int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -115,7 +121,7 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 				return nil, 0, false, 0, ErrFragmentOverlap
 			}
 			// Incoming fragment is a duplicate.
-			// Not dropping packet incase of duplicates.
+			// Not dropping packet in case of duplicates.
 			continue
 		}
 
@@ -176,8 +182,8 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 		return nil, 0, false, memConsumed, nil
 	}
 
-	sort.Slice(r.holes, func(i, j int) bool {
-		return r.holes[i].first < r.holes[j].first
+	slices.SortFunc(r.holes, func(a, b hole) int {
+		return cmp.Compare(a.first, b.first)
 	})
 
 	resPkt := r.holes[0].pkt.Clone()
@@ -187,6 +193,7 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 	return resPkt, r.proto, true /* done */, memConsumed, nil
 }
 
+// +checklocksexclude:r.mu
 func (r *reassembler) checkDoneOrMark() bool {
 	r.mu.Lock()
 	prev := r.done

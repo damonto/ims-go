@@ -106,7 +106,9 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 		return
 	}
 	if message[0] == icmpv4EchoRequest && message[1] == 0 {
-		e.sendEchoReply(message, header.IPv4(pkt.NetworkHeader().Slice()))
+		if !pkt.NetworkPacketInfo.LocalAddressBroadcast {
+			e.sendEchoReply(message, header.IPv4(pkt.NetworkHeader().Slice()))
+		}
 		return
 	}
 	transErr, ok := icmpTransportErrorFromMessage(message)

@@ -97,15 +97,24 @@ type protocol struct {
 	recvBufferSize             tcpip.TCPReceiveBufferSizeRangeOption
 	congestionControl          string
 	availableCongestionControl []string
-	moderateReceiveBuffer      bool
-	lingerTimeout              time.Duration
-	timeWaitTimeout            time.Duration
-	timeWaitReuse              tcpip.TCPTimeWaitReuseOption
-	minRTO                     time.Duration
-	maxRTO                     time.Duration
-	maxRetries                 uint32
-	synRetries                 uint8
-	dispatcher                 dispatcher
+	// +checklocks:mu
+	moderateReceiveBuffer bool
+	// +checklocks:mu
+	lingerTimeout time.Duration
+	// +checklocks:mu
+	timeWaitTimeout time.Duration
+	// +checklocks:mu
+	timeWaitReuse tcpip.TCPTimeWaitReuseOption
+	// +checklocks:mu
+	minRTO time.Duration
+	// +checklocks:mu
+	maxRTO time.Duration
+	// +checklocks:mu
+	maxRetries uint32
+	// +checklocks:mu
+	synRetries uint8
+
+	dispatcher dispatcher
 
 	// probe, if not nil, will be invoked any time an endpoint receives a
 	// TCP segment.
@@ -174,7 +183,7 @@ func (p *protocol) HandleUnknownDestinationPacket(id stack.TransportEndpointID, 
 
 func (p *protocol) tsOffset(src, dst tcpip.Address) tcp.TSOffset {
 	// Initialize a random tsOffset that will be added to the recentTS
-	// everytime the timestamp is sent when the Timestamp option is enabled.
+	// every time the timestamp is sent when the Timestamp option is enabled.
 	//
 	// See https://tools.ietf.org/html/rfc7323#section-5.4 for details on
 	// why this is required.
@@ -195,6 +204,7 @@ func (p *protocol) tsOffset(src, dst tcpip.Address) tcp.TSOffset {
 // then the route's default TTL will be used.
 func replyWithReset(st *stack.Stack, s *segment, tos, ipv4TTL uint8, ipv6HopLimit int16) tcpip.Error {
 	net := s.pkt.Network()
+	// TODO: b/528377510 - Verify if passing the NICID is correct.
 	route, err := st.FindRoute(s.pkt.NICID, net.DestinationAddress(), net.SourceAddress(), s.pkt.NetworkProtocolNumber, false /* multicastLoop */)
 	if err != nil {
 		return err
@@ -249,6 +259,8 @@ func replyWithReset(st *stack.Stack, s *segment, tos, ipv4TTL uint8, ipv6HopLimi
 }
 
 // SetOption implements stack.TransportProtocol.SetOption.
+//
+// +checklocksexclude:p.mu
 func (p *protocol) SetOption(option tcpip.SettableTransportProtocolOption) tcpip.Error {
 	switch v := option.(type) {
 	case *tcpip.TCPSACKEnabled:
@@ -385,13 +397,22 @@ func (p *protocol) SetOption(option tcpip.SettableTransportProtocolOption) tcpip
 	}
 }
 
+// sackPermitted reports whether the stack allows SACK negotiation.
+//
+// +checklocksexclude:p.mu
+func (p *protocol) sackPermitted() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.sackEnabled
+}
+
 // Option implements stack.TransportProtocol.Option.
+//
+// +checklocksexclude:p.mu
 func (p *protocol) Option(option tcpip.GettableTransportProtocolOption) tcpip.Error {
 	switch v := option.(type) {
 	case *tcpip.TCPSACKEnabled:
-		p.mu.RLock()
-		*v = tcpip.TCPSACKEnabled(p.sackEnabled)
-		p.mu.RUnlock()
+		*v = tcpip.TCPSACKEnabled(p.sackPermitted())
 		return nil
 
 	case *tcpip.TCPRecovery:
@@ -490,6 +511,8 @@ func (p *protocol) Option(option tcpip.GettableTransportProtocolOption) tcpip.Er
 }
 
 // SendBufferSize implements stack.SendBufSizeProto.
+//
+// +checklocksexclude:p.mu
 func (p *protocol) SendBufferSize() tcpip.TCPSendBufferSizeRangeOption {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

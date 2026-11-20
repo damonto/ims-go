@@ -21,13 +21,16 @@ type segmentQueue struct {
 	ep   *Endpoint
 }
 
-// emptyLocked determines if the queue is empty.
-// Preconditions: q.mu must be held.
+// emptyLocked is equivalent to empty with q.mu already held.
+//
+// +checklocks:q.mu
 func (q *segmentQueue) emptyLocked() bool {
 	return q.list.Empty()
 }
 
 // empty determines if the queue is empty.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) empty() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -36,13 +39,11 @@ func (q *segmentQueue) empty() bool {
 
 // enqueue adds the given segment to the queue.
 //
-// Returns true when the segment is successfully added to the queue, in which
-// case ownership of the reference is transferred to the queue. And returns
-// false if the queue is full, in which case ownership is retained by the
-// caller.
+// If enqueue succeeds, the queue acquires its own reference and returns true.
+// Otherwise it returns false. The caller retains its reference in either case.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) enqueue(s *segment) bool {
-	// q.ep.receiveBufferParams() must be called without holding q.mu to
-	// avoid lock order inversion.
 	bufSz := q.ep.ops.GetReceiveBufferSize()
 	used := q.ep.receiveMemUsed()
 
@@ -51,7 +52,7 @@ func (q *segmentQueue) enqueue(s *segment) bool {
 
 	// Allow zero sized segments (ACK/FIN/RSTs etc even if the segment queue
 	// is currently full).
-	allow := used <= int(bufSz) || s.payloadSize() == 0
+	allow := used <= bufSz || s.payloadSize() == 0
 
 	if allow {
 		s.IncRef()
@@ -66,6 +67,8 @@ func (q *segmentQueue) enqueue(s *segment) bool {
 // dequeue removes and returns the next segment from queue, if one exists.
 // Ownership is transferred to the caller, who is responsible for decrementing
 // the ref count when done.
+//
+// +checklocksexclude:q.mu
 func (q *segmentQueue) dequeue() *segment {
 	q.mu.Lock()
 	defer q.mu.Unlock()

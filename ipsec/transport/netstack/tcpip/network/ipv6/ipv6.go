@@ -17,6 +17,7 @@ package ipv6
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -260,8 +261,9 @@ func (e *endpoint) Disable() {
 	e.disableLocked()
 }
 
+// +checklocks:e.mu.RWMutex
 func (e *endpoint) disableLocked() {
-	if !e.Enabled() {
+	if !e.isEnabled() {
 		return
 	}
 	if !e.setEnabled(false) {
@@ -537,7 +539,7 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	r, err := stk.FindRoute(0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
 	switch err.(type) {
 	case nil:
-	case *tcpip.ErrNetworkUnreachable:
+	case *tcpip.ErrNetworkUnreachable, *tcpip.ErrBadLocalAddress:
 		// We return the original error rather than the result of returning the
 		// ICMP packet because the original error is more relevant to the caller.
 		return &ip.ErrHostUnreachable{}
@@ -652,6 +654,11 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum bool) {
 	stats := e.stats.ip
 	stats.PacketsReceived.Increment()
+
+	if !e.isEnabled() {
+		stats.DisabledPacketsReceived.Increment()
+		return
+	}
 
 	pkt = pkt.CloneToInbound()
 	defer pkt.DecRef()
@@ -834,6 +841,13 @@ func (e *endpoint) processExtensionHeader(it *header.IPv6PayloadIterator, pkt **
 // Returns an error if the processing of a header failed or if the packet should
 // be discarded.
 func (e *endpoint) processExtensionHeaders(h header.IPv6, pkt *stack.PacketBuffer, forwarding bool) error {
+	if h.PayloadLength() == 0 && h.NextHeader() == uint8(header.IPv6HopByHopOptionsExtHdrIdentifier) {
+		// Jumbograms are unsupported. RFC 2675 section 3 defines this
+		// combination as a Jumbo Payload option or a malformed packet.
+		e.stats.ip.MalformedPacketsReceived.Increment()
+		return errors.New("zero payload length with Hop-by-Hop Options header")
+	}
+
 	// Create a VV to parse the packet. We don't plan to modify anything here.
 	// vv consists of:
 	//	- Any IPv6 header bytes after the first 40 (i.e. extensions).

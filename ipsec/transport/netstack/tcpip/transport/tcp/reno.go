@@ -16,6 +16,8 @@ package tcp
 
 import (
 	"time"
+
+	"github.com/damonto/ims-go/ipsec/transport/netstack/tcpip"
 )
 
 // renoState stores the variables related to TCP New Reno congestion
@@ -57,8 +59,9 @@ func (r *renoState) updateCongestionAvoidance(packetsAcked int) {
 	// Consume the packets in congestion avoidance mode.
 	r.s.SndCAAckCount += packetsAcked
 	if r.s.SndCAAckCount >= r.s.SndCwnd {
-		r.s.SndCwnd += r.s.SndCAAckCount / r.s.SndCwnd
-		r.s.SndCAAckCount = r.s.SndCAAckCount % r.s.SndCwnd
+		increase := r.s.SndCAAckCount / r.s.SndCwnd
+		r.s.SndCAAckCount %= r.s.SndCwnd
+		r.s.SndCwnd += increase
 	}
 }
 
@@ -79,7 +82,7 @@ func (r *renoState) reduceSlowStartThreshold() {
 // Update implements congestionControl.Update.
 //
 // +checklocks:r.s.ep.mu
-func (r *renoState) Update(packetsAcked int, _ time.Duration) {
+func (r *renoState) Update(packetsAcked int, _ time.Duration, _ tcpip.MonotonicTime) {
 	if r.s.SndCwnd < r.s.Ssthresh {
 		packetsAcked = r.updateSlowStart(packetsAcked)
 		if packetsAcked == 0 {
@@ -114,4 +117,11 @@ func (r *renoState) HandleRTOExpired() {
 // PostRecovery implements congestionControl.PostRecovery.
 func (r *renoState) PostRecovery() {
 	// noop.
+}
+
+// HandleWindowRestart implements congestionControl.HandleWindowRestart.
+//
+// +checklocks:r.s.ep.mu
+func (r *renoState) HandleWindowRestart() {
+	r.s.SndCAAckCount = 0
 }
