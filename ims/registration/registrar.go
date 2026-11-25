@@ -33,6 +33,18 @@ const (
 )
 
 // Config specifies registration identity, transport security, and notifications.
+// RegisterStage identifies a stage in initial IMS registration.
+type RegisterStage string
+
+// Initial registration stages reported by Config.OnRegisterStage.
+const (
+	StageRegistrationSlot  RegisterStage = "ims_registration_slot"
+	StageRegisterChallenge RegisterStage = "ims_register_challenge"
+	StageAKA               RegisterStage = "ims_aka"
+	StageIPSec             RegisterStage = "ims_ipsec"
+	StageRegisterFinal     RegisterStage = "ims_register_final"
+)
+
 type Config struct {
 	PrivateIdentity           string
 	PublicIdentity            string
@@ -57,6 +69,8 @@ type Config struct {
 	// latest state. It can run during establishment, refresh, or cleanup.
 	// It must not re-enter registration or cleanup operations on this registrar.
 	OnRegistrationChange func()
+	// OnRegisterStage observes initial registration synchronously and must return promptly.
+	OnRegisterStage func(RegisterStage)
 
 	DialSecureTCP   func(ctx context.Context, cfg session.SecureTCPConfig) (session.Transport, error)
 	DialSecureUDP   func(ctx context.Context, cfg session.SecureUDPConfig) (session.Transport, error)
@@ -304,6 +318,7 @@ func (s *Registrar) Register(ctx context.Context) (retErr error) {
 		}
 	}()
 
+	s.reportRegisterStage(StageRegistrationSlot)
 	s.logger.Info("waiting for IMS registration slot", "public_identity", s.State().PublicIdentity)
 	release, err := s.beginRegistration(ctx)
 	if err != nil {
@@ -340,7 +355,7 @@ func (s *Registrar) Register(ctx context.Context) (retErr error) {
 	var initialAuth *security.Authorization
 	resynchronized := false
 	for {
-		initialAuth, err = s.buildRegisterAuthorization(ctx, challenge)
+		initialAuth, err = s.initialRegisterAuthorization(ctx, challenge)
 		if err == nil {
 			break
 		}
@@ -365,6 +380,12 @@ func (s *Registrar) Register(ctx context.Context) (retErr error) {
 	return nil
 }
 
+func (s *Registrar) reportRegisterStage(stage RegisterStage) {
+	if s.cfg.OnRegisterStage != nil {
+		s.cfg.OnRegisterStage(stage)
+	}
+}
+
 func (s *Registrar) Establish(ctx context.Context) error {
 	return s.Register(ctx)
 }
@@ -387,6 +408,7 @@ func (s *Registrar) beginDeregistration(ctx context.Context) (func(), bool, erro
 }
 
 func (s *Registrar) awaitRegisterChallenge(ctx context.Context) (sip.Message, error) {
+	s.reportRegisterStage(StageRegisterChallenge)
 	adjustedExpires := false
 	natPortsAdjusted := false
 	for {
@@ -442,7 +464,7 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 	for {
 		if auth == nil {
 			var err error
-			auth, err = s.buildRegisterAuthorization(ctx, challenge)
+			auth, err = s.initialRegisterAuthorization(ctx, challenge)
 			if err != nil {
 				resp, err := s.exchangeAKAFailure(ctx, challenge, s.currentAuthorizationHeaderName(), s.CurrentFlow(), err)
 				if err != nil {
@@ -466,6 +488,9 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 			if err := pendingSecurity.close(); err != nil {
 				return fmt.Errorf("closing stale IMS security: %w", err)
 			}
+			if s.currentSecurityVerify() != nil {
+				s.reportRegisterStage(StageIPSec)
+			}
 			nextSecurity, err := s.openRegisterSecurity(ctx)
 			if err != nil {
 				return err
@@ -473,6 +498,7 @@ func (s *Registrar) completeRegistration(ctx context.Context, challenge security
 			pendingSecurity = nextSecurity
 			secureTransportStale = false
 		}
+		s.reportRegisterStage(StageRegisterFinal)
 		resp, err := s.exchangeProtectedRegister(ctx, pendingSecurity, auth)
 		if err != nil {
 			if registrationTimeoutRequiresInitial(err) {

@@ -26,21 +26,23 @@ type connectionScope struct {
 }
 
 type activeConn struct {
-	scope  *connectionScope
-	access accessSession
-	tunnel *swutunnel.Session
-	ims    imsStack // Protected by clientState.mu after publication.
+	progressAttempt uint64 // Owned by the connection runner after publication.
+	scope           *connectionScope
+	access          accessSession
+	tunnel          *swutunnel.Session
+	ims             imsStack // Protected by clientState.mu after publication.
 }
 
 type connectSetup struct {
-	client    *Client
-	setupStop context.CancelFunc
-	scope     *connectionScope
-	access    accessSession
-	tunnelCfg swutunnel.Config
-	imsCfg    ServiceConfig
-	tunnel    *swutunnel.Session
-	ims       imsStack
+	progressAttempt uint64
+	client          *Client
+	setupStop       context.CancelFunc
+	scope           *connectionScope
+	access          accessSession
+	tunnelCfg       swutunnel.Config
+	imsCfg          ServiceConfig
+	tunnel          *swutunnel.Session
+	ims             imsStack
 }
 
 type imsStack struct {
@@ -133,13 +135,16 @@ func (c *Client) connect(ctx context.Context, purpose wfcsetup.Purpose) error {
 		done()
 		return c.connectionError(ErrClientNotConnected)
 	}
+	progressAttempt := active.progressAttempt
 	runDone := c.startConnectionRunner(active, done)
 	if err := stack.sip.WaitStarted(ctx); err != nil {
 		wrapped := fmt.Errorf("connecting client: waiting for IMS session start: %w", err)
+		c.finishConnectionProgress(progressAttempt, wrapped)
 		wrapped = errors.Join(wrapped, c.cancelConnectStart(active, runDone))
 		c.emitConnectFailure(ctx, wrapped)
 		return wrapped
 	}
+	c.finishConnectionProgress(progressAttempt, nil)
 	return nil
 }
 
@@ -152,7 +157,17 @@ func (c *Client) Tunnel() swutunnel.Info {
 }
 
 func (c *Client) connectOnce(ctx context.Context, internal bool, purpose wfcsetup.Purpose) (_ *activeConn, resultErr error) {
-	setup, setupCtx, err := c.prepareConnect(ctx, internal, purpose)
+	if err := c.state.reserveConnect(internal); err != nil {
+		return nil, fmt.Errorf("connecting client: %w", err)
+	}
+	progressAttempt := c.beginConnectionProgress("")
+	defer func() {
+		if resultErr != nil {
+			c.finishConnectionProgress(progressAttempt, resultErr)
+		}
+	}()
+
+	setup, setupCtx, err := c.prepareConnect(ctx, internal, purpose, progressAttempt)
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +235,7 @@ func (c *Client) openIMSWithPCSCFFailoverAttempts(ctx context.Context, setup *co
 		if attempt+1 == attempts || ctx.Err() != nil || !pcscfFailoverRequired(err, setup.imsCfg.SIPTimers.TF) {
 			return errs
 		}
+		c.finishConnectionProgress(setup.progressAttempt, err)
 		if err := reselector.SelectNextPCSCF(); err != nil {
 			return errors.Join(errs, err)
 		}
@@ -241,20 +257,16 @@ func pcscfFailoverRequired(err error, timerF time.Duration) bool {
 	return ok && netErr.Timeout()
 }
 
-func (c *Client) prepareConnect(ctx context.Context, internal bool, purpose wfcsetup.Purpose) (*connectSetup, context.Context, error) {
-	if err := c.state.reserveConnect(internal); err != nil {
-		return nil, nil, fmt.Errorf("connecting client: %w", err)
-	}
-
+func (c *Client) prepareConnect(ctx context.Context, internal bool, purpose wfcsetup.Purpose, progressAttempt uint64) (*connectSetup, context.Context, error) {
 	setupCtx, setupStop := c.newSetupContext(ctx, internal)
 
-	if err := c.ensureReady(setupCtx, purpose); err != nil {
+	if err := c.ensureReady(setupCtx, purpose, progressAttempt); err != nil {
 		setupStop()
 		c.finishConnectAttempt()
 		return nil, nil, err
 	}
 	if c.cfg.usesVoWiFi() {
-		if err := c.waitSWUBackoff(setupCtx); err != nil {
+		if err := c.waitSWUBackoff(setupCtx, progressAttempt); err != nil {
 			setupStop()
 			c.finishConnectAttempt()
 			return nil, nil, err
@@ -277,20 +289,22 @@ func (c *Client) prepareConnect(ctx context.Context, internal bool, purpose wfcs
 		c.applySWUPDNTypeRestriction(&tunnelCfg)
 
 		if tunnelCfg.RemoteAddr == "" {
+			c.connectionStage(progressAttempt, stageEPDGResolve)
 			return fail(errors.New("preparing connect: tunnel remote address is empty"))
 		}
 	}
 
 	return &connectSetup{
-		client:    c,
-		setupStop: setupStop,
-		scope:     scope,
-		tunnelCfg: tunnelCfg,
-		imsCfg:    imsCfg,
+		progressAttempt: progressAttempt,
+		client:          c,
+		setupStop:       setupStop,
+		scope:           scope,
+		tunnelCfg:       tunnelCfg,
+		imsCfg:          imsCfg,
 	}, setupCtx, nil
 }
 
-func (c *Client) ensureReady(ctx context.Context, purpose wfcsetup.Purpose) error {
+func (c *Client) ensureReady(ctx context.Context, purpose wfcsetup.Purpose, progressAttempt uint64) error {
 	var ready bool
 	var reader usimcard.Reader
 	var cfg Config
@@ -306,6 +320,7 @@ func (c *Client) ensureReady(ctx context.Context, purpose wfcsetup.Purpose) erro
 		return nil
 	}
 
+	c.connectionStage(progressAttempt, stageSIMSetup)
 	card, err := usim.New(ctx, reader, cfg.Logger)
 	if err != nil {
 		return fmt.Errorf("loading USIM: %w", err)
@@ -315,6 +330,7 @@ func (c *Client) ensureReady(ctx context.Context, purpose wfcsetup.Purpose) erro
 		return err
 	}
 	if readyCfg.usesVoWiFi() {
+		c.connectionStage(progressAttempt, stageWFCSetup)
 		if err := c.checkWFCSetup(ctx, &readyCfg, card, purpose); err != nil {
 			return err
 		}
@@ -357,10 +373,11 @@ func (c *Client) openAccess(ctx context.Context, setup *connectSetup) error {
 
 func (c *Client) commitConnect(setup *connectSetup) (*activeConn, error) {
 	active := &activeConn{
-		scope:  setup.scope,
-		access: setup.access,
-		tunnel: setup.tunnel,
-		ims:    setup.ims,
+		progressAttempt: setup.progressAttempt,
+		scope:           setup.scope,
+		access:          setup.access,
+		tunnel:          setup.tunnel,
+		ims:             setup.ims,
 	}
 
 	if err := c.state.commitActive(active); err != nil {
@@ -650,6 +667,7 @@ func (c *Client) finishReconnect() {
 }
 
 func (c *Client) reconnect(cause error) (*activeConn, error) {
+	progressAttempt := c.ConnectionProgress().Attempt
 	reconnectID := c.state.nextReconnectID()
 	if c.cfg.usesVoWiFi() {
 		c.recordSWUBackoff(cause, time.Now())
@@ -664,6 +682,7 @@ func (c *Client) reconnect(cause error) (*activeConn, error) {
 	defer stopClientCtx()
 	replaced := errors.Is(cause, registration.ErrRegistrationReplaced)
 	if replaced && c.cfg.IMS.RegistrationGroup != nil {
+		c.waitConnectionProgress(progressAttempt, stageIMSSlot, 0)
 		c.logger.Info("fallback IMS flow waiting for preferred registration release", "reconnect_id", reconnectID)
 		if err := c.cfg.IMS.RegistrationGroup.WaitForRegistration(
 			clientCtx,
@@ -677,6 +696,9 @@ func (c *Client) reconnect(cause error) (*activeConn, error) {
 	initialDelay := time.Duration(0)
 	if !replaced {
 		initialDelay = c.reconnectDelay(cause, backoff, registrationBackoff)
+	}
+	if initialDelay > 0 {
+		c.waitConnectionProgress(progressAttempt, stageRetryWait, initialDelay)
 	}
 	c.logger.Info("reconnect scheduled", "reconnect_id", reconnectID, "delay", initialDelay, "cause", cause)
 	if err := sleepContext(clientCtx, initialDelay); err != nil {
@@ -698,6 +720,7 @@ func (c *Client) reconnect(cause error) (*activeConn, error) {
 		}
 
 		nextDelay := c.reconnectDelay(err, backoff, registrationBackoff)
+		c.waitConnectionProgress(c.ConnectionProgress().Attempt, stageRetryWait, nextDelay)
 		c.logger.Warn("reconnect attempt failed", "reconnect_id", reconnectID, "attempt", attempt, "err", err, "next_delay", nextDelay)
 		if err := sleepContext(clientCtx, nextDelay); err != nil {
 			return nil, err
@@ -776,6 +799,7 @@ type connectionRunner struct {
 	active    *activeConn
 	done      func()
 	reconnect func(error) (*activeConn, error)
+	initial   bool
 }
 
 func (c *Client) startConnectionRunner(active *activeConn, done func()) <-chan struct{} {
@@ -784,6 +808,7 @@ func (c *Client) startConnectionRunner(active *activeConn, done func()) <-chan s
 		active:    active,
 		done:      done,
 		reconnect: c.reconnect,
+		initial:   true,
 	}
 	return runner.start()
 }
@@ -807,14 +832,24 @@ func (r *connectionRunner) run() {
 }
 
 func (r *connectionRunner) runOnce() bool {
-	err := r.runIMS()
-	if err == nil || r.active.scope.stopped() {
+	started, err := r.runIMS()
+	initial := r.initial
+	r.initial = false
+	// Connect still owns cleanup until the first SIP stack starts.
+	if err == nil || r.active.scope.stopped() || (initial && !started) {
 		return false
 	}
 	return r.recover(err)
 }
 
 func (r *connectionRunner) recover(cause error) bool {
+	if !errors.Is(cause, registration.ErrRegistrationReplaced) {
+		progress := r.client.ConnectionProgress()
+		if progress.Status == ProgressReady {
+			r.client.connectionStage(progress.Attempt, stageIMSLost)
+		}
+		r.client.finishConnectionProgress(progress.Attempt, cause)
+	}
 	restored, nextCause := r.restoreIMSAfterSWUPCSCF(cause)
 	if restored {
 		return true
@@ -870,7 +905,13 @@ func (r *connectionRunner) restoreIMSAfterRegistrationPCSCF(cause error) (bool, 
 	return true, nil
 }
 
-func (c *Client) restoreIMSWithNextLTEPCSCF(active *activeConn, access pcscfReselectingAccess) (*activeConn, error) {
+func (c *Client) restoreIMSWithNextLTEPCSCF(active *activeConn, access pcscfReselectingAccess) (_ *activeConn, resultErr error) {
+	progressAttempt := c.beginConnectionProgress(stagePCSCF)
+	defer func() {
+		if resultErr != nil {
+			c.finishConnectionProgress(progressAttempt, resultErr)
+		}
+	}()
 	if err := c.closeIMS(active); err != nil {
 		return nil, err
 	}
@@ -881,11 +922,12 @@ func (c *Client) restoreIMSWithNextLTEPCSCF(active *activeConn, access pcscfRese
 	setupCtx, setupStop := c.newIMSRestoreContext(active.scope)
 	defer setupStop()
 	setup := &connectSetup{
-		setupStop: setupStop,
-		scope:     active.scope,
-		access:    access,
-		imsCfg:    c.cfg.IMS,
-		tunnel:    active.tunnel,
+		progressAttempt: progressAttempt,
+		setupStop:       setupStop,
+		scope:           active.scope,
+		access:          access,
+		imsCfg:          c.cfg.IMS,
+		tunnel:          active.tunnel,
 	}
 	// SelectNextPCSCF removes the failed address, so the reported count already
 	// contains only candidates that still need to be attempted.
@@ -966,10 +1008,10 @@ func (t imsTask) String() string {
 	}
 }
 
-func (r *connectionRunner) runIMS() error {
+func (r *connectionRunner) runIMS() (bool, error) {
 	stack := r.client.state.imsSnapshot(r.active)
 	if stack.sip == nil || stack.reg == nil {
-		return r.client.connectionError(ErrClientNotConnected)
+		return false, r.client.connectionError(ErrClientNotConnected)
 	}
 	runCtx, cancel := r.active.scope.context()
 	defer cancel()
@@ -982,16 +1024,25 @@ func (r *connectionRunner) runIMS() error {
 		results <- imsRunResult{task: imsTaskMaintainRegistration, err: stack.reg.Maintain(runCtx)}
 	}()
 
-	first := <-results
+	var first imsRunResult
+	select {
+	case <-stack.sip.StartupDone():
+		if stack.sip.WaitStarted(runCtx) == nil {
+			r.client.finishConnectionProgress(r.active.progressAttempt, nil)
+		}
+		first = <-results
+	case first = <-results:
+	}
 	cancel()
 	second := <-results
+	started := stack.sip.WaitStarted(runCtx) == nil
 
 	for _, result := range []imsRunResult{first, second} {
 		if result.err != nil && !errors.Is(result.err, context.Canceled) {
-			return fmt.Errorf("%s: %w", result.task, result.err)
+			return started, fmt.Errorf("%s: %w", result.task, result.err)
 		}
 	}
-	return nil
+	return started, nil
 }
 
 func (c *Client) restoreIMSAfterPCSCFReselection(active *activeConn, cause error) (*activeConn, error) {
@@ -1025,7 +1076,13 @@ func (c *Client) restoreIMSAfterRegistrationPCSCFReselection(active *activeConn)
 	return c.restoreIMSWithTunnelInfo(active, tunnelInfo)
 }
 
-func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunnel.Info) (*activeConn, error) {
+func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunnel.Info) (_ *activeConn, resultErr error) {
+	progressAttempt := c.beginConnectionProgress(stagePCSCF)
+	defer func() {
+		if resultErr != nil {
+			c.finishConnectionProgress(progressAttempt, resultErr)
+		}
+	}()
 	wifiAccess, ok := active.access.(*voWiFiAccess)
 	if !ok || wifiAccess.netstack == nil {
 		return nil, errors.New("VoWiFi userspace network stack is missing")
@@ -1043,8 +1100,9 @@ func (c *Client) restoreIMSWithTunnelInfo(active *activeConn, tunnelInfo swutunn
 	imsCfg := c.cfg.IMS
 
 	setup := &connectSetup{
-		setupStop: setupStop,
-		scope:     active.scope,
+		progressAttempt: progressAttempt,
+		setupStop:       setupStop,
+		scope:           active.scope,
 		access: &voWiFiAccess{
 			session:   active.tunnel,
 			netstack:  wifiAccess.netstack,
@@ -1107,6 +1165,7 @@ func (c *Client) commitIMSRestore(active *activeConn, setup *connectSetup) error
 	if err := c.state.restoreIMS(active, setup.ims, setup.access); err != nil {
 		return err
 	}
+	active.progressAttempt = setup.progressAttempt
 	c.notifyRegistrationChange()
 	setup.ims = imsStack{}
 	setup.access = nil

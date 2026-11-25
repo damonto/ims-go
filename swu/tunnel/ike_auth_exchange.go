@@ -105,6 +105,9 @@ func (f *akaAuthFlow) finishSuccess(ctx context.Context, serverPayloads []ike.Pa
 	if err := f.validateEAPSuccess(); err != nil {
 		return nil, 0, err
 	}
+	if f.reportStage != nil {
+		f.reportStage(StageIPSec)
+	}
 	storeAKAIdentityState(f.card, f.pendingState)
 	authValue, err := f.crypto.ComputeInitiatorAuth(f.ikeInitRequest, f.responderNonce, f.idiRaw)
 	if err != nil {

@@ -85,7 +85,7 @@ type Stack struct {
 	closedCh       chan struct{}
 	closed         bool
 	started        bool
-	ready          bool
+	startErr       error
 	running        bool
 	primaryErr     error
 
@@ -159,15 +159,19 @@ func (s *Stack) Run(ctx context.Context) error {
 		s.mu.Unlock()
 		return errors.New("running session: already started")
 	}
+	startErr := s.primaryErr
+	if startErr == nil {
+		startErr = ctx.Err()
+	}
 	s.started = true
-	s.running = true
+	s.startErr = startErr
+	s.running = startErr == nil
 	inboundCh := s.inbound
-	primaryErr := s.primaryErr
+	close(s.startedCh)
 	s.mu.Unlock()
 	defer s.finishRunning()
-	s.markReady()
-	if primaryErr != nil {
-		return primaryErr
+	if startErr != nil {
+		return startErr
 	}
 
 	for {
@@ -276,42 +280,30 @@ func unsupportedRequireOptions(msg sip.Message) []string {
 	return unsupported
 }
 
-func (s *Stack) WaitStarted(ctx context.Context) error {
-	s.mu.Lock()
-	if s.ready {
-		s.mu.Unlock()
-		return nil
-	}
-	startedCh := s.startedCh
-	closedCh := s.closedCh
-	s.mu.Unlock()
-
-	select {
-	case <-startedCh:
-		return nil
-	case <-closedCh:
-		s.mu.Lock()
-		ready := s.ready
-		s.mu.Unlock()
-		if ready {
-			return nil
-		}
-		return errors.New("waiting for session start: session is closed")
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+// StartupDone closes when Run has recorded its startup result. WaitStarted
+// returns that result. Use WaitStarted directly when waiting for cancellation
+// or for the stack to close before Run starts.
+func (s *Stack) StartupDone() <-chan struct{} {
+	return s.startedCh
 }
 
-func (s *Stack) markReady() {
-	s.mu.Lock()
-	if s.ready {
-		s.mu.Unlock()
-		return
+// WaitStarted waits for Run to accept the primary transport or report a startup error.
+func (s *Stack) WaitStarted(ctx context.Context) error {
+	select {
+	case <-s.startedCh:
+	case <-s.closedCh:
+	case <-ctx.Done():
 	}
-	s.ready = true
-	startedCh := s.startedCh
-	s.mu.Unlock()
-	close(startedCh)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.started:
+		return s.startErr
+	case s.closed:
+		return errors.New("waiting for session start: session is closed")
+	default:
+		return ctx.Err()
+	}
 }
 
 func (s *Stack) finishRunning() {

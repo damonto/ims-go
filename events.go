@@ -17,6 +17,10 @@ type Events struct {
 	// Client.Registration, then read a fresh snapshot after each notification.
 	RegistrationChanged <-chan struct{}
 
+	// ConnectionProgressChanged coalesces changes. Read Client.ConnectionProgress
+	// after subscribing and after each notification.
+	ConnectionProgressChanged <-chan struct{}
+
 	closeOnce sync.Once
 	closeFn   func()
 }
@@ -66,6 +70,7 @@ type eventHub struct {
 	state               broadcaster[ClientState]
 	errors              broadcaster[error]
 	registrationChanged broadcaster[struct{}]
+	progressChanged     broadcaster[struct{}]
 
 	smsIncoming broadcaster[SMS]
 	smsReports  broadcaster[SMSReport]
@@ -80,6 +85,7 @@ func newEventHub() eventHub {
 		state:               newBroadcaster[ClientState](),
 		errors:              newBroadcaster[error](),
 		registrationChanged: newBroadcaster[struct{}](),
+		progressChanged:     newBroadcaster[struct{}](),
 		smsIncoming:         newBroadcaster[SMS](),
 		smsReports:          newBroadcaster[SMSReport](),
 		ussd:                newBroadcaster[IncomingUSSD](),
@@ -93,6 +99,7 @@ func (h *eventHub) close() {
 	h.state.close()
 	h.errors.close()
 	h.registrationChanged.close()
+	h.progressChanged.close()
 	h.smsIncoming.close()
 	h.smsReports.close()
 	h.ussd.close()
@@ -197,14 +204,17 @@ func (c *Client) Events() *Events {
 	stateSub := c.events.state.subscribe(eventBufferSize)
 	errorSub := c.events.errors.subscribe(eventBufferSize)
 	registrationSub := c.events.registrationChanged.subscribe(1)
+	progressSub := c.events.progressChanged.subscribe(1)
 	return &Events{
-		State:               stateSub.channel,
-		Errors:              errorSub.channel,
-		RegistrationChanged: registrationSub.channel,
+		State:                     stateSub.channel,
+		Errors:                    errorSub.channel,
+		RegistrationChanged:       registrationSub.channel,
+		ConnectionProgressChanged: progressSub.channel,
 		closeFn: func() {
 			stateSub.close()
 			errorSub.close()
 			registrationSub.close()
+			progressSub.close()
 		},
 	}
 }

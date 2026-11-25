@@ -1020,6 +1020,25 @@ func TestWaitStartedReturnsWhenRunBegins(t *testing.T) {
 	}
 }
 
+func TestWaitStartedReportsTransportFailure(t *testing.T) {
+	sess, err := Open(Config{}, newStubTransport(5062, 5060))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStackAfterTest(t, sess)
+
+	cause := errors.New("primary transport failed before startup")
+	sess.mu.Lock()
+	sess.primaryErr = cause
+	sess.mu.Unlock()
+	if err := sess.Run(t.Context()); !errors.Is(err, cause) {
+		t.Fatalf("Run() = %v, want %v", err, cause)
+	}
+	if err := sess.WaitStarted(t.Context()); !errors.Is(err, cause) {
+		t.Fatalf("WaitStarted() = %v, want %v", err, cause)
+	}
+}
+
 func TestExchangeAfterRunExitFallsBackToSynchronousTransport(t *testing.T) {
 	transport := newStubTransport(5062, 5060)
 	sess, err := Open(Config{}, transport)

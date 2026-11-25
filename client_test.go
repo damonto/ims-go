@@ -635,7 +635,7 @@ func TestEnsureReadyConfigErrorContextIsNotRepeated(t *testing.T) {
 				}
 			})
 
-			err := client.ensureReady(t.Context(), wfcsetup.PurposeActivation)
+			err := client.ensureReady(t.Context(), wfcsetup.PurposeActivation, 0)
 			if err == nil {
 				t.Fatal("ensureReady() error = nil, want non-nil")
 			}
@@ -3476,7 +3476,8 @@ func TestConnectionRunnerRunIMSKeepsParentContextOnRegistrationRefreshError(t *t
 	errCh := make(chan error, 1)
 	go func() {
 		runner := connectionRunner{client: client, active: active}
-		errCh <- runner.runIMS()
+		_, err := runner.runIMS()
+		errCh <- err
 	}()
 
 	select {
@@ -3545,7 +3546,8 @@ func TestConnectionRunnerRunIMSReturnsRegistrationEventTermination(t *testing.T)
 	errCh := make(chan error, 1)
 	go func() {
 		runner := connectionRunner{client: client, active: active}
-		errCh <- runner.runIMS()
+		_, err := runner.runIMS()
+		errCh <- err
 	}()
 	if err := sess.WaitStarted(t.Context()); err != nil {
 		t.Fatalf("WaitStarted() error = %v", err)

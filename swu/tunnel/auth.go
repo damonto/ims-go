@@ -13,6 +13,7 @@ import (
 
 type akaAuthFlow struct {
 	session                   *Session
+	reportStage               func(ConnectStage)
 	card                      Card
 	authenticateAKA           AKAAuthenticator
 	imei                      string
@@ -94,6 +95,7 @@ func (s *Session) authenticateEAPAKA(ctx context.Context, state *connectState, i
 	ikePeer, useNATT := s.connectIKEPeer(state)
 	flow := akaAuthFlow{
 		session:                          s,
+		reportStage:                      state.reportStage,
 		card:                             state.card,
 		authenticateAKA:                  AKAAuthenticator(state.input.AuthenticateAKA),
 		imei:                             state.imei,

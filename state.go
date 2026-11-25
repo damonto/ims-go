@@ -89,6 +89,7 @@ type clientState struct {
 	mu           sync.Mutex
 	status       ClientStatus
 	lastErr      error
+	progress     ConnectionProgress
 	closed       bool
 	connecting   bool
 	reconnecting bool

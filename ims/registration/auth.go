@@ -82,6 +82,13 @@ func (s *Registrar) nextAuthNonceCount() uint32 {
 	return s.authNonceCount
 }
 
+func (s *Registrar) initialRegisterAuthorization(ctx context.Context, challenge security.Challenge) (*security.Authorization, error) {
+	if challenge.Nonce != "" {
+		s.reportRegisterStage(StageAKA)
+	}
+	return s.buildRegisterAuthorization(ctx, challenge)
+}
+
 func (s *Registrar) buildRegisterAuthorization(ctx context.Context, challenge security.Challenge) (*security.Authorization, error) {
 	if challenge.Nonce == "" {
 		return nil, nil

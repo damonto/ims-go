@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,11 @@ func TestRegistrationSnapshotsAndChanges(t *testing.T) {
 			}
 
 			transport := newGatedCancelTransport(5062, 5060)
-			setup := &connectSetup{scope: newConnectionScope(), imsCfg: client.cfg.IMS, access: smsStartupProbeAccess{transport}}
+			attempt := client.beginConnectionProgress(stageSIMSetup)
+			setup := &connectSetup{
+				progressAttempt: attempt, scope: newConnectionScope(),
+				imsCfg: client.cfg.IMS, access: smsStartupProbeAccess{transport},
+			}
 			t.Cleanup(func() {
 				if err := setup.closeIMS(); err != nil {
 					t.Errorf("closeIMS() = %v", err)
@@ -71,6 +76,32 @@ func TestRegistrationSnapshotsAndChanges(t *testing.T) {
 			}
 			if err := client.openIMS(ctx, setup); err != nil {
 				t.Fatalf("openIMS() = %v", err)
+			}
+			progress := client.ConnectionProgress()
+			var stages []ConnectionStage
+			for _, step := range progress.Steps {
+				stages = append(stages, step.Stage)
+			}
+			wantStages := []ConnectionStage{
+				stageSIMSetup, stagePCSCF, stageIMSSlot, "ims_register_challenge",
+				"ims_aka", "ims_ipsec", "ims_register_final", stageIMSStarting,
+			}
+			if !slices.Equal(stages, wantStages) || progress.Status != ProgressRunning {
+				t.Fatalf("registration progress = %+v, want stages %v and session still starting", progress, wantStages)
+			}
+			progress.Steps[0].Stage = ""
+			if client.ConnectionProgress().Steps[0].Stage != stageSIMSetup {
+				t.Fatal("progress snapshot changed live history")
+			}
+			select {
+			case <-events.ConnectionProgressChanged:
+			default:
+				t.Fatal("missing progress notification")
+			}
+			select {
+			case <-events.ConnectionProgressChanged:
+				t.Fatal("progress notifications did not coalesce")
+			default:
 			}
 			reg := setup.ims.reg
 			if _, err := client.commitConnect(setup); err != nil {
@@ -176,7 +207,7 @@ func TestRegistrationConcurrentIMSCleanup(t *testing.T) {
 			})
 			wg.Wait()
 			runner := connectionRunner{client: client, active: active}
-			if err := runner.runIMS(); !errors.Is(err, ErrClientNotConnected) {
+			if _, err := runner.runIMS(); !errors.Is(err, ErrClientNotConnected) {
 				t.Fatalf("runIMS() after cleanup = %v, want ErrClientNotConnected", err)
 			}
 			if err := client.Close(); err != nil {

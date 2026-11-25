@@ -58,6 +58,7 @@ type voLTEAccess struct {
 }
 
 func (c *Client) openVoLTEAccess(ctx context.Context, setup *connectSetup) (*voLTEAccess, error) {
+	c.connectionStage(setup.progressAttempt, stageIMSPDN)
 	client, ok := c.reader.(imsPDNClient)
 	if !ok {
 		return nil, errors.New("opening VoLTE access: WWAN client does not support IMS PDN")

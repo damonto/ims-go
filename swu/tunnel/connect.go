@@ -27,6 +27,7 @@ const (
 var ErrIKESAInitNoResponse = errors.New("ike_sa_init response not received")
 
 type connectState struct {
+	onStage                   func(ConnectStage)
 	input                     handshake.ConnectInput
 	saInit                    handshake.SAInitState
 	auth                      handshake.AuthState
@@ -74,10 +75,12 @@ func (s *Session) Connect(ctx context.Context, req ConnectRequest) error {
 
 func (s *Session) connectAttempt(ctx context.Context, state *connectState) error {
 	s.logger.Info("starting SWu authentication", "remote_addr", s.outerRemote, "aka_identity_type", state.identityType.String())
+	state.reportStage(StageIKEInit)
 	if err := s.exchangeIKESAInit(ctx, state); err != nil {
 		return err
 	}
 	s.logger.Info("IKE_SA_INIT established", "initiator_spi", state.initiatorSPI, "responder_spi", state.responderSPI, "natt_supported", state.nattSupported, "nat_detected", state.natDetected, "ike_fragmentation_supported", state.ikeFragmentationSupported)
+	state.reportStage(StageEAPAKA)
 	if err := s.exchangeIKEAuth(ctx, state); err != nil {
 		return err
 	}
@@ -105,7 +108,14 @@ func (s *Session) prepareConnect(req ConnectRequest) (*connectState, func(), err
 		finish()
 		return nil, nil, err
 	}
+	state.onStage = req.OnStage
 	return state, finish, nil
+}
+
+func (cs *connectState) reportStage(stage ConnectStage) {
+	if cs.onStage != nil {
+		cs.onStage(stage)
+	}
 }
 
 func (cs *connectState) consumeInitialAKAReauthIdentity() bool {

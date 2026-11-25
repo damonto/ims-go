@@ -19,6 +19,7 @@ func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel
 	if c.cfg.Access.VoWiFi != nil {
 		underlay = c.cfg.Access.VoWiFi.Underlay
 	}
+	c.connectionStage(setup.progressAttempt, stageEPDGResolve)
 	remotes, err := epdgRemoteCandidates(ctx, underlay, setup.tunnelCfg.RemoteAddr, setup.tunnelCfg.InitialPort)
 	if err != nil {
 		return swutunnel.Info{}, err
@@ -28,6 +29,7 @@ func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel
 	for attempt, remote := range remotes {
 		tunnelCfg := setup.tunnelCfg
 		tunnelCfg.RemoteAddr = remote
+		c.connectionStage(setup.progressAttempt, stageEPDGIKEInit)
 		session, err := swutunnel.Dial(ctx, tunnelCfg)
 		if err == nil {
 			setup.tunnel = session
@@ -35,6 +37,9 @@ func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel
 				IMEI:            c.cfg.Terminal.ID,
 				Card:            c.card,
 				AuthenticateAKA: setup.imsCfg.coordinatedAKA(c.card.EAPAKA),
+				OnStage: func(stage swutunnel.ConnectStage) {
+					c.connectionStage(setup.progressAttempt, ConnectionStage(stage))
+				},
 			})
 		}
 		if err == nil {
@@ -54,6 +59,7 @@ func (c *Client) openTunnel(ctx context.Context, setup *connectSetup) (swutunnel
 		if attempt+1 == len(remotes) || !shouldTryNextEPDG(ctx, err) {
 			break
 		}
+		c.finishConnectionProgress(setup.progressAttempt, err)
 	}
 	return swutunnel.Info{}, errs
 }
@@ -136,15 +142,17 @@ func (c *Client) clearCurrentSWUBackoff() {
 	})
 }
 
-func (c *Client) waitSWUBackoff(ctx context.Context) error {
+func (c *Client) waitSWUBackoff(ctx context.Context, attempt uint64) error {
 	for {
 		delay, deactivated, active := c.swuBackoffDelay(time.Now())
 		if !active {
 			return nil
 		}
 		if deactivated {
+			c.connectionStage(attempt, stageRetryWait)
 			return fmt.Errorf("preparing connect: %w", errSWUBackoffDeactivated)
 		}
+		c.waitConnectionProgress(attempt, stageRetryWait, delay)
 		c.logger.Info("waiting for SWu backoff", "delay", delay)
 		if err := sleepContext(ctx, delay); err != nil {
 			return fmt.Errorf("waiting for swu backoff: %w", err)

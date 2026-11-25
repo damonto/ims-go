@@ -18,6 +18,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	if setup.access == nil {
 		return errors.New("opening IMS: access session is missing")
 	}
+	c.connectionStage(setup.progressAttempt, stagePCSCF)
 	accessIMS, err := setup.access.OpenIMS(ctx, accessIMSConfig{
 		Transport:     setup.imsCfg.Transport,
 		SIPServerPort: setup.imsCfg.SIPServerPort,
@@ -45,6 +46,10 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 
 	regConfig := c.buildRegistrationConfig(setup.imsCfg, accessIMS.Security)
 	regConfig.OnRegistrationChange = c.notifyRegistrationChange
+	progressAttempt := setup.progressAttempt
+	regConfig.OnRegisterStage = func(stage registration.RegisterStage) {
+		c.connectionStage(progressAttempt, ConnectionStage(stage))
+	}
 	reg, err := registration.New(regConfig, imsSession, c.card)
 	if err != nil {
 		return err
@@ -70,6 +75,7 @@ func (c *Client) openIMS(ctx context.Context, setup *connectSetup) error {
 	if err := reg.Establish(ctx); err != nil {
 		return err
 	}
+	c.connectionStage(setup.progressAttempt, stageIMSStarting)
 	if err := reg.Subscribe(ctx); err != nil {
 		return err
 	}
