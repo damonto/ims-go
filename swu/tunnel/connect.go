@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/damonto/ims-go/ipsec/esp"
@@ -22,9 +23,27 @@ const (
 	ikeSPISeedLength          = 16
 )
 
+// SWu handshake stages reported by ConnectRequest.OnStage.
+const (
+	StageIKEInit ConnectStage = "epdg_ike_init"
+	StageEAPAKA  ConnectStage = "epdg_eap_aka"
+	StageIPSec   ConnectStage = "epdg_ipsec"
+)
+
 // ErrIKESAInitNoResponse reports that every IKE_SA_INIT retransmission timed
 // out without receiving a matching response from the peer.
 var ErrIKESAInitNoResponse = errors.New("ike_sa_init response not received")
+
+// ConnectStage identifies an operation in the initial SWu handshake.
+type ConnectStage string
+
+type ConnectRequest struct {
+	IMEI            string
+	Card            Card
+	AuthenticateAKA AKAAuthenticator
+	// OnStage observes handshake stages synchronously and must return promptly.
+	OnStage func(ConnectStage)
+}
 
 type connectState struct {
 	onStage                   func(ConnectStage)
@@ -375,10 +394,5 @@ func ikeSPIInUse(spi uint64, existing ...uint64) bool {
 	if spi == 0 {
 		return true
 	}
-	for _, candidate := range existing {
-		if spi == candidate {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(existing, spi)
 }
